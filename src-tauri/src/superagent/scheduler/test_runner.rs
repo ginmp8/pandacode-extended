@@ -1,0 +1,391 @@
+//! A separate native Demand test effect. Ordinary chat checks are never task
+//! authority. An immutable one-time local grant selects a fixed command, and
+//! results are bound to the latest Worker proofs and exact Git snapshot.
+use super::*;
+use std::{path::Path,process::Command,time::Duration};
+use tauri::Manager;
+
+pub(crate) const SCHEMA:&str=r#"
+CREATE TABLE IF NOT EXISTS sa_demand_test_grants (
+ ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ team_version INTEGER NOT NULL, policy_revision INTEGER NOT NULL,
+ project_id TEXT NOT NULL, checkout_root TEXT NOT NULL,
+ command TEXT NOT NULL CHECK(command IN ('npm test','cargo test')),
+ manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+ authorized_at INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS sa_test_grant_immutable BEFORE UPDATE ON sa_demand_test_grants
+ BEGIN SELECT RAISE(ABORT,'Demand test grant is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_test_grant_no_delete BEFORE DELETE ON sa_demand_test_grants
+ BEGIN SELECT RAISE(ABORT,'Demand test grant is durable'); END;
+CREATE TABLE IF NOT EXISTS sa_demand_test_runs (
+ ticket_id TEXT PRIMARY KEY REFERENCES sa_demand_test_grants(ticket_id) ON DELETE RESTRICT,
+ plan_sha256 TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL,
+ command TEXT NOT NULL, state TEXT NOT NULL
+   CHECK(state IN ('running','passed','failed','uncertain')),
+ started_at INTEGER NOT NULL, finished_at INTEGER,
+ exit_code INTEGER, stdout_sha256 TEXT, stderr_sha256 TEXT
+);
+"#;
+
+fn digest(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
+
+/// Fixed command vectors only. Cargo is locked/offline. The npm command runs
+/// the project's explicitly confirmed test script, never model-provided argv.
+pub(super) fn manifest_hash(root:&Path,command:&str)->Result<String> {
+    let name=match command {
+        "npm test"=>"package.json","cargo test"=>"Cargo.toml",
+        _=>return Err("Only npm test or cargo test is supported.".into()),
+    };
+    let bytes=std::fs::read(root.join(name))
+        .map_err(|_|"The selected test manifest is unavailable.")?;
+    if command=="npm test" {
+        let manifest:serde_json::Value=serde_json::from_slice(&bytes)
+            .map_err(|_|"Invalid package.json test manifest.")?;
+        if !manifest["scripts"]["test"].as_str().is_some_and(|s|!s.trim().is_empty()) {
+            return Err("No declared npm test script.".into());
+        }
+    } else if !root.join("Cargo.lock").is_file() {
+        return Err("Cargo.lock is required for locked offline tests.".into());
+    }
+    let mut sha=Sha256::new();
+    sha.update(&bytes);
+    if command=="cargo test" {
+        sha.update(std::fs::read(root.join("Cargo.lock"))
+            .map_err(|_|"Cargo.lock unavailable.")?);
+    }
+    Ok(format!("{:x}",sha.finalize()))
+}
+
+/// A request-key replay may never expand or replace the original process grant.
+pub(super) fn replay_matches(db:&rusqlite::Connection,team:&str,key:&str,
+    request:Option<(i64,i64,&str,&str,&str,&str)>)->Result<bool> {
+    let old:Option<String>=db.query_row(
+        "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
+        params![team,key],|r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some(id)=old else {return Ok(false)};
+    let saved:Option<(i64,i64,String,String,String,String)>=db.query_row(
+        "SELECT team_version,policy_revision,project_id,checkout_root,command,manifest_sha256
+         FROM sa_demand_test_grants WHERE ticket_id=?1",
+        [&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    match (saved,request) {
+        (None,None)=>Ok(true),
+        (Some((a,b,c,d,e,f)),Some((v,p,project,root,command,hash)))
+            if a==v && b==p && c==project && d==root && e==command && f==hash =>Ok(true),
+        _=>Err("Demand replay cannot change previously authorized tests.".into()),
+    }
+}
+
+/// Called only from trusted main-window admission AFTER the one-time dialog.
+pub(super) fn issue(store:&Store,id:&str,command:&str,
+    team_version:i64,policy:i64,project:&str,checkout:&str,hash:&str)->Result<()> {
+    let now=storage::now();
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let n=tx.execute(
+        "INSERT INTO sa_demand_test_grants
+         (ticket_id,team_version,policy_revision,project_id,checkout_root,
+          command,manifest_sha256,authorized_at)
+         SELECT t.id,?2,?3,?4,?5,?6,?7,?8
+         FROM sa_tickets t JOIN sa_mandates m ON m.ticket_id=t.id
+         JOIN sa_orchestrations team ON team.id=t.orchestration_id
+         WHERE t.id=?1 AND t.actor='local-user' AND t.source='manual'
+           AND t.state='running' AND t.active_assignment_id IS NOT NULL
+           AND t.policy_revision=?3 AND t.project_id=?4
+           AND team.enabled=1 AND team.policy_revision=?3 AND team.project_id=?4
+           AND EXISTS(SELECT 1 FROM sa_team_versions v
+             WHERE v.orchestration_id=team.id AND v.version=?2
+             AND v.version=(SELECT MAX(version) FROM sa_team_versions
+               WHERE orchestration_id=team.id))
+           AND m.actor=t.actor AND length(trim(m.authorization_id))>0
+           AND m.revoked=0 AND m.expires_at>?8
+           AND m.policy_revision=?3 AND m.project_id=?4
+           AND m.allowed_tools='[]' AND m.allowed_side_effects=0",
+        params![id,team_version,policy,project,checkout,command,hash,now],
+    ).map_err(|e|e.to_string())?;
+    if n!=1 {return Err("Test consent changed before admission.".into());}
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'demand_test_authorized',?2,?3)",
+        params![id,format!("Exact approved test command: {command}"),now],
+    ).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+pub(super) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)",
+        [root],|r|r.get(0)).map_err(|e|e.to_string())
+}
+
+fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<String> {
+    let mut stmt=db.prepare(
+        "SELECT item.id,proof.assignment_id,proof.evidence_sha256
+         FROM sa_work_items item JOIN sa_work_item_evidence_receipts proof
+           ON proof.item_id=item.id AND proof.child_ticket_id=item.child_ticket_id
+         WHERE item.ticket_id=?1 AND item.state='completed'
+         ORDER BY item.ordinal,item.id",
+    ).map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([root],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,
+    ))).map_err(|e|e.to_string())?;
+    let receipts=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    if receipts.is_empty() {return Err("Completed Worker proofs are required.".into());}
+    let (head,status,diff,_)=super::super::delivery::observe_git(checkout)?;
+    let mut sha=Sha256::new();
+    for (item,assignment,proof) in receipts {
+        for value in [&item,&assignment,&proof] {
+            sha.update((value.len() as u64).to_le_bytes());
+            sha.update(value.as_bytes());
+        }
+    }
+    for value in [&head,&status,&diff] {
+        sha.update((value.len() as u64).to_le_bytes());
+        sha.update(value.as_bytes());
+    }
+    Ok(format!("{:x}",sha.finalize()))
+}
+
+/// True only for an executed passing test against the current plan/checkout.
+pub(super) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
+    let row:Option<(String,String,String,String,String,String,String)>=db.query_row(
+        "SELECT grant.checkout_root,grant.command,grant.manifest_sha256,
+           run.plan_sha256,run.snapshot_sha256,plan.plan_sha256,run.state
+         FROM sa_demand_test_grants grant
+         JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
+         JOIN sa_demand_test_runs run ON run.ticket_id=grant.ticket_id
+         WHERE grant.ticket_id=?1",
+        [root],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((checkout,command,hash,plan,snapshot,current,state))=row else {return Ok(false)};
+    if state!="passed" || plan!=current {return Ok(false);}
+    let path=Path::new(&checkout);
+    if !std::fs::canonicalize(path).is_ok_and(|p|p==path) {return Ok(false);}
+    Ok(manifest_hash(path,&command).ok().as_deref()==Some(hash.as_str())
+        && snapshot_hash(db,root,path).ok().as_deref()==Some(snapshot.as_str()))
+}
+
+#[derive(Clone)]
+struct Reserved {root:String,command:String,checkout:String,manifest:String,snapshot:String,expires:i64}
+struct Outcome {state:&'static str,code:Option<i32>,stdout:String,stderr:String}
+
+/// Native state + live effect gate; a receipt is reserved once and never
+/// re-executed blindly after a crash, timeout or uncertain outcome.
+fn reserve(store:&Store)->Result<Option<Reserved>> {
+    let now=storage::now();
+    let mut stmt=store.db.prepare(
+        "SELECT grant.ticket_id,grant.command,grant.checkout_root,
+           grant.manifest_sha256,m.expires_at,plan.plan_sha256
+         FROM sa_demand_test_grants grant
+         JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
+         JOIN sa_tickets root ON root.id=grant.ticket_id
+         JOIN sa_mandates m ON m.ticket_id=root.id
+         JOIN sa_orchestrations team ON team.id=root.orchestration_id
+         WHERE plan.state='active' AND root.state='queued'
+           AND root.active_assignment_id IS NULL
+           AND root.revision=plan.ticket_revision
+           AND root.policy_revision=grant.policy_revision
+           AND root.project_id=grant.project_id
+           AND m.revoked=0 AND m.expires_at>?1
+           AND m.policy_revision=grant.policy_revision
+           AND m.project_id=grant.project_id AND m.actor=root.actor
+           AND m.allowed_tools='[]' AND m.allowed_side_effects=0
+           AND team.enabled=1 AND team.policy_revision=grant.policy_revision
+           AND team.project_id=grant.project_id
+           AND EXISTS(SELECT 1 FROM sa_ticket_team_snapshots pinned
+             WHERE pinned.ticket_id=root.id
+               AND pinned.team_version=grant.team_version
+               AND pinned.policy_revision=grant.policy_revision
+               AND pinned.source_kind='native')
+           AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs
+             WHERE ticket_id=grant.ticket_id)
+         ORDER BY plan.created_at LIMIT 16",
+    ).map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([now],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+        r.get::<_,i64>(4)?,r.get::<_,String>(5)?,
+    ))).map_err(|e|e.to_string())?;
+    let candidates=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    drop(stmt);
+    for (root,command,checkout,manifest,expires,plan) in candidates {
+        if !super::super::auto::ticket_authorized(store,&root)?
+            || super::dispatch::unsettled_root_effects(&store.db,&root)?
+            || !super::dispatch::root_work_item_proofs_current(&store.db,&root)? {
+            continue;
+        }
+        let incomplete:bool=store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_items
+               WHERE ticket_id=?1 AND state<>'completed') OR
+               EXISTS(SELECT 1 FROM sa_subagent_nodes
+               WHERE root_ticket_id=?1 AND state<>'completed')",
+            [&root],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if incomplete {continue;}
+        if !std::fs::canonicalize(&checkout).is_ok_and(|p|p==Path::new(&checkout))
+            || manifest_hash(Path::new(&checkout),&command).ok().as_deref()
+                !=Some(manifest.as_str()) {continue;}
+        let Ok(snapshot)=snapshot_hash(&store.db,&root,Path::new(&checkout)) else {continue;};
+        let n=store.db.execute(
+            "INSERT INTO sa_demand_test_runs
+             (ticket_id,plan_sha256,snapshot_sha256,command,state,started_at)
+             SELECT grant.ticket_id,?2,?3,grant.command,'running',?4
+             FROM sa_demand_test_grants grant
+             JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
+             JOIN sa_tickets ticket ON ticket.id=grant.ticket_id
+             JOIN sa_mandates m ON m.ticket_id=ticket.id
+             WHERE grant.ticket_id=?1 AND plan.state='active'
+               AND plan.plan_sha256=?2 AND ticket.state='queued'
+               AND m.revoked=0 AND m.expires_at>?4
+               AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
+            params![root,plan,snapshot,now],
+        ).map_err(|e|e.to_string())?;
+        if n==1 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'demand_test_started',?2,?3)",
+                params![root,format!("Native {command}; pinned WorkItems and Git snapshot"),now],
+            ).map_err(|e|e.to_string())?;
+            return Ok(Some(Reserved{root,command,checkout,manifest,snapshot,expires}));
+        }
+    }
+    Ok(None)
+}
+
+fn execute(job:&Reserved)->Outcome {
+    let blank=digest(b"");
+    let remaining=job.expires.saturating_sub(storage::now());
+    if remaining<=0 {
+        return Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank};
+    }
+    let mut cmd=match job.command.as_str() {
+        "npm test" if cfg!(windows) =>return Outcome {
+            state:"failed",code:None,stdout:blank.clone(),stderr:blank,
+        },
+        "npm test" => {
+            let mut command=Command::new("npm");
+            command.args(["test","--silent"]);
+            command.env("npm_config_offline","true");
+            command
+        }
+        "cargo test" => {
+            let mut command=Command::new("cargo");
+            command.args(["test","--locked","--offline"]);
+            command.env("CARGO_NET_OFFLINE","true");
+            command
+        }
+        _=>return Outcome{state:"failed",code:None,stdout:blank.clone(),stderr:blank},
+    };
+    cmd.current_dir(&job.checkout);
+    match crate::workspace::run_process(
+        cmd,"Demand test",64*1024,Duration::from_secs((remaining as u64).min(120)),
+    ) {
+        Ok(output)=>Outcome {
+            state:if output.status.success() {"passed"} else {"failed"},
+            code:output.status.code(),
+            stdout:digest(&output.stdout.bytes),stderr:digest(&output.stderr.bytes),
+        },
+        Err(_)=>Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank},
+    }
+}
+
+fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
+    let now=storage::now();
+    let live:bool=store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets root
+          JOIN sa_mandates m ON m.ticket_id=root.id
+          JOIN sa_demand_plans plan ON plan.ticket_id=root.id
+          JOIN sa_orchestrations team ON team.id=root.orchestration_id
+          WHERE root.id=?1 AND root.state='queued' AND plan.state='active'
+            AND root.revision=plan.ticket_revision
+            AND m.revoked=0 AND m.expires_at>?2
+            AND m.policy_revision=plan.policy_revision
+            AND m.actor=root.actor AND m.project_id=root.project_id
+            AND team.enabled=1 AND team.policy_revision=plan.policy_revision)",
+        params![job.root,now],|r|r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let current=live
+        && manifest_hash(Path::new(&job.checkout),&job.command)
+            .ok().as_deref()==Some(job.manifest.as_str())
+        && snapshot_hash(&store.db,&job.root,Path::new(&job.checkout))
+            .ok().as_deref()==Some(job.snapshot.as_str());
+    let state=if current {result.state} else {"uncertain"};
+    let n=store.db.execute(
+        "UPDATE sa_demand_test_runs
+         SET state=?2,exit_code=?3,stdout_sha256=?4,stderr_sha256=?5,finished_at=?6
+         WHERE ticket_id=?1 AND state='running' AND snapshot_sha256=?7",
+        params![job.root,state,result.code,result.stdout,result.stderr,now,job.snapshot],
+    ).map_err(|e|e.to_string())?;
+    if n==1 {
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'demand_test_settled',?2,?3)",
+            params![job.root,format!("Native {}: {state}; exit {:?}",job.command,result.code),now],
+        ).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The scheduler reserves before the external effect and settles under the
+/// existing native dispatch fence. No renderer/model can invoke this directly.
+pub(super) async fn advance(app:&tauri::AppHandle)->Result<usize> {
+    let reserved={
+        let state=app.state::<AppState>();
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        let _fence=super::super::effects::lock_dispatch(&store.path)?;
+        reserve(&store)?
+    };
+    let Some(job)=reserved else {return Ok(0)};
+    let for_process=job.clone();
+    let outcome=tauri::async_runtime::spawn_blocking(move ||execute(&for_process))
+        .await.map_err(|e|e.to_string())?;
+    let state=app.state::<AppState>();
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    let _fence=super::super::effects::lock_dispatch(&store.path)?;
+    settle(&store,&job,outcome)?;
+    Ok(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_command_is_literal_and_manifest_bound() {
+        let root=std::env::temp_dir().join(format!("sa-test-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"),r#"{"scripts":{"test":"vitest run"}}"#).unwrap();
+        assert_eq!(manifest_hash(&root,"npm test").unwrap().len(),64);
+        for invalid in ["npm run build","npm test; curl example.com",
+            "cargo test -- --nocapture","sh -c npm test"] {
+            assert!(manifest_hash(&root,invalid).is_err());
+        }
+        std::fs::write(root.join("package.json"),r#"{"scripts":{"test":""}}"#).unwrap();
+        assert!(manifest_hash(&root,"npm test").is_err());
+        std::fs::write(root.join("Cargo.toml"),"[package]\nname=\"fixture\"\nversion=\"0.1.0\"\n").unwrap();
+        assert!(manifest_hash(&root,"cargo test").is_err());
+        std::fs::write(root.join("Cargo.lock"),"version = 3\n").unwrap();
+        assert_eq!(manifest_hash(&root,"cargo test").unwrap().len(),64);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn immutable_grants_and_replay_fail_closed() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,orchestration_id TEXT,request_key TEXT);
+          INSERT INTO sa_tickets VALUES('ticket','team','request');").unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let hash="a".repeat(64);
+        db.execute("INSERT INTO sa_demand_test_grants
+          (ticket_id,team_version,policy_revision,project_id,checkout_root,command,
+           manifest_sha256,authorized_at)
+          VALUES('ticket',1,2,'project','/repo','npm test',?1,100)",[&hash]).unwrap();
+        assert!(replay_matches(&db,"team","request",
+            Some((1,2,"project","/repo","npm test",&hash))).unwrap());
+        assert!(replay_matches(&db,"team","request",
+            Some((1,2,"project","/repo","cargo test",&hash))).is_err());
+        assert!(replay_matches(&db,"team","request",None).is_err());
+        assert!(db.execute("UPDATE sa_demand_test_grants SET command='cargo test'",[]).is_err());
+        assert!(db.execute("DELETE FROM sa_demand_test_grants",[]).is_err());
+    }
+}

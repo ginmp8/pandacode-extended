@@ -409,6 +409,12 @@ test('Demand preflight reads native manual eligibility without granting or start
   await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
   await host.getByRole('button',{name:'New Demand'}).click();
   await expect(host.locator('form[data-sa-form="run"]')).toContainText('each write-required WorkItem must select a nonempty subset');
+  const approvedCommand=host.getByRole('combobox',{name:'Native Demand test command'});
+  await expect(approvedCommand).toHaveValue('');
+  await approvedCommand.selectOption('cargo test');
+  await expect(approvedCommand).toHaveValue('cargo test');
+  await expect(host.locator('form[data-sa-form="run"]'))
+    .toContainText('A failed or uncertain run cannot be silently replayed.');
   const objective=host.getByRole('textbox',{name:'Task objective'});
   await objective.fill('Make an authorized source change');
   await host.getByRole('button',{name:'Review native preflight'}).click();

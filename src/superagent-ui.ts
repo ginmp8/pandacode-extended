@@ -267,6 +267,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
   let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
   let initialDemandWritePaths = '';
+  let initialDemandTestCommand = '';
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -1027,6 +1028,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'Native validation denies unapproved files; each child receives only its own immutable subset. ' +
         'Leave blank for read-only planning and ' +
         'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>' +
+      '<label>Optional approved native test command<select name="initialTestCommand" aria-label="Native Demand test command">' +
+        '<option value="">No test process authorized</option>' +
+        '<option value="npm test"' + (initialDemandTestCommand === 'npm test' ? ' selected' : '') +
+          '>npm test (declared package.json script)</option>' +
+        '<option value="cargo test"' + (initialDemandTestCommand === 'cargo test' ? ' selected' : '') +
+          '>cargo test --locked --offline</option></select></label>' +
+      '<p>This one-time test approval is separate from Worker file rights. ' +
+      'The native scheduler executes the selected command after verified WorkItem results. ' +
+      'A project test script executes code; no unrestricted shell or GitHub effects are granted. ' +
+      'A failed or uncertain run cannot be silently replayed.</p>' +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
@@ -1760,6 +1771,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const replacement = host.querySelector<HTMLInputElement>('[data-sa-team-search]');
       replacement?.focus({preventScroll:true});
       if (replacement && selection !== null) replacement.setSelectionRange(selection, selection);
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.name === 'initialTestCommand' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
+      initialDemandTestCommand = target.value;
       return;
     }
     if (target instanceof HTMLTextAreaElement && target.name === 'initialAllowedPaths' &&
@@ -3024,6 +3040,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           teamStrategy.executionMode === 'off') return;
       const key = taskKey;
       initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
+      initialDemandTestCommand = String(data.get('initialTestCommand') ?? '');
       const initialPaths = initialDemandWritePaths.split(/\r\n?|\n/).filter(Boolean);
       if (initialPaths.length > 16 || new Set(initialPaths).size !== initialPaths.length) {
         error = 'Supply at most 16 unique exact project-relative paths.'; render(); return;
@@ -3032,12 +3049,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const admitted = await call<Ticket>('superagent_start_demand',{
           orchestrationId:selectedConfig.id, objective, requestKey:key,
           ...(initialPaths.length ? {allowedPaths:initialPaths} : {}),
+          ...(initialDemandTestCommand ? {allowedTest:initialDemandTestCommand} : {}),
         });
         if (!admitted.id || admitted.orchestrationId !== selectedConfig.id)
           throw new Error('Native Demand admission returned a mismatched Team or missing Ticket.');
         taskKey = crypto.randomUUID(); demandObjective = '';
         demandPreflight = null;
         initialDemandWritePaths = '';
+        initialDemandTestCommand = '';
         inspectedTicket = admitted.id;
         workspaceView = 'run';
         await reload();

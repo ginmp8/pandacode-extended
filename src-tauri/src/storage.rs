@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 62;
+pub const SCHEMA_VERSION: i64 = 63;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -999,6 +999,12 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=62;")
                     .map_err(|e|e.to_string())?;
             }
+            if version < 63 {
+                migration.execute_batch(crate::superagent::scheduler::test_runner::SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=63;")
+                    .map_err(|e|e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         // Recovery can revoke a SuperAgent mandate. Serialize it with the
@@ -1010,6 +1016,10 @@ impl Store {
             Some(crate::superagent::effects::lock_dispatch(path)?)
         };
         let recovery = db.transaction().map_err(|e| e.to_string())?;
+        // Interrupted native test effects are uncertain, never replayed or passed.
+        recovery.execute(
+            "UPDATE sa_demand_test_runs SET state='uncertain' WHERE state='running'", [],
+        ).map_err(|e|e.to_string())?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
         Self::record_legacy_prompt_cutoff(&recovery)?;

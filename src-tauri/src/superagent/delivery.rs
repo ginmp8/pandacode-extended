@@ -123,7 +123,7 @@ fn git_read(root:&Path,args:&[&str],limit:usize)->Result<Vec<u8>> {
     Ok(output.stdout.bytes)
 }
 
-fn observe_git(root:&Path)->Result<(String,String,String,usize)> {
+pub(super) fn observe_git(root:&Path)->Result<(String,String,String,usize)> {
     let expected=std::fs::canonicalize(root)
         .map_err(|_|"Configured checkout is unavailable.".to_owned())?;
     let actual=git_read(&expected,&["rev-parse","--show-toplevel"],4096)?;
@@ -186,7 +186,8 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
         } else {
             "not_attributed_to_ticket"
         }).into(),
-        test_execution_verified:false,ci_result_verified:false,
+        test_execution_verified:super::scheduler::test_runner::verified(&store.db,ticket_id)?,
+        ci_result_verified:false,
         external_delivery_verified:false,
         checked_at:storage::now(),read_only:true,
     };

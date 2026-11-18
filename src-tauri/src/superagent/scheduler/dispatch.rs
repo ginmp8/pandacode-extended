@@ -108,7 +108,7 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
 /// Recheck both native and external unsettled effects inside the same SQLite
 /// transaction that transitions a Demand to completed. Earlier WorkItem
 /// approvals cannot launder an uncertain write after a process restart.
-fn unsettled_root_effects(db:&Connection,root:&str)->Result<bool> {
+pub(super) fn unsettled_root_effects(db:&Connection,root:&str)->Result<bool> {
     db.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sa_effect_receipts effect
@@ -267,7 +267,9 @@ fn reconcile(store:&Store)->Result<()> {
         // A prior, independently verified WorkItem may have acquired an
         // uncertain file or GitHub receipt since its approval. Do not finalize.
         if unsettled_root_effects(&tx,&root)?
-            || !root_work_item_proofs_current(&tx,&root)? {
+            || !root_work_item_proofs_current(&tx,&root)?
+            || (test_runner::required(&tx,&root)?
+                && !test_runner::verified(&tx,&root)?) {
             continue;
         }
         let moved=tx.execute(
@@ -357,7 +359,7 @@ fn approved_child_attempt_current(db:&Connection,child_ticket_id:&str)->Result<b
 
 /// Re-evaluate all native child approvals inside the Demand completion
 /// transaction; the initial frontier query alone is not a finalization gate.
-fn root_work_item_proofs_current(db:&Connection,root:&str)->Result<bool> {
+pub(super) fn root_work_item_proofs_current(db:&Connection,root:&str)->Result<bool> {
     let mut query=db.prepare(
         "SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1"
     ).map_err(|error|error.to_string())?;
@@ -605,7 +607,9 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
     // The same native scheduler advances worker-created descendants only
     // after their parent released the protected checkout/Assignment.
     let nested=superagent::subagents::advance(app).await?;
-    Ok(progressed+nested)
+    // Never borrow ordinary turn-end test privileges for SuperAgent.
+    let tested=test_runner::advance(app).await?;
+    Ok(progressed+nested+tested)
 }
 
 #[cfg(test)]

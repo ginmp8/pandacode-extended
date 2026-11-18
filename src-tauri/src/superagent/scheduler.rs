@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use tauri::{Manager,State};
 
 mod dispatch;
+pub(crate) mod test_runner;
 pub(crate) mod evidence;
 pub(crate) use dispatch::{advance,parent_active,revoke_descendants,sessions_for_root};
 
@@ -589,7 +590,7 @@ fn replayed_demand_scope_confirmed(
 pub async fn superagent_start_demand(
     window:tauri::WebviewWindow,app:tauri::AppHandle,state:State<'_,AppState>,
     orchestration_id:String,objective:String,request_key:String,
-    allowed_paths:Option<Vec<String>>,
+    allowed_paths:Option<Vec<String>>,allowed_test:Option<String>,
 )->Result<super::Ticket> {
     super::require_main_window(&window)?;
     if crate::feature_controls::get().bots_paused {
@@ -600,6 +601,7 @@ pub async fn superagent_start_demand(
     // before allocating any Coordinator session. No later model instruction
     // can widen this finite exact-file scope or acquire shell/MCP rights.
     let paths=allowed_paths.unwrap_or_default();
+    let test=allowed_test.filter(|cmd|!cmd.trim().is_empty());
     let initial=if paths.is_empty() {None} else {
         if !crate::workspace::scoped_writes_supported() {
             return Err("policy_unsupported: initial Demand writes are not supported on this platform.".into());
@@ -621,32 +623,52 @@ pub async fn superagent_start_demand(
         }
         Some((config.team_version,config.policy_revision,config.project_id.clone()))
     };
+    // A native test process is explicitly selected before Coordinator dispatch,
+    // separately from the immutable exact-file grant for Workers.
+    let test_initial=if let Some(command)=test.as_deref() {
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        let config=configuration(&store,&orchestration_id)?;
+        if !config.enabled {return Err("Team is disabled; tests cannot be authorized.".into());}
+        let root=store.workspace_root(&config.project_id,None)?;
+        let canonical=std::fs::canonicalize(&root)
+            .map_err(|_|"The Demand test checkout is unavailable.")?;
+        let manifest=test_runner::manifest_hash(&canonical,command)?;
+        Some((config.team_version,config.policy_revision,config.project_id.clone(),
+            canonical.to_string_lossy().into_owned(),manifest))
+    } else {None};
     let prior_consent={
         let store=state.store.lock().map_err(|e|e.to_string())?;
         let checkout=initial.as_ref().map(|(_,_,project)|
             store.workspace_root(project,None).map(|root|root.to_string_lossy().into_owned())
         ).transpose()?;
-        replayed_demand_scope_confirmed(
+        let files=replayed_demand_scope_confirmed(
             &store.db,&orchestration_id,&objective,&request_key,
             initial.as_ref().map(|(v,r,p)|(
                 *v,*r,p.as_str(),checkout.as_deref().unwrap_or(""),paths.as_slice(),
             )),
-        )?
+        )?;
+        let tests=test_runner::replay_matches(&store.db,&orchestration_id,
+            &request_key,test_initial.as_ref().map(|(v,p,project,root,hash)|
+                (*v,*p,project.as_str(),root.as_str(),
+                 test.as_deref().unwrap_or(""),hash.as_str())))?;
+        files && tests
     };
-    if initial.is_some() && !prior_consent {
+    if (initial.is_some() || test_initial.is_some()) && !prior_consent {
         use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
         let names=paths.iter().map(|path|format!("  - {path}")).collect::<Vec<_>>().join("\n");
+        let tests=test.as_deref().unwrap_or("No native test process");
         let dialog=window.dialog()
             .message(format!(
-                "Authorize ONE Demand to let its separately admitted, eligible Codex WorkItems \
-                 modify ONLY these exact project files?\n\nTeam: {orchestration_id}\n\n{names}\n\n\
-                 This one-time scope is shared with write-required WorkItems in this Demand. \
-                 No shell, MCP, GitHub effects, broader paths or Council approvals are granted. \
-                 Stop, expiration and checkout/Team changes still revoke executable rights."
+                "Authorize ONE Demand for exactly the following scoped effects?\n\n\
+                 Team: {orchestration_id}\nFiles:\n{names}\n\nNative test: {tests}\n\n\
+                 The test command executes declared project code, with a 120-second \
+                 deadline and offline package mode. No arbitrary argv, general shell, \
+                 MCP, GitHub effects, additional files or Council approvals are granted. \
+                 Stop, expiry and policy/manifest changes revoke acceptance."
             ))
-            .title("Authorize initial Demand file scope")
+            .title("Authorize scoped Demand files and tests")
             .buttons(MessageDialogButtons::OkCancelCustom(
-                "Authorize exact files for this Demand".into(),"Cancel".into(),
+                "Authorize exact Demand scope".into(),"Cancel".into(),
             ));
         #[cfg(desktop)]
         let dialog=dialog.parent(&window);
@@ -694,6 +716,24 @@ pub async fn superagent_start_demand(
                 let exact=serde_json::to_string(&paths).map_err(|e|e.to_string())?;
                 if saved.as_deref()!=Some(exact.as_str()) {
                     return Err("Demand request-key replay cannot change the initial write scope.".into());
+                }
+            }
+        }
+        if let Some((version,policy,project,checkout,hash))=&test_initial {
+            if launch {
+                let current=std::fs::canonicalize(store.workspace_root(project,None)?)
+                    .map_err(|_|"The authorized test checkout changed.")?;
+                if current.to_string_lossy()!=checkout.as_str() ||
+                    test_runner::manifest_hash(&current,test.as_deref().unwrap_or(""))?!=*hash {
+                    let _=super::fail_launch(&store,&ticket.id,"Test checkout or manifest changed.");
+                    return Err("Initial test scope changed before Coordinator dispatch.".into());
+                }
+                if let Err(error)=test_runner::issue(
+                    &store,&ticket.id,test.as_deref().unwrap_or(""),*version,
+                    *policy,project,checkout,hash,
+                ) {
+                    let _=super::fail_launch(&store,&ticket.id,&error);
+                    return Err(format!("Initial test authorization failed for {}: {error}",ticket.id));
                 }
             }
         }

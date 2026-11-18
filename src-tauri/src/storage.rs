@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 64;
+pub const SCHEMA_VERSION: i64 = 65;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -1011,6 +1011,28 @@ impl Store {
                 migration.execute_batch(crate::superagent::scheduler::test_runner::SCHEMA)
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=64;")
+                    .map_err(|e|e.to_string())?;
+            }
+            if version < 65 {
+                // Existing failure receipts have no attributable Worker proof
+                // identity. Keep them, but never infer retry permission from
+                // mutable Git state or backfill unverified evidence.
+                for (table,statement) in [
+                    ("sa_demand_test_runs",
+                     "ALTER TABLE sa_demand_test_runs ADD COLUMN worker_proofs_sha256 TEXT NOT NULL DEFAULT '';"),
+                    ("sa_demand_test_attempts",
+                     "ALTER TABLE sa_demand_test_attempts ADD COLUMN worker_proofs_sha256 TEXT NOT NULL DEFAULT '';"),
+                ] {
+                    let present:bool=migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1)
+                         WHERE name='worker_proofs_sha256')",
+                        [table],|row|row.get(0),
+                    ).map_err(|e|e.to_string())?;
+                    if !present {
+                        migration.execute_batch(statement).map_err(|e|e.to_string())?;
+                    }
+                }
+                migration.execute_batch("PRAGMA user_version=65;")
                     .map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
@@ -4262,6 +4284,42 @@ mod tests {
             [],|r|r.get(0),
         ).unwrap();
         assert!(still_present,"repeat startup must retain history immutability");
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn v65_binds_retests_to_new_worker_proofs_without_backfilling_old_receipts() {
+        let directory=std::env::temp_dir().join(format!("worker-retest-v65-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path=directory.join("store.sqlite3");
+        {
+            let old=Store::open(&path).unwrap();
+            old.db.execute_batch(
+                "ALTER TABLE sa_demand_test_runs DROP COLUMN worker_proofs_sha256;
+                 ALTER TABLE sa_demand_test_attempts DROP COLUMN worker_proofs_sha256;
+                 PRAGMA user_version=64;",
+            ).unwrap();
+        }
+        let migrated=Store::open(&path).unwrap();
+        for table in ["sa_demand_test_runs","sa_demand_test_attempts"] {
+            let exists:bool=migrated.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1)
+                 WHERE name='worker_proofs_sha256')",
+                [table],|r|r.get(0),
+            ).unwrap();
+            assert!(exists,"Missing immutable Worker proof field in {table}");
+        }
+        assert_eq!(
+            migrated.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        drop(migrated);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
         drop(reopened);
         std::fs::remove_dir_all(directory).unwrap();
     }

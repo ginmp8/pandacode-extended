@@ -240,6 +240,87 @@ mod tests {
     }
 
     #[test]
+    fn native_full_auto_worker_retains_chat_mode_and_task_guards_without_council() {
+        let path=std::env::temp_dir().join(format!(
+            "sa-native-mode-{}.sqlite3",storage::id(),
+        ));
+        let checkout=std::env::temp_dir().join(format!(
+            "sa-native-checkout-{}",storage::id(),
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Fixture',?1)",
+            [checkout.to_string_lossy().as_ref()],
+        ).unwrap();
+        for bot in ["coordinator","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![bot,storage::now()],
+            ).unwrap();
+        }
+        let draft=super::super::create_configuration(
+            &store,super::super::NewOrchestration {
+                name:"Native access".into(),
+                coordinator_bot_id:"coordinator".into(),
+                worker_bot_id:"worker".into(),
+            },
+        ).unwrap();
+        let edited=update(&store,&draft.id,draft.policy_revision,StrategyUpdate {
+            priority:"balanced".into(),
+            attempt_timeout_ms:MAX_ASSIGNMENT_RUN_MS,
+            max_attempts_per_assignment:2,max_concurrent_tasks:1,
+            execution_mode:Some("full_auto".into()),
+            token_ceiling:None,estimated_cost_ceiling_minor:None,
+            subagent_delegation_enabled:false,
+        }).unwrap();
+        let enabled=super::super::change_enabled(
+            &store,&draft.id,edited.policy_revision,true,
+        ).unwrap();
+        assert!(!enabled.council_required);
+        assert!(enabled.reviewer_bot_ids.is_empty());
+        let ordinary=store.create_session("project","codex","default","ask").unwrap();
+        let (ticket,launched)=super::super::admit(
+            &mut store,&draft.id,"Implement under native Full Access",
+            "native-full-mode-execution",false,
+        ).unwrap();
+        assert!(launched);
+        let task=super::super::assignment_session(
+            &store,&ticket.id,
+        ).unwrap().unwrap();
+        assert_eq!(store.session(&task).unwrap().mode,"full");
+        assert_eq!(store.session(&ordinary.id).unwrap().mode,"ask");
+        assert_eq!(crate::bots::get(&store,"worker").unwrap().mode,"plan");
+        assert_eq!(crate::bots::get(&store,"coordinator").unwrap().mode,"plan");
+        // Native Full Access returns no synthetic reviewer tool policy;
+        // the provider adapter receives its real task-specific session mode.
+        assert!(super::super::read_only_policy(&store,&task).unwrap().is_none());
+        assert!(super::super::guard_gateway_inbound(
+            &store,"worker",&ticket.id,"local-user",true,
+        ).is_ok());
+        assert!(super::super::guard_gateway_inbound(
+            &store,"worker",&ticket.id,"untrusted",true,
+        ).is_err());
+        assert!(super::super::guard_gateway_inbound(
+            &store,"worker",&ticket.id,"local-user",false,
+        ).is_err());
+        // The same native checkout lease protects Full Access Workers.
+        assert!(super::super::guard_run_admission(
+            &store,&task,&[ordinary.id.clone()],
+        ).is_err());
+        assert!(super::super::guard_cloud_attach(&store,&task).is_err());
+        assert!(super::super::guard_cloud_attach(&store,&ordinary.id).is_ok());
+        super::super::stop(&store,&ticket.id).unwrap();
+        assert!(super::super::guard_gateway_inbound(
+            &store,"worker",&ticket.id,"local-user",true,
+        ).is_err());
+        assert!(super::super::guard_cloud_attach(&store,&task).is_err());
+        assert_eq!(store.session(&ordinary.id).unwrap().mode,"ask");
+        std::fs::remove_dir_all(checkout).unwrap();
+    }
+
+    #[test]
     fn execution_mode_rejects_unknown_or_ambiguous_values() {
         let mut request = StrategyUpdate {
             priority: "balanced".into(), attempt_timeout_ms: 300_000,

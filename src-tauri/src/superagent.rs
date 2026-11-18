@@ -4281,8 +4281,23 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     tx.commit().map_err(|e| e.to_string())
 }
 
-/// A provider turn is evidence for a task, not its approval. The only successful
-/// transition here is running -> waiting_approval; native human acceptance is separate.
+/// An attributed native file-write trace is stronger than a model response.
+/// The Tracker records only file bytes owned by this provider turn; failed,
+/// truncated, concurrently edited or untracked changes cannot prove a write.
+fn native_worker_write_attested(store: &Store, session_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turn_changes trace
+           WHERE trace.session_id=?1
+             AND json_extract(trace.summary,'$.attributed')=1
+             AND json_extract(trace.summary,'$.truncated')=0
+             AND json_extract(trace.summary,'$.concurrent')=0
+             AND json_array_length(json_extract(trace.summary,'$.files'))>0)",
+        [session_id], |row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
+/// Native Full Access may finish a Council-Off Worker turn without creating
+/// a fake Council/human verdict. Read-only and With Approval remain unchanged.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
     let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     // A callback may arrive twice, after Stop, or after process restart.
@@ -4330,11 +4345,23 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         authorized && role_current && provenance_ok && within_budget && thread_current,
         crate::feature_controls::get().bots_paused,
     );
+    let native_full_access = !coordinator && team_snapshot.as_ref().is_some_and(|snapshot|
+        is_full_access_autonomy(&snapshot.policy.autonomy) && !snapshot.policy.council_required);
+    let requires_native_write: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_work_items
+         WHERE child_ticket_id=?1 AND requires_write=1)",
+        [&task_id], |row|row.get(0),
+    ).map_err(|error|error.to_string())?;
+    let native_write_proved = if native_full_access && requires_native_write {
+        native_worker_write_attested(store, session_id)?
+    } else { true };
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
         else if coordinator { "queued" }
         else if team_snapshot.as_ref().is_some_and(|snapshot| snapshot.policy.council_required) { "waiting_review" }
+        else if native_full_access && native_write_proved { "completed" }
+        else if native_full_access { "inconclusive" }
         else { "waiting_approval" };
     let now = storage::now();
     // A revoked, stale or remapped callback cannot leave provider output as
@@ -4394,6 +4421,16 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])
                 .map_err(|e| e.to_string())?;
         }
+    }
+    if next == "completed" && native_full_access {
+        // This is a provider-completion receipt, NOT a Council or human
+        // approval. Its digest is checked against the exact final Assignment
+        // and current output before a WorkItem dependency is released.
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'native_worker_finished',?2,?3)",
+            params![task_id,sha256_hex(trimmed.as_bytes()),now],
+        ).map_err(|error|error.to_string())?;
     }
     if team_snapshot.is_none() {
         tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])

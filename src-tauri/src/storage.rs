@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 66;
+pub const SCHEMA_VERSION: i64 = 67;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -1041,6 +1041,36 @@ impl Store {
                 migration.execute_batch(crate::superagent::auto::scope::SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=66;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 67 {
+                // Native Full Access provider completion is not an independent
+                // human/Council approval. Expand the existing immutable receipt
+                // kind without rewriting previously issued historical verdicts.
+                migration.execute_batch(
+                    "ALTER TABLE sa_work_item_evidence_receipts
+                         RENAME TO sa_work_item_evidence_receipts_v66;
+                     CREATE TABLE sa_work_item_evidence_receipts(
+                       item_id TEXT PRIMARY KEY REFERENCES sa_work_items(id) ON DELETE RESTRICT,
+                       child_ticket_id TEXT NOT NULL UNIQUE REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+                       assignment_id TEXT NOT NULL UNIQUE REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+                       evidence_sha256 TEXT NOT NULL CHECK(length(evidence_sha256)=64),
+                       approval_kind TEXT NOT NULL CHECK(approval_kind IN (
+                         'human_accepted','council_passed','council_human_accepted','native_worker_finished')),
+                       reviewed_at INTEGER NOT NULL CHECK(reviewed_at>0),
+                       recorded_at INTEGER NOT NULL CHECK(recorded_at>0)
+                     );
+                     INSERT INTO sa_work_item_evidence_receipts
+                       (item_id,child_ticket_id,assignment_id,evidence_sha256,
+                        approval_kind,reviewed_at,recorded_at)
+                     SELECT item_id,child_ticket_id,assignment_id,evidence_sha256,
+                            approval_kind,reviewed_at,recorded_at
+                     FROM sa_work_item_evidence_receipts_v66;
+                     DROP TABLE sa_work_item_evidence_receipts_v66;"
+                ).map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::scheduler::evidence::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=67;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;

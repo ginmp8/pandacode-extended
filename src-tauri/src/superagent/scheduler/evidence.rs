@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sa_work_item_evidence_receipts(
   assignment_id TEXT NOT NULL UNIQUE REFERENCES sa_assignments(id) ON DELETE RESTRICT,
   evidence_sha256 TEXT NOT NULL CHECK(length(evidence_sha256)=64),
   approval_kind TEXT NOT NULL CHECK(approval_kind IN
-    ('human_accepted','council_passed','council_human_accepted')),
+    ('human_accepted','council_passed','council_human_accepted','native_worker_finished')),
   reviewed_at INTEGER NOT NULL CHECK(reviewed_at>0),
   recorded_at INTEGER NOT NULL CHECK(recorded_at>0)
 );

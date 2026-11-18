@@ -303,15 +303,14 @@ fn test_effect_live(db:&rusqlite::Connection,job:&Reserved)->bool {
 /// environment is empty, and the process has no network namespace access.
 /// Until native sandbox adapters exist, non-Linux platforms are unsupported
 /// rather than launching unrestricted host-side commands.
-fn sandboxed_test_command(job:&Reserved)->Result<Command> {
-    #[cfg(target_os="linux")]
-    {
+#[cfg(target_os="linux")]
+fn linux_sandbox(checkout:&str)->Result<Command> {
         if !Path::new("/usr/bin/bwrap").is_file() {
             return Err("Native test sandbox unavailable: bubblewrap is required.".into());
         }
-        if !Path::new(&job.checkout).is_absolute() ||
-            !std::fs::canonicalize(&job.checkout)
-                .is_ok_and(|path|path==Path::new(&job.checkout)) {
+        if !Path::new(checkout).is_absolute() ||
+            !std::fs::canonicalize(checkout)
+                .is_ok_and(|path|path==Path::new(checkout)) {
             return Err("Native test sandbox requires a canonical checkout.".into());
         }
         let mut command=Command::new("/usr/bin/bwrap");
@@ -322,7 +321,7 @@ fn sandboxed_test_command(job:&Reserved)->Result<Command> {
             "--symlink","usr/bin","/bin",
             "--symlink","usr/lib","/lib",
             "--symlink","usr/lib64","/lib64",
-            "--dir","/workspace","--ro-bind",&job.checkout,"/workspace",
+            "--dir","/workspace","--ro-bind",checkout,"/workspace",
             "--tmpfs","/tmp","--dir","/home",
             "--proc","/proc","--dev","/dev",
             "--clearenv","--setenv","HOME","/tmp",
@@ -333,6 +332,13 @@ fn sandboxed_test_command(job:&Reserved)->Result<Command> {
             "--setenv","npm_config_offline","true",
             "--chdir","/workspace",
         ]);
+        Ok(command)
+}
+
+fn sandboxed_test_command(job:&Reserved)->Result<Command> {
+    #[cfg(target_os="linux")]
+    {
+        let mut command=linux_sandbox(&job.checkout)?;
         match job.command.as_str() {
             "npm test" if Path::new("/usr/bin/npm").is_file() =>
                 {command.args(["--","/usr/bin/npm","test","--silent"]);},
@@ -443,6 +449,37 @@ mod tests {
         assert_eq!(bounded_test_timeout(now,now+3_000),Some(Duration::from_secs(3)));
         assert_eq!(bounded_test_timeout(now,now+180_000),Some(Duration::from_secs(120)));
         assert_eq!(bounded_test_timeout(i64::MIN,i64::MAX),None);
+    }
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn native_test_sandbox_denies_external_files_network_and_ambient_secrets() {
+        use std::net::TcpListener;
+        // CI installs bubblewrap; unsupported local hosts fail closed.
+        if !Path::new("/usr/bin/bwrap").is_file() {return;}
+        let root=std::env::temp_dir().join(format!("native-test-sandbox-{}",storage::id()));
+        let external=std::env::temp_dir().join(format!("native-test-external-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let script=format!(
+            "echo SANDBOX_STARTED; if echo forbidden > /workspace/denied.txt 2>/dev/null; then echo FILE_ALLOWED; else echo FILE_DENIED; fi; echo private > {}; if /usr/bin/printenv FULLAUTO_TEST_SECRET >/dev/null 2>&1; then echo ENV_ALLOWED; else echo ENV_DENIED; fi; if echo ping > /dev/tcp/127.0.0.1/{} 2>/dev/null; then echo NET_ALLOWED; else echo NET_DENIED; fi",
+            external.display(),port,
+        );
+        let mut command=linux_sandbox(root.to_str().unwrap()).unwrap();
+        command.env("FULLAUTO_TEST_SECRET","must-not-be-inherited");
+        command.args(["--","/usr/bin/bash","-c",&script]);
+        let output=crate::workspace::run_process(
+            command,"Sandbox test",16*1024,Duration::from_secs(10),
+        ).unwrap();
+        let stdout=String::from_utf8_lossy(&output.stdout.bytes);
+        assert!(output.status.success(),"{stdout}");
+        for witness in ["SANDBOX_STARTED","FILE_DENIED","ENV_DENIED","NET_DENIED"] {
+            assert!(stdout.contains(witness),"missing {witness}: {stdout}");
+        }
+        assert!(!external.exists());
+        assert!(!root.join("denied.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

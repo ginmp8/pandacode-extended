@@ -4363,6 +4363,124 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
 
 
 #[test]
+fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same_cycle() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["recovery-security", "recovery-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["recovery-security", "recovery-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Recover a pristine child", None, None).unwrap();
+    let (old_child, before_root) = {
+        let store = state.store.lock().unwrap();
+        let old = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
+        (old, serde_json::to_value(&root).unwrap())
+    };
+    assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
+    let replacement = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert_eq!(root.council_since, started.council_since);
+        let views = child_council::inspect(&store, &root).unwrap();
+        let replacement = views.iter().find(|view| view.bot_id == "recovery-security")
+            .unwrap().child_session_id.clone();
+        assert_ne!(replacement, old_child);
+        assert_eq!(parent_of(&store, &old_child).unwrap().as_deref(), Some(sid.as_str()));
+        assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        assert_eq!(store.session(&replacement).unwrap().mode, "plan");
+        assert!(load(&store, &replacement).unwrap().unwrap().workers.is_empty());
+        replacement
+    };
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root,
+        "recovery must neither approve nor mutate the root Council cycle");
+    let resumed = control_state(&state, &sid, "resume").unwrap();
+    assert_eq!(resumed.council_since, started.council_since);
+    let (pending, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"Dispatch fresh native child review"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let store = state.store.lock().unwrap();
+    let child = load(&store, &replacement).unwrap().unwrap();
+    assert_eq!(child.workers.len(), 2);
+    assert_eq!(launch.admission.parent, replacement);
+    assert!(child.workers.iter().all(|leaf| leaf.read_only && leaf.wrote_at == 0
+        && leaf.reviewer_binding.is_some()));
+}
+
+#[test]
+fn explicit_native_child_recovery_rejects_foreign_work_and_preserves_old_authority() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["tamper-security", "tamper-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["tamper-security", "tamper-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Reject a contaminated child", None, None).unwrap();
+    let before = {
+        let store = state.store.lock().unwrap();
+        let old = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
+        store.message(&old, "assistant", "Unrelated chat content").unwrap();
+        (serde_json::to_value(&root).unwrap(), old)
+    };
+    let error = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(error.contains("child_council_recovery_denied"), "{error}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before.0);
+    let store = state.store.lock().unwrap();
+    let record: String = store.db.query_row(
+        "SELECT worker_id FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
+        rusqlite::params![sid, format!("native-council-child:{}:tamper-security", started.council_since)],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(record, before.1);
+}
+
+#[test]
 fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
     let (state, sid) = state_fixture();
     {

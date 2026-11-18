@@ -102,6 +102,15 @@ fn frozen(
     store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
     session_id: &str, child_config: &TeamConfig,
 ) -> Result<FrozenChildReservation> {
+    frozen_with_recovery_status(store, root, child, session_id, child_config, false)
+}
+
+// Only the explicit unstarted-child recovery preflight may inspect an interrupted
+// task's frozen identity. Ordinary inspection, launches and callbacks revoke it.
+fn frozen_with_recovery_status(
+    store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
+    session_id: &str, child_config: &TeamConfig, unstarted_interrupted: bool,
+) -> Result<FrozenChildReservation> {
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
@@ -109,7 +118,8 @@ fn frozen(
     // across restart, even when its old child TeamSnapshot still says running.
     // Recheck the native session on every inspection, launch and callback.
     if session.archived || session.task_stage == "completed"
-        || matches!(session.status.as_str(), "interrupted" | "error")
+        || (matches!(session.status.as_str(), "interrupted" | "error")
+            && !(unstarted_interrupted && session.status == "interrupted"))
     {
         return Err("child_council_revoked: reserved child task is archived, completed, interrupted or failed.".into());
     }
@@ -438,6 +448,137 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         }
     }
     Ok(())
+}
+
+/// Explicit recovery may replace a crash-interrupted child that never admitted
+/// a leaf. It never renews an old reviewer grant, restores a conversation or
+/// changes the root cycle. Old child ownership is retained as a revocation
+/// tombstone, preventing an orphaned bot chat from claiming the session.
+/// The caller must hold the store lock and exclude all live root/leaf agents.
+pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+    let config = root.config.council.as_ref().ok_or("Council is off.")?;
+    if !matches!(root.status.as_str(), "paused" | "failed" | "interrupted")
+        || root.council_since <= 0 || config.nested_bot_reviewers.is_empty()
+        || root.pending_setup.is_some()
+    {
+        return Err("child_council_recovery_denied: only an unchanged resting hierarchical Council may recover.".into());
+    }
+    config.validate()?;
+    let parent = store.session(&root.session_id)?;
+    if parent.archived || parent.task_stage == "completed" {
+        return Err("child_council_recovery_denied: root task is settled.".into());
+    }
+    crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut recovered = 0;
+    for choice in &config.nested_bot_reviewers {
+        let key = key(root, &choice.bot_id);
+        let row: Option<(String, String)> = store.db.query_row(
+            "SELECT worker_id,content FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
+            params![&root.session_id, &key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        let (old_id, frozen_json) = row.ok_or(
+            "child_council_recovery_denied: required frozen child reservation is missing."
+        )?;
+        let old = store.session(&old_id)?;
+        if old.status != "interrupted" {
+            // Noninterrupted children are independently checked by the full
+            // native preflight before this transaction can commit.
+            continue;
+        }
+        let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)
+            .map_err(|_| "child_council_recovery_denied: malformed reservation.")?;
+        let child_config = child_config(config, choice)?;
+        let expected = frozen_with_recovery_status(
+            store, root, choice, &old_id, &child_config, true,
+        )?;
+        let old_team = super::load(store, &old_id)?
+            .ok_or("child_council_recovery_denied: child state is missing.")?;
+        if previous != expected
+            || super::parent_of(store, &old_id)?.as_deref() != Some(root.session_id.as_str())
+            || old_team.status != "blocked" || !old_team.workers.is_empty()
+            || old_team.config != child_config || !old_team.objective.is_empty()
+            || old_team.generation != 0 || old_team.council_since != 0
+            || old_team.pending_setup.is_some() || old_team.pending_turn.is_some()
+            || old_team.summary.is_some() || old_team.council_accepted.is_some()
+            || !old_team.briefings.is_empty()
+        {
+            return Err("child_council_recovery_denied: interrupted child is not pristine and frozen.".into());
+        }
+        let claims: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            params![&root.session_id, &old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let owned: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers
+             WHERE parent_session_id=?1 AND session_id=?2",
+            params![&root.session_id, &old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let descendants: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let requests: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1",
+            [&old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let messages: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id=?1",
+            [&old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let description: String = store.db.query_row(
+            "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
+            [&old_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if claims != 1 || owned != 1 || descendants != 0
+            || requests != 0 || messages != 0
+            || description != RESERVATION_DESCRIPTION
+            || old.resume_id.is_some()
+        {
+            return Err("child_council_recovery_denied: interrupted child has existing work or competing authority.".into());
+        }
+        // The old task stays interrupted and task-owned. A new session gets a
+        // new native identity, with no chat, worker, grant or earlier score.
+        let fresh = store.create_session(&parent.project_id, &old.provider, &old.model, "plan")?;
+        store.db.execute(
+            "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+            params![&fresh.id, format!("Council child: {}", choice.bot_id),
+                RESERVATION_DESCRIPTION, &parent.worktree_path, &old.reasoning_effort],
+        ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+            params![&root.session_id, storage::id(), &fresh.id],
+        ).map_err(|e| e.to_string())?;
+        let mut fresh_team = super::new_team(fresh.id.clone(), child_config.clone());
+        fresh_team.status = "blocked".into();
+        super::save(store, &mut fresh_team)?;
+        let new_record = frozen(store, root, choice, &fresh.id, &child_config)?;
+        let updated = store.db.execute(
+            "UPDATE architect_requests SET worker_id=?1,content=?2
+             WHERE parent_session_id=?3 AND kind='council_child' AND key=?4 AND worker_id=?5",
+            params![&fresh.id, serde_json::to_string(&new_record).map_err(|e| e.to_string())?,
+                &root.session_id, &key, &old_id],
+        ).map_err(|e| e.to_string())?;
+        if updated != 1 {
+            return Err("child_council_recovery_denied: reservation changed during recovery.".into());
+        }
+        recovered += 1;
+    }
+    if recovered == 0 {
+        return Err("child_council_recovery_denied: no pristine interrupted child needs recovery.".into());
+    }
+    // Roll back every replacement if any sibling has stale or unauthorized
+    // native evidence. Root status and Council revision remain unchanged.
+    if root.status == "interrupted" {
+        require_resumable_child_cycles(store, root)?;
+    } else {
+        require_unrevoked_child_sessions_on_resume(store, root)?;
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(recovered)
 }
 
 /// Resolve task descendants through native ownership, never a bot's editable

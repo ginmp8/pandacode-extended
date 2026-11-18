@@ -1946,6 +1946,18 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
                     }
                 }
             }
+            "recover" => {
+                if !can_resume(&team.status) || agents.contains_key(session_id)
+                    || team.workers.iter().any(|worker| agents.contains_key(&worker.session_id))
+                    || child_council::active_leaf_agents(&store, session_id, &agents)?
+                {
+                    return Err("child_council_recovery_denied: root or reviewer agents are still running.".into());
+                }
+                child_council::recover_unstarted_children(&store, &team)?;
+                // A separate explicit Resume admits new leaf work; this action
+                // does not alter the root's status, revision or approval gate.
+                return Ok(team);
+            }
             "resume" => {
                 if child_council::active_leaf_agents(&store, session_id, &agents)? {
                     return Err(AGENTS_STOPPING.into());

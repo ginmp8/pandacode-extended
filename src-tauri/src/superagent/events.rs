@@ -1532,6 +1532,18 @@ fn list_decisions_page(
         return Err("Source decision cursor requires a positive sequence and bounded delivery ID.".into());
     }
     source(store, source_id)?;
+    // A keyset boundary must be an actual receipt of this exact source.
+    // Arbitrary or foreign-source cursors cannot silently skip history.
+    if let (Some(sequence), Some(delivery_id)) = (before_sequence, before_delivery_id) {
+        let anchored: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_event_decisions
+             WHERE source_id=?1 AND sequence=?2 AND delivery_id=?3)",
+            params![source_id, sequence, delivery_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !anchored {
+            return Err("Source decision cursor does not belong to this source.".into());
+        }
+    }
     let mut stmt = store.db.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,d.sequence,
                 d.decision,d.policy_revision,d.at,
@@ -1907,6 +1919,39 @@ fn linked_decisions_page(
         return Err("Invalid linked source decision page cursor.".into());
     }
     let ticket = super::get_ticket(store, ticket_id)?;
+    // Do not use a boundary from another Ticket, an unlinked thread, or a
+    // stale repository identity: the cursor must still be visible here.
+    if let Some(cursor) = before {
+        let anchored: bool = store.db.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_event_decisions d
+               JOIN sa_event_sources observed ON observed.id=d.source_id
+               WHERE d.source_id=?2 AND d.delivery_id=?3 AND d.at=?4
+                 AND d.decision='observed_permitted'
+                 AND observed.orchestration_id=?5
+                 AND EXISTS(
+                   SELECT 1 FROM sa_source_thread_links l
+                   JOIN sa_event_sources linked ON linked.id=l.source_id
+                   WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
+                     AND linked.repository=observed.repository COLLATE NOCASE
+                     AND linked.orchestration_id=observed.orchestration_id
+                     AND (linked.id=observed.id OR EXISTS(
+                       SELECT 1 FROM sa_source_repository_identity li
+                       JOIN sa_source_repository_identity oi
+                         ON oi.source_id=observed.id
+                        AND oi.repository_id=li.repository_id
+                       WHERE li.source_id=linked.id
+                     ))
+                 )
+             )",
+            params![ticket_id, &cursor.source_id, &cursor.delivery_id,
+                    cursor.at, &ticket.orchestration_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !anchored {
+            return Err("Linked activity cursor is not visible to this Ticket.".into());
+        }
+    }
     // A same-source legacy receipt remains visible after upgrade. A different
     // event class needs matching, positive GitHub repository IDs, never a name
     // match or two NULL identity records.
@@ -2644,6 +2689,12 @@ mod tests {
         assert!(list_decisions_page(&reopened, &primary.id, 50, Some(1), None).is_err());
         assert!(list_decisions_page(&reopened, &primary.id, 50, Some(0), Some("receipt_001")).is_err());
         assert!(list_decisions_page(&reopened, &primary.id, 50, Some(1), Some("../private")).is_err());
+        // Valid syntax alone is not authority to reuse another source's
+        // position (or a made-up sequence) as this source's history cursor.
+        assert!(list_decisions_page(&reopened, &primary.id, 50,
+            Some(200), Some("foreign_001")).is_err());
+        assert!(list_decisions_page(&reopened, &primary.id, 50,
+            Some(1), Some("fabricated_receipt")).is_err());
         assert!(list_decisions_page(&reopened, "unknown", 50, None, None).is_err());
         let first: serde_json::Value = serde_json::from_str(
             &headless_source_decisions_page(&path, &primary.id, 50, None, None).unwrap(),
@@ -4530,6 +4581,22 @@ mod tests {
         }
         assert_eq!(found, expected);
         assert!(!found.contains(&"foreign-thread".to_string()));
+        // An actual receipt of a different thread cannot be reused as a
+        // pagination anchor, even after linking it to another Ticket.
+        let foreign_at: i64 = store.db.query_row(
+            "SELECT at FROM sa_event_decisions WHERE source_id=?1 AND delivery_id='foreign-thread'",
+            [&on.id], |row| row.get(0),
+        ).unwrap();
+        let foreign_cursor = LinkedActivityCursor {
+            at: foreign_at, source_id: on.id.clone(),
+            delivery_id: "foreign-thread".into(),
+        };
+        assert!(linked_decisions_page(&store, "paged-ticket", 3,
+            Some(&foreign_cursor)).is_err());
+        link_thread(&store, &on.id, "other-ticket", "issue:43").unwrap();
+        assert_eq!(linked_decisions(&store, "other-ticket", 3).unwrap().len(), 1);
+        assert!(linked_decisions_page(&store, "paged-ticket", 3,
+            Some(&foreign_cursor)).is_err());
         assert!(linked_decisions_page(&store, "paged-ticket", 2,
             Some(&LinkedActivityCursor { at:0, source_id:on.id.clone(),
                 delivery_id:"page-1".into() })).is_err());
@@ -4540,6 +4607,11 @@ mod tests {
         let second = linked_decisions_page(&reopened, "paged-ticket", 3,
             Some(&continuation)).unwrap();
         assert_eq!(second.decisions.len(), 3);
+        // A revoked source-thread link invalidates its outstanding cursor:
+        // no historical pages can be silently resumed under changed scope.
+        unlink_thread(&reopened, &on.id, "paged-ticket", "issue:42").unwrap();
+        assert!(linked_decisions_page(&reopened, "paged-ticket", 3,
+            Some(&continuation)).is_err());
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);

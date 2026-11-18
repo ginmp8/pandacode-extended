@@ -2041,6 +2041,83 @@ pub(crate) fn headless_quarantine_detached_ticket(
     })).map_err(|e| e.to_string())
 }
 
+/// A trusted local operator can quarantine an expired or invalid-clock native
+/// Assignment without opening startup recovery beside a live serve process.
+/// This is not a provider stop or permission to retry: the owning serve host
+/// observes the durable revocation and cancels its task-owned handle.
+pub(crate) fn headless_quarantine_expired_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before expiry quarantine.".into());
+    }
+    if state != "running" {
+        return Err("Only a running Ticket can have an expired Assignment quarantined.".into());
+    }
+    let active = active.ok_or("Running Ticket has no active Assignment; inspect recovery state.")?;
+    let running: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if running != 1 {
+        return Err("Expiry quarantine requires exactly one running native Assignment.".into());
+    }
+    let started_at: i64 = tx.query_row(
+        "SELECT created_at FROM sa_assignments
+         WHERE id=?1 AND ticket_id=?2 AND state='running'",
+        params![&active,ticket_id], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("Active native Assignment does not match the running Ticket.")?;
+    let now = storage::now();
+    if assignment_within_budget(started_at, now) {
+        return Err("Assignment is within its native run budget; expiry quarantine denied.".into());
+    }
+    if tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+        [ticket_id]).map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Mandate missing; expiry quarantine aborted.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND active_assignment_id=?4",
+        params![ticket_id,expected_revision,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Ticket changed before expiry quarantine.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE id=?1 AND ticket_id=?3 AND state='running'",
+        params![&active,now,ticket_id],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Assignment changed before expiry quarantine.".into());
+    }
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_expired_quarantined',
+           'Expired or invalid-clock native assignment revoked; verify live provider and external effects before retry',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id, "state":"interrupted", "revision":revision+1,
+        "quarantinedAssignments":1, "pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false, "liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicitly quarantine an orphaned provider attempt on a terminal Ticket.
 /// A detached headless process never replays effects or claims to stop the provider.
 pub(crate) fn headless_quarantine_terminal_orphan(
@@ -5332,6 +5409,59 @@ mod tests {
             "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
             [&ticket.id], |r| r.get::<_, String>(0),
         ).unwrap(), "uncertain");
+    }
+
+    #[test]
+    fn headless_expired_quarantine_is_revisioned_denies_healthy_and_never_replays() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private expired work", "headless-expired-native", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id, ticket.revision).is_err(),
+            "A healthy running provider must not be quarantined");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let expired_at = storage::now() - MAX_ASSIGNMENT_RUN_MS - 1;
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![&ticket.id,expired_at],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'external-expired',?2,'pending',?3,?3)",
+            params![&ticket.id,"a".repeat(64),storage::now()],
+        ).unwrap();
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id,
+            ticket.revision + 1).is_err(), "Stale or forged revision must not mutate state");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let raw = headless_quarantine_expired_ticket(
+            &path, &ticket.id, ticket.revision,
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(result["revision"], ticket.revision + 1);
+        assert_eq!(result["state"], "interrupted");
+        assert_eq!(result["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(result["providerStoppedByCommand"], false);
+        assert_eq!(result["externalEffectReplayAllowed"], false);
+        assert!(!raw.contains("Private expired work"));
+        assert!(!raw.contains(&session));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(!on_run_finished(&store, &session, true, "Late provider success").unwrap());
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id,
+            ticket.revision).is_err(), "Duplicate quarantine must not add another audit entry");
+        assert_eq!(history(&store, &ticket.id, 20).unwrap()
+            .iter().filter(|a| a.kind == "headless_expired_quarantined").count(), 1);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 10).unwrap()[0].state,
+            "uncertain");
     }
 
     #[test]

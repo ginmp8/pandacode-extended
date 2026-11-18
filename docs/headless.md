@@ -141,6 +141,26 @@ and audit failures abort without a partial transition. The CLI does **not**
 stop a live external provider, launch work, acknowledge a remote effect or
 allow automatic replay. Uncertain effects need independent reconciliation.
 
+### Quarantine an expired native Assignment
+
+When the read-only recovery inbox identifies a running Ticket whose current
+Assignment exceeded its 30-minute native execution budget (or has an invalid
+clock), a local operator can explicitly revoke it using the exact current
+Ticket revision:
+
+```sh
+pandacode serve --list-recovery-inbox
+pandacode serve --quarantine-expired-ticket <ticket-id> <expected-revision>
+```
+
+This rechecks the native Assignment clock and Ticket/Assignment identity in one
+SQLite transaction, revokes the Mandate, interrupts the Assignment, and marks
+pending external receipts uncertain. Healthy attempts, stale revisions, missing
+or multiple running Assignments are rejected without partial writes. The command
+does **not** stop a live provider, assert any remote result, or authorize a
+retry. A running serve host must observe the revoked task and cancel its provider
+handle; independently reconcile any uncertain remote effect first.
+
 ### Quarantine a terminal Ticket's orphaned assignment
 
 The read-only recovery inbox may find a terminal Ticket with a stranded native

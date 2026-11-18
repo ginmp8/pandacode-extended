@@ -204,6 +204,10 @@ fn reconcile(store:&Store)->Result<()> {
            AND NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts receipt
              WHERE receipt.item_id=sa_work_items.id)",[now],
     ).map_err(|e|e.to_string())?;
+    // A native Full Access Worker without real passing tests must progress
+    // automatically to bounded test/repair WorkItems, never remain a falsely
+    // completed or permanently idle root.
+    test_runner::queue_native_test_followups(store,now)?;
     // A local user authorized the full Demand once. All child Tickets
     // already passed their own native human/Council/effect gates, so no
     // additional per-step "continue" prompt is necessary for final state.

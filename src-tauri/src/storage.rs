@@ -1055,7 +1055,7 @@ impl Store {
         };
         let recovery = db.transaction().map_err(|e| e.to_string())?;
         // Native test processes interrupted on restart are never replayed.
-        // Full Auto roots must also receive one safe terminal decision rather
+        // Full Access roots must also receive one safe terminal decision rather
         // than remain queued behind an uncertain, unrepeatable test receipt.
         crate::superagent::scheduler::test_runner::recover_interrupted(&recovery)?;
         // Only rows from before typed coordination existed are eligible for the
@@ -4333,9 +4333,9 @@ mod tests {
     }
 
     #[test]
-    fn v65_startup_reconciles_persisted_uncertain_full_auto_test_once() {
+    fn v65_startup_reconciles_persisted_uncertain_full_access_test_once() {
         // Simulate a pre-v65 database that already marked a native process
-        // uncertain but never terminalized its Full Auto Demand. The real
+        // uncertain but never terminalized its Full Access Demand. The real
         // Store::open migration/recovery path must preserve the receipt and
         // require no provider process or second user prompt.
         let directory=std::env::temp_dir().join(format!("legacy-test-recovery-{}",id()));

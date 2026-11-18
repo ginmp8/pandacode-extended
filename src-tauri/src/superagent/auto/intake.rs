@@ -190,11 +190,11 @@ async fn admit(app:&tauri::AppHandle,item:PendingIssue)->Result<bool> {
         if src.policy_revision!=item.source_revision || src.repository!=item.repository
             || !src.actor_filter.eq_ignore_ascii_case(&item.actor)
             || active_grant(&store,&src,storage::now())?.is_none() {return Ok(false)}
-        // A previous read-only grant must never launch a Full Auto Demand
-        // which cannot receive its mandated test and file authority.
+        // Verify the original authenticated source and active Team admission.
+        // Worker tool permissions come from the native bot chat Full Access.
         if !super::scope::ready(&store,&src).unwrap_or(false) {
             mark_blocked(&store,&item,
-                "Full Auto source requires current native file and test consent")?;
+                "Authenticated source or native Team authority is missing or stale")?;
             return Ok(false);
         }
         active_grant(&store,&src,storage::now())?.map(|(operator,_,_)|operator)

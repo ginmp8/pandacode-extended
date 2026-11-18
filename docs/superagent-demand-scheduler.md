@@ -65,7 +65,7 @@
 
 The incomplete items still include initial Demand-level file authorization
 (before Coordinator planning); the batch confirmation still requires a user
-interaction after the WorkItem plan exists. Full Auto DD-02/DD-09 is therefore
+interaction after the WorkItem plan exists. Full Access DD-02/DD-09 is therefore
 **not** satisfied by the batch UI alone. Other gaps include provider-local
 native test execution and quality-backed autonomous acceptance without
 per-child human decisions, full
@@ -90,13 +90,13 @@ all descendants. See [the subagent contract](superagent-native-subagents.md).
 
 ## 2026-11-18 native Full Access correction (PR #157)
 
-The user clarified that Full Auto means existing PandaCode native **Full Access**
+The owner clarified that this feature **is native PandaCode Full Access**, not a separately named automation permission mode. Full Access
 for new executor Worker task sessions, **not** a second tool permission system.
 The native `full` session mode is selected through existing bot/harness
 adapters; unrelated existing bot chats and their saved modes are not mutated.
 A new admission-bound audit receipt distinguishes sessions issued under this
 corrected policy from historical read-only SuperAgent sessions. Council is
-independent and optional; selecting Full Auto by itself requires **zero**
+independent and optional; selecting Full Access by itself requires **zero**
 reviewers. If Council is explicitly required, its native reviewer validation
 still applies. With Approval uses native bot session modes and separate
 human WorkItem acceptance.
@@ -106,6 +106,6 @@ ToolHost-only write evidence, explicit native test command grants and
 human/Council-only final WorkItem proof are not yet removed/reconciled across
 the full scheduler and delivery pipeline. This change proves a permission
 routing slice, **not** a working provider-backed no-prompt Full Access Demand.
-Do not consider Full Auto complete until normal shell/MCP/file tools, tests,
+Do not consider Full Access complete until normal shell/MCP/file tools, tests,
 optional Council, multi-WorkItem completion, and safe stop/recovery are verified
 at the current PR HEAD. See owner clarification on issue #148.

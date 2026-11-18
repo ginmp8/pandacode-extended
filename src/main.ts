@@ -527,7 +527,7 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <section id="superagent-workspace" aria-label="Orchestrations" hidden>
       <header class="sa-workspace-header">
         <div class="sa-workspace-trail"><button type="button" data-action="superagent-back">Back to Bots</button><span aria-hidden="true">/</span><h1>Orchestrations</h1></div>
-        <p>Build reusable Teams, configure Full Auto or human approval, and follow each Demand in its bot's native chat.</p>
+        <p>Build reusable Teams, choose Full Access or human approval, and follow each Demand in its bot's native chat.</p>
       </header>
       <div id="superagent-host"><p role="status">Loading orchestrations…</p></div>
     </section>

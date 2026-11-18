@@ -294,7 +294,7 @@ pub async fn superagent_auto_authorize(
                 Every actual Worker ToolHost still validates its own exact grant.\n",
             scope.allowed_paths.join(", "),scope.command,scope.manifest)
     } else {
-        "\nRead-only planning only. No file writes or native test effects authorized.\n".into()
+        "\nWorker tool permissions follow the Team's existing native bot/chat mode; this source grant introduces no separate permission level.\n".into()
     };
     let dialog=window.dialog().message(format!(
         "Authorize bounded authenticated GitHub Auto admission?\n\n\
@@ -302,9 +302,11 @@ pub async fn superagent_auto_authorize(
          Event: issues.opened\nSigned-in operator: {login}\n\
          Maximum Demands per rolling 24h: {max_daily_tasks}\n\
          Grant expiration: 24 hours\n{execution_details}\n\
-         Incoming GitHub text never grants tools or expands file scope. \
-         No shell, MCP, GitHub comments, pushes, merges or releases are authorized. \
-         Stop, expiry, source revocation or policy drift blocks later effects.",
+         Incoming GitHub text never grants tool permissions. \
+         Workers use their native bot/chat permissions, including Full Access \
+         where selected. This source admission does not itself grant GitHub \
+         comments, pushes, merges or releases. Stop, expiry, revocation or \
+         policy drift blocks new demands.",
         src.repository,src.actor_filter,
     )).title("Authorize GitHub Auto")
         .buttons(MessageDialogButtons::OkCancelCustom(

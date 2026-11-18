@@ -439,8 +439,12 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
         }
         Some(paths)
     } else {
-        if items.iter().any(|item|!item.write_paths.is_empty()) {
-            return Err("WorkItem file paths require an explicitly authorized initial Demand scope.".into());
+        // Native bot permissions govern executor tool use. writePaths are
+        // advisory task planning when no separate historical scope was saved.
+        if items.iter().any(|item|!item.write_paths.is_empty())
+            && !super::is_full_access_autonomy(&snapshot.policy.autonomy)
+            && snapshot.policy.autonomy != "approval" {
+            return Err("Legacy read-only WorkItems need an explicit file scope.".into());
         }
         None
     };
@@ -484,7 +488,7 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'work_plan_issued',?2,?3)",
-        params![ticket_id,format!("{} WorkItems ({} request local file authorization); plan digest {}",
+        params![ticket_id,format!("{} WorkItems ({} require source modifications); plan digest {}",
                 items.len(),items.iter().filter(|item|item.requires_write).count(),digest),now],
     ).map_err(|error|error.to_string())?;
     tx.commit().map_err(|error|error.to_string())?;
@@ -521,7 +525,7 @@ pub async fn superagent_demand_plan(
 /// untrusted intent that must pass the later local-user confirmation gate.
 fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],initial_paths:&[String])->String {
     let path_guidance=if initial_paths.is_empty() {
-        "No initial file scope was authorized. Leave writePaths empty; write-required WorkItems must await separate native authorization.".to_string()
+        "Use the selected Workers' existing native bot/chat permissions. Leave writePaths empty unless describing desired edits; Full Access needs no separate file or test grant.".to_string()
     } else {
         format!("The operator approved ONLY these project files for this Demand:\n- {}\nFor each requiresWrite=true item, select a NONEMPTY writePaths subset of that list. Never request another file.",initial_paths.join("\n- "))
     };
@@ -533,13 +537,12 @@ fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],ini
          objects with key, objective, workerBotId, dependsOn (array of prerequisite keys) \
          and requiresWrite (boolean), writePaths (array of exact project-relative files). Use ONLY these existing Worker IDs:\n{}\n\n\
          Keep every WorkItem inside the admitted user objective. Set requiresWrite=true \
-         ONLY when editing source files is necessary. This flag NEVER authorizes any write. \
-         Exact native file rights may come only from an already confirmed initial Demand \
-         scope or a later local-user confirmation; a model cannot extend either grant. \
-         You are planning read-only: do not modify files, run shell commands or call \
-         external tools. Workers may only use a separate native scoped-file ToolHost \
-         after exact path confirmation, and must never infer shell, MCP, GitHub or \
-         Council privileges from this plan. Every child receives a new native \
+         when edits are necessary, but never treat this data as a permission grant. \
+         Workers use their *existing* native bot/chat tool permission mode, \
+         including Full Access when selected for this Demand; no additional \
+         SuperAgent-specific file, shell, MCP or test-command level exists. \
+         You are planning only: do not edit files or run tools as Coordinator. \
+         WorkItem children receive new native sessions with project, role, \
          Ticket, session, independent policy check and completion gate. \
          Output valid JSON only, no Markdown or commentary.",
         ticket_id,objective,selected,

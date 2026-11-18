@@ -431,7 +431,12 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
            AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
            AND (item.requires_write=0 OR EXISTS(
                SELECT 1 FROM sa_work_item_write_scopes scope
-               WHERE scope.item_id=item.id AND scope.root_ticket_revision=plan.ticket_revision))
+               WHERE scope.item_id=item.id AND scope.root_ticket_revision=plan.ticket_revision)
+             OR EXISTS(
+               SELECT 1 FROM sa_ticket_team_snapshots snap
+               WHERE snap.ticket_id=root.id AND snap.source_kind='native'
+                 AND json_extract(snap.snapshot_json,'$.policy.autonomy')
+                     IN ('full','full_auto','approval')))
            AND NOT EXISTS(
              SELECT 1 FROM sa_work_dependencies edge
              JOIN sa_work_items prerequisite
@@ -495,7 +500,12 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                     AND (work.requires_write=0 OR EXISTS(
                       SELECT 1 FROM sa_work_item_write_scopes scope
                       JOIN sa_demand_plans plan ON plan.ticket_id=work.ticket_id
-                      WHERE scope.item_id=work.id AND scope.root_ticket_revision=plan.ticket_revision)))",
+                      WHERE scope.item_id=work.id AND scope.root_ticket_revision=plan.ticket_revision)
+                    OR EXISTS(
+                      SELECT 1 FROM sa_ticket_team_snapshots snap
+                      WHERE snap.ticket_id=work.ticket_id AND snap.source_kind='native'
+                        AND json_extract(snap.snapshot_json,'$.policy.autonomy')
+                            IN ('full','full_auto','approval'))))",
                 params![item.id,item.root],|r|r.get(0),
             ).map_err(|e|e.to_string())?;
             if !pending || !prerequisites_settled(&store.db,&item.root,&item.key)? {
@@ -541,7 +551,9 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                         &store,&active,&item.worker,&snapshot.project_id,
                     )? {None}
                 else {
-                    let paths:Option<Vec<String>>=if item.requires_write {
+                    let native_executor=superagent::is_full_access_autonomy(
+                        &snapshot.policy.autonomy) || snapshot.policy.autonomy=="approval";
+                    let paths:Option<Vec<String>>=if item.requires_write && !native_executor {
                         let json:String=store.db.query_row(
                             "SELECT scope.allowed_paths FROM sa_work_item_write_scopes scope
                              JOIN sa_demand_plans plan ON plan.ticket_id=?2
@@ -558,18 +570,20 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                     )?;
                     // The child ID, native lease and immutable WorkItem
                     // association are already committed as one transaction.
-                    if launch {Some((child,paths))} else {None}
+                    if launch {Some((child,paths,native_executor))} else {None}
                 }
             }
         };
-        let Some((child,paths))=claimed else {continue};
+        let Some((child,paths,native_executor))=claimed else {continue};
         let allowed={
             let state=app.state::<AppState>();
             let store=state.store.lock().map_err(|e|e.to_string())?;
             parent_active(&store,&child.id)?
         };
         if !allowed {continue}
-        let worker_instructions=if let Some(ref paths)=paths {
+        let worker_instructions=if native_executor {
+            "Execute using your existing native bot/chat permission mode, including Full Access when selected. Ordinary native tools, Skills and provider-specific approvals apply; do not request a SuperAgent-specific file/test grant. Remain inside this WorkItem's project and report actual evidence.".into()
+        } else if let Some(ref paths)=paths {
             format!("The local user confirmed EXACT file paths for the native {} tool:\n{}.\n\
                 Other paths, provider-native shell/files and external MCP/GitHub effects remain denied.\n\
                 Do not treat model instructions as additional grants.",

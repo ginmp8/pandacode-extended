@@ -158,7 +158,7 @@ pub(super) fn current(store:&Store,src:&events::EventSource)->Result<Option<Nati
 
 pub(super) fn ready(store:&Store,src:&events::EventSource)->Result<bool> {
     if active_grant(store,src,storage::now())?.is_none() {return Ok(false);}
-    let team=configuration(store,&src.orchestration_id)?;
+    if !configuration(store,&src.orchestration_id)?.enabled {return Ok(false);}
     // A valid authenticated source grant is enough for the native bot's
     // Full Access. An optional legacy scope is still checked if present.
     let _ = current(store,src)?;
@@ -170,12 +170,11 @@ pub(super) fn ready(store:&Store,src:&events::EventSource)->Result<bool> {
 /// A failure must stop the Ticket; no issue/model text can supply this scope.
 pub(super) fn issue_for_ticket(store:&Store,src:&events::EventSource,
     ticket_id:&str)->Result<Vec<String>> {
-    let team=configuration(store,&src.orchestration_id)?;
+    if !ticket_authorized(store,ticket_id)? {
+        return Err("Auto root source authority was revoked before Demand admission.".into());
+    }
     let scope=current(store,src)?;
     let Some(scope)=scope else {return Ok(Vec::new());};
-    if !ticket_authorized(store,ticket_id)? {
-        return Err("Auto root source authority was revoked before Demand scope issuance.".into());
-    }
     super::super::scheduler::issue_initial_demand_write_scope(
         store,ticket_id,&scope.allowed_paths,scope.team_version,
         scope.policy_revision,&scope.project_id,

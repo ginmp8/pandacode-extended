@@ -833,6 +833,24 @@ fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
 /// Resolve the exact repository identity through an independently
 /// authenticated GitHub repository metadata request. A renamed repository
 /// or an alias that redirects elsewhere cannot silently reuse this source.
+/// A local GitHub CLI login can change while a bounded read is in flight.
+/// Recheck the signed-in operator before any Observe receipt is committed,
+/// or the earlier identity could misclassify the new operator's own events.
+fn require_same_authenticated_operator(
+    expected: &str, response: &serde_json::Value,
+) -> Result<()> {
+    let current = authenticated_login(response)?;
+    if !current.eq_ignore_ascii_case(expected) {
+        return Err("Signed-in GitHub operator changed during Observe; no source receipt recorded.".into());
+    }
+    Ok(())
+}
+
+fn recheck_authenticated_operator(root: &std::path::Path, expected: &str) -> Result<()> {
+    let response = crate::github::run_gh(root, &["api", "user"], crate::github::TIMEOUT)?;
+    require_same_authenticated_operator(expected, &crate::github::json(&response)?)
+}
+
 fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Result<u64> {
     let name = raw.get("full_name").and_then(|value| value.as_str())
         .ok_or("Authenticated GitHub repository has no full name.")?;
@@ -1375,6 +1393,7 @@ fn fetch_authenticated_github_window(
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
     require_authenticated_feed_repository(&response, repository_id)?;
+    recheck_authenticated_operator(&root, &signed_in)?;
     Ok((signed_in, response, pages.len(), repository_id))
 }
 
@@ -1783,7 +1802,9 @@ fn fetch_authenticated_check_run(
     )?;
     let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
     let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
-    Ok((signed_in, crate::github::json(&output)?, repository_id))
+    let verified = crate::github::json(&output)?;
+    recheck_authenticated_operator(&root, &signed_in)?;
+    Ok((signed_in, verified, repository_id))
 }
 
 /// Explicit one-shot Checks API observation without a desktop Webview. The
@@ -2886,6 +2907,21 @@ mod tests {
             "SELECT COUNT(*) FROM sa_event_decisions", [],
             |row| row.get::<_,i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn observe_operator_identity_drift_fails_closed_for_events_and_checks() {
+        assert!(require_same_authenticated_operator(
+            "Operator", &serde_json::json!({"login":"operator"})
+        ).is_ok());
+        for response in [
+            serde_json::json!({"login":"other-operator"}),
+            serde_json::json!({"login":""}),
+            serde_json::json!({"login":null}),
+            serde_json::json!({}),
+        ] {
+            assert!(require_same_authenticated_operator("Operator", &response).is_err());
+        }
     }
 
     #[test]

@@ -119,8 +119,6 @@ export async function invokeSuperagent<T>(
         if(!['off','approval','full_auto'].includes(mode) ||
            (request?.executionMode !== undefined && !['approval','full_auto'].includes(request.executionMode)))
           throw Error('Execution mode must be approval or full_auto.');
-        if(mode === 'full_auto' && (!config.councilRequired || config.reviewerBotIds.length < 2))
-          throw Error('Full Auto requires the native Council and at least two independent reviewers.');
         if(mode === 'approval' && config.councilRequired)
           throw Error('With Approval requires human acceptance; disable automatic Council finalization.');
         if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||
@@ -278,10 +276,8 @@ export async function invokeSuperagent<T>(
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
       const strategy=strategyFor(c.id);
-      if(args.enabled && (strategy.executionMode === 'full_auto' &&
-            (!c.councilRequired || c.reviewerBotIds.length < 2) ||
-          strategy.executionMode === 'approval' && c.councilRequired))
-        throw Error('Execution mode and Council configuration disagree.');
+      if(args.enabled && strategy.executionMode === 'approval' && c.councilRequired)
+        throw Error('With Approval requires human acceptance; disable native Council finalization.');
       if(args.enabled && (strategy.maxConcurrentTasks!==1 ||
           strategy.settings.tokenCeiling!==undefined ||
           strategy.settings.estimatedCostCeilingMinor!==undefined ||

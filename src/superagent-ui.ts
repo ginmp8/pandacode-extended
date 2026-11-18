@@ -1019,13 +1019,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ticketDetails?.ticket.id===attentionTicket.id &&
       !ticketDetails.mandate.revoked && ticketDetails.mandate.expiresAt>Date.now() &&
       Boolean(chosen?.enabled);
+    const blockedWorkReasons=attentionTicket && workPlan?.ticketId===attentionTicket.id &&
+      workPlanLoaded ? workPlan.items.filter(item=>item.state==='blocked' && item.lastReason)
+        .slice(0,3) : [];
+    const attentionMandate=ticketDetails?.ticket.id===attentionTicket?.id
+      ? ticketDetails.mandate : null;
     const attentionPanel=attentionTicket &&
       ['blocked','failed','interrupted','inconclusive'].includes(attentionTicket.state)
       ? '<section class="sa-attention-panel" role="region" aria-label="Demand needs attention">' +
         '<div><h4>Needs attention · ' + safe(attentionTicket.state) + '</h4>' +
         '<p>This native run is not verified as delivered. Inspect its evidence before ' +
-        'recovery. A new Demand always requires fresh native admission.</p></div>' +
-        '<div class="sa-actions">' +
+        'recovery. A new Demand always requires fresh native admission.</p>' +
+        (attentionMandate?.revoked
+          ? '<p class="sa-attention-reason">The original native authorization was revoked.</p>'
+          : attentionMandate && attentionMandate.expiresAt<=Date.now()
+            ? '<p class="sa-attention-reason">The original native authorization expired.</p>'
+            : '') +
+        blockedWorkReasons.map(item=>'<p class="sa-attention-reason">Blocked WorkItem ' +
+          safe(item.key) + ': ' + safe(item.lastReason) + '</p>').join('') +
+        '</div><div class="sa-actions">' +
         (nativeRetryAvailable
           ? '<button type="button" data-sa-retry="' + safe(attentionTicket.id) +
             '">Retry current Demand</button>' : '') +
@@ -1527,6 +1539,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
+    workPlan=null; workPlanLoaded=false;
     directRetryEligible = false;
     runGraph = null; runGraphLoaded = false;
     delivery=null; deliveryLoaded=false;
@@ -1536,13 +1549,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
     ]);
     let directRetryCandidate=false;
-    if (snapshot.ticket.state==='blocked') {
+    let inspectedPlan:DemandPlanEvidence|null=null;
+    let inspectedPlanLoaded=false;
+    if (['blocked','failed','interrupted','inconclusive'].includes(snapshot.ticket.state)) {
       try {
-        // A native DAG root cannot be retried through the direct-Ticket command.
-        // Inspection failures are not permission for an implicit retry.
-        const plan=await call<DemandPlanEvidence | null>(
+        // Native DAG evidence is read-only. Neither absent nor failed inspection
+        // grants authority. The backend still validates any Retry transaction.
+        inspectedPlan=await call<DemandPlanEvidence | null>(
           'superagent_demand_plan',{ticketId:id});
-        directRetryCandidate=plan===null;
+        inspectedPlanLoaded=true;
+        directRetryCandidate=snapshot.ticket.state==='blocked' && inspectedPlan===null;
       } catch {
         directRetryCandidate=false;
       }
@@ -1554,6 +1570,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       ticketDetails = snapshot;
       directRetryEligible = directRetryCandidate;
+      workPlan=inspectedPlan; workPlanLoaded=inspectedPlanLoaded;
       if (!snapshot.assignments.some(item => item.id === inspectedAssignmentId)) {
         inspectedAssignmentId = '';
       }

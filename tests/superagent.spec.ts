@@ -163,8 +163,10 @@ async function mountNativeFixture(page: Page, options: {
         teamVersion:cfg.teamVersion,policyRevision:cfg.policyRevision,
         planSha256:'native-plan',state:'active',
         items:[{id:'item-1',key:'task-1',ordinal:0,workerBotId:'worker',
-          objective:'Implement isolated native WorkItem',dependsOn:[],state:'running',
-          childTicketId:'child-1',childTicketState:'running',lastReason:null,
+          objective:'Implement isolated native WorkItem',dependsOn:[],
+          state:ticket?.state==='blocked'?'blocked':'running',
+          childTicketId:'child-1',childTicketState:'running',
+          lastReason:ticket?.state==='blocked'?'Native Worker delivery failed':null,
           requiresWrite:false,writeAuthorized:false}],
         } as never;
       }
@@ -668,6 +670,20 @@ test('blocked DAG and a revoked mandate cannot expose invalid native Retry',asyn
   await expect(panel.getByRole('button',{name:'Retry current Demand'})).toHaveCount(0);
   await expect(panel.getByRole('button',{name:'Start new Demand'})).toBeVisible();
   await expect(panel).toContainText('Native retry is not available');
+  await expect(panel).toContainText('Blocked WorkItem task-1: Native Worker delivery failed');
+});
+
+test('Needs attention explains revoked native authorization without offering Retry',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{
+    mode:'full',enabled:true,withTicket:true,ticketState:'blocked',revoked:true,
+  });
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('button',{name:'Resolve demand'}).click();
+  const attention=host.getByRole('region',{name:'Demand needs attention'});
+  await expect(attention).toContainText('original native authorization was revoked');
+  await expect(attention.getByRole('button',{name:'Retry current Demand'})).toHaveCount(0);
+  await expect(attention.getByRole('button',{name:'Start new Demand'})).toBeVisible();
 });
 
 test('failed Demand cannot be falsely approved and pre-fills a separately authorized new run',async({page})=>{

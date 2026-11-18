@@ -924,7 +924,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                   safe(botName(item.workerBotId)) + ' · State: ' + safe(item.state) +
                   (item.childTicketState ? ' · Native Ticket: ' + safe(item.childTicketState) : '') +
                   (item.dependsOn.length ? ' · After: ' + safe(item.dependsOn.join(', ')) : '') +
-                  '</small><small>' + safe(workItemProgressHint(item,teamPlan.items)) +
+                  '</small><small>' + safe(workItemProgressHint(item,teamPlan?.items ?? [])) +
                   '</small></li>').join('') + '</ol>'
               : '<p>No native WorkItem plan has been issued for this Demand yet.</p>') +
           '<button type="button" data-sa-open-demand="' + safe(demand.id) +
@@ -2345,6 +2345,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             'chat history remain unchanged; restoring never restarts execution.',async()=>{
             await call('superagent_restore_demand',
               {ticketId,expectedRevision:snapshot.ticket.revision});
+            // A restored Demand immediately returns to the visible active board.
+            teamArchived=false;
+            globalArchived=false;
             await reload();
             feedback='Demand restored to its Team board. No Worker execution was restarted.';
           });

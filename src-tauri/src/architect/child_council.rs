@@ -496,16 +496,44 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         )?;
         let old_team = super::load(store, &old_id)?
             .ok_or("child_council_recovery_denied: child state is missing.")?;
+        // A crash may interrupt a child after its leaf roster is admitted,
+        // but before any reviewer is launched. Recover only that zero-work
+        // state: started, scored, reported or externally resumed leaves must
+        // remain revoked until a new task cycle is explicitly authorized.
+        let pristine = old_team.status == "blocked" && old_team.workers.is_empty()
+            && old_team.objective.is_empty() && old_team.generation == 0
+            && old_team.council_since == 0;
+        let admitted_unstarted = old_team.status == "running"
+            && old_team.workers.len() == choice.child_reviewers
+            && old_team.objective == root.objective
+            && old_team.generation == root.generation
+            && old_team.council_since == root.council_since
+            && old_team.workers.iter().all(|leaf| {
+                leaf.status == "queued" && !leaf.abandoned
+                    && leaf.council.as_ref().is_some_and(|seat|
+                        seat.round == 1 && seat.score.is_none() && seat.started_at == 0
+                        && !seat.closed_by_selection && !seat.reported_severe_finding
+                        && !seat.reported_conflict)
+                    && leaf.summary.is_empty() && leaf.error.is_none()
+                    && leaf.result_revision == 0 && !leaf.reported
+                    && !leaf.timed_out && leaf.wrote_at == 0
+            });
         if previous != expected
             || super::parent_of(store, &old_id)?.as_deref() != Some(root.session_id.as_str())
-            || old_team.status != "blocked" || !old_team.workers.is_empty()
-            || old_team.config != child_config || !old_team.objective.is_empty()
-            || old_team.generation != 0 || old_team.council_since != 0
+            || old_team.config != child_config
+            || (!pristine && !admitted_unstarted)
             || old_team.pending_setup.is_some() || old_team.pending_turn.is_some()
             || old_team.summary.is_some() || old_team.council_accepted.is_some()
             || !old_team.briefings.is_empty()
         {
-            return Err("child_council_recovery_denied: interrupted child is not pristine and frozen.".into());
+            return Err("child_council_recovery_denied: interrupted child has started, changed or unauthorized work.".into());
+        }
+        if admitted_unstarted {
+            // All previously issued seats must have real recorded native
+            // authority and exact project/cycle/leaf ownership. Do not
+            // recover a forged child by merely counting its worker entries.
+            validate_admitted(store, root, choice, &previous, &old_team)
+                .map_err(|reason| format!("child_council_recovery_denied: invalid admitted leaf roster ({reason})."))?;
         }
         let claims: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM architect_requests
@@ -533,12 +561,50 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
             "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
             [&old_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if claims != 1 || owned != 1 || descendants != 0
-            || requests != 0 || messages != 0
+        let expected_leaves = if admitted_unstarted { choice.child_reviewers as i64 } else { 0 };
+        if claims != 1 || owned != 1 || descendants != expected_leaves
+            || requests != expected_leaves || messages != 0
             || description != RESERVATION_DESCRIPTION
             || old.resume_id.is_some()
         {
             return Err("child_council_recovery_denied: interrupted child has existing work or competing authority.".into());
+        }
+        // An admitted but never launched reviewer must have no conversation,
+        // resumed provider state or completed task. Leave its immutable native
+        // grant as historical evidence while removing its ownership edge;
+        // both the old session and any late callback become ineligible.
+        if admitted_unstarted {
+            for leaf in &old_team.workers {
+                let session = store.session(&leaf.session_id)?;
+                let messages: i64 = store.db.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE session_id=?1",
+                    [&leaf.session_id], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                let task: String = store.db.query_row(
+                    "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
+                    [&leaf.session_id], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if messages != 0 || session.resume_id.is_some()
+                    || session.archived || session.task_stage == "completed"
+                    || task != leaf.assignment
+                {
+                    return Err("child_council_recovery_denied: admitted leaf has already started or its task changed.".into());
+                }
+            }
+            for leaf in &old_team.workers {
+                store.db.execute(
+                    "UPDATE sessions SET status='interrupted' WHERE id=?1",
+                    [&leaf.session_id],
+                ).map_err(|e| e.to_string())?;
+                let detached = store.db.execute(
+                    "DELETE FROM architect_workers
+                     WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",
+                    params![&old_id, &leaf.id, &leaf.session_id],
+                ).map_err(|e| e.to_string())?;
+                if detached != 1 {
+                    return Err("child_council_recovery_denied: admitted leaf ownership changed.".into());
+                }
+            }
         }
         // The old task stays interrupted and task-owned. A new session gets a
         // new native identity, with no chat, worker, grant or earlier score.

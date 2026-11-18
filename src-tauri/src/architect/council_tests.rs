@@ -4433,6 +4433,104 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
 }
 
 #[test]
+fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reusing_grants() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["queued-security", "queued-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["queued-security", "queued-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Recover an admitted but unlaunched child", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit read-only child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let (old_child, old_leaves, original_cycle, paused_snapshot) = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let old = child_council::inspect(&store, &root).unwrap()[0].child_session_id.clone();
+        let mut child = load(&store, &old).unwrap().unwrap();
+        assert_eq!(child.status, "running");
+        assert_eq!(child.workers.len(), 2);
+        assert!(child.workers.iter().all(|leaf| leaf.status == "queued"
+            && leaf.council.as_ref().unwrap().started_at == 0));
+        let leaves = child.workers.iter().map(|leaf| leaf.session_id.clone()).collect::<Vec<_>>();
+        let mut paused = root.clone();
+        paused.status = "paused".into();
+        save(&store, &mut paused).unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
+        // Even with no model response, an admitted reviewer that actually
+        // started is not safe to discard and silently replace.
+        child.workers[0].status = "running".into();
+        child.workers[0].council.as_mut().unwrap().started_at = storage::now();
+        save(&store, &mut child).unwrap();
+        (old, leaves, root.council_since, serde_json::to_value(&paused).unwrap())
+    };
+    let denied = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(denied.contains("child_council_recovery_denied"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot);
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &old_child).unwrap().unwrap();
+        child.workers[0].status = "queued".into();
+        child.workers[0].council.as_mut().unwrap().started_at = 0;
+        save(&store, &mut child).unwrap();
+    }
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert_eq!(root.council_since, original_cycle);
+        let fresh = child_council::inspect(&store, &root).unwrap()
+            .into_iter().find(|view| view.bot_id == "queued-security").unwrap();
+        assert_ne!(fresh.child_session_id, old_child);
+        assert!(load(&store, &fresh.child_session_id).unwrap().unwrap().workers.is_empty());
+        assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        for leaf in &old_leaves {
+            assert_eq!(store.session(leaf).unwrap().status, "interrupted");
+            assert!(parent_of(&store, leaf).unwrap().is_none(),
+                "revoked leaf ownership must not survive recovery");
+        }
+    }
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot);
+    let resumed = control_state(&state, &sid, "resume").unwrap();
+    assert_eq!(resumed.council_since, original_cycle);
+    let (pending, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"Admit genuinely fresh child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let fresh = child_council::inspect(&store, &root).unwrap()
+        .into_iter().find(|view| view.bot_id == "queued-security").unwrap();
+    let child = load(&store, &fresh.child_session_id).unwrap().unwrap();
+    assert_eq!(child.workers.len(), 2);
+    assert!(child.workers.iter().all(|leaf|
+        !old_leaves.contains(&leaf.session_id) && leaf.read_only
+        && leaf.reviewer_binding.is_some() && leaf.wrote_at == 0));
+}
+
+#[test]
 fn explicit_native_child_recovery_rejects_foreign_work_and_preserves_old_authority() {
     let (state, sid) = state_fixture();
     {

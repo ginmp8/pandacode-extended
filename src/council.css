@@ -46,6 +46,10 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-new{display:inline-flex;align-items:center;gap:6px;font-size:var(--ds-text-meta);color:var(--muted);cursor:pointer}
 .council-new input{accent-color:var(--ds-primary-bg);width:13px;height:13px;margin:0}
 .council-panel p.council-error{color:var(--ds-danger)}
+.council-recovery{display:grid;gap:6px;padding-top:8px;border-top:1px solid color-mix(in srgb,var(--text) 12%,transparent)}
+.council-recovery[hidden],.council-recovery-feedback[hidden]{display:none}
+.council-recovery .ds-btn{justify-self:start;max-width:100%;white-space:normal;text-align:left}
+.council-panel .council-recovery-feedback[role="alert"]{color:var(--ds-danger)}
 /* The switch while an automatic team starts for it: dimmed, softly pulsing (opacity). */
 .council-switch[aria-busy="true"]{opacity:.6}
 @media(prefers-reduced-motion:no-preference){.council-switch[aria-busy="true"]{animation:state-pulse 1.6s ease-in-out infinite}}

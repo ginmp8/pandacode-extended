@@ -12,7 +12,7 @@ type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: 
 test.setTimeout(60_000);
 
 /** Records every architect_set_council; `refuse` makes the mock refuse a command, like a native error. */
-async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null): Promise<void> {
+async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null, recovery?: 'eligible' | 'denied'): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
@@ -30,6 +30,21 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
       if (command === 'architect_council_inspect' && ${inspection !== undefined}) return ${JSON.stringify(inspection ?? null)};
+      if (command === 'architect_get' && ${Boolean(recovery)}) {
+        const current = architect.get(args.sessionId);
+        if (current?.config.council) return {
+          ...current, status: 'paused', config: { ...current.config, council: {
+            ...current.config.council, nestedBotReviewers: [
+              { botId: 'child-reviewer', childReviewers: 2, childTarget: 9, childMaxRounds: 2 },
+            ],
+          } },
+        };
+      }
+      if (command === 'architect_control' && args.action === 'recover' && ${Boolean(recovery)}) {
+        (window.__councilRecoverCalls ??= []).push(structuredClone(args));
+        if (${recovery === 'denied'}) throw new Error('child_council_recovery_denied: interrupted child has existing work.');
+        return architect.get(args.sessionId);
+      }
       switch (command) {
     `);
     await route.fulfill({ response, body });
@@ -913,6 +928,39 @@ test('Council inspector denial remains accessible on narrow screens', async ({ p
   await expect(panel(page)).toHaveCount(0);
 });
 
+
+test('existing Council modal exposes only native unstarted child recovery on resting nested tasks', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'eligible');
+  await button(page).click();
+  const recovery = panel(page).getByRole('button', { name: 'Recover unstarted child Council' });
+  await expect(recovery).toBeVisible();
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  await expect(panel(page).locator('.council-recovery-feedback')).toContainText('resume the team separately');
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
+  await expect(recovery).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+
+  await open(page, '/?council');
+  await button(page).click();
+  await expect(panel(page).getByRole('button', { name: 'Recover unstarted child Council' })).toBeHidden();
+});
+
+test('native child recovery denial is visible but cannot silently resume or approve', async ({ page }) => {
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'denied');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Recover unstarted child Council' }).click();
+  await expect(panel(page).locator('.council-recovery-feedback[role="alert"]'))
+    .toContainText('child_council_recovery_denied: interrupted child has existing work');
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
+  await expect(panel(page).getByRole('button', { name: 'Recover unstarted child Council' })).toBeEnabled();
+});
 
 test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {
   // Start without a Council: strategy selection remains staged until the explicit enable.

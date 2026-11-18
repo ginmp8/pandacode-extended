@@ -90,6 +90,9 @@ export function createCouncil(host: CouncilHost) {
   // Strategy is task-scoped; a pre-enable selection must not become a global default.
   const strategyDraft = new Map<string, 'parallel' | 'escalated' | 'two_phase'>();
   const escalationDraft = new Map<string, boolean>();
+  // A recovery attempt never implicitly resumes the root or approves a child.
+  const recoveringChildren = new Set<string>();
+  const recoveryFeedback = new Map<string, { message: string; denied: boolean }>();
   const selection = (sessionId: string): ReviewerSelection => {
     let draft = reviewerDraft.get(sessionId);
     const persisted = shownConfig(sessionId);
@@ -332,6 +335,20 @@ export function createCouncil(host: CouncilHost) {
     const error = panel.querySelector<HTMLElement>('.council-error')!, failed = failure && notChanged(failure);
     if (error.textContent !== failed) error.textContent = failed;
     error.hidden = !failure;
+    const recovery = panel.querySelector<HTMLElement>('.council-recovery');
+    if (recovery) {
+      const team = host.team(sessionId);
+      recovery.hidden = !(team?.config.council?.nestedBotReviewers?.length
+        && ['paused', 'failed', 'interrupted'].includes(team.status));
+      const control = recovery.querySelector<HTMLButtonElement>('[data-council-recover]')!;
+      control.disabled = recoveringChildren.has(sessionId);
+      control.setAttribute('aria-busy', String(control.disabled));
+      const feedback = recovery.querySelector<HTMLElement>('.council-recovery-feedback')!;
+      const result = recoveryFeedback.get(sessionId);
+      feedback.textContent = result?.message ?? '';
+      feedback.hidden = !result?.message;
+      feedback.setAttribute('role', result?.denied ? 'alert' : 'status');
+    }
     // Beside Target score: native's current lowest, so lowering it is an informed choice.
     const status = host.team(sessionId)?.councilStatus, lowest = status?.lowest, open = status?.state === 'reviewing' || status?.state === 'dispatch';
     const lowestNote = shown && typeof lowest === 'number' ? ` · lowest ${open ? 'so far' : 'now'} ${formatScore(lowest)}` : '';
@@ -453,6 +470,32 @@ export function createCouncil(host: CouncilHost) {
     return entry.tail;
   }
 
+  async function recoverUnstartedChild(sessionId: string): Promise<void> {
+    const team = host.team(sessionId);
+    if (recoveringChildren.has(sessionId)
+      || !team?.config.council?.nestedBotReviewers?.length
+      || !['paused', 'failed', 'interrupted'].includes(team.status)) return;
+    recoveringChildren.add(sessionId);
+    recoveryFeedback.delete(sessionId);
+    paint(sessionId);
+    try {
+      // Native owns the authorization, immutable cycle and replacement; its
+      // returned root snapshot is intentionally unchanged and must not replace
+      // a newer UI snapshot while the request was in flight.
+      await host.call<TeamSnapshot>('architect_control', { sessionId, action: 'recover' });
+      const message = 'An unstarted child reservation was recovered. Reopen review evidence to inspect it, then resume the team separately.';
+      recoveryFeedback.set(sessionId, { message, denied: false });
+      host.announce(message);
+    } catch (cause) {
+      const message = 'Child Council recovery denied: ' + (cause instanceof Error ? cause.message : String(cause));
+      recoveryFeedback.set(sessionId, { message, denied: true });
+      host.announce(message);
+    } finally {
+      recoveringChildren.delete(sessionId);
+      paint(sessionId);
+    }
+  }
+
   function close(focus = false): void {
     if (!panel) return;
     const closing = panel;
@@ -492,6 +535,16 @@ export function createCouncil(host: CouncilHost) {
         panel!.querySelector<HTMLElement>('.council-foot')!.before(inspection);
         inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
       }
+      // This is an explicit, narrow native recovery action for a resting root,
+      // not a shortcut around the interrupted reviewer/leaf authority gates.
+      const recovery = document.createElement('section');
+      recovery.className = 'council-recovery';
+      recovery.setAttribute('aria-label', 'Child Council recovery');
+      recovery.hidden = true;
+      recovery.innerHTML = '<button type="button" class="ds-btn" data-council-recover>Recover unstarted child Council</button>' +
+        '<small>Only an interrupted child reservation with no admitted reviewers is eligible. Other interrupted reviews remain blocked; resume the team separately.</small>' +
+        '<p class="council-recovery-feedback" aria-live="polite" hidden></p>';
+      panel.querySelector<HTMLElement>('.council-foot')!.before(recovery);
       // Opening or changing the disclosure alters the popover's natural height.
       // Reposition after the staged editor has updated its visibility.
       const positionEditor = () => requestAnimationFrame(() => placeNow?.());
@@ -669,6 +722,10 @@ export function createCouncil(host: CouncilHost) {
       catch (cause) { input.checked = false; selectedError(sessionId, cause instanceof Error ? cause.message : String(cause)); }
     };
     const onClick = (event: MouseEvent) => {
+      if ((event.target as Element).closest('[data-council-recover]')) {
+        void recoverUnstartedChild(sessionId);
+        return;
+      }
       const option = (event.target as Element).closest<HTMLElement>('[data-value], [data-reviewers-source]');
       if (!option) return;
       const key = option.closest<HTMLElement>('[data-field]')!.dataset.field as Field;

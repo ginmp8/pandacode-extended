@@ -299,7 +299,9 @@ test('native Team role picker preserves checked bots and saves ordered IDs only 
   await expect(council.getByRole('checkbox',{name:/Worker Two/})).toBeDisabled();
   await expect(council.getByRole('checkbox',{name:/Reviewer One/})).toBeChecked();
   await council.getByRole('button',{name:'Done'}).click();
-  await expect(workers.getByRole('checkbox',{name:/Worker Two/})).toBeChecked();
+  // A closed native <details> hides its inputs from the accessibility tree.
+  // Assert the actual checked input without reopening the picker.
+  await expect(workers.locator('input[data-sa-multi-option][value="worker2"]')).toBeChecked();
   expect(await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
   await host.getByRole('button',{name:'Save configured roles'}).click();
@@ -624,12 +626,18 @@ test('Worker checkbox and Council selection have consistent label alignment',asy
   await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Coordinator'});
   await builder.locator('details[data-sa-multi="builderWorkers"] summary').click();
   await builder.locator('details[data-sa-multi="builderWorkers"]').locator('input[data-sa-multi-option][value="worker"]').check();
+  // Both role pickers should align the checkbox alongside its label.
+  const workerRow=builder.locator('details[data-sa-multi="builderWorkers"] .sa-multi-option').first();
+  const reviewerRow=builder.locator('details[data-sa-multi="builderReviewers"] .sa-multi-option').first();
+  await expect(workerRow).toHaveCSS('flex-direction','row');
+  await expect(workerRow).toHaveCSS('align-items','center');
+  await expect(reviewerRow).toHaveCSS('flex-direction','row');
+  await expect(reviewerRow).toHaveCSS('align-items','center');
   await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('button',{name:'Done'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('radio',{name:/Full Access/}).check();
-  const workers=builder.locator('details[data-sa-multi="builderWorkers"]');
-  await expect(workers).toBeVisible();
+  await expect(builder.getByRole('radio',{name:/Full Access/})).toBeChecked();
   await expect(builder).toContainText('Configured reviewers are always invoked');
 });
 

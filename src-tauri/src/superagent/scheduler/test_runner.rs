@@ -2,7 +2,7 @@
 //! authority. An immutable one-time local grant selects a fixed command, and
 //! results are bound to the latest Worker proofs and exact Git snapshot.
 use super::*;
-use std::{path::Path,process::Command,time::Duration};
+use std::{io::Read,path::{Component,Path},process::Command,time::Duration};
 use tauri::Manager;
 
 pub(crate) const SCHEMA:&str=r#"
@@ -207,6 +207,64 @@ fn worker_proofs_hash(db:&rusqlite::Connection,root:&str)->Result<String> {
     Ok(format!("{:x}",sha.finalize()))
 }
 
+/// Content attestation for nonignored, untracked inputs. Git status includes
+/// their paths but not bytes; Git diff HEAD ignores them entirely. Fail closed
+/// on symlinks, file type changes, oversized inputs or an incomplete listing.
+fn untracked_inputs_hash(checkout:&Path)->Result<String> {
+    const MAX_FILES:usize=512;
+    const MAX_FILE_BYTES:u64=1024*1024;
+    const MAX_TOTAL_BYTES:u64=8*1024*1024;
+    let output=crate::workspace::run_git_bounded(
+        checkout,&["ls-files","--others","--exclude-standard","-z"],
+        256*1024,false,Duration::from_secs(10),
+    ).map_err(|_|"Untracked input inventory unavailable.".to_owned())?;
+    if !output.status.success() || output.stdout.truncated {
+        return Err("Untracked input inventory incomplete.".into());
+    }
+    let entries=output.stdout.bytes.split(|byte|*byte==0)
+        .filter(|entry|!entry.is_empty()).collect::<Vec<_>>();
+    if entries.len()>MAX_FILES {
+        return Err("Untracked input inventory exceeds the safe file limit.".into());
+    }
+    let mut sha=Sha256::new();
+    let mut total=0u64;
+    for entry in entries {
+        let name=std::str::from_utf8(entry)
+            .map_err(|_|"Untracked input filename is not UTF-8.")?;
+        let relative=Path::new(name);
+        if !relative.components().all(|part|matches!(part,Component::Normal(_))) {
+            return Err("Untracked input escaped the pinned checkout.".into());
+        }
+        let file=checkout.join(relative);
+        let metadata=std::fs::symlink_metadata(&file)
+            .map_err(|_|"An untracked input disappeared during attestation.")?;
+        if !metadata.file_type().is_file() || metadata.len()>MAX_FILE_BYTES {
+            return Err("Untracked input is not a bounded regular file.".into());
+        }
+        if std::fs::canonicalize(&file).ok().as_deref()!=Some(file.as_path()) {
+            return Err("Untracked input traversed a symlink or changed location.".into());
+        }
+        total=total.checked_add(metadata.len())
+            .ok_or("Untracked input byte count overflow.")?;
+        if total>MAX_TOTAL_BYTES {
+            return Err("Untracked inputs exceed the total safe byte limit.".into());
+        }
+        let mut bytes=Vec::new();
+        std::fs::File::open(&file)
+            .map_err(|_|"Untracked input could not be reopened.")?
+            .take(MAX_FILE_BYTES+1).read_to_end(&mut bytes)
+            .map_err(|_|"Untracked input could not be read.")?;
+        if bytes.len() as u64>MAX_FILE_BYTES {
+            return Err("Untracked input grew past the safe byte limit.".into());
+        }
+        sha.update((entry.len() as u64).to_le_bytes());
+        sha.update(entry);
+        sha.update((bytes.len() as u64).to_le_bytes());
+        sha.update(bytes);
+    }
+    Ok(format!("{:x}",sha.finalize()))
+}
+
 fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<String> {
     let mut stmt=db.prepare(
         "SELECT item.id,proof.assignment_id,proof.evidence_sha256
@@ -222,6 +280,7 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
         .map_err(|e|e.to_string())?;
     if receipts.is_empty() {return Err("Completed Worker proofs are required.".into());}
     let (head,status,diff,_)=super::super::delivery::observe_git(checkout)?;
+    let untracked=untracked_inputs_hash(checkout)?;
     let mut sha=Sha256::new();
     for (item,assignment,proof) in receipts {
         for value in [&item,&assignment,&proof] {
@@ -229,7 +288,7 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
             sha.update(value.as_bytes());
         }
     }
-    for value in [&head,&status,&diff] {
+    for value in [&head,&status,&diff,&untracked] {
         sha.update((value.len() as u64).to_le_bytes());
         sha.update(value.as_bytes());
     }
@@ -697,6 +756,39 @@ mod tests {
         db.execute("UPDATE sa_mandates SET expires_at=expires_at+1000",[]).unwrap();
         assert!(!test_effect_live(&db,&job));
     }
+    #[test]
+    fn changed_untracked_test_inputs_invalidate_an_unchanged_git_status() {
+        let root=std::env::temp_dir().join(format!("native-test-inputs-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let init=Command::new("git").args(["init","-q"])
+            .current_dir(&root).status().unwrap();
+        assert!(init.success());
+        let commit=Command::new("git")
+            .args(["-c","user.name=Fixture","-c","user.email=fixture@example.invalid",
+                "commit","--allow-empty","-q","-m","Baseline"])
+            .current_dir(&root).status().unwrap();
+        assert!(commit.success());
+        let input=root.join("input.txt");
+        std::fs::write(&input,b"PASS").unwrap();
+        let before=untracked_inputs_hash(&root).unwrap();
+        let git_before=super::super::super::delivery::observe_git(&root).unwrap();
+        std::fs::write(&input,b"FAIL").unwrap();
+        let after=untracked_inputs_hash(&root).unwrap();
+        let git_after=super::super::super::delivery::observe_git(&root).unwrap();
+        assert_ne!(before,after,"Untracked bytes must invalidate passing tests");
+        assert_eq!(git_before.1,git_after.1,"Git status only observes filename");
+        assert_eq!(git_before.2,git_after.2,"Git diff omits untracked bytes");
+        std::fs::write(&input,vec![b'X';1024*1024+1]).unwrap();
+        assert!(untracked_inputs_hash(&root).is_err());
+        std::fs::remove_file(&input).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hosts",&input).unwrap();
+            assert!(untracked_inputs_hash(&root).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn test_command_is_literal_and_manifest_bound() {
         let root=std::env::temp_dir().join(format!("sa-test-{}",storage::id()));

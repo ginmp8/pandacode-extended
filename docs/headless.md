@@ -746,6 +746,26 @@ pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New
 
 The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
 
+### Headless Team strategy (future Demands only)
+
+A trusted local operator can update a disabled Team's scenario purpose and
+optimization strategy without launching workers, changing permissions or rewriting
+historical Demand snapshots. Store the purpose in a private local UTF-8 file:
+
+```sh
+pandacode serve --set-team-strategy <team-id> <expected-policy-revision> economy /private/purpose.txt
+```
+
+Valid strategies are `balanced`, `economy`, `performance`, `security_critical`
+and `custom`. The purpose is limited to 400 characters. This command reuses
+the **same native CAS and transaction as the desktop Team editor**: the Team
+must be disabled, and active/reviewable Demands or unresolved effects prevent
+the update. A stale revision or invalid strategy fails without a partial write;
+the command never issues grants, selects a different model, or dispatches a
+provider. Earlier admitted Tickets retain their immutable strategy snapshots.
+The CLI opens the existing SQLite database without startup recovery, protecting
+concurrent headless sessions from an unrelated interruption.
+
 ### Headless operator association of a GitHub Ticket context link
 
 The authorized local operator can add a context-only source link using the same

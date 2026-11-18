@@ -1820,6 +1820,27 @@ pub(crate) fn headless_rename_orchestration(
     })).map_err(|e| e.to_string())
 }
 
+/// Local headless strategy changes reuse the desktop's native Team policy
+/// transaction. A purpose file is read by the CLI, never echoed as a command
+/// argument or treated as authority. Only future Demand snapshots change.
+pub(crate) fn headless_set_team_strategy(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, purpose: &str, strategy: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set_team_strategy(
+        &store, orchestration_id, expected_revision, purpose, strategy,
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        "purpose": updated.purpose,
+        "strategy": updated.strategy,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI acceptance; the native revision guard and audit remain
 /// the same as the desktop action.
 pub(crate) fn headless_accept_ticket(
@@ -8556,6 +8577,59 @@ mod tests {
         assert!(headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision+1,"Unsafe")
             .is_err());
         assert_eq!(configuration(&store,&cfg.id).unwrap().name,"Renamed Team");
+    }
+
+    #[test]
+    fn headless_strategy_uses_native_policy_cas_and_preserves_history_across_restart() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Strategy CLI".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let path = store.path.clone();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+              project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('strategy-cli-history',?1,'strategy-cli-history','Private original objective',
+              'local-user','manual',?2,?3,?4,'completed',?5,?5)",
+            params![&team.id,&team.project_id,&team.worker_bot_id,team.policy_revision,now],
+        ).unwrap();
+        let output = headless_set_team_strategy(
+            &path, &team.id, team.policy_revision, "Release engineering", "economy",
+        ).unwrap();
+        let outcome: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(outcome["policyRevision"], team.policy_revision + 1);
+        assert_eq!(outcome["purpose"], "Release engineering");
+        assert_eq!(outcome["strategy"], "economy");
+        assert_eq!(outcome["grantIssued"], false);
+        assert_eq!(outcome["providerDispatched"], false);
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision, "Replay", "performance",
+        ).is_err(), "stale revision cannot rewrite the Team");
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision + 1, "Invalid", "unrestricted",
+        ).is_err(), "CLI cannot bypass native strategy validation");
+        assert_eq!(get_ticket(&store,"strategy-cli-history").unwrap().objective,
+            "Private original objective");
+        assert_eq!(get_ticket(&store,"strategy-cli-history").unwrap().policy_revision,
+            team.policy_revision);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review'
+             WHERE id='strategy-cli-history'", [],
+        ).unwrap();
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision + 1, "Cannot change", "performance",
+        ).is_err(), "reviewable Demand must block policy edits");
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='strategy-cli-history'", [],
+        ).unwrap();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let saved = roster::read(&reopened, &team.id).unwrap();
+        assert_eq!(saved.purpose, "Release engineering");
+        assert_eq!(saved.strategy, "economy");
+        assert_eq!(saved.policy_revision, team.policy_revision + 1);
     }
 
     #[test]

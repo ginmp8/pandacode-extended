@@ -76,6 +76,7 @@ enum Command {
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
+    SetTeamStrategy { orchestration_id: String, expected_revision: i64, strategy: String, purpose_file: PathBuf },
 }
 
 fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
@@ -598,7 +599,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::QuarantinePendingEffect { .. }
                 | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
-                | Command::RenameOrchestration { .. });
+                | Command::RenameOrchestration { .. }
+                | Command::SetTeamStrategy { .. });
             if native_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -632,6 +634,12 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_rename_orchestration(
                                     &database, orchestration_id, *expected_revision, name,
                                 ),
+                            Command::SetTeamStrategy { orchestration_id, expected_revision, strategy, purpose_file } => {
+                                let purpose = read_bounded_objective(purpose_file)?;
+                                crate::superagent::headless_set_team_strategy(
+                                    &database, orchestration_id, *expected_revision, &purpose, strategy,
+                                )
+                            }
                             _ => unreachable!(),
                         }
                     });
@@ -685,7 +693,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::QuarantinePendingEffect { .. }
         | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
-        | Command::RenameOrchestration { .. } => {
+        | Command::RenameOrchestration { .. }
+        | Command::SetTeamStrategy { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -1669,6 +1678,31 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--set-team-strategy" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--set-team-strategy needs Team ID, revision, strategy and purpose file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--set-team-strategy needs an expected policy revision.")?;
+                let strategy = args.get(index + 3)
+                    .ok_or("--set-team-strategy needs a strategy name.")?;
+                if !matches!(strategy.as_str(),
+                    "balanced" | "economy" | "performance" | "security_critical" | "custom") {
+                    return Err("Unsupported Team optimization strategy.".into());
+                }
+                let purpose_file = args.get(index + 4)
+                    .ok_or("--set-team-strategy needs a local UTF-8 purpose file.")?;
+                if purpose_file.is_empty() || purpose_file.starts_with("--") {
+                    return Err("Provide a local purpose file path, not another command.".into());
+                }
+                command = Command::SetTeamStrategy {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    strategy: strategy.clone(), purpose_file: PathBuf::from(purpose_file),
+                };
+                ops += 1;
+                index += 4;
+            }
             "--quarantine-detached-ticket" => {
                 let ticket_id=args.get(index+1)
                     .ok_or("--quarantine-detached-ticket needs Ticket ID and revision.")?;
@@ -1838,7 +1872,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1956,7 +1990,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --rename-orchestration <id> <revision> <name>
                          Explicit local, revision-guarded Team rename only while disabled
                          and all Tickets/effects are settled; does not change bots, roles
-                         or task authorization. Quote names with spaces."
+                         or task authorization. Quote names with spaces.
+  --set-team-strategy <id> <revision> <strategy> <purpose-file>
+                         Set future Demand strategy and purpose using native revision guards.
+                         The Team must be disabled and all Tickets/effects settled.
+                         The UTF-8 purpose file is local and limited to 400 characters;
+                         no bot permissions or model selection are changed."
         .into()
 }
 
@@ -2539,6 +2578,22 @@ mod tests {
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
+        assert_eq!(parsed("--set-team-strategy team_123 3 economy purpose.txt"),
+            Ok(Command::SetTeamStrategy {
+                orchestration_id: "team_123".into(), expected_revision: 3,
+                strategy: "economy".into(), purpose_file: PathBuf::from("purpose.txt"),
+            }));
+        for invalid in [
+            "--set-team-strategy", "--set-team-strategy team_123",
+            "--set-team-strategy team_123 3", "--set-team-strategy team_123 3 economy",
+            "--set-team-strategy team_123 nope economy purpose.txt",
+            "--set-team-strategy ../unsafe 3 economy purpose.txt",
+            "--set-team-strategy team_123 3 unrestricted purpose.txt",
+            "--set-team-strategy team_123 3 economy --sign-out",
+            "--set-team-strategy team_123 3 economy purpose.txt --list-tickets",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--accept-ticket ticket_123 1 --import-bots bots.json").is_err());
         assert!(parsed("--inspect-ticket").is_err());
         assert!(parsed("--inspect-ticket ../outside").is_err());
@@ -2608,6 +2663,7 @@ mod tests {
             "--quarantine-detached-ticket",
             "--disable-orchestration",
             "--rename-orchestration",
+            "--set-team-strategy",
             "--sync-bots",
             "xvfb-run",
         ] {

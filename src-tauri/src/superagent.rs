@@ -3885,8 +3885,7 @@ fn native_worker_mode_recorded(
         "SELECT EXISTS(SELECT 1 FROM sa_audit audit
          JOIN sa_assignments assignment ON assignment.ticket_id=audit.ticket_id
          WHERE audit.ticket_id=?1 AND audit.kind='native_worker_mode'
-           AND audit.detail=?2 AND assignment.session_id=?3
-           AND audit.at>=assignment.created_at)",
+           AND audit.detail=?2 AND assignment.session_id=?3)",
         params![ticket_id,format!("{session_id}:{mode}"),session_id],
         |row| row.get(0),
     ).map_err(|error| error.to_string())
@@ -4092,9 +4091,14 @@ pub(crate) fn read_only_policy(
 /// A settled, revoked or detached task also fails; ordinary cloud sessions
 /// retain the original attach behavior.
 pub(crate) fn guard_cloud_attach(store: &Store, session_id: &str) -> Result<()> {
-    if read_only_policy(store, session_id)?.is_some() {
+    // Cloud reattachment bypasses the local native provider's permission
+    // adapter. Neither read-only nor native Full Access SuperAgent sessions
+    // may cross that boundary until a matching cloud adapter exists.
+    if has_task_assignment_history(store, session_id)? {
+        let _ = read_only_policy(store, session_id)?;
         return Err("policy_unsupported: SuperAgent task cannot attach through an unrestricted cloud provider.".into());
     }
+    let _ = read_only_policy(store, session_id)?;
     Ok(())
 }
 
@@ -4138,9 +4142,9 @@ pub(crate) fn guard_gateway_inbound(
     let session_id = session_id.ok_or(
         "policy_unsupported: no active native assignment owns this SuperAgent thread.",
     )?;
-    if read_only_policy(store, &session_id)?.is_none() {
-        return Err("policy_unsupported: internal SuperAgent assignment has no native policy.".into());
-    }
+    // A valid Worker can legitimately return None: its *native bot* mode,
+    // rather than a synthetic read-only reviewer policy, owns tool approval.
+    let _ = read_only_policy(store, &session_id)?;
     Ok(())
 }
 
@@ -4153,7 +4157,10 @@ pub(crate) fn guard_run_admission(
     store: &Store, session_id: &str, running_sessions: &[String],
 ) -> Result<()> {
     let session = store.session(session_id)?;
-    let superagent_run = read_only_policy(store, session_id)?.is_some();
+    // An explicit native Worker mode returns None from read_only_policy
+    // while remaining a SuperAgent Ticket, with the same exclusive lease.
+    let _ = read_only_policy(store, session_id)?;
+    let superagent_run = has_task_assignment_history(store, session_id)?;
     // An existing native bot lease also fences stale sessions in other projects.
     let session_bot_id = bots::owner_of(store, session_id)?.map(|(bot, _)| bot.id);
     let leased_by_other: bool = store.db.query_row(

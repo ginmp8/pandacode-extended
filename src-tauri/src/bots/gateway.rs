@@ -483,7 +483,7 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         reply(app, &bot, &thread.channel_id, &thread.external_id, &text).await;
     }
     if let Ok(store) = state.store.lock() {
-        let _ = super::log(&store, &bot.id, if successful { "reply" } else { "error" }, &text.chars().take(200).collect::<String>(), json!({"sessionId": session_id}));
+        let _ = log_turn_result(&store, &bot.id, &thread.channel_id, successful, &text, session_id);
     }
     let _ = app.emit("bots-changed", ());
     // Send the next queued message natively, so bot threads keep moving without the window.
@@ -550,6 +550,22 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         }
     }
     settled
+}
+
+/// Native SuperAgent results belong to the durable Ticket evidence and audit.
+/// Do not mirror private task outputs into the bot's shared activity history.
+/// Ordinary chats, schedules and external channels retain their activity log.
+fn log_turn_result(
+    store: &Store, bot_id: &str, channel_id: &str,
+    successful: bool, text: &str, session_id: &str,
+) -> Result<()> {
+    if channel_id == crate::superagent::CHANNEL {
+        return Ok(());
+    }
+    super::log(
+        store, bot_id, if successful { "reply" } else { "error" },
+        &text.chars().take(200).collect::<String>(), json!({"sessionId": session_id}),
+    )
 }
 
 /// A SuperAgent session has exactly one native ticket assignment. Its turn
@@ -737,6 +753,58 @@ mod tests {
             assert!(!scoped.contains(excluded), "ambient bot data leaked: {excluded}");
         }
         assert!(scoped_turn_text(&profile, "desktop", "Normal conversation").is_none());
+    }
+
+    #[test]
+    fn superagent_result_stays_in_ticket_instead_of_ambient_bot_activity() {
+        let root = std::env::temp_dir().join(format!(
+            "sa-gateway-activity-{}", crate::storage::id(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let input = super::super::BotInput {
+            name: "Activity isolation worker".into(),
+            role: "Worker".into(),
+            provider: "claude".into(),
+            model: "default".into(),
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let bot = super::super::create(&store, &input, &root).unwrap();
+        for successful in [true, false] {
+            log_turn_result(
+                &store, &bot.id, crate::superagent::CHANNEL, successful,
+                "Private task objective, result and evidence", "ticket-session",
+            ).unwrap();
+        }
+        let task_activity: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_activity WHERE bot_id=?1 AND kind IN ('reply','error')",
+            [&bot.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(task_activity, 0, "Ticket results must not become shared bot history");
+
+        log_turn_result(
+            &store, &bot.id, super::super::DESKTOP, true,
+            "Ordinary conversation reply", "chat-session",
+        ).unwrap();
+        log_turn_result(
+            &store, &bot.id, "schedule", false,
+            "Ordinary scheduled error", "schedule-session",
+        ).unwrap();
+        let mut statement = store.db.prepare(
+            "SELECT kind,summary FROM bot_activity
+             WHERE bot_id=?1 AND kind IN ('reply','error') ORDER BY id",
+        ).unwrap();
+        let history = statement.query_map([&bot.id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(history, vec![
+            ("reply".into(), "Ordinary conversation reply".into()),
+            ("error".into(), "Ordinary scheduled error".into()),
+        ]);
+        drop(statement);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

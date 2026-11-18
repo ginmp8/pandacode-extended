@@ -56,11 +56,13 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
     let now=storage::now();
     let roots={
         let mut stmt=db.prepare(
-            "SELECT DISTINCT root.id,root.revision FROM sa_demand_test_runs run
+            "SELECT DISTINCT root.id,root.revision,run.state FROM sa_demand_test_runs run
              JOIN sa_demand_plans plan ON plan.ticket_id=run.ticket_id
              JOIN sa_tickets root ON root.id=plan.ticket_id
+             JOIN sa_mandates mandate ON mandate.ticket_id=root.id
              JOIN sa_ticket_team_snapshots snapshot ON snapshot.ticket_id=root.id
-             WHERE run.state='running' AND run.plan_sha256=plan.plan_sha256
+             WHERE run.state IN ('running','uncertain')
+               AND mandate.revoked=0 AND run.plan_sha256=plan.plan_sha256
                AND plan.state='active' AND root.state='queued'
                AND root.active_assignment_id IS NULL
                AND root.revision=plan.ticket_revision
@@ -71,12 +73,13 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
                AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')='full_auto'"
         ).map_err(|e|e.to_string())?;
         let rows=stmt.query_map([],|row|Ok((
-            row.get::<_,String>(0)?,row.get::<_,i64>(1)?,
+            row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,
         ))).map_err(|e|e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e|e.to_string())?
     };
-    for (root,revision) in roots {
+    let mut legacy_reconciled=0usize;
+    for (root,revision,prior_state) in roots {
         let moved=db.execute(
             "UPDATE sa_tickets SET state='inconclusive',
                 revision=revision+1,updated_at=?3
@@ -100,18 +103,28 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
             "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1 AND revoked=0",
             [&root],
         ).map_err(|e|e.to_string())?;
+        // Keep legacy uncertain receipts immutable while terminalizing the
+        // original exact pinned Full Auto root. Never infer subprocess success.
+        let (kind,detail)=if prior_state=="uncertain" {
+            legacy_reconciled+=1;
+            ("native_test_prior_uncertain_reconciled",
+             "Prior uncertain native test reconciled on restart; no replay")
+        } else {
+            ("native_test_restart_inconclusive",
+             "Native test was running on restart; execution uncertain, no replay")
+        };
         db.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'native_test_restart_inconclusive',
-                'Native test was running on restart; execution uncertain, no replay',?2)",
-            params![root,now],
+             VALUES(?1,?2,?3,?4)",
+            params![root,kind,detail,now],
         ).map_err(|e|e.to_string())?;
     }
-    db.execute(
+    let running=db.execute(
         "UPDATE sa_demand_test_runs SET state='uncertain',finished_at=?1
          WHERE state='running'",
         [now],
-    ).map_err(|e|e.to_string())
+    ).map_err(|e|e.to_string())?;
+    Ok(running+legacy_reconciled)
 }
 
 fn digest(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
@@ -1162,34 +1175,43 @@ mod tests {
                ticket_id TEXT PRIMARY KEY,state TEXT,plan_sha256 TEXT,finished_at INTEGER);
              CREATE TABLE sa_mandates(ticket_id TEXT PRIMARY KEY,revoked INTEGER);
              INSERT INTO sa_mandates VALUES
-               ('full',0),('manual',0),('stopped',0),('stale',0),('passed',0);
+               ('full',0),('manual',0),('stopped',0),('stale',0),('passed',0),
+               ('legacy_uncertain',0),('revoked_uncertain',1);
              CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
              INSERT INTO sa_tickets VALUES
                ('full','queued',3,NULL,2,1),
                ('manual','queued',3,NULL,2,1),
                ('stopped','stopped',3,NULL,2,1),
                ('stale','queued',4,NULL,2,1),
-               ('passed','queued',3,NULL,2,1);
+               ('passed','queued',3,NULL,2,1),
+               ('legacy_uncertain','queued',3,NULL,2,1),
+               ('revoked_uncertain','queued',3,NULL,2,1);
              INSERT INTO sa_demand_plans VALUES
                ('full','active','plan',3,1,2,1),
                ('manual','active','plan',3,1,2,1),
                ('stopped','active','plan',3,1,2,1),
                ('stale','active','plan',3,1,2,1),
-               ('passed','active','plan',3,1,2,1);
+               ('passed','active','plan',3,1,2,1),
+               ('legacy_uncertain','active','plan',3,1,2,1),
+               ('revoked_uncertain','active','plan',3,1,2,1);
              INSERT INTO sa_ticket_team_snapshots VALUES
                ('full','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
                ('manual','native',1,2,'{\"policy\":{\"autonomy\":\"approval\"}}'),
                ('stopped','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
                ('stale','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('passed','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('passed','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('legacy_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('revoked_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
              INSERT INTO sa_demand_test_runs VALUES
                ('full','running','plan',NULL),
                ('manual','running','plan',NULL),
                ('stopped','running','plan',NULL),
                ('stale','running','plan',NULL),
-               ('passed','passed','plan',9);",
+               ('passed','passed','plan',9),
+               ('legacy_uncertain','uncertain','plan',NULL),
+               ('revoked_uncertain','uncertain','plan',NULL);",
         ).unwrap();
-        assert_eq!(recover_interrupted(&db).unwrap(),4);
+        assert_eq!(recover_interrupted(&db).unwrap(),5);
         assert_eq!(recover_interrupted(&db).unwrap(),0,
             "Restart cannot replay a previous uncertain test");
         for (root,ticket_state,plan_state,test_state) in [
@@ -1198,6 +1220,8 @@ mod tests {
             ("stopped","stopped","active","uncertain"),
             ("stale","queued","active","uncertain"),
             ("passed","queued","active","passed"),
+            ("legacy_uncertain","inconclusive","blocked","uncertain"),
+            ("revoked_uncertain","queued","active","uncertain"),
         ] {
             let state:(String,String,String)=db.query_row(
                 "SELECT t.state,p.state,r.state FROM sa_tickets t
@@ -1215,11 +1239,30 @@ mod tests {
         ).unwrap();
         assert_eq!(audits,1,"One terminal decision per interrupted Demand");
         for (ticket,revoked) in [("full",1),("manual",0),("stopped",0),
-            ("stale",0),("passed",0)] {
+            ("stale",0),("passed",0),("legacy_uncertain",1),
+            ("revoked_uncertain",1)] {
             assert_eq!(db.query_row(
                 "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
                 [ticket],|row|row.get::<_,i64>(0)).unwrap(),revoked);
         }
+        let prior:Option<i64>=db.query_row(
+            "SELECT finished_at FROM sa_demand_test_runs
+             WHERE ticket_id='legacy_uncertain'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(prior,None,"Legacy uncertain receipt must keep its original timestamp");
+        let legacy_audits:i64=db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id='legacy_uncertain'
+               AND kind='native_test_prior_uncertain_reconciled'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(legacy_audits,1,"Exactly one legacy reconciliation decision");
+        let denied_audits:i64=db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='revoked_uncertain'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(denied_audits,0,"Revoked mandates cannot be terminalized again");
         assert_eq!(db.query_row(
             "SELECT revision FROM sa_tickets WHERE id='full'",
             [],|row|row.get::<_,i64>(0)).unwrap(),4);

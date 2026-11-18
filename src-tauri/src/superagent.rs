@@ -3418,7 +3418,11 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
     // previously finished plan must not authorize a worker after reset.
     let sql =
         "SELECT t.id,t.state FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
-         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1)
+         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1
+            OR EXISTS (SELECT 1 FROM sa_team_roles r
+                       WHERE r.orchestration_id=t.orchestration_id AND r.bot_id=?1)
+            OR EXISTS (SELECT 1 FROM sa_ticket_profiles p, json_each(p.profiles_json) m
+                       WHERE p.ticket_id=t.id AND json_extract(m.value,'$.botId')=?1))
          AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')";
     let affected = {
         let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
@@ -3456,7 +3460,8 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
         // original names/IDs remain in history for audit, never cascaded away.
         store.db.execute(
             "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1,
-             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1) AND enabled=1",
+             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1
+               OR id IN (SELECT orchestration_id FROM sa_team_roles WHERE bot_id=?1)) AND enabled=1",
             params![bot_id,now],
         ).map_err(|e| e.to_string())?;
     }
@@ -8798,6 +8803,56 @@ mod tests {
         assert!(coordinator_packet.contains("\n\nInspect fixture\n\n"));
         assert!(coordinator_packet.contains("Read-only coordinator"));
         assert!(coordinator_packet.len() < 32 * 1024);
+    }
+
+    #[test]
+    fn secondary_team_member_reset_revokes_only_affected_demands_and_survives_restart() {
+        let mut store = fixture();
+        for id in ["secondary-worker", "secondary-reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let affected_team = enabled(&store);
+        let unaffected_team = enabled(&store);
+        let (affected, started) = admit(
+            &mut store, &affected_team.id, "Scoped task", "secondary-reset-1", true,
+        ).unwrap();
+        assert!(!started);
+        let (unaffected, started) = admit(
+            &mut store, &unaffected_team.id, "Other task", "secondary-reset-2", true,
+        ).unwrap();
+        assert!(!started);
+        assert!(!mandate(&store, &affected.id).unwrap().revoked);
+        // A repaired or imported legacy Team can acquire additional members
+        // while a queued Ticket exists. Their reset must not leave its original
+        // Mandate viable, regardless of whether the topology can execute yet.
+        for (role, position, bot_id) in [
+            ("worker", 1, "secondary-worker"),
+            ("reviewer", 0, "secondary-reviewer"),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+                 VALUES(?1,?2,?3,?4)",
+                params![&affected_team.id, role, position, bot_id],
+            ).unwrap();
+        }
+        invalidate_bot(&store, "secondary-worker", false).unwrap();
+        assert!(mandate(&store, &affected.id).unwrap().revoked);
+        assert!(!mandate(&store, &unaffected.id).unwrap().revoked);
+        let previous_revision = get_ticket(&store, &affected.id).unwrap().revision;
+        invalidate_bot(&store, "secondary-reviewer", true).unwrap();
+        assert_eq!(get_ticket(&store, &affected.id).unwrap().revision, previous_revision + 1);
+        assert!(!configuration(&store, &affected_team.id).unwrap().enabled);
+        assert!(configuration(&store, &unaffected_team.id).unwrap().enabled);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(mandate(&reopened, &affected.id).unwrap().revoked);
+        assert!(!mandate(&reopened, &unaffected.id).unwrap().revoked);
+        assert!(!configuration(&reopened, &affected_team.id).unwrap().enabled);
     }
 
     #[test]

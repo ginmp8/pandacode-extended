@@ -382,20 +382,10 @@ fn execute(job:&Reserved)->Outcome {
 
 fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
     let now=storage::now();
-    let live:bool=store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets root
-          JOIN sa_mandates m ON m.ticket_id=root.id
-          JOIN sa_demand_plans plan ON plan.ticket_id=root.id
-          JOIN sa_orchestrations team ON team.id=root.orchestration_id
-          WHERE root.id=?1 AND root.state='queued' AND plan.state='active'
-            AND root.revision=plan.ticket_revision
-            AND m.revoked=0 AND m.expires_at>?2
-            AND m.policy_revision=plan.policy_revision
-            AND m.actor=root.actor AND m.project_id=root.project_id
-            AND team.enabled=1 AND team.policy_revision=plan.policy_revision)",
-        params![job.root,now],|r|r.get(0),
-    ).map_err(|e|e.to_string())?;
-    let current=live
+    // Use the same effect-time authorization predicate at settlement.
+    // A changed plan, grant, active assignment or tool scope must never
+    // turn a cancelled process into durable passing test evidence.
+    let current=test_effect_live(&store.db,job)
         && manifest_hash(Path::new(&job.checkout),&job.command)
             .ok().as_deref()==Some(job.manifest.as_str())
         && snapshot_hash(&store.db,&job.root,Path::new(&job.checkout))
@@ -537,6 +527,18 @@ mod tests {
         assert!(!test_effect_live(&db,&job));
         db.execute("UPDATE sa_demand_plans SET plan_sha256='plan'",[]).unwrap();
         db.execute("UPDATE sa_tickets SET state='stopped'",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_tickets SET state='queued'",[]).unwrap();
+        db.execute("UPDATE sa_tickets SET active_assignment_id='other'",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_tickets SET active_assignment_id=NULL",[]).unwrap();
+        db.execute("UPDATE sa_mandates SET allowed_tools='[\"shell\"]'",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_mandates SET allowed_tools='[]'",[]).unwrap();
+        db.execute("UPDATE sa_tickets SET revision=8",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_tickets SET revision=7",[]).unwrap();
+        db.execute("UPDATE sa_mandates SET expires_at=expires_at+1000",[]).unwrap();
         assert!(!test_effect_live(&db,&job));
     }
     #[test]

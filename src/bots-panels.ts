@@ -1,9 +1,10 @@
 import { escape, icon } from './dom';
 import { infoMark } from './tooltip';
+import { renderCapabilityPanel, capabilityClick, capabilitySubmit } from './bot-capability-panel';
 import type { Activity, BotDetail, Channel, Schedule } from './bots';
 import { channelGuide, connectChange, connectClick, connectSection, connectSubmit, kindLabel } from './bots-connect';
 
-export type Tab = 'skills' | 'conversations' | 'memory' | 'schedules' | 'channels' | 'rules' | 'activity';
+export type Tab = 'capabilities' | 'skills' | 'conversations' | 'memory' | 'schedules' | 'channels' | 'rules' | 'activity';
 export interface PanelContext {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   notify(text: string): void;
@@ -219,6 +220,7 @@ function saveCapabilities(target: HTMLElement, context: PanelContext): void {
 export function renderPanel(tab: Tab, detail: BotDetail, context: PanelContext): string {
   switch (tab) {
     case 'skills': return skillsPanel(detail, context);
+    case 'capabilities': return renderCapabilityPanel(detail, context);
     case 'conversations': return conversationsPanel(detail, context);
     case 'memory': return memoryPanel(detail);
     case 'schedules': return schedulesPanel(detail);
@@ -238,7 +240,7 @@ export function panelClick(target: HTMLElement, _tab: Tab, context: PanelContext
   const bot = detail.bot;
   const data = target.dataset;
   const done = async (text: string) => { invalidateActivity(); context.notify(text); await context.reload(); };
-  if (connectClick(target, context)) return;
+  if (connectClick(target, context) || capabilityClick(target, context)) return;
   if (data.openTask) context.openTask(data.openTask);
   else if (data.forget) void context.work(async () => { await context.call('bot_forget', { botId: bot.id, memoryId: data.forget }); await done('Forgotten'); });
   else if (data.runSchedule) void context.work(async () => { await context.call('bot_run_schedule_now', { scheduleId: data.runSchedule }); await done('Started'); });
@@ -270,6 +272,7 @@ export function panelSubmit(form: HTMLFormElement, _tab: Tab, context: PanelCont
   const data = new FormData(form);
   const text = (name: string) => String(data.get(name) ?? '').trim();
   const done = async (message: string) => { invalidateActivity(); context.notify(message); await context.reload(); };
+  if (capabilitySubmit(form, context)) return;
   if (form.matches('.bots-memory')) {
     const content = text('content'); if (!content) return;
     void context.work(async () => { await context.call('bot_remember', { botId: bot.id, content }); await done('Remembered'); });

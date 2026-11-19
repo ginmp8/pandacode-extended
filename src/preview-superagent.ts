@@ -1,4 +1,5 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
+import { previewCapabilityVisibility } from './preview-bots';
 type Bot = { id:string; name:string; paused:boolean; projectId:string;
   provider?:string; model?:string; mode?:string; skills?:string[]; reasoningEffort?:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
@@ -44,7 +45,8 @@ export async function invokeSuperagent<T>(
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
   const needsBots=['superagent_create','superagent_duplicate','superagent_update',
-    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
+    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import',
+    'superagent_capability_candidates'].includes(command);
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
@@ -103,6 +105,41 @@ export async function invokeSuperagent<T>(
         coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
         reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
         executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
+    case 'superagent_capability_candidates': {
+      const c = get(args.orchestrationId);
+      const objective = String(args.objective ?? '').trim();
+      if (!objective || objective.length > 2000 || /[\x00-\x1f\x7f]/.test(objective))
+        throw Error('Provide a one-line objective of at most 2000 characters.');
+      const words = new Set(objective.toLowerCase().split(/[^a-z0-9]+/).filter(word => word.length >= 3));
+      let excludedByPrivacyPreference = 0;
+      const candidates = bots.filter(bot => bot.id !== c.coordinatorBotId).flatMap(bot => {
+        if (previewCapabilityVisibility(bot.id) === 'owner_only') {
+          excludedByPrivacyPreference++;
+          return [];
+        }
+        const matchedTerms = [...new Set(
+          [String((bot as Bot & {role?:string}).role ?? ''), ...(bot.skills ?? [])]
+            .flatMap(text => text.toLowerCase().split(/[^a-z0-9]+/))
+            .filter(word => words.has(word)),
+        )];
+        return [{
+          botId:bot.id, name:bot.name, suggestedRole:'worker' as const,
+          alreadyAssigned:c.workerBotIds.includes(bot.id) || c.reviewerBotIds.includes(bot.id),
+          declaredMatchScore:matchedTerms.length * 2,
+          matchedTerms, evidenceSources:matchedTerms.length ? ['user_declared_role','assigned_skill_reference'] : [],
+          status:bot.paused ? 'unavailable' : matchedTerms.length ? 'declared_match' : 'no_matching_declaration',
+          projectScope:{projectId:bot.projectId,status:'project_reference_only'},
+          permissionMode:{value:bot.mode ?? 'ask',status:'not_an_execution_grant'},
+          availability:{status:bot.paused?'unavailable':'configured_not_running',paused:bot.paused},
+          executionEligibility:'not_verified', sourceConfidence:'declarations_only',
+        }];
+      }).sort((a,b) => b.declaredMatchScore-a.declaredMatchScore || a.name.localeCompare(b.name));
+      value = {orchestrationId:c.id,policyRevision:c.policyRevision,observedAt:Date.now(),
+        candidates:candidates.slice(0,30),excludedByPrivacyPreference,truncated:candidates.length>30,
+        selectionApplied:false,authorizationGranted:false,
+        disclaimer:'Current declared configuration only; native Team admission is required.'};
       break;
     }
     case 'superagent_strategy_get':

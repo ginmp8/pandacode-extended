@@ -3582,9 +3582,12 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((task_id, assignment_id, bot_id, coordinator, started_at, attempt)) = assignment else { return Ok(false) };
-    let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
+    let ticket = get_ticket(store, &task_id)?;
+    let cfg = configuration(store, &ticket.orchestration_id)?;
+    // The immutable Ticket selects the executing Worker; the Team's legacy
+    // first-member projection is not the authority for callback settlement.
     let role_current = assignment_role_authorized(
-        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &cfg.worker_bot_id,
+        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &ticket.worker_bot_id,
     )?;
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
@@ -5372,6 +5375,12 @@ mod tests {
         assert!(accept(&store, &ticket_id, running.revision).is_err());
         let waiting = get_ticket(&store, &ticket_id).unwrap();
         assert_eq!(waiting.state, "waiting_approval");
+        assert_eq!(waiting.evidence.as_deref(), Some("Independent evidence"));
+        let rejected: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='callback_rejected'",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(rejected, 0, "A valid secondary Worker callback must not be rejected as the legacy first Worker");
         assert_eq!(accept(&store, &ticket_id, waiting.revision).unwrap().state, "completed");
         assert!(!on_run_finished(&store, &session, true, "Late callback").unwrap());
         let path = store.path.clone();

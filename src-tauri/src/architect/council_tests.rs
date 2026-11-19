@@ -6282,15 +6282,28 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
     let (started, _) = start_state(
         &state, &sid, "Verify the restart child roster", None, None,
     ).unwrap();
-    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    // Model the root's persisted state after an interrupted native task.
+    // Restart preflight is invoked before the old cycle is allowed to resume.
     {
         let store = state.store.lock().unwrap();
-        child_council::require_resumable_child_cycles(&store, &started).unwrap();
+        let mut interrupted = load(&store, &sid).unwrap().unwrap();
+        interrupted.status = "interrupted".into();
+        save(&store, &mut interrupted).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid],
+        ).unwrap();
+    }
+    let interrupted = saved(&state, &sid);
+    assert_eq!(interrupted.council_since, started.council_since);
+    let before = serde_json::to_value(&interrupted).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        child_council::require_resumable_child_cycles(&store, &interrupted).unwrap();
         let genuine_key = format!(
-            "native-council-child:{}:roster-security", started.council_since
+            "native-council-child:{}:roster-security", interrupted.council_since
         );
         let extra_key = format!(
-            "native-council-child:{}:unselected-bot", started.council_since
+            "native-council-child:{}:unselected-bot", interrupted.council_since
         );
         // Copy valid-looking JSON under a different, unowned native session.
         // Per-choice inspection still finds both real reservations, but
@@ -6303,14 +6316,14 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
             rusqlite::params![sid, extra_key, genuine_key],
         ).unwrap(), 1);
         let denied = child_council::require_resumable_child_cycles(
-            &store, &started,
+            &store, &interrupted,
         ).unwrap_err();
         assert!(denied.contains("child reservation roster changed"), "{denied}");
         assert_eq!(store.db.execute(
             "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
             rusqlite::params![sid, extra_key],
         ).unwrap(), 1);
-        child_council::require_resumable_child_cycles(&store, &started).unwrap();
+        child_council::require_resumable_child_cycles(&store, &interrupted).unwrap();
     }
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
         "denied preflight must not alter the native root Council");

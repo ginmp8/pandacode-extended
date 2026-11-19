@@ -105,11 +105,11 @@ fn frozen(
     frozen_with_recovery_status(store, root, child, session_id, child_config, false)
 }
 
-// Only the explicit unstarted-child recovery preflight may inspect an interrupted
+// Only explicit recovery preflight may inspect a failed or interrupted child
 // task's frozen identity. Ordinary inspection, launches and callbacks revoke it.
 fn frozen_with_recovery_status(
     store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
-    session_id: &str, child_config: &TeamConfig, unstarted_interrupted: bool,
+    session_id: &str, child_config: &TeamConfig, allow_revoked_for_recovery: bool,
 ) -> Result<FrozenChildReservation> {
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
     let parent = store.session(&root.session_id)?;
@@ -119,7 +119,7 @@ fn frozen_with_recovery_status(
     // Recheck the native session on every inspection, launch and callback.
     if session.archived || session.task_stage == "completed"
         || (matches!(session.status.as_str(), "interrupted" | "error")
-            && !(unstarted_interrupted && session.status == "interrupted"))
+            && !allow_revoked_for_recovery)
     {
         return Err("child_council_revoked: reserved child task is archived, completed, interrupted or failed.".into());
     }
@@ -501,7 +501,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             && old.status != "interrupted"
             && old_team.status == "running"
             && old_team.generation < root.generation;
-        if old.status != "interrupted" && !stale_paused_child {
+        if !matches!(old.status.as_str(), "interrupted" | "error") && !stale_paused_child {
             continue;
         }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)

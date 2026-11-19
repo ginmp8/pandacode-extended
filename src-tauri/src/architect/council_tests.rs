@@ -1568,7 +1568,7 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
     assert_ne!(council::status(&no_trigger_writer).unwrap().state, "passed",
         "even no-trigger S2 must reject a reviewer that modified the artifact");
     team.workers[0].council.as_mut().unwrap().score = Some(8.0);
-    assert_eq!(council::status(&team).unwrap().state, "fixing");
+    assert_eq!(council::status(&team).unwrap().state, "dispatch");
     assert_eq!(council::round_for(&team, &config, None).unwrap(), 2,
         "a scored S2 trigger must admit fresh reviewers before an artifact edit");
     team.changed_at = SINCE + 3; // Work was corrected after the low score.
@@ -1627,7 +1627,7 @@ fn native_unforced_s2_low_score_admits_fresh_real_reviewer_sessions() {
         ), true);
     }
     let initial = saved(&state, &sid);
-    assert_eq!(council::status(&initial).unwrap().state, "fixing");
+    assert_eq!(council::status(&initial).unwrap().state, "dispatch");
     assert_eq!(council::round_for(
         &initial, initial.config.council.as_ref().unwrap(), None,
     ).unwrap(), 2, "a failed initial score is a native escalation trigger");
@@ -1679,14 +1679,18 @@ fn s2_incomplete_original_evidence_requires_independent_replacement_and_bounded_
     fresh_b.council.as_mut().unwrap().lens = "lens original-b".into();
     let team = team_with(config, vec![
         seat("original-a", 1, Some(9.6), SINCE + 1),
-        seat("original-b", 1, Some(9.7), SINCE + 2),
+        seat("original-b", 1, None, SINCE + 2),
         fresh_a, fresh_b,
     ]);
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "a fully independent, bounded review must remain eligible");
 
+    let mut untriggered = team.clone();
+    untriggered.workers[1].council.as_mut().unwrap().score = Some(9.7);
+    assert_ne!(council::status(&untriggered).unwrap().state, "passed",
+        "a complete passing first wave must not authorize an untriggered follow-up");
     let mut missing = team.clone();
-    missing.workers[1].council.as_mut().unwrap().score = None;
+    missing.workers[0].council.as_mut().unwrap().score = None;
     assert_eq!(council::status(&missing).unwrap().state, "passed",
         "a fresh complete wave may replace incomplete original evidence");
     let mut reused = missing.clone();
@@ -1718,8 +1722,11 @@ fn native_s2_scored_conflict_claim_triggers_fresh_independent_review() {
     ]);
     assert_eq!(council::status(&team).unwrap().state, "passed");
     team.workers[0].council.as_mut().unwrap().reported_conflict = true;
-    assert_eq!(council::status(&team).unwrap().state, "dispatch");
+    assert_eq!(council::status(&team).unwrap().state, "fixing");
     assert!(finish_refusal(&team).unwrap().contains("S2 automatic escalation"));
+    assert!(council::round_for(&team, &config, None).is_err(),
+        "an unresolved conflict must not mint new reviewer authority");
+    team.changed_at = SINCE + 3; // The conflict was corrected after its scored report.
     assert_eq!(council::round_for(&team, &config, None).unwrap(), 2);
 
     let mut fresh_a = seat("fresh-a", 2, Some(9.8), SINCE + 3);
@@ -1728,6 +1735,10 @@ fn native_s2_scored_conflict_claim_triggers_fresh_independent_review() {
     fresh_b.council.as_mut().unwrap().lens = "lens original-b".into();
     team.workers.extend([fresh_a, fresh_b]);
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    let mut unresolved = team.clone();
+    unresolved.changed_at = 0;
+    assert_ne!(council::status(&unresolved).unwrap().state, "passed",
+        "a later clean score cannot erase an unresolved earlier conflict");
     let mut reused = team.clone();
     reused.workers[2].id = "original-a".into();
     assert_ne!(council::status(&reused).unwrap().state, "passed");
@@ -4778,6 +4789,58 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
     assert_eq!(launch.admission.parent, replacement);
     assert!(child.workers.iter().all(|leaf| leaf.read_only && leaf.wrote_at == 0
         && leaf.reviewer_binding.is_some()));
+}
+
+
+#[test]
+fn failed_unstarted_child_requires_explicit_recovery_and_new_native_session() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["failed-child-security", "failed-child-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["failed-child-security", "failed-child-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Recover failed child reservation", None, None).unwrap();
+    let old = {
+        let store = state.store.lock().unwrap();
+        let old = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        store.db.execute("UPDATE sessions SET status='error' WHERE id=?1", [&old]).unwrap();
+        old
+    };
+    assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"),
+        "an errored child cannot regain its old reviewer authority through ordinary Resume");
+    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let new = child_council::inspect(&store, &root).unwrap().into_iter()
+        .find(|view| view.bot_id == "failed-child-security")
+        .unwrap().child_session_id;
+    assert_ne!(new, old, "recovery must create a new isolated child session");
+    assert_eq!(store.session(&old).unwrap().status, "interrupted");
+    assert_eq!(store.session(&new).unwrap().mode, "plan");
+    assert!(load(&store, &new).unwrap().unwrap().workers.is_empty());
+    assert_eq!(serde_json::to_value(&root).unwrap(), before,
+        "recovering a failed child must not approve or modify the root cycle");
 }
 
 #[test]

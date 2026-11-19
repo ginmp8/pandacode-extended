@@ -1284,6 +1284,16 @@ fn reported_conflicts(team: &TeamSnapshot, round: usize) -> bool {
         && worker.status == "completed" && seat.score.is_some() && seat.reported_conflict)
 }
 
+fn latest_conflict_report(team: &TeamSnapshot, through_round: usize) -> Option<i64> {
+    (1..=through_round)
+        .flat_map(|round| in_round(team, round))
+        .filter(|(worker, seat)| counts(worker, seat)
+            && worker.status == "completed" && seat.score.is_some()
+            && seat.reported_conflict)
+        .map(|(worker, _)| worker.updated_at)
+        .max()
+}
+
 fn latest_severe_report(team: &TeamSnapshot, through_round: usize) -> Option<i64> {
     (1..=through_round)
         .flat_map(|round| in_round(team, round))
@@ -2030,6 +2040,8 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     // finding into approval, including after a persisted round is restored.
     if latest_severe_report(team, trigger_round)
         .is_some_and(|reported_at| !written_since(team, reported_at))
+        || latest_conflict_report(team, trigger_round)
+            .is_some_and(|reported_at| !written_since(team, reported_at))
     {
         return false;
     }

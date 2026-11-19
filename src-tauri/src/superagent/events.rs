@@ -231,6 +231,31 @@ fn list_thread_links(store: &Store, ticket_id: &str) -> Result<Vec<SourceThreadL
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Legacy sources with two missing IDs retain their original context,
+/// but an attested Ticket repository cannot mix old or new GitHub identities.
+/// Enforce this within the same transaction as both explicit linking paths.
+fn require_ticket_link_repository_identity(
+    tx: &rusqlite::Transaction<'_>, source_id: &str,
+    ticket_id: &str, repository: &str,
+) -> Result<()> {
+    let mismatched: bool = tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_source_thread_links link
+           JOIN sa_event_sources previous ON previous.id=link.source_id
+           WHERE link.ticket_id=?1 AND previous.repository=?3 COLLATE NOCASE
+             AND (SELECT repository_id FROM sa_source_repository_identity
+                  WHERE source_id=previous.id)
+                 IS NOT (SELECT repository_id FROM sa_source_repository_identity
+                         WHERE source_id=?2)
+         )",
+        params![ticket_id,source_id,repository], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if mismatched {
+        return Err("Ticket thread links cannot combine different or unverified GitHub repository identities.".into());
+    }
+    Ok(())
+}
+
 fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &str)
     -> Result<SourceThreadLink>
 {
@@ -248,6 +273,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     {
         return Err("Terminal Tickets cannot gain new source thread links.".into());
     }
+    require_ticket_link_repository_identity(&tx, source_id, ticket_id, &src.repository)?;
     let current: Option<String> = tx.query_row(
         "SELECT ticket_id FROM sa_source_thread_links
          WHERE source_id=?1 AND subject_key=?2",
@@ -349,6 +375,7 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
         || matches!(ticket.state.as_str(),"completed"|"stopped"|"failed"|"interrupted"|"inconclusive") {
         return Err("Ticket is terminal or outside the source Team.".into());
     }
+    require_ticket_link_repository_identity(&tx, source_id, ticket_id, &src.repository)?;
     let previous: Option<String> = tx.query_row(
         "SELECT ticket_id FROM sa_source_thread_links WHERE source_id=?1 AND subject_key=?2",
         params![source_id,pull_key], |r|r.get(0),
@@ -5177,6 +5204,59 @@ mod tests {
         assert_eq!(tasks, 1, "Observation and correlation never admit work");
     }
 
+
+    #[test]
+    fn same_ticket_cannot_mix_recreated_or_unattested_github_repository_threads() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "one-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let permitted_pull = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "pull_request.opened").unwrap();
+        let recreated = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issue_comment.created").unwrap();
+        let unknown = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "pull_request_review.submitted").unwrap();
+        for (source, repository_id) in [
+            (&issue, 101_i64), (&permitted_pull, 101_i64), (&recreated, 202_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![&source.id,repository_id,storage::now()],
+            ).unwrap();
+        }
+        link_thread(&store, &issue.id, "one-ticket", "issue:42").unwrap();
+        // A reused owner/name cannot combine distinct repositories into one
+        // Ticket, even when a different event kind or thread is selected.
+        assert!(link_thread(&store, &recreated.id, "one-ticket", "issue:42").is_err());
+        assert!(link_thread(&store, &recreated.id, "one-ticket", "pull:99").is_err());
+        assert!(link_thread(&store, &unknown.id, "one-ticket", "pull:99").is_err());
+        assert!(link_issue_to_pull(&store, &recreated.id, "one-ticket",
+            "issue:42", "pull:99").is_err());
+
+        let allowed = link_issue_to_pull(&store, &permitted_pull.id,
+            "one-ticket", "issue:42", "pull:99").unwrap();
+        assert_eq!(allowed.subject_key, "pull:99");
+        assert_eq!(list_thread_links(&store, "one-ticket").unwrap().len(), 2);
+        let linked_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='one-ticket'
+             AND kind IN ('source_thread_linked','source_issue_pull_associated')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked_audit, 2, "denied links never append audit");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let links = list_thread_links(&reopened, "one-ticket").unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|link| link.source_id != recreated.id
+            && link.source_id != unknown.id));
+        assert!(link_thread(&reopened, &unknown.id, "one-ticket", "pull:88").is_err());
+        assert_eq!(list_thread_links(&reopened, "one-ticket").unwrap().len(), 2);
+    }
 
     #[test]
     fn reused_repository_name_keeps_distinct_attested_ticket_threads_isolated() {

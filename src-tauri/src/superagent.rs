@@ -2495,7 +2495,15 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
     };
     let mut sessions = Vec::new();
     for (assignment_id,ticket_id,session_id,revision,reason) in stopped {
-        let Some(reason) = reason else { continue };
+        // The SQL fast path does not capture task thread, frozen bot prompt,
+        // provider profile or resolved checkout identity. The owner watchdog
+        // must settle these failures, not merely request provider cancellation.
+        let reason = match reason {
+            Some(reason) => reason,
+            None if !matches!(read_only_policy(store, &session_id), Ok(Some(_))) =>
+                "Native task admission or session identity changed; no replay".to_owned(),
+            None => continue,
+        };
         let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute(
             "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
@@ -8403,6 +8411,63 @@ mod tests {
             assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
             assert!(!history(&store, &ticket.id, 10).unwrap().iter()
                 .any(|entry| entry.kind == "human_accepted"));
+        }
+    }
+
+    #[test]
+    fn watchdog_settles_task_thread_profile_and_checkout_drift_without_replay() {
+        for fault in ["thread", "provider", "instructions", "checkout"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Watchdog native identity guard",
+                &format!("watchdog-native-identity-{fault}"), false,
+            ).unwrap();
+            assert!(launched, "{fault}");
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+
+            match fault {
+                "thread" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bot_threads SET external_id='untrusted-ticket'
+                         WHERE session_id=?1 AND channel_id=?2",
+                        params![&session, CHANNEL],
+                    ).unwrap(), 1);
+                }
+                "provider" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                        [&session],
+                    ).unwrap(), 1);
+                }
+                "instructions" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bots SET instructions='Changed operator instructions'
+                         WHERE id=?1",
+                        [&config.worker_bot_id],
+                    ).unwrap(), 1);
+                }
+                "checkout" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE projects SET path='/tmp/superagent-watchdog-rebound'
+                         WHERE id=?1",
+                        [&config.project_id],
+                    ).unwrap(), 1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            let interrupted = watchdog_expired_assignments(&store, storage::now()).unwrap();
+            assert_eq!(interrupted, vec![session.clone()], "{fault}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            assert!(mandate(&store, &ticket.id).unwrap().revoked, "{fault}");
+            assert!(history(&store, &ticket.id, 20).unwrap().iter().any(|entry| {
+                entry.kind == "watchdog_interrupted"
+                    && entry.detail.contains("Native task admission or session identity changed")
+            }), "{fault}");
+            assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &session, true, "Stale success").unwrap());
         }
     }
 

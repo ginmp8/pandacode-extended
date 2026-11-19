@@ -13,6 +13,7 @@ const bots = new Map<string, Store>();
 const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
 const channelHistoryOverrides = new Map<string, Map<string, 'include' | 'exclude'>>();
+const capabilityPreferences = new Map<string, { visibility: string; summary: string }>();
 let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
 const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();
@@ -258,6 +259,51 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       if (!ask || !['send', 'wait'].includes(String(args.action))) throw new Error('This message is no longer on hold.');
       failoverAsks.delete(sessionId); result = null; changed(); break;
     }
+    case 'bot_capability_profile': {
+      const bot = store(args.botId).bot;
+      const prefs = capabilityPreferences.get(bot.id) ?? { visibility: 'local_bots', summary: '' };
+      result = { schemaVersion: 1, botId: bot.id, name: bot.name,
+        role: { value: bot.role || null, source: 'user_declared', status: bot.role ? 'self_report' : 'missing' },
+        summary: { value: prefs.summary || null, source: 'explicitly_published', status: prefs.summary ? 'self_report' : 'missing' },
+        instructions: { configured: !!bot.instructions, status: 'restricted' },
+        skills: bot.skills.map(id => ({ id, status: 'not_verified', source: 'assigned_bot_config' })),
+        mcp: bot.mcp.map(name => ({ name, status: 'not_verified' })),
+        tools: [{ name: 'pandacode_bot_inspect_capabilities', status: 'conditional_on_runtime_scope' },
+          { name: 'pandacode_bot_ask_capability', status: 'conditional_on_runtime_scope' }],
+        provider: { value: bot.provider, status: 'current' },
+        model: { value: bot.model, status: 'current' },
+        permissionMode: { value: bot.mode, status: 'not_an_execution_grant' },
+        projectScope: { projectId: bot.projectId, status: 'project_reference_only' },
+        availability: { status: bot.paused ? 'unavailable' : 'configured_not_running', paused: bot.paused },
+        executionLimits: { status: 'unknown' }, visibility: prefs.visibility,
+        configurationUpdatedAt: bot.updatedAt, observedAt: Date.now(), cacheStatus: 'live' };
+      break;
+    }
+    case 'bot_capability_question': {
+      const bot = store(args.botId).bot;
+      const q = String(args.question ?? '').toLowerCase();
+      const topic = q.includes('skill') ? 'skills' : q.includes('permission') ? 'permissions'
+        : q.includes('model') ? 'harness' : q.includes('tool') ? 'tools'
+        : q.includes('instruction') ? 'instructions' : 'unsupported';
+      result = { botId: bot.id, topic, status: topic === 'unsupported' ? 'unsupported' : 'informational',
+        fields: topic === 'skills' ? { skills: bot.skills.map(id => ({ id, status: 'not_verified' })) }
+          : topic === 'permissions' ? { permissionMode: { value: bot.mode, status: 'not_an_execution_grant' } }
+          : topic === 'harness' ? { model: bot.model, provider: bot.provider }
+          : topic === 'instructions' ? { instructions: { status: 'restricted', configured: !!bot.instructions } }
+          : topic === 'tools' ? { tools: ['pandacode_bot_inspect_capabilities'] } : { status: 'unsupported' },
+        executed: false, authorizationGranted: false, observedAt: Date.now() };
+      break;
+    }
+    case 'bot_capability_preferences_set': {
+      store(args.botId);
+      const visibility = String(args.visibility);
+      if (!['local_bots', 'owner_only'].includes(visibility)) throw new Error('Invalid visibility.');
+      const summary = String(args.summary ?? '').trim();
+      if (summary.length > 500 || /api_key|password|secret=|token=/i.test(summary))
+        throw new Error('Capability summary may not contain credentials.');
+      capabilityPreferences.set(args.botId, { visibility, summary });
+      result = { visibility, summary }; changed(); break;
+    }
     case 'bot_detail': result = detail(store(args.botId)); break;
     case 'bot_create': result = createBot(host, args.input); break;
     case 'bot_update': {
@@ -303,7 +349,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     }
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused), updatedAt: Date.now() }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
     case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_delete': store(args.botId); bots.delete(args.botId); channelHistoryOverrides.delete(String(args.botId)); changed(); break;
+    case 'bot_delete': store(args.botId); capabilityPreferences.delete(String(args.botId)); bots.delete(args.botId); channelHistoryOverrides.delete(String(args.botId)); changed(); break;
     case 'bot_remember': {
       const entry = store(args.botId); const content = String(args.content ?? '').trim().slice(0, 2000);
       if (!content) throw new Error('A memory needs some text.');

@@ -927,3 +927,63 @@ test('native bot Conversations identifies SuperAgent threads and never calls the
   await expect(ordinary.locator('[data-open-task="latest-scheduled-chat"]'))
     .toHaveText('Open chat');
 });
+
+
+test('Orchestrations reference Teams cards use native counters, avatars and status states',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true,withOtherTeam:true});
+  const teams=host.getByRole('region',{name:'Saved Teams'});
+  await expect(host.getByRole('group',{name:'Native workspace metrics'})).toBeVisible();
+  const first=teams.locator('.sa-team-card').filter({hasText:'Native Team'});
+  await expect(first).toContainText('1 Demands');
+  await expect(first.locator('.sa-ux-avatar-stack .bot-avatar').first()).toBeVisible();
+  await expect(first.locator('[data-native-tone="success"]')).toContainText('Enabled');
+  await expect(teams.locator('.sa-team-card')).toHaveCount(2);
+  // Native Team metadata does not provide a blocked count in this fixture.
+  // Never silently convert an unknown aggregate into zero.
+  await expect(host.getByRole('group',{name:'Native workspace metrics'}))
+    .toContainText('Counts unavailable');
+  await expect(host.getByRole('button',{name:'New Team',exact:true})).toBeVisible();
+});
+
+test('reference Team board preserves native WorkItems and worker conversation evidence',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true});
+  await host.locator('[data-sa-team-tasks="team-1"]').click();
+  const board=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await expect(host.getByRole('group',{name:'Native workspace metrics'})).toBeVisible();
+  await expect(board.locator('.sa-demand-column[data-native-tone="info"]')).toContainText('Working');
+  const card=board.locator('.sa-demand-card');
+  await expect(card.locator('[data-native-tone="info"]')).toContainText('Working');
+  await expect(card).toContainText('WorkItems: Inspect native tasks');
+  await card.locator('[data-sa-team-demand-tasks="demand-1"]').click();
+  const task=board.getByRole('region',{name:'Demand task timeline'});
+  await expect(task).toContainText('Implement isolated native WorkItem');
+  await expect(task.locator('.bot-avatar').first()).toBeVisible();
+  await expect(card).toContainText('0 / 1 tasks recorded');
+  await task.getByRole('button',{name:'Open full Demand timeline'}).click();
+  const run=host.getByRole('region',{name:'Selected native Demand'});
+  await expect(run).toContainText('Native execution timeline');
+  await expect(run.locator('.sa-run-milestones li')).toHaveCount(5);
+  await run.locator('details.sa-ux-accordion summary').click();
+  await expect(run.locator('details.sa-ux-accordion')).toContainText('Worker');
+  const mutations=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations);
+  expect(mutations).toEqual([]);
+});
+
+test('reference Review inbox separates human decisions from unverified Council pending',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,ticketState:'waiting_review'});
+  await host.getByRole('button',{name:'Review inbox'}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(1);
+  await expect(inbox).toContainText('Awaiting native Council (not approved)');
+  await expect(inbox.locator('[data-native-tone="warning"]')).toContainText('Council pending');
+  await inbox.locator('[data-sa-review-tab="human"]').click();
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(0);
+  await inbox.locator('[data-sa-review-tab="council"]').click();
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(1);
+  await expect(inbox.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
+});

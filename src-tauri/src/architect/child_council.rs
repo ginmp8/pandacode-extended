@@ -639,6 +639,14 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 {
                     return Err("child_council_recovery_denied: started leaf has no native interruption.".into());
                 }
+                // Persisted queued/stopped worker state and a missing local agent
+                // do not prove that the native provider process is gone. In
+                // particular, a foreign or remote session can remain live after
+                // the root is paused or interrupted. Never detach or replace
+                // that review grant while its native session is still active.
+                if matches!(session.status.as_str(), "running" | "waiting") {
+                    return Err("child_council_recovery_denied: leaf native session is still active.".into());
+                }
                 if (!started && (messages != 0 || session.resume_id.is_some()))
                     || session.archived || session.task_stage == "completed"
                     || task != leaf.assignment

@@ -5464,6 +5464,22 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
         let mut child = load(&store, &old_child).unwrap().unwrap();
         child.workers[0].council.as_mut().unwrap().score = None;
         save(&store, &mut child).unwrap();
+        // A stopped leaf snapshot is not evidence that its native provider
+        // session stopped. Recovery must reject a still-live remote session.
+        store.db.execute(
+            "UPDATE sessions SET status='waiting' WHERE id=?1",
+            [&old_leaves[1]],
+        ).unwrap();
+    }
+    let active_denial = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(active_denial.contains("leaf native session is still active"), "{active_denial}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='error' WHERE id=?1",
+            [&old_leaves[1]],
+        ).unwrap();
     }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
@@ -5586,10 +5602,23 @@ fn interrupted_root_recovery_requires_native_crash_and_revokes_started_leaf_gran
     let denied = control_state(&state, &sid, "recover").unwrap_err();
     assert!(denied.contains("started leaf has no native interruption"), "{denied}");
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    for native_status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+                [&old_leaves[0]]).unwrap();
+            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&old_leaves[1], native_status]).unwrap();
+        }
+        let denial = control_state(&state, &sid, "recover").unwrap_err();
+        assert!(denial.contains("leaf native session is still active"), "{denial}");
+        assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+            "a live unstarted reviewer must not be detached from an interrupted root");
+    }
     {
         let store = state.store.lock().unwrap();
-        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
-            [&old_leaves[0]]).unwrap();
+        store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
+            [&old_leaves[1]]).unwrap();
         // Scored or reported work cannot be relabeled as an unscored crash.
         let mut child = load(&store, &old_children[0]).unwrap().unwrap();
         child.workers[0].council.as_mut().unwrap().score = Some(9.5);

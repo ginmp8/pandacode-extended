@@ -66,6 +66,8 @@ enum Command {
     InspectTeamReadiness { orchestration_id: String },
     PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
+    CreateSource { orchestration_id: String, repository: String, actor_filter: String, event_kind: String },
+    ListTeamSources { orchestration_id: String },
     SetSourceMode { source_id: String, expected_revision: i64, mode: String },
     ObserveSource { source_id: String },
     ObserveTeamSources { orchestration_id: String },
@@ -602,6 +604,41 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::CreateSource {
+                orchestration_id, repository, actor_filter, event_kind,
+            } = &command {
+                // Operator-created, disabled-by-default native source. Does not
+                // authenticate events, launch a bot or recover a live serve host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_create_source(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                        repository, actor_filter, event_kind,
+                    ));
+                match result {
+                    Ok(source) => { println!("{source}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source creation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTeamSources { orchestration_id } = &command {
+                // Read only: preserve concurrent server ownership and
+                // never run startup recovery to inspect Team source policy.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_list_team_sources(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(sources) => { println!("{sources}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team source inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::SetSourceMode { source_id, expected_revision, mode } = &command {
                 // Trusted local operator action; the native source policy CAS
                 // is shared with desktop and revokes Observe immediately.
@@ -818,6 +855,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
+        | Command::CreateSource { .. } | Command::ListTeamSources { .. }
         | Command::SetSourceMode { .. }
         | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
         | Command::ObserveCheckRun { .. }
@@ -1595,6 +1633,40 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--create-source" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--create-source needs Team ID, owner/repo, actor and event kind.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let repository = args.get(index + 2)
+                    .ok_or("--create-source needs an exact owner/repo.")?;
+                let actor_filter = args.get(index + 3)
+                    .ok_or("--create-source needs an exact GitHub actor.")?;
+                let event_kind = args.get(index + 4)
+                    .ok_or("--create-source needs a supported event kind.")?;
+                if [repository, actor_filter, event_kind].iter()
+                    .any(|value| value.is_empty() || value.starts_with("--"))
+                {
+                    return Err("Source fields must be explicit values, not CLI switches.".into());
+                }
+                command = Command::CreateSource {
+                    orchestration_id: orchestration_id.clone(),
+                    repository: repository.clone(),
+                    actor_filter: actor_filter.clone(),
+                    event_kind: event_kind.clone(),
+                };
+                ops += 1;
+                index += 4;
+            }
+            "--list-team-sources" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--list-team-sources needs a Team ID.")?;
+                validate_orchestration_id(orchestration_id)?;
+                command = Command::ListTeamSources {
+                    orchestration_id: orchestration_id.clone(),
+                };
+                ops += 1;
+                index += 1;
+            }
             "--set-source-mode" => {
                 let source_id = args.get(index + 1)
                     .ok_or("--set-source-mode needs a source ID, expected revision and off or observe.")?;
@@ -2255,6 +2327,11 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                           Read 50 source-scoped decisions. Legacy command returns an array;
                           --page returns nextCursor, --before follows the exact keyset.
                           No GitHub polling, startup recovery, worker admission or writes; exit.
+  --create-source <team-id> <owner/repo> <actor> <event-kind>
+                         Register an exact GitHub source in Off through native Team storage;
+                         repeat safely without enabling an existing source.
+  --list-team-sources <team-id>
+                         Read the Team's native source policies/cursors; no GitHub request.
   --set-source-mode <id> <revision> <off|observe>
                          Enable or immediately revoke a native GitHub Observe source with
                          optimistic policy revision; no GitHub call or task execution; exit.
@@ -2695,6 +2772,29 @@ mod tests {
         assert!(parsed("--inspect-team-readiness").is_err());
         assert!(parsed("--inspect-team-readiness ../other").is_err());
         assert!(parsed("--inspect-team-readiness team_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--create-source team_123 owner/repo dependabot[bot] issues.opened"),
+            Ok(Command::CreateSource {
+                orchestration_id: "team_123".into(),
+                repository: "owner/repo".into(),
+                actor_filter: "dependabot[bot]".into(),
+                event_kind: "issues.opened".into(),
+            }));
+        for invalid in [
+            "--create-source", "--create-source ../unsafe owner/repo actor issues.opened",
+            "--create-source team_123", "--create-source team_123 owner/repo actor",
+            "--create-source team_123 owner/repo actor --stop-ticket",
+            "--create-source team_123 owner/repo actor issues.opened --stop-ticket task",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--list-team-sources team_123"),
+            Ok(Command::ListTeamSources { orchestration_id: "team_123".into() }));
+        for invalid in [
+            "--list-team-sources", "--list-team-sources ../unsafe",
+            "--list-team-sources team_123 --stop-ticket task",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--observe-source source_123"),
             Ok(Command::ObserveSource { source_id: "source_123".into() }));
         assert!(parsed("--observe-source").is_err());

@@ -518,12 +518,23 @@ not mark a healthy worker as interrupted.
 ### Authenticated GitHub Observe from headless (local operator)
 
 ```sh
+pandacode serve --create-source <team-id> <owner/repo> <actor> <event-kind>
+pandacode serve --list-team-sources <team-id>
 pandacode serve --set-source-mode <source-id> <expected-policy-revision> observe
 pandacode serve --set-source-mode <source-id> <expected-policy-revision> off
 pandacode serve --observe-source <source-id>
 pandacode serve --observe-team-sources <team-id>
 pandacode serve --observe-check-run <source-id> <check-run-id>
 ```
+
+The local operator may create an exact source for an existing Team without the
+desktop. Creation uses the same native source registry as the UI, starts in
+`off`, rejects unsupported event classes and cross-Team IDs, and returns the
+source ID/policy revision. Repeating an equivalent configuration preserves the
+existing source ID, enabled state, cursor and receipts. `--list-team-sources`
+inspects one Team's source metadata without polling GitHub or running startup
+recovery. Source creation is configuration only, not an authenticated event
+subscription or a request to run a Demand.
 
 The local operator can first enable or revoke an existing exact source using
 `--set-source-mode`. This reuses the desktop's native optimistic policy

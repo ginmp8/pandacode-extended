@@ -605,6 +605,28 @@ pub(crate) fn headless_set_source_mode(
     serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
 }
 
+/// Local headless source administration uses the same native Team/source
+/// contract as the desktop. Creation is disabled by default and reusing a
+/// matching source preserves its existing policy, cursor and receipts.
+pub(crate) fn headless_create_source(
+    database_path: &std::path::Path, orchestration_id: &str,
+    repository: &str, actor_filter: &str, event_kind: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(database_path)?;
+    let created = create_source(&store, orchestration_id, repository, actor_filter, event_kind)?;
+    serde_json::to_string_pretty(&created).map_err(|e| e.to_string())
+}
+
+/// Inspect one Team's configured sources without GitHub access, a provider
+/// session or Store::open startup recovery beside a live serve process.
+pub(crate) fn headless_list_team_sources(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    serde_json::to_string_pretty(&list_sources(&store, orchestration_id)?)
+        .map_err(|e| e.to_string())
+}
+
 /// Headless has the same source-scoped, bounded decision history as desktop.
 /// This reads immutable metadata only and cannot invoke GitHub, providers,
 /// restart recovery or issue a task grant.
@@ -2268,6 +2290,56 @@ pub async fn superagent_source_thread_links(
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn headless_source_admin_preserves_off_policy_receipts_and_team_scope() {
+        let (store, path) = fixture();
+        let first: serde_json::Value = serde_json::from_str(
+            &headless_create_source(
+                &path, "orch", "owner/repo", "dependabot[bot]", "issues.opened",
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(first["mode"], "off");
+        assert_eq!(first["policyRevision"], 1);
+        let id = first["id"].as_str().unwrap().to_owned();
+        let enabled = set_mode(&store, &id, 1, "observe").unwrap();
+        store.db.execute(
+            "UPDATE sa_event_sources SET last_sequence=42 WHERE id=?1",
+            [&id],
+        ).unwrap();
+        assert!(headless_create_source(
+            &path, "orch", "OWNER/REPO", "dependabot[bot]", "issues.opened",
+        ).is_err(), "Noncanonical repository names must be rejected");
+        let existing: serde_json::Value = serde_json::from_str(
+            &headless_create_source(
+                &path, "orch", "owner/repo", "Dependabot[Bot]", "issues.opened",
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(existing["id"], id);
+        assert_eq!(existing["mode"], "observe");
+        assert_eq!(existing["policyRevision"], enabled.policy_revision);
+        assert_eq!(existing["lastSequence"], 42);
+
+        let sources: serde_json::Value = serde_json::from_str(
+            &headless_list_team_sources(&path, "orch").unwrap(),
+        ).unwrap();
+        assert_eq!(sources.as_array().unwrap().len(), 1);
+        assert_eq!(sources[0]["id"], id);
+        assert!(headless_list_team_sources(&path, "missing-team").is_err());
+        assert!(headless_create_source(
+            &path, "missing-team", "owner/repo", "actor", "issues.opened",
+        ).is_err());
+        assert!(headless_create_source(
+            &path, "orch", "owner/repo", "actor", "unknown.event",
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "Source management must not admit a Demand");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &id).unwrap().last_sequence, 42);
+        assert_eq!(list_sources(&reopened, "orch").unwrap().len(), 1);
+    }
 
     #[test]
     fn headless_source_links_are_ticket_scoped_read_only_and_restart_durable() {

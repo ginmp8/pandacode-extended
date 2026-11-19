@@ -960,30 +960,41 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const terminal=['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state);
       const archived=Boolean(demand.archived);
       const showingTasks=scope==='team' && teamPlanTicketId===demand.id;
+      const scopedPlan=showingTasks && teamPlanLoaded && teamPlan?.ticketId===demand.id
+        ? teamPlan : null;
       const taskList=showingTasks
         ? '<div class="sa-team-task-detail" role="region" aria-label="Demand task timeline">' +
           (!teamPlanLoaded
             ? '<p role="status">Loading native WorkItems…</p>'
-            : teamPlan && teamPlan.ticketId===demand.id
+            : scopedPlan
               ? '<ol class="sa-team-task-timeline">' +
-                teamPlan.items.map(item => '<li><strong>' + safe(item.key) + ' · ' +
-                  safe(item.objective) + '</strong><small>Worker: ' +
-                  safe(botName(item.workerBotId)) + ' · State: ' + safe(item.state) +
+                scopedPlan.items.map(item => '<li data-native-tone="' + nativeTone(item.state) +
+                  '"><div class="sa-demand-meta">' + botPortrait(item.workerBotId) +
+                  nativeBadge(item.state) + '</div><strong>' + safe(item.key) +
+                  ' · ' + safe(item.objective) + '</strong><small>Worker: ' +
+                  safe(botName(item.workerBotId)) +
                   (item.childTicketState ? ' · Native Ticket: ' + safe(item.childTicketState) : '') +
                   (item.dependsOn.length ? ' · After: ' + safe(item.dependsOn.join(', ')) : '') +
-                  '</small><small>' + safe(workItemProgressHint(item,teamPlan?.items ?? [])) +
-                  '</small></li>').join('') + '</ol>'
+                  '</small><small>' +
+                  safe(workItemProgressHint(item,scopedPlan.items)) + '</small></li>').join('') +
+                '</ol>'
               : '<p>No native WorkItem plan has been issued for this Demand yet.</p>') +
           '<button type="button" data-sa-open-demand="' + safe(demand.id) +
           '">Open full Demand timeline</button></div>'
         : '';
       return '<li class="sa-demand-card" data-sa-demand-team="' +
-        safe(demand.orchestrationId) + '"><div><strong>' + safe(demand.objective) +
-        '</strong><small>' + safe(presets.find(item => item.id===demand.orchestrationId)?.name ??
-          'Unknown Team') + ' · ' + safe(demand.state) +
-        (archived ? ' · Archived' : '') + ' · Revision ' + demand.revision +
-        ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
-        ' · Updated ' + safe(activityTime(demand.updatedAt)) + '</small></div>' +
+        safe(demand.orchestrationId) + '"><div class="sa-demand-main">' +
+        '<div class="sa-demand-meta"><span>Ticket ' + safe(demand.id.slice(0,8)) +
+        '</span>' + (archived?nativeBadge('off','Archived'):'') + '</div>' +
+        '<strong>' + safe(demand.objective) + '</strong>' +
+        nativeBadge(demand.state) +
+        '<small>' + safe(presets.find(item => item.id===demand.orchestrationId)?.name ??
+          'Unknown Team') + ' · Revision ' + demand.revision +
+        ' · Updated ' + safe(activityTime(demand.updatedAt)) + '</small>' +
+        '<small>WorkItems: ' +
+        (scopedPlan ? scopedPlan.items.filter(item=>item.state==='completed').length +
+          ' / ' + scopedPlan.items.length + ' tasks recorded' : 'Inspect native tasks') +
+        '</small></div>' +
         '<div class="sa-demand-actions">' +
         '<button type="button" data-sa-open-demand="' + safe(demand.id) +
         '">Open demand</button>' +

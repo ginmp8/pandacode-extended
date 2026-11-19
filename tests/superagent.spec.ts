@@ -987,3 +987,21 @@ test('reference Review inbox separates human decisions from unverified Council p
   await expect(inbox.locator('.sa-review-card')).toHaveCount(1);
   await expect(inbox.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
 });
+
+
+test('Team member activity is native, bounded, read-only and scoped to its Team',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,withOtherTeam:true});
+  await host.getByRole('button',{name:'Details'}).first().click();
+  const activity=host.getByRole('region',{name:'Recent native Team activity'});
+  await expect(activity).toContainText('No automatic polling or execution');
+  await activity.getByRole('button',{name:'Inspect Worker activity'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(activity).toContainText('Last recorded bot assignments');
+  await expect(activity).toContainText('Worker');
+  await expect(activity).toContainText('Attempt 1');
+  const mutations=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations);
+  expect(mutations).toEqual([]);
+});

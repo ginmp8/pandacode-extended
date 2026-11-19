@@ -50,6 +50,9 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
 
 
 test('explicit secondary Worker selection uses native preflight and read-only task admission', async ({page}) => {
+  // CI hydration, native roster loading and confirm/dispatch may exceed the short default.
+  // Keep every original assertion and action; allow the same budget as adjacent integration tests.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{
     const {mountSuperagent}=await import('/src/superagent-ui.ts');

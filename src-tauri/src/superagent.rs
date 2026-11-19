@@ -9591,6 +9591,7 @@ mod tests {
             project_id: bot.project_id, project_path: None, resolved_project_path: None,
             provider: bot.provider, model: bot.model, mode: bot.mode,
             reasoning_effort: bot.reasoning_effort, assigned_skill_ids: bot.skills,
+            prompt_identity_sha256: None, // Historical snapshot without a prompt digest.
         });
         store.db.execute(
             "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",

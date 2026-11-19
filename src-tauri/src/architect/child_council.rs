@@ -849,7 +849,9 @@ fn validate_admitted(
             // its task-scoped native session is actually running or waiting.
             // Check the entire issued roster before allowing any sibling
             // launch, escalation, callback or composite evidence inspection.
-            || (leaf.status == "queued"
+            // Explicit recovery checks every live native session again before
+            // any revocation; ordinary dispatch and callbacks must fail here.
+            || (!allow_revoked_leaf_session && leaf.status == "queued"
                 && matches!(session.status.as_str(), "running" | "waiting"))
             || !matches!(leaf.status.as_str(), "queued" | "running" | "waiting" | "completed" | "failed" | "stopped")
             || leaf.council.as_ref().is_none_or(|seat| seat.round != expected_round)

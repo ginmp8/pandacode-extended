@@ -2480,6 +2480,86 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
 
 
 #[test]
+fn all_21_modes_and_strategies_create_frozen_native_task_reservations_without_a_verdict() {
+    for (mode, direct_count, child_count, automatic_count) in [
+        ("m1", 0, 0, 0), ("m2", 2, 0, 0), ("m3", 1, 0, 1),
+        ("m4", 0, 2, 0), ("m5", 0, 1, 1), ("m6", 1, 1, 0),
+        ("m7", 1, 1, 1),
+    ] {
+        for strategy in [
+            council::CouncilExecutionStrategy::Parallel,
+            council::CouncilExecutionStrategy::Escalated,
+            council::CouncilExecutionStrategy::TwoPhase,
+        ] {
+            let (state, sid) = state_fixture();
+            {
+                let store = state.store.lock().unwrap();
+                let project = store.session(&sid).unwrap().project_id;
+                let bot_ids = (0..direct_count).map(|i| format!("direct-{i}"))
+                    .chain((0..child_count).map(|i| format!("child-{i}")))
+                    .collect::<Vec<_>>();
+                for bot in &bot_ids {
+                    store.db.execute(
+                        "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                         VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                        rusqlite::params![bot, project, storage::now()],
+                    ).unwrap();
+                }
+                let mut config = on(9.0, 3, 0);
+                config.strategy = strategy;
+                config.reviewer_bot_ids = (0..direct_count)
+                    .map(|i| format!("direct-{i}")).collect();
+                config.nested_bot_reviewers = (0..child_count)
+                    .map(|i| council::CouncilNestedReviewer {
+                        bot_id: format!("child-{i}"), child_reviewers: 2,
+                        child_target: 9.0, child_max_rounds: 2,
+                    }).collect();
+                config.automatic_reviewers = automatic_count;
+                assert_eq!(config.mode(), mode);
+                config.validate().unwrap();
+                let mut root = load(&store, &sid).unwrap().unwrap();
+                root.config.council = Some(config);
+                root.status = "ready".into();
+                root.round = 0;
+                save(&store, &mut root).unwrap();
+            }
+            let (started, _) = start_state(
+                &state, &sid, "Review a frozen native task", None, None,
+            ).unwrap();
+            assert!(started.council_since > 0, "{mode}/{strategy:?}");
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            let reservations = child_council::inspect(&store, &root).unwrap();
+            assert_eq!(reservations.len(), child_count, "{mode}/{strategy:?}");
+            let distinct = reservations.iter().map(|child| child.child_session_id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(distinct.len(), child_count, "{mode}/{strategy:?}");
+            for child in &reservations {
+                assert_eq!(child.root_cycle_id,
+                    format!("{}:{}", sid, root.council_since), "{mode}/{strategy:?}");
+                let child_team = load(&store, &child.child_session_id).unwrap().unwrap();
+                assert_eq!(child_team.status, "blocked", "{mode}/{strategy:?}");
+                assert!(child_team.workers.is_empty(),
+                    "{mode}/{strategy:?} cannot dispatch leaves before the root barrier");
+                assert_eq!(parent_of(&store, &child.child_session_id).unwrap().as_deref(),
+                    Some(sid.as_str()), "{mode}/{strategy:?}");
+            }
+            let recorded: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests
+                 WHERE parent_session_id=?1 AND kind='council_child'",
+                [&sid], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(recorded, child_count as i64, "{mode}/{strategy:?}");
+            let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+            assert_eq!(inspected.mode, mode);
+            assert_eq!(inspected.strategy, strategy);
+            assert!(!inspected.verified_pass && !verified_council_pass(&store, &root),
+                "{mode}/{strategy:?} cannot pass from reservation-only state");
+        }
+    }
+}
+
+#[test]
 fn m3_root_never_admits_forged_partial_sources_in_any_strategy() {
     for strategy in [
         council::CouncilExecutionStrategy::Parallel,

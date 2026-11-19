@@ -908,6 +908,8 @@ export function mountSuperagent(
         '<button type="button" data-sa-duplicate="' + safe(chosen.id) +
         '">Duplicate as new Team</button></div></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
+    // Capture mutable UI state once so native review row predicates remain type-safe.
+    const capturedRejection = globalRejection;
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
       '<h3>Review inbox · ' + safe(reviewTeamFilter
@@ -934,20 +936,20 @@ export function mountSuperagent(
             ? '<button type="button" data-sa-global-reject="' + safe(item.id) +
               '">Reject evidence</button>' : '') + '</li>').join('') ||
           '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>' +
-          (globalRejection && reviewQueue.some(row => row.id === globalRejection.id &&
-              row.orchestrationId === globalRejection.teamId &&
-              row.revision === globalRejection.revision && row.state === 'waiting_approval')
+          (capturedRejection && reviewQueue.some(row => row.id === capturedRejection.id &&
+              row.orchestrationId === capturedRejection.teamId &&
+              row.revision === capturedRejection.revision && row.state === 'waiting_approval')
             ? '<form data-sa-form="global-review-reject" class="sa-global-review-reject" ' +
               'aria-label="Reject native Demand evidence"><h4>Reject Demand ' +
-              safe(globalRejection.id) + '</h4><p>Original Team ' +
-              safe(presets.find(team => team.id === globalRejection.teamId)?.name ?? 'Unknown') +
-              ' · Revision ' + globalRejection.revision +
+              safe(capturedRejection.id) + '</h4><p>Original Team ' +
+              safe(presets.find(team => team.id === capturedRejection.teamId)?.name ?? 'Unknown') +
+              ' · Revision ' + capturedRejection.revision +
               '. This is a negative human decision, not a Council verdict or a retry.</p>' +
               '<p>Native Worker evidence excerpt (up to 2,000 characters):</p>' +
               '<blockquote class="sa-evidence-excerpt">' +
-              safe(globalRejection.evidence?.slice(0, 2000) || 'No evidence recorded') +
+              safe(capturedRejection.evidence?.slice(0, 2000) || 'No evidence recorded') +
               '</blockquote>' +
-              (globalRejection.evidence && globalRejection.evidence.length > 2000
+              (capturedRejection.evidence && capturedRejection.evidence.length > 2000
                 ? '<p>Evidence truncated. Open Demand to inspect the complete native record.</p>' : '') +
               '<label>Reason for rejecting evidence<textarea name="reason" rows="3" ' +
               'maxlength="500" required></textarea></label>' +

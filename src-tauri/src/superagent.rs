@@ -4399,12 +4399,10 @@ pub async fn superagent_submit_to_worker(
         let config=configuration(&store,&orchestration_id)?;
         let worker=direct_team_member(&store,&config,&worker_bot_id)?;
         let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
-        let check=manual_preflight_worker(
-            &store,&orchestration_id,&objective,&worker.id,busy,
-        )?;
-        if !check.eligible {
-            return Err(check.reason.unwrap_or_else(||"Selected Worker is unavailable.".into()));
-        }
+        // Deduplication must run before occupied-worker rejection. The native
+        // admission boundary rechecks role, policy, lease and authorization for
+        // new Tickets; a repeated request key returns its existing Ticket
+        // without ever delivering a second provider packet.
         let (ticket,launch)=admit_role_with_staging_member(
             &mut store,&orchestration_id,&objective,&request_key,busy,false,false,Some(&worker.id),
         )?;

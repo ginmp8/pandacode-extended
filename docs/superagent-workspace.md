@@ -4,6 +4,32 @@ The existing **Bots → Orchestrations** workspace offers native-backed, persist
 for reusable Teams and their Demands/Runs. One configured Team is one SuperAgent;
 each independent Demand is a durable Ticket bound to exactly one Team.
 
+## Direct read-only assignment to a configured Worker (partial S2)
+
+For a Team with two or more configured Workers and **no Council Reviewers**, the
+trusted local operator may now explicitly enable the Team, open **Demands / Runs**,
+load its native Worker roster, select one Worker and choose **Worker directly**.
+A fresh native preflight shows the exact selected bot, project, policy revision
+and zero tool/side-effect authority. Submission independently rechecks the
+selected roster member, immutable project scope, current policy and live checkout
+occupancy before atomically creating the Ticket, task-scoped Mandate, Assignment,
+native bot conversation and audit. The original role/profile snapshot includes
+the entire configured Team, while the Ticket pins the one explicitly selected
+Worker. Request-key replays cannot switch Workers or deliver another packet;
+busy selected Workers are denied rather than silently queued. Stopping revokes
+the same native Mandate and rejects late callbacks. Other ordinary bot chats
+are not modified.
+
+**This does not implement autonomous multi-Worker scheduling**, implicit worker
+selection, Council reviewer execution, delegated subagents, scoped write tools,
+or automatic retry. Coordinated dispatch for multi-Worker Teams and any Team with
+configured Council Reviewers remain unsupported. The legacy single-Worker
+admission path does not silently select the first member of a multi-Worker Team.
+Native tests cover selection, prohibited identities, task profile persistence,
+no ambient tool grants, idempotency and revocation; a focused Playwright test
+checks that the UI supplies an explicit Worker ID. These tests require a passing
+exact-HEAD CI run before the slice is considered verified.
+
 ## Native-backed surfaces
 
 The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.
@@ -69,8 +95,9 @@ The global Demands workspace can filter by the exact native project ID already a
 The views never issue Mandates, spawn sessions, infer task approval, start source
 Auto, execute GitHub effects or authorize tools. Source events do not create
 Demands. Coordinator and Council remain read-only; existing task admission must
-repeat native guards. Unsupported multi-worker execution, scoped writes,
-recursive subagents and production external-effect dispatch remain unavailable.
+repeat native guards. Automatic multi-Worker delegation, scoped writes, recursive subagents and production
+external-effect dispatch remain unavailable. Explicit operator-selected direct
+read-only Worker admission has the limited native boundary described above.
 Ticket selection is discarded on Team change and when a native reload finds
 the Assignment missing. Board uses ordinary keyboard-focusable native buttons
 and the same theme tokens for desktop, narrow, light and dark views.

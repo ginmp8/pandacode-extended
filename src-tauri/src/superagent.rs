@@ -2535,6 +2535,82 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         tx.commit().map_err(|e| e.to_string())?;
         sessions.push(session_id);
     }
+    // A damaged or legacy writer can lose the active Assignment link while
+    // leaving a Ticket running. The ordinary watchdog join only visits linked
+    // assignments; without this separate pass those Tickets stay executable
+    // in storage indefinitely. Never infer that a detached provider stopped.
+    let unlinked: Vec<(String, i64)> = {
+        let mut stmt = store.db.prepare(
+            "SELECT t.id,t.revision FROM sa_tickets t
+             WHERE t.state='running' AND (
+               t.active_assignment_id IS NULL
+               OR (SELECT COUNT(*) FROM sa_assignments a
+                   WHERE a.ticket_id=t.id AND a.state='running')<>1
+               OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                   WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                     AND a.state='running')
+             )
+             ORDER BY t.updated_at,t.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for (ticket_id, revision) in unlinked {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let provider_sessions: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT session_id FROM sa_assignments
+                 WHERE ticket_id=?1 AND state='running'",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&ticket_id], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+        };
+        // Recheck the structural fault with the current Ticket revision
+        // inside the same transaction. A repaired running Ticket is untouched.
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='interrupted',
+               active_assignment_id=NULL,revision=revision+1,updated_at=?3
+             WHERE id=?1 AND revision=?2 AND state='running' AND (
+               active_assignment_id IS NULL
+               OR (SELECT COUNT(*) FROM sa_assignments a
+                   WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
+               OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                   WHERE a.id=sa_tickets.active_assignment_id
+                     AND a.ticket_id=sa_tickets.id AND a.state='running')
+             )",
+            params![&ticket_id,revision,now],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            tx.rollback().map_err(|e| e.to_string())?;
+            continue;
+        }
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket_id]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE ticket_id=?1 AND state='running'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'watchdog_orphan_interrupted',
+               'Running Ticket lost unique active Assignment; all task authority revoked without replay',?2)",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        for session_id in provider_sessions {
+            if !sessions.contains(&session_id) {
+                sessions.push(session_id);
+            }
+        }
+    }
     Ok(sessions)
 }
 
@@ -8079,6 +8155,112 @@ mod tests {
         assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
         assert_eq!(history(&store, &ticket.id, 10).unwrap()
             .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+    }
+
+    #[test]
+    fn watchdog_quarantines_unlinked_running_tickets_without_replaying_provider_effects() {
+        for fault in ["missing-link", "wrong-link", "assignment-not-running"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, started) = admit(
+                &mut store, &config.id, "Private task objective",
+                "watchdog-orphan-running", false,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let original_revision = ticket.revision;
+            let now = storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'orphan-effect','digest','pending',?2,?2)",
+                params![&ticket.id,now],
+            ).unwrap();
+            match fault {
+                "missing-link" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "wrong-link" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET active_assignment_id='unrelated-attempt' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "assignment-not-running" => {
+                    store.db.execute(
+                        "UPDATE sa_assignments SET state='interrupted'
+                         WHERE ticket_id=?1", [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            let stopped = watchdog_expired_assignments(&store, now).unwrap();
+            if fault == "assignment-not-running" {
+                assert!(stopped.is_empty(), "{fault}");
+            } else {
+                assert_eq!(stopped, vec![session.clone()], "{fault}");
+            }
+            let interrupted = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(interrupted.state, "interrupted", "{fault}");
+            assert_eq!(interrupted.revision, original_revision + 1, "{fault}");
+            assert!(interrupted.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert!(assignments(&store, &ticket.id, 10).unwrap()
+                .iter().all(|a| a.state == "interrupted"));
+            assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+                .filter(|entry| entry.kind == "watchdog_orphan_interrupted").count(), 1);
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &session, true, "Late completion").unwrap());
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+            assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn watchdog_orphan_audit_error_rolls_back_all_revocation_and_quarantine() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Private recovery task", "watchdog-orphan-rollback", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'rollback-effect','digest','pending',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_orphan_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_orphan_interrupted'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(watchdog_expired_assignments(&store, storage::now()).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, ticket.revision);
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "pending");
+        store.db.execute_batch("DROP TRIGGER deny_orphan_audit").unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(),
+            vec![session]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
     }
 
     #[test]

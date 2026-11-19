@@ -1246,8 +1246,10 @@ mod tests {
             "provider":{"value":"codex"},"model":{"value":"default"},
             "projectScope":{"projectId":"project-a","status":"project_reference_only"},
             "permissionMode":{"value":"ask"},
-            "instructions":{"configured":true,"status":"restricted"},
-            "goals":{"configured":true,"status":"restricted"},
+            "instructions":{"configured":true,"status":"restricted",
+                "value":"provider-secret not to disclose"},
+            "goals":{"configured":true,"status":"restricted",
+                "value":"another private provider-secret"},
             "availability":{"status":"not_paused_runtime_unknown"}
         });
         let entry=coordinator_safe_capability("worker-a",&discovered);

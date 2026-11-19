@@ -21,7 +21,7 @@ Raw instructions, hidden prompts, private memories, unrelated chats, environment
 
 The Team editor can compare discoverable candidates against an explicit objective. Ranking uses exact terms from declared role, the explicitly published summary and assigned Skill references. It does not infer abilities from bot names or prior conversation text. Results explain match terms, provenance, unknown execution eligibility and Project scope. Suggestions can be staged as Workers or Reviewers, but roles are not changed until the user saves through the existing revision-checked native roster API.
 
-When a coordinated Demand is admitted, its Coordinator also receives a bounded, read-only snapshot of the current configured Team members. Opted-out bots contribute no profile details. The packet is labelled untrusted context; the existing read-only mandate remains authoritative. No ambient bot tools are enabled for SuperAgent Coordinator sessions.
+When a coordinated manual Demand is admitted, its Coordinator receives a bounded, read-only snapshot of configured Team members. Automatic Demand planning also derives worker specialization from privacy-filtered native discovery profiles after verifying each immutable admitted Team member snapshot. Neither path returns raw Worker instructions, goals, memories or secrets. An owner-only bot contributes only its identifier and a privacy-restricted status. The packets are labelled untrusted context; existing read-only mandates and immutable admission checks remain authoritative. No ambient bot tools are enabled for SuperAgent Coordinator sessions.
 
 ## Persistence and audit
 

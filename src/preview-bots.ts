@@ -13,6 +13,10 @@ const bots = new Map<string, Store>();
 const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
 const channelHistoryOverrides = new Map<string, Map<string, 'include' | 'exclude'>>();
+const capabilityPreferences = new Map<string, { visibility: string; summary: string }>();
+export function previewCapabilityVisibility(id: string): string {
+  return capabilityPreferences.get(id)?.visibility ?? 'local_bots';
+}
 let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
 const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();
@@ -113,6 +117,22 @@ async function lastMessage(host: PreviewBotsHost, sessionId: string): Promise<Bo
   return { role: latest.role as 'user' | 'assistant', text: [...line].length > 160 ? [...line].slice(0, 160).join('') + '…' : line, at: latest.createdAt ?? latest.created_at ?? Date.now() };
 }
 
+function createBot(host: PreviewBotsHost, input: BotInput, projectId?: string): Bot {
+  const normalized = validate(input);
+  const id = crypto.randomUUID(), now = Date.now();
+  const bot: Bot = { ...normalized, soul: normalized.soul ?? '', skills: [], mcp: [], id,
+    projectId: projectId ?? host.addProject(normalized.name).id, paused: false, memoryVersion: 0,
+    notifyChannelId: null, notifyThread: null,
+    nextHeartbeatAt: normalized.heartbeatMinutes ? now + normalized.heartbeatMinutes * MINUTE : null,
+    createdAt: now, updatedAt: now };
+  const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [],
+    activity: [], freshContextEachMessage: false, includeSharedChannelHistory: true };
+  log(entry, 'created', `Created ${bot.name}`);
+  bots.set(id, entry);
+  host.emit('bots-changed', null);
+  return structuredClone(bot);
+}
+
 const params = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
 let sampled = false;
 let sampleChannelSeeded = false;
@@ -125,8 +145,12 @@ export const previewBotBusy = (sessionId: string): boolean => sampleBusy.has(ses
 async function seedSamples(host: PreviewBotsHost): Promise<void> {
   if (sampled || params.get('bots') !== 'sample') return;
   sampled = true;
-  const base = { instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0 };
-  const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) => invokeBots<Bot>('bot_create', { input: { ...base, name, role, avatar, ...profile } }, host);
+  const base: Pick<BotInput, 'instructions' | 'goals' | 'provider' | 'model' | 'mode' | 'heartbeatMinutes'> = {
+    instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0,
+  };
+  const sampleProjectId = host.addProject('Sample bots').id;
+  const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) =>
+    createBot(host, { ...base, name, role, avatar, ...profile }, sampleProjectId);
   const [waiting, working, limited, paused] = await Promise.all([make('Scout', 'Research', 'panda:5'), make('Writer', 'Drafts posts', 'panda:4'), make('Ledger', 'Finance', 'panda:7', { color: '#14b8a6', reasoningEffort: 'high', backupModels: [{ provider: 'codex', model: 'gpt-5' }], fallbackMode: 'auto', notify: false, whileWorking: 'steer', showPlan: true }), make('Dozy', 'Night shift', 'panda:8')]);
   if (!sampleChannelSeeded) {
     sampleChannelSeeded = true;
@@ -238,16 +262,59 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       if (!ask || !['send', 'wait'].includes(String(args.action))) throw new Error('This message is no longer on hold.');
       failoverAsks.delete(sessionId); result = null; changed(); break;
     }
-    case 'bot_detail': result = detail(store(args.botId)); break;
-    case 'bot_create': {
-      const input = validate(args.input);
-      const id = crypto.randomUUID(), now = Date.now();
-      const project = host.addProject(input.name);
-      const bot: Bot = { ...input, soul: input.soul ?? '', skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
-      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [], freshContextEachMessage: false, includeSharedChannelHistory: true };
-      log(entry, 'created', `Created ${bot.name}`);
-      bots.set(id, entry); result = structuredClone(bot); changed(); break;
+    case 'bot_capability_profile': {
+      const bot = store(args.botId).bot;
+      const prefs = capabilityPreferences.get(bot.id) ?? { visibility: 'local_bots', summary: '' };
+      result = { schemaVersion: 1, botId: bot.id, name: bot.name,
+        role: { value: bot.role || null, source: 'user_declared', status: bot.role ? 'self_report' : 'missing' },
+        summary: { value: prefs.summary || null, source: 'explicitly_published', status: prefs.summary ? 'self_report' : 'missing' },
+        conciseSummary: { value: prefs.summary || ('Declared role: ' + (bot.role || 'not declared') +
+          '. Assigned Skill references: ' + (bot.skills.join(', ') || 'none') +
+          '. Runtime execution capability is not verified.'),
+          source: prefs.summary ? 'explicitly_published' : 'native_declared_configuration',
+          status: prefs.summary ? 'self_report' : 'summarized' },
+        instructions: { configured: !!bot.instructions, status: 'restricted' },
+        skills: bot.skills.map(id => ({ id, status: 'not_verified', source: 'assigned_bot_config' })),
+        mcp: bot.mcp.map(name => ({ name, status: 'not_verified' })),
+        tools: [{ name: 'pandacode_bot_inspect_capabilities', status: 'conditional_on_runtime_scope' },
+          { name: 'pandacode_bot_ask_capability', status: 'conditional_on_runtime_scope' }],
+        provider: { value: bot.provider, status: 'current' },
+        model: { value: bot.model, status: 'current' },
+        permissionMode: { value: bot.mode, status: 'not_an_execution_grant' },
+        projectScope: { projectId: bot.projectId, status: 'project_reference_only' },
+        availability: { status: bot.paused ? 'unavailable' : 'not_paused_runtime_unknown', paused: bot.paused },
+        executionLimits: { status: 'unknown' }, visibility: prefs.visibility,
+        configurationUpdatedAt: bot.updatedAt, observedAt: Date.now(), cacheStatus: 'live' };
+      break;
     }
+    case 'bot_capability_question': {
+      const bot = store(args.botId).bot;
+      const q = String(args.question ?? '').toLowerCase();
+      const topic = q.includes('skill') ? 'skills' : q.includes('what can') || q.includes('capabilit') || q.includes('role') ? 'summary' : q.includes('permission') ? 'permissions'
+        : q.includes('model') ? 'harness' : q.includes('tool') ? 'tools'
+        : q.includes('instruction') ? 'instructions' : 'unsupported';
+      result = { botId: bot.id, topic, status: topic === 'unsupported' ? 'unsupported' : 'informational',
+        fields: topic === 'skills' ? { skills: bot.skills.map(id => ({ id, status: 'not_verified' })) }
+          : topic === 'summary' ? { conciseSummary: { value: 'Declared role: ' + (bot.role || 'not declared') + '; Skill references: ' + (bot.skills.join(', ') || 'none'), source: 'native_declared_configuration', status: 'summarized' } }
+          : topic === 'permissions' ? { permissionMode: { value: bot.mode, status: 'not_an_execution_grant' } }
+          : topic === 'harness' ? { model: bot.model, provider: bot.provider }
+          : topic === 'instructions' ? { instructions: { status: 'restricted', configured: !!bot.instructions } }
+          : topic === 'tools' ? { tools: ['pandacode_bot_inspect_capabilities'] } : { status: 'unsupported' },
+        executed: false, authorizationGranted: false, observedAt: Date.now() };
+      break;
+    }
+    case 'bot_capability_preferences_set': {
+      store(args.botId);
+      const visibility = String(args.visibility);
+      if (!['local_bots', 'owner_only'].includes(visibility)) throw new Error('Invalid visibility.');
+      const summary = String(args.summary ?? '').trim();
+      if (summary.length > 500 || /api_key|password|secret=|token=/i.test(summary))
+        throw new Error('Capability summary may not contain credentials.');
+      capabilityPreferences.set(args.botId, { visibility, summary });
+      result = { visibility, summary }; changed(); break;
+    }
+    case 'bot_detail': result = detail(store(args.botId)); break;
+    case 'bot_create': result = createBot(host, args.input); break;
     case 'bot_update': {
       const entry = store(args.botId); const input = validate(args.input);
       entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };
@@ -291,7 +358,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     }
     case 'bot_set_paused': { const entry = store(args.botId); entry.bot = { ...entry.bot, paused: Boolean(args.paused), updatedAt: Date.now() }; log(entry, 'updated', args.paused ? 'Paused' : 'Resumed'); result = structuredClone(entry.bot); changed(); break; }
     case 'bot_reset': { const entry = store(args.botId); entry.memories = []; entry.schedules = []; entry.threads = []; entry.activity = []; log(entry, 'reset', 'Reset: conversations, memories and schedules cleared'); result = structuredClone(entry.bot); changed(); break; }
-    case 'bot_delete': store(args.botId); bots.delete(args.botId); channelHistoryOverrides.delete(String(args.botId)); changed(); break;
+    case 'bot_delete': store(args.botId); capabilityPreferences.delete(String(args.botId)); bots.delete(args.botId); channelHistoryOverrides.delete(String(args.botId)); changed(); break;
     case 'bot_remember': {
       const entry = store(args.botId); const content = String(args.content ?? '').trim().slice(0, 2000);
       if (!content) throw new Error('A memory needs some text.');

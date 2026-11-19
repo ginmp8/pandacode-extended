@@ -1,8 +1,15 @@
-//! Durable idempotency receipts for future authorized SuperAgent external effects.
-//! A transport timeout or restart never authorizes blind replay.
-use crate::{storage::{self, Store}, Result};
-use rusqlite::{params, OptionalExtension};
+use crate::{github, storage::{self, Store}, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::{
+    fs::{File, OpenOptions},
+    path::Path,
+    time::Duration,
+};
+
+const EFFECT_MARKER: &str = "<!-- pandacode-superagent-effect:";
+const MAX_COMMENT_BYTES: usize = 60_000;
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_effect_receipts (
@@ -16,193 +23,2164 @@ CREATE TABLE IF NOT EXISTS sa_effect_receipts (
 );
 CREATE INDEX IF NOT EXISTS sa_effect_unresolved ON sa_effect_receipts(ticket_id,state)
  WHERE state!='applied';
+CREATE TABLE IF NOT EXISTS sa_effect_grants (
+ ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ effect_key TEXT NOT NULL,
+ ticket_revision INTEGER NOT NULL,
+ project_id TEXT NOT NULL,
+ repository TEXT NOT NULL,
+ issue_number INTEGER NOT NULL CHECK(issue_number>0),
+ comment_body TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL,
+ created_at INTEGER NOT NULL,
+ PRIMARY KEY(ticket_id,effect_key)
+);
 "#;
-pub(crate) const RECOVER: &str =
-    "UPDATE sa_effect_receipts SET state='uncertain',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
+
+pub(crate) const GRANT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_effect_grants (
+ ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ effect_key TEXT NOT NULL,
+ ticket_revision INTEGER NOT NULL,
+ project_id TEXT NOT NULL,
+ repository TEXT NOT NULL,
+ issue_number INTEGER NOT NULL CHECK(issue_number>0),
+ comment_body TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL,
+ created_at INTEGER NOT NULL,
+ PRIMARY KEY(ticket_id,effect_key)
+);
+"#;
+
+/// Store::open runs this inside its native recovery transaction. Record one
+/// bounded attribution per affected Ticket before moving pending effects to
+/// uncertain; an audit failure must roll back the quarantine as well. Never
+/// infer that GitHub applied a pending write or expose the original payload.
+pub(crate) const RECOVER: &str = r#"
+INSERT INTO sa_audit(ticket_id,kind,detail,at)
+ SELECT DISTINCT ticket_id,'restart_effect_uncertain',
+   'Pending external effects quarantined on restart; verify remotely before reconciliation',
+   CAST(strftime('%s','now') AS INTEGER)*1000
+ FROM sa_effect_receipts WHERE state='pending';
+UPDATE sa_effect_receipts SET state='uncertain',
+ uncertainty_reason='process_restarted_before_settlement',
+ readback_state='not_attempted',
+ updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE state='pending';
+"#;
 
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
-pub enum Reservation {
+pub(crate) enum Reservation {
     Reserved,
     AlreadyPending,
     RequiresReconciliation,
     AlreadyApplied,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
-pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Result<Reservation> {
-    if key.is_empty() || key.len()>128 || !key.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.'|b':'))
-        || payload.is_empty() || payload.len()>1_048_576 {
-        return Err("Invalid or oversized effect identity.".into());
+pub(crate) fn open_effect_store(database_path: &Path) -> Result<Store> {
+    let db = Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|e| e.to_string())?;
+    db.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    db.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| e.to_string())?;
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if version != storage::SCHEMA_VERSION {
+        return Err(format!(
+            "Database schema {version} differs from expected {}; open PandaCode to migrate it.",
+            storage::SCHEMA_VERSION
+        ));
     }
-    let digest=format!("{:x}",Sha256::digest(payload));
-    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
-    // A receipt is not a grant. Require the live worker assignment and every
-    // immutable scope field to still agree before allowing a caller to attempt
-    // an effect. Current production mandates are read-only.
-    let authorized: bool=tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets t
-         JOIN sa_mandates m ON m.ticket_id=t.id
-         JOIN sa_orchestrations o ON o.id=t.orchestration_id
-         JOIN sa_assignments a ON a.id=t.active_assignment_id
-           AND a.ticket_id=t.id AND a.state='running'
-           AND a.bot_id=t.worker_bot_id
-         JOIN bots b ON b.id=a.bot_id
-         WHERE t.id=?1 AND t.state='running' AND m.revoked=0
-           AND m.expires_at>?2
-           AND t.policy_revision=m.policy_revision
-           AND m.policy_revision=o.policy_revision
-           AND t.project_id=m.project_id AND m.project_id=o.project_id
-           AND t.actor=m.actor AND m.authorization_id<>''
-           AND b.project_id=t.project_id AND b.paused=0
-           AND m.allowed_side_effects=1 AND o.enabled=1)",
-        params![ticket_id,storage::now()],|r|r.get(0)
-    ).map_err(|e|e.to_string())?;
-    if !authorized {return Err("Native effect authorization unavailable.".into());}
-    let existing: Option<(String,String)>=tx.query_row(
-        "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
-        params![ticket_id,key],|r|Ok((r.get(0)?,r.get(1)?))
-    ).optional().map_err(|e|e.to_string())?;
-    let result=match existing {
-        Some((previous,_)) if previous!=digest =>
-            return Err("Effect key already used for different payload.".into()),
-        Some((_,state)) => match state.as_str(){
-            "pending"=>Reservation::AlreadyPending,
-            "uncertain"=>Reservation::RequiresReconciliation,
-            "applied"=>Reservation::AlreadyApplied,
-            _=>return Err("Invalid effect state.".into()),
-        },
-        None=>{
-            let now=storage::now();
-            tx.execute(
-                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
-                 VALUES(?1,?2,?3,'pending',?4,?4)",
-                params![ticket_id,key,digest,now]
-            ).map_err(|e|e.to_string())?;
-            Reservation::Reserved
-        }
-    };
-    tx.commit().map_err(|e|e.to_string())?;
-    Ok(result)
+    Ok(Store { db, path: database_path.into() })
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
-pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
-    let n=store.db.execute(
-        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
-         WHERE ticket_id=?1 AND effect_key=?2 AND state IN ('pending','uncertain')",
-        params![ticket_id,key,storage::now()]
-    ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("No unresolved effect receipt.".into());}
-    Ok(())
-}
-
-/// Caller must verify the external provider result independently: this
-/// primitive neither executes an action nor infers success from a timeout.
-#[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
-pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->Result<()>{
-    let digest=format!("{:x}",Sha256::digest(payload));
-    let n=store.db.execute(
-        "UPDATE sa_effect_receipts SET state='applied',updated_at=?4
-         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
-        params![ticket_id,key,digest,storage::now()]
-    ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("Missing receipt or mismatched payload.".into());}
-    Ok(())
-}
-
-pub(crate) fn unresolved_count(store:&Store,ticket_id:&str)->Result<i64>{
-    store.db.query_row(
-        "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state!='applied'",
-        [ticket_id],|r|r.get(0)
-    ).map_err(|e|e.to_string())
+/// A cross-process fence ordering effect grants and the final live-authority
+/// check with Stop's mandate revocation. The GitHub write call stays under the
+/// same fence as its final live-authority check. This is a file lock rather
+/// than a SQLite transaction, so the bounded `gh` wait never holds a database
+/// transaction open. The lock is released automatically if a process exits
+/// unexpectedly.
+pub(crate) struct DispatchFence {
+    _file: File,
 }
 
 #[cfg(test)]
-mod tests{
-    use super::*;
-    use crate::superagent::{self,NewOrchestration};
+std::thread_local! {
+    static DISPATCH_FENCE_ACQUIRED_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static DISPATCH_FENCE_WAITING_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
 
-    fn fixture()->(Store,String){
-        let path=std::env::temp_dir().join(format!("sa-effect-{}.db",storage::id()));
-        let mut store=Store::open(&path).unwrap();
-        store.db.execute("INSERT INTO projects(id,name,path) VALUES('p','P','/tmp/sa-effects')",[]).unwrap();
-        for (id,name) in [("co","Coordinator"),("wo","Worker")]{
+#[cfg(test)]
+fn observe_next_dispatch_fence_acquired(observer: impl FnOnce() + 'static) {
+    DISPATCH_FENCE_ACQUIRED_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+}
+
+#[cfg(test)]
+fn observe_next_dispatch_fence_waiting(observer: impl FnOnce() + 'static) {
+    DISPATCH_FENCE_WAITING_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+}
+
+#[cfg(test)]
+fn notify_dispatch_fence_acquired() {
+    let observer = DISPATCH_FENCE_ACQUIRED_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
+}
+
+#[cfg(test)]
+fn notify_dispatch_fence_waiting() {
+    let observer = DISPATCH_FENCE_WAITING_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
+}
+
+pub(crate) fn lock_dispatch(database_path: &Path) -> Result<DispatchFence> {
+    lock_dispatch_before_wait(database_path, || {})
+}
+
+pub(crate) fn lock_dispatch_before_wait(
+    database_path: &Path,
+    before_wait: impl FnOnce(),
+) -> Result<DispatchFence> {
+    let lock_path = database_path.with_extension("superagent-effect-dispatch.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|e| e.to_string())?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            before_wait();
+            #[cfg(test)]
+            notify_dispatch_fence_waiting();
+            file.lock().map_err(|e| e.to_string())?;
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
+    }
+    #[cfg(test)]
+    notify_dispatch_fence_acquired();
+    Ok(DispatchFence { _file: file })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueCommentIntent {
+    pub ticket_id: String,
+    pub expected_revision: i64,
+    pub repository: String,
+    pub issue_number: i64,
+    pub effect_key: String,
+    pub comment_body: String,
+    pub payload_sha256: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EffectStatus {
+    pub ticket_id: String,
+    pub ticket_revision: i64,
+    pub repository: String,
+    pub issue_number: i64,
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub reconciliation: String,
+    pub uncertainty_reason: Option<String>,
+    pub readback_state: Option<String>,
+    pub remote_comment_id: Option<String>,
+    pub remote_comment_url: Option<String>,
+    pub remote_comment_author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Readback {
+    Exact(RemoteCommentEvidence),
+    Missing,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteCommentEvidence {
+    id: Option<String>,
+    url: Option<String>,
+    author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrantBinding {
+    project_id: String,
+    assignment_id: String,
+    session_id: String,
+}
+
+pub(crate) fn validate_repository(repository: &str) -> Result<()> {
+    let mut parts = repository.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+    };
+    if parts.next().is_some() || !valid_component(owner) || !valid_component(name) {
+        return Err("Provide one exact GitHub repository in owner/name form.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_effect_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("Provide a bounded stable effect key using letters, digits, '.', '_' , ':' or '-'.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_issue_comment(
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    issue_number: i64,
+    effect_key: &str,
+    comment: &str,
+) -> Result<IssueCommentIntent> {
+    if ticket_id.is_empty()
+        || ticket_id.len() > 128
+        || !ticket_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || expected_revision < 0
+    {
+        return Err("Provide a valid Ticket ID and nonnegative Ticket revision.".into());
+    }
+    validate_repository(repository)?;
+    validate_effect_key(effect_key)?;
+    if issue_number <= 0 {
+        return Err("Provide a positive GitHub issue number.".into());
+    }
+    if comment.trim().is_empty()
+        || comment.len() > MAX_COMMENT_BYTES
+        || comment.contains('\0')
+        || comment.contains(EFFECT_MARKER)
+    {
+        return Err("Provide a nonempty issue comment within the size limit and without a PandaCode effect marker.".into());
+    }
+    let marker = format!("{EFFECT_MARKER}ticket={ticket_id};key={effect_key} -->");
+    let comment_body = format!("{comment}\n\n{marker}");
+    let payload_sha256 = digest_intent(
+        ticket_id,
+        expected_revision,
+        repository,
+        issue_number,
+        effect_key,
+        &comment_body,
+    )?;
+    Ok(IssueCommentIntent {
+        ticket_id: ticket_id.into(),
+        expected_revision,
+        repository: repository.into(),
+        issue_number,
+        effect_key: effect_key.into(),
+        comment_body,
+        payload_sha256,
+    })
+}
+
+fn digest_intent(
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    issue_number: i64,
+    effect_key: &str,
+    comment_body: &str,
+) -> Result<String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload<'a> {
+        ticket_id: &'a str,
+        expected_revision: i64,
+        repository: &'a str,
+        issue_number: i64,
+        effect_key: &'a str,
+        comment_body: &'a str,
+    }
+    let bytes = serde_json::to_vec(&Payload {
+        ticket_id,
+        expected_revision,
+        repository,
+        issue_number,
+        effect_key,
+        comment_body,
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn intent_marker(intent: &IssueCommentIntent) -> String {
+    format!(
+        "{EFFECT_MARKER}ticket={};key={} -->",
+        intent.ticket_id, intent.effect_key
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveScope {
+    project_id: String,
+    assignment_id: String,
+    session_id: String,
+}
+
+fn active_scope_if_current(
+    db: &Connection,
+    intent: &IssueCommentIntent,
+) -> Result<Option<ActiveScope>> {
+    active_scope_for_ticket(db, &intent.ticket_id, intent.expected_revision)
+}
+
+fn active_scope_for_ticket(
+    db: &Connection,
+    ticket_id: &str,
+    expected_revision: i64,
+) -> Result<Option<ActiveScope>> {
+    if crate::feature_controls::get().bots_paused {
+        return Ok(None);
+    }
+    db.query_row(
+        "SELECT t.project_id,a.id,a.session_id FROM sa_tickets t
+         JOIN sa_mandates m ON m.ticket_id=t.id
+         JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         JOIN sa_assignments a ON a.id=t.active_assignment_id
+           AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
+         JOIN sessions s ON s.id=a.session_id AND s.project_id=t.project_id
+         JOIN bots b ON b.id=a.bot_id
+         WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
+           AND m.expires_at>?3 AND t.policy_revision=m.policy_revision
+           AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
+           AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
+           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1
+           AND EXISTS (SELECT 1 FROM bots coordinator
+                       WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0)
+           AND a.bot_id<>o.coordinator_bot_id
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=t.id AND other.state='running')=1",
+        params![ticket_id, expected_revision, storage::now()],
+        |row| Ok(ActiveScope {
+            project_id: row.get(0)?,
+            assignment_id: row.get(1)?,
+            session_id: row.get(2)?,
+        }),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveScope> {
+    if crate::feature_controls::get().bots_paused {
+        return Err(
+            "Native issue-comment authorization is unavailable while Bots are paused.".into(),
+        );
+    }
+    active_scope_if_current(db, intent)?.ok_or_else(|| {
+        "The Ticket, revision, mandate, or active worker no longer permits this effect.".into()
+    })
+}
+
+/// An effect grant is not a provider-session grant. Recheck the original
+/// task-owned worker thread, admitted role and frozen model before any write.
+fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
+    effect_worker_session_current_for_ticket(store, &intent.ticket_id, intent.expected_revision)
+}
+
+fn effect_worker_session_current_for_ticket(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+) -> Result<bool> {
+    let scope = active_scope_for_ticket(&store.db, ticket_id, expected_revision)?
+        .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
+    let pinned=super::ticket_team_snapshot(store,ticket_id)?;
+    let attempt_timeout=pinned.policy.strategy.attempt_timeout_ms;
+    // A persisted effect grant does not renew an expired provider attempt.
+    // Ambiguous concurrent running assignments cannot authorize a remote write.
+    let now = storage::now();
+    let (bot_id, attempt): (String, i64) = store.db.query_row(
+        "SELECT bot_id,attempt FROM sa_assignments
+         WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'
+           AND created_at>0 AND created_at<=?4 AND (?4-created_at)<?5
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=?2 AND other.state='running')=1",
+        params![scope.assignment_id,ticket_id,scope.session_id,
+            now,attempt_timeout],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    let session = store.session(&scope.session_id)?;
+    Ok(session.project_id == scope.project_id
+        && super::assignment_thread_current(store,&scope.session_id,ticket_id)?
+        && super::assignment_role_authorized(store,ticket_id,&bot_id,attempt)?
+        && super::admitted_session_matches_profile(
+            store,ticket_id,&bot_id,"worker",&session,
+        )?)
+}
+
+/// Read-only first stage of native draft-PR authorization. No branch is pushed
+/// and no PR, effect receipt, or grant is created. Recheck native Ticket authority
+/// after remote reads, since stop/revocation may race the GitHub CLI.
+pub(crate) fn verify_draft_pull_request_target(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<String> {
+    validate_repository(repository)?;
+    if expected_revision < 0 {
+        return Err("Provide a nonnegative Ticket revision.".into());
+    }
+    let initial_scope = active_scope_for_ticket(&store.db, ticket_id, expected_revision)?
+        .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
+    if !effect_worker_session_current_for_ticket(store, ticket_id, expected_revision)? {
+        return Err("The Ticket worker session is no longer authorized.".into());
+    }
+    let root = store.workspace_root(&initial_scope.project_id, Some(&initial_scope.session_id))?;
+    let verified_sha = github::verify_draft_pull_request_target(
+        root.as_path(), repository, head, base,
+    )?;
+    if active_scope_for_ticket(&store.db, ticket_id, expected_revision)?.as_ref()
+        != Some(&initial_scope)
+        || !effect_worker_session_current_for_ticket(store, ticket_id, expected_revision)?
+    {
+        return Err("The active Ticket worker changed during draft PR target verification.".into());
+    }
+    Ok(verified_sha)
+}
+
+// Keep durable consent separate from current execution authority. A stored
+// receipt may be reconciled after revocation, but only against the complete
+// immutable grant binding and its original assignment/session.
+fn exact_grant_binding(db: &Connection, intent: &IssueCommentIntent) -> Result<GrantBinding> {
+    let grant: Option<(i64, String, String, i64, String, String)> = db
+        .query_row(
+            "SELECT ticket_revision,project_id,repository,issue_number,comment_body,payload_sha256
+             FROM sa_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id, intent.effect_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((revision, project_id, repository, issue, body, digest)) = grant else {
+        return Err("The exact native effect grant is missing.".into());
+    };
+    if revision != intent.expected_revision
+        || repository != intent.repository
+        || issue != intent.issue_number
+        || body != intent.comment_body
+        || digest != intent.payload_sha256
+    {
+        return Err(
+            "The native effect grant does not match this exact Ticket, target, key, and payload."
+                .into(),
+        );
+    }
+    let detail: Option<String> = db
+        .query_row(
+            "SELECT detail FROM sa_audit
+             WHERE ticket_id=?1 AND kind='issue_comment_granted'
+               AND json_extract(detail,'$.effectKey')=?2
+               AND json_extract(detail,'$.payloadSha256')=?3
+             ORDER BY id DESC LIMIT 1",
+            params![intent.ticket_id, intent.effect_key, intent.payload_sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let detail: serde_json::Value = serde_json::from_str(
+        detail
+            .as_deref()
+            .ok_or_else(|| "The exact native effect grant binding is missing.".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let assignment_id = detail
+        .get("assignmentId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "The exact native effect assignment binding is invalid.".to_string())?;
+    let session_id = detail
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "The exact native effect session binding is invalid.".to_string())?;
+    let project_binding = detail
+        .get("projectId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| *value == project_id.as_str())
+        .ok_or_else(|| "The exact native effect project binding is invalid.".to_string())?;
+    let exact_detail = detail.get("ticketRevision").and_then(serde_json::Value::as_i64)
+        == Some(intent.expected_revision)
+        && detail.get("repository").and_then(serde_json::Value::as_str)
+            == Some(intent.repository.as_str())
+        && detail.get("issueNumber").and_then(serde_json::Value::as_i64)
+            == Some(intent.issue_number)
+        && detail.get("effectKey").and_then(serde_json::Value::as_str)
+            == Some(intent.effect_key.as_str())
+        && detail.get("payloadSha256").and_then(serde_json::Value::as_str)
+            == Some(intent.payload_sha256.as_str());
+    if !exact_detail {
+        return Err("The native effect grant audit does not match this exact intent.".into());
+    }
+    let assignment_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_assignments
+             WHERE id=?1 AND ticket_id=?2 AND session_id=?3)",
+            params![assignment_id, intent.ticket_id, session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let ticket_project: Option<String> = db
+        .query_row(
+            "SELECT project_id FROM sa_tickets WHERE id=?1",
+            [&intent.ticket_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if !assignment_exists || ticket_project.as_deref() != Some(project_binding) {
+        return Err("The native effect grant no longer matches its original assignment and project.".into());
+    }
+    let session_project: Option<String> = db
+        .query_row(
+            "SELECT project_id FROM sessions WHERE id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if session_project.as_deref().is_some_and(|value| value != project_binding) {
+        return Err("The native effect session has moved outside its granted project.".into());
+    }
+    Ok(GrantBinding {
+        project_id,
+        assignment_id: assignment_id.into(),
+        session_id: session_id.into(),
+    })
+}
+
+// Kept separate for call sites that only need to locate the exact workspace.
+fn exact_grant_payload(db: &Connection, intent: &IssueCommentIntent) -> Result<String> {
+    Ok(exact_grant_binding(db, intent)?.project_id)
+}
+
+fn exact_grant_scope_matches(
+    db: &Connection,
+    intent: &IssueCommentIntent,
+    scope: &ActiveScope,
+) -> Result<bool> {
+    let binding = exact_grant_binding(db, intent)?;
+    Ok(binding.project_id == scope.project_id
+        && binding.assignment_id == scope.assignment_id
+        && binding.session_id == scope.session_id)
+}
+
+fn exact_grant(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveScope> {
+    let scope = active_scope(db, intent)?;
+    if exact_grant_payload(db, intent)? != scope.project_id
+        || !exact_grant_scope_matches(db, intent, &scope)?
+    {
+        return Err(
+            "The native effect grant does not match this exact Ticket, assignment, session, target, key, and payload.".into(),
+        );
+    }
+    Ok(scope)
+}
+
+pub(crate) fn has_exact_grant(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT payload_sha256 FROM sa_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id, intent.effect_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let present = match existing {
+        None => false,
+        Some(digest) if digest == intent.payload_sha256 => {
+            let grant_project = exact_grant_payload(&tx, intent)?;
+            match active_scope_if_current(&tx, intent)? {
+                Some(scope)
+                    if scope.project_id == grant_project
+                        && exact_grant_scope_matches(&tx, intent, &scope)? => true,
+                _ => {
+                    let receipt_state: Option<String> = tx
+                        .query_row(
+                            "SELECT state FROM sa_effect_receipts
+                             WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+                            params![intent.ticket_id, intent.effect_key, intent.payload_sha256],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    if matches!(receipt_state.as_deref(), Some("pending" | "uncertain")) {
+                        true
+                    } else {
+                        exact_grant(&tx, intent)?;
+                        true
+                    }
+                }
+            }
+        }
+        Some(_) => return Err("Effect key already has a grant for a different exact payload.".into()),
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(present)
+}
+
+pub(crate) fn authorize(store: &Store, intent: &IssueCommentIntent) -> Result<()> {
+    authorize_with_lock_observer(store, intent, || {})
+}
+
+fn authorize_with_lock_observer(
+    store: &Store,
+    intent: &IssueCommentIntent,
+    before_wait: impl FnOnce(),
+) -> Result<()> {
+    let _dispatch_fence = lock_dispatch_before_wait(&store.path, before_wait)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let scope = active_scope(&tx, intent)?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT payload_sha256 FROM sa_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id, intent.effect_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match existing {
+        Some(digest) if digest == intent.payload_sha256 => {
+            exact_grant(&tx, intent)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        Some(_) => return Err("Effect key already has a grant for a different exact payload.".into()),
+        None => {}
+    }
+    let now = storage::now();
+    tx.execute(
+        "INSERT INTO sa_effect_grants(ticket_id,effect_key,ticket_revision,project_id,repository,
+         issue_number,comment_body,payload_sha256,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            intent.ticket_id,
+            intent.effect_key,
+            intent.expected_revision,
+            scope.project_id,
+            intent.repository,
+            intent.issue_number,
+            intent.comment_body,
+            intent.payload_sha256,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let detail = serde_json::json!({
+        "effectKey": intent.effect_key,
+        "ticketRevision": intent.expected_revision,
+        "projectId": scope.project_id,
+        "assignmentId": scope.assignment_id,
+        "sessionId": scope.session_id,
+        "repository": intent.repository,
+        "issueNumber": intent.issue_number,
+        "payloadSha256": intent.payload_sha256,
+    })
+    .to_string();
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'issue_comment_granted',?2,?3)",
+        params![intent.ticket_id, detail, now],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+pub(crate) fn reserve(store: &Store, intent: &IssueCommentIntent) -> Result<Reservation> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id, intent.effect_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let result = match existing {
+        Some((previous, _)) if previous != intent.payload_sha256 => {
+            return Err("Effect key already used for a different payload.".into())
+        }
+        Some((_, state)) => {
+            let grant_project = exact_grant_payload(&tx, intent)?;
+            match state.as_str() {
+                "pending" => match active_scope_if_current(&tx, intent)? {
+                    Some(scope)
+                        if scope.project_id == grant_project
+                            && exact_grant_scope_matches(&tx, intent, &scope)? => Reservation::AlreadyPending,
+                    _ => Reservation::RequiresReconciliation,
+                },
+                "uncertain" => Reservation::RequiresReconciliation,
+                "applied" => Reservation::AlreadyApplied,
+                _ => return Err("Invalid effect state.".into()),
+            }
+        }
+        None => {
+            if !effect_worker_session_current(store, intent)? {
+                return Err("Native effect authorization unavailable: worker session changed.".into());
+            }
+            exact_grant(&tx, intent)?;
+            let now = storage::now();
+            tx.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at,readback_state)
+                 VALUES(?1,?2,?3,'pending',?4,?4,'not_attempted')",
+                params![intent.ticket_id, intent.effect_key, intent.payload_sha256, now],
+            )
+            .map_err(|e| e.to_string())?;
+            Reservation::Reserved
+        }
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+fn validate_pending_dispatch(store: &Store, intent: &IssueCommentIntent) -> Result<ActiveScope> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let scope = exact_grant(&tx, intent)?;
+    let state: Option<String> = tx
+        .query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2
+             AND payload_sha256=?3",
+            params![intent.ticket_id, intent.effect_key, intent.payload_sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if state.as_deref() != Some("pending") {
+        return Err("The effect receipt is no longer pending; dispatch was not attempted.".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    if !effect_worker_session_current(store, intent)? {
+        return Err("Native effect authorization unavailable: worker session changed.".into());
+    }
+    Ok(scope)
+}
+
+fn mark_uncertain(
+    store: &Store,
+    intent: &IssueCommentIntent,
+    reason: &str,
+    readback_state: &str,
+) -> Result<()> {
+    let n = store
+        .db
+        .execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',uncertainty_reason=?4,
+             readback_state=?5,remote_comment_id=NULL,remote_comment_url=NULL,
+             remote_author_login=NULL,updated_at=?6
+             WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+               AND state IN ('pending','uncertain')",
+            params![intent.ticket_id, intent.effect_key, intent.payload_sha256,
+                reason, readback_state, storage::now()],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 1 {
+        return Ok(());
+    }
+    let state: Option<String> = store
+        .db
+        .query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+            params![intent.ticket_id, intent.effect_key, intent.payload_sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if matches!(state.as_deref(), Some("uncertain" | "applied")) {
+        Ok(())
+    } else {
+        Err("No unresolved matching effect receipt.".into())
+    }
+}
+
+fn settle_applied(
+    store: &Store,
+    intent: &IssueCommentIntent,
+    evidence: &RemoteCommentEvidence,
+) -> Result<()> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    exact_grant_payload(&tx, intent)?;
+    let changed = tx
+        .execute(
+            "UPDATE sa_effect_receipts SET state='applied',uncertainty_reason=NULL,
+             readback_state='exact',remote_comment_id=?4,remote_comment_url=?5,
+             remote_author_login=?6,updated_at=?7
+             WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+               AND state IN ('pending','uncertain')",
+            params![intent.ticket_id, intent.effect_key, intent.payload_sha256,
+                evidence.id, evidence.url, evidence.author, storage::now()],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed != 1 {
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2
+                 AND payload_sha256=?3",
+                params![intent.ticket_id, intent.effect_key, intent.payload_sha256],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if state.as_deref() == Some("applied") {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        return Err("Missing unresolved matching effect receipt.".into());
+    }
+    let detail = serde_json::json!({
+        "effectKey": intent.effect_key,
+        "ticketRevision": intent.expected_revision,
+        "repository": intent.repository,
+        "issueNumber": intent.issue_number,
+        "payloadSha256": intent.payload_sha256,
+    })
+    .to_string();
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'issue_comment_applied',?2,?3)",
+        params![intent.ticket_id, detail, storage::now()],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn bounded_remote_value(value: Option<&serde_json::Value>, max_bytes: usize) -> Option<String> {
+    let value = value?;
+    let text = match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Number(number) => number.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty() && text.len() <= max_bytes && !text.chars().any(char::is_control))
+        .then_some(text)
+}
+
+fn remote_comment_evidence(comment: &serde_json::Value) -> RemoteCommentEvidence {
+    let id = bounded_remote_value(comment.get("databaseId"), 128)
+        .or_else(|| bounded_remote_value(comment.get("id"), 128));
+    let url = bounded_remote_value(comment.get("url"), 2048)
+        .filter(|value| value.starts_with("https://"));
+    let author = comment
+        .get("author")
+        .and_then(|author| author.get("login"))
+        .and_then(|value| bounded_remote_value(Some(value), 128));
+    RemoteCommentEvidence { id, url, author }
+}
+
+fn readback_state(value: &serde_json::Value, intent: &IssueCommentIntent) -> Result<Readback> {
+    let comments = value
+        .get("comments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "GitHub did not return issue comments.".to_string())?;
+    let marker = intent_marker(intent);
+    let mut exact = Vec::new();
+    let mut conflict = false;
+    for comment in comments {
+        let body = comment
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "GitHub returned an unreadable issue comment.".to_string())?;
+        if body.contains(&marker) {
+            if body == intent.comment_body.as_str() {
+                exact.push(remote_comment_evidence(comment));
+            } else {
+                conflict = true;
+            }
+        }
+    }
+    Ok(match (exact.len(), conflict) {
+        (0, false) => Readback::Missing,
+        (1, false) => Readback::Exact(exact.pop().expect("one exact comment was observed")),
+        _ => Readback::Conflict,
+    })
+}
+
+fn reconcile_unresolved(
+    store: &Store,
+    intent: &IssueCommentIntent,
+    root: &Path,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> std::result::Result<crate::workspace::Capture, String>,
+) -> Result<EffectStatus> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    exact_grant_payload(&tx, intent)?;
+    let receipt: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state,payload_sha256 FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id, intent.effect_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((state, digest)) = receipt else {
+        return Err("No effect receipt exists to reconcile.".into());
+    };
+    if digest != intent.payload_sha256 {
+        return Err("Effect receipt does not match this exact payload.".into());
+    }
+    if state == "applied" {
+        tx.commit().map_err(|e| e.to_string())?;
+        return status(store, intent, "already-applied");
+    }
+    if !matches!(state.as_str(), "pending" | "uncertain") {
+        return Err("Invalid effect state.".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    let issue = intent.issue_number.to_string();
+    let repo_flag = github::flag("repo", &intent.repository);
+    let capture = run_gh(
+        root,
+        &["issue", "view", &issue, &repo_flag, "--json=comments"],
+        github::TIMEOUT,
+    );
+    let observed = capture
+        .and_then(|capture| github::json(&capture))
+        .and_then(|value| readback_state(&value, intent));
+    // Stop waits on this fence before it starts its read-then-write transition.
+    // Taking the same fence around the settlement write means Stop either sees
+    // the settled receipt before its read snapshot or settles first; it can no
+    // longer lose its write to a newer WAL snapshot committed in between.
+    let reconciliation = {
+        let _settlement_fence = lock_dispatch(&store.path)?;
+        match observed {
+            Ok(Readback::Exact(evidence)) => {
+                if let Err(error) = settle_applied(store, intent, &evidence) {
+                    let _ = mark_uncertain(store, intent, "readback_settlement_failed", "exact");
+                    return Err(error);
+                }
+                "exact-readback"
+            }
+            Ok(Readback::Missing) => {
+                mark_uncertain(store, intent, "marker_not_found", "missing")?;
+                "marker-not-found"
+            }
+            Ok(Readback::Conflict) => {
+                mark_uncertain(store, intent, "marker_conflict", "conflict")?;
+                "marker-conflict"
+            }
+            Err(_) => {
+                mark_uncertain(store, intent, "readback_unavailable", "unavailable")?;
+                "readback-unavailable"
+            }
+        }
+    };
+    status(store, intent, reconciliation)
+}
+
+pub(crate) fn post_issue_comment(
+    database_path: &Path,
+    intent: &IssueCommentIntent,
+) -> Result<EffectStatus> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| github::run_gh(root, args, timeout);
+    post_issue_comment_with(database_path, intent, &mut run_gh)
+}
+
+fn post_issue_comment_with(
+    database_path: &Path,
+    intent: &IssueCommentIntent,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> std::result::Result<crate::workspace::Capture, String>,
+) -> Result<EffectStatus> {
+    let store = open_effect_store(database_path)?;
+    let project_id = {
+        let tx = store
+            .db
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        let project_id = exact_grant_payload(&tx, intent)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        project_id
+    };
+    match reserve(&store, intent)? {
+        Reservation::AlreadyApplied => status(&store, intent, "already-applied"),
+        Reservation::AlreadyPending => status(&store, intent, "dispatch-in-progress"),
+        Reservation::RequiresReconciliation => {
+            let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let session_id = active_scope_if_current(&tx, intent)?
+                .filter(|scope| scope.project_id == project_id)
+                .map(|scope| scope.session_id);
+            tx.commit().map_err(|e| e.to_string())?;
+            let root = store.workspace_root(&project_id, session_id.as_deref())?;
+            reconcile_unresolved(&store, intent, &root, run_gh)
+        }
+        Reservation::Reserved => {
+            let issue = intent.issue_number.to_string();
+            let repo_flag = github::flag("repo", &intent.repository);
+            let body_flag = github::flag("body", &intent.comment_body);
+            let mut attempted = false;
+            let dispatch = (|| -> Result<std::result::Result<crate::workspace::Capture, String>> {
+                let _fence = lock_dispatch(database_path)?;
+                let scope = validate_pending_dispatch(&store, intent)?;
+                let root = store.workspace_root(&scope.project_id, Some(&scope.session_id))?;
+                attempted = true;
+                let remote_result = run_gh(
+                    &root,
+                    &["issue", "comment", &issue, &repo_flag, &body_flag],
+                    github::TIMEOUT,
+                );
+                // The adapter may have timed out after GitHub accepted the
+                // request. Persist uncertainty before releasing the fence and
+                // before any readback, so a waiting Stop observes the
+                // uncertain receipt instead of racing this write with its own
+                // read-then-write transaction.
+                mark_uncertain(&store, intent, "write_result_unverified", "not_attempted")?;
+                Ok(remote_result)
+            })();
+            match dispatch {
+                Err(error) => {
+                    // A failed settlement after the provider call must not be
+                    // overwritten by "dispatch_not_started". Retry under the
+                    // fence when possible so Stop cannot interleave a commit.
+                    let reason = if attempted {
+                        "write_result_unverified"
+                    } else {
+                        "dispatch_not_started"
+                    };
+                    // Best-effort settlement, fenced when the lock is
+                    // available so Stop cannot interleave. This also retries
+                    // an uncertainty write that failed after the provider
+                    // call, rather than leaving a pending receipt behind.
+                    let _fence = lock_dispatch(database_path).ok();
+                    let _ = mark_uncertain(&store, intent, reason, "not_attempted");
+                    Err(error)
+                }
+                Ok(_remote_result) => {
+                    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+                    let session_id = active_scope_if_current(&tx, intent)?
+                        .filter(|scope| scope.project_id == project_id)
+                        .map(|scope| scope.session_id);
+                    tx.commit().map_err(|e| e.to_string())?;
+                    let root = store.workspace_root(&project_id, session_id.as_deref())?;
+                    reconcile_unresolved(&store, intent, &root, run_gh)
+                }
+            }
+        }
+    }
+}
+
+type EffectReceiptEvidence = (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+
+fn status(store: &Store, intent: &IssueCommentIntent, reconciliation: &str) -> Result<EffectStatus> {
+    let evidence: Option<EffectReceiptEvidence> = store.db
+        .query_row(
+            "SELECT state,uncertainty_reason,readback_state,remote_comment_id,
+                    remote_comment_url,remote_author_login
+             FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+            params![intent.ticket_id,intent.effect_key,intent.payload_sha256],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((state,uncertainty_reason,readback_state,remote_comment_id,remote_comment_url,remote_comment_author)) = evidence else {
+        return Err("The exact external-effect receipt disappeared during reconciliation.".into());
+    };
+    Ok(EffectStatus {
+        ticket_id: intent.ticket_id.clone(),
+        ticket_revision: intent.expected_revision,
+        repository: intent.repository.clone(),
+        issue_number: intent.issue_number,
+        effect_key: intent.effect_key.clone(),
+        payload_sha256: intent.payload_sha256.clone(),
+        state,
+        reconciliation: reconciliation.into(),
+        uncertainty_reason,
+        readback_state,
+        remote_comment_id,
+        remote_comment_url,
+        remote_comment_author,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EffectReceiptView {
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) fn receipt_history(
+    store: &Store, ticket_id: &str, limit: i64,
+) -> Result<Vec<EffectReceiptView>> {
+    if !(1..=100).contains(&limit) {
+        return Err("Effect receipt page size must be between 1 and 100.".into());
+    }
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("SuperAgent Ticket not found.".into());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT effect_key,payload_sha256,state,created_at,updated_at
+         FROM sa_effect_receipts WHERE ticket_id=?1
+         ORDER BY created_at DESC,effect_key DESC LIMIT ?2",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, limit], |row| Ok(EffectReceiptView {
+        effect_key: row.get(0)?,
+        payload_sha256: row.get(1)?,
+        state: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// Paged, task-scoped native receipts. A compound timestamp/key cursor
+/// prevents dropping receipts with identical creation timestamps.
+pub(crate) type EffectReceiptPage = (Vec<EffectReceiptView>, Option<(i64, String)>);
+
+pub(crate) fn receipt_history_page(
+    store: &Store, ticket_id: &str, limit: i64,
+    before: Option<(i64, &str)>, unresolved_only: bool,
+) -> Result<EffectReceiptPage> {
+    if !(1..=100).contains(&limit) {
+        return Err("Effect receipt page size must be between 1 and 100.".into());
+    }
+    if let Some((created_at, key)) = before {
+        if created_at <= 0 || key.is_empty() || key.len() > 128
+            || !key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err("Invalid effect receipt cursor.".into());
+        }
+    }
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("SuperAgent Ticket not found.".into());
+    }
+    let (before_at, before_key) = match before {
+        Some((created_at, key)) => (Some(created_at), Some(key)),
+        None => (None, None),
+    };
+    let mut stmt = store.db.prepare(
+        "SELECT effect_key,payload_sha256,state,created_at,updated_at
+         FROM sa_effect_receipts
+         WHERE ticket_id=?1
+           AND (?2 IS NULL OR created_at<?2 OR (created_at=?2 AND effect_key<?3))
+           AND (?4=0 OR state!='applied')
+         ORDER BY created_at DESC,effect_key DESC LIMIT ?5",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        params![ticket_id,before_at,before_key,i64::from(unresolved_only),limit+1],
+        |row| Ok(EffectReceiptView {
+            effect_key: row.get(0)?,
+            payload_sha256: row.get(1)?,
+            state: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    let mut receipts = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let next_cursor = if receipts.len() > limit as usize {
+        receipts.truncate(limit as usize);
+        receipts.last().map(|item| (item.created_at, item.effect_key.clone()))
+    } else {
+        None
+    };
+    Ok((receipts, next_cursor))
+}
+
+
+/// A cross-Ticket native reconciliation queue for a trusted local operator.
+/// Listing pending/uncertain identities never acknowledges or retries them.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnresolvedEffectView {
+    pub ticket_id: String,
+    pub orchestration_id: String,
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) type UnresolvedEffectPage = (Vec<UnresolvedEffectView>, Option<(i64, String, String)>);
+
+pub(crate) fn unresolved_effects_page(
+    store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
+) -> Result<UnresolvedEffectPage> {
+    if !(1..=100).contains(&limit) {
+        return Err("Unresolved effect page size must be between 1 and 100.".into());
+    }
+    if let Some((at, ticket_id, effect_key)) = before {
+        if at <= 0 || ticket_id.is_empty() || ticket_id.len() > 128
+            || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || effect_key.is_empty() || effect_key.len() > 128
+            || !effect_key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err("Invalid unresolved effect cursor.".into());
+        }
+    }
+    let (before_at, before_ticket, before_key) = match before {
+        Some((at, ticket, key)) => (Some(at), Some(ticket), Some(key)),
+        None => (None, None, None),
+    };
+    let mut stmt = store.db.prepare(
+        "SELECT r.ticket_id,t.orchestration_id,r.effect_key,r.payload_sha256,
+                r.state,r.created_at,r.updated_at
+         FROM sa_effect_receipts r
+         JOIN sa_tickets t ON t.id=r.ticket_id
+         WHERE r.state IN ('pending','uncertain')
+           AND (?1 IS NULL OR r.updated_at<?1
+                OR (r.updated_at=?1 AND (r.ticket_id<?2
+                     OR (r.ticket_id=?2 AND r.effect_key<?3))))
+         ORDER BY r.updated_at DESC,r.ticket_id DESC,r.effect_key DESC LIMIT ?4",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        params![before_at,before_ticket,before_key,limit+1],
+        |r| Ok(UnresolvedEffectView {
+            ticket_id: r.get(0)?, orchestration_id: r.get(1)?,
+            effect_key: r.get(2)?, payload_sha256: r.get(3)?,
+            state: r.get(4)?, created_at: r.get(5)?, updated_at: r.get(6)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let next = if items.len()>limit as usize {
+        items.truncate(limit as usize);
+        items.last().map(|r| (r.updated_at,r.ticket_id.clone(),r.effect_key.clone()))
+    } else { None };
+    Ok((items,next))
+}
+
+pub(crate) fn unresolved_count(store: &Store, ticket_id: &str) -> Result<i64> {
+    store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state!='applied'",
+            [ticket_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::superagent::{self, NewOrchestration};
+    use std::{
+        process::{Command, Stdio},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+            Arc,
+        },
+        thread,
+    };
+
+    fn fixture() -> (Store, String) {
+        let path = std::env::temp_dir().join(format!("sa-effect-{}.db", storage::id()));
+        let mut store = Store::open(&path).unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,path) VALUES('p','P',?1)",
+                [std::env::temp_dir().to_string_lossy().into_owned()],
+            )
+            .unwrap();
+        for (id, name) in [("co", "Coordinator"), ("wo", "Worker")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
+                    params![id, name, storage::now()],
+                )
+                .unwrap();
+        }
+        let cfg = superagent::create_configuration(
+            &store,
+            NewOrchestration {
+                name: "Effect Test".into(),
+                coordinator_bot_id: "co".into(),
+                worker_bot_id: "wo".into(),
+            },
+        )
+        .unwrap();
+        superagent::change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let (ticket, started) =
+            superagent::admit(&mut store, &cfg.id, "Safe work", "receipt-fixture", false).unwrap();
+        assert!(started);
+        (store, ticket.id)
+    }
+
+    #[test]
+    fn global_unresolved_effect_inbox_is_complete_read_only_and_restart_safe() {
+        let (store, id) = fixture();
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             SELECT 'other-effect-ticket',orchestration_id,'other-effect-request',
+                    'PRIVATE OBJECTIVE',actor,source,project_id,worker_bot_id,
+                    policy_revision,'blocked',created_at,updated_at
+             FROM sa_tickets WHERE id=?1",
+            [&id],
+        ).unwrap();
+        for index in 0..205_i64 {
+            let ticket = if index % 2 == 0 { id.as_str() } else { "other-effect-ticket" };
+            let state = if index == 0 { "pending" } else { "uncertain" };
             store.db.execute(
-                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-                 VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
-                params![id,name,storage::now()]
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![ticket,format!("effect:{index:03}"),
+                    format!("{index:064x}"),state,1000+index/5],
             ).unwrap();
         }
-        let cfg=superagent::create_configuration(&store,NewOrchestration{
-            name:"Effect Test".into(),coordinator_bot_id:"co".into(),worker_bot_id:"wo".into()
-        }).unwrap();
-        store.db.execute("UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id]).unwrap();
-        let (ticket,started)=superagent::admit(&mut store,&cfg.id,"Safe work","receipt-fixture",false).unwrap();
-        assert!(started);
-        (store,ticket.id)
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'already-applied',?2,'applied',9000,9000)",
+            params![&id,"a".repeat(64)],
+        ).unwrap();
+        let path=store.path.clone();
+        let mut cursor_at=None;
+        let mut cursor_ticket:Option<String>=None;
+        let mut cursor_key:Option<String>=None;
+        let mut seen=std::collections::HashSet::new();
+        let mut pages=0;
+        loop {
+            let response:serde_json::Value=serde_json::from_str(
+                &superagent::list_headless_unresolved_effects(
+                    &path,cursor_at,cursor_ticket.as_deref(),cursor_key.as_deref(),
+                ).unwrap(),
+            ).unwrap();
+            pages+=1;
+            assert!(pages<=3, "unresolved inbox cursor must advance");
+            assert_eq!(response["unresolvedTotal"],205);
+            assert_eq!(response["observationalOnly"],true);
+            assert_eq!(response["automaticReplayAllowed"],false);
+            assert_eq!(response["requiresIndependentRemoteReconciliation"],true);
+            assert!(!response.to_string().contains("PRIVATE OBJECTIVE"));
+            assert!(!response.to_string().contains("already-applied"));
+            for item in response["items"].as_array().unwrap() {
+                let composite=format!("{}:{}",
+                    item["ticketId"].as_str().unwrap(),
+                    item["effectKey"].as_str().unwrap());
+                assert!(seen.insert(composite),"a receipt cannot repeat across pages");
+                assert!(item["state"]=="pending" || item["state"]=="uncertain");
+            }
+            if response["nextCursor"].is_null() {break;}
+            cursor_at=response["nextCursor"]["updatedAt"].as_i64();
+            cursor_ticket=response["nextCursor"]["ticketId"].as_str().map(str::to_owned);
+            cursor_key=response["nextCursor"]["effectKey"].as_str().map(str::to_owned);
+        }
+        assert_eq!(pages,3);
+        assert_eq!(seen.len(),205);
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(0),Some(&id),Some("effect:000")).is_err());
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some("../bad"),Some("effect:000")).is_err());
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some(&id),None).is_err());
+        let pending:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='pending'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(pending,1,"read-only inventory cannot settle live effects");
+        drop(store);
+        let restarted=Store::open(&path).unwrap();
+        let count:i64=restarted.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='uncertain'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,205,"restart must quarantine pending without replay");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &superagent::list_headless_unresolved_effects(&path,None,None,None).unwrap(),
+        ).unwrap()["unresolvedTotal"],205);
+    }
+
+    fn make_intent(ticket_id: &str, comment: &str) -> IssueCommentIntent {
+        prepare_issue_comment(
+            ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            comment,
+        )
+        .unwrap()
+    }
+
+    fn capture_json(value: serde_json::Value) -> crate::workspace::Capture {
+        crate::workspace::Capture {
+            bytes: value.to_string().into_bytes(),
+            truncated: false,
+        }
+    }
+
+    fn is_issue_comment_write(args: &[&str]) -> bool {
+        args.first() == Some(&"issue") && args.get(1) == Some(&"comment")
+    }
+
+    fn exact_readback(intent: &IssueCommentIntent) -> crate::workspace::Capture {
+        capture_json(serde_json::json!({
+            "comments": [{
+                "body": intent.comment_body,
+                "databaseId": 901,
+                "url": "https://github.com/owner/repo/issues/7#issuecomment-901",
+                "author": { "login": "panda-reviewer" }
+            }]
+        }))
     }
 
     #[test]
-    fn receipt_never_grants_write_and_prevents_mismatched_or_uncertain_replay(){
-        let (store,id)=fixture();
-        assert!(reserve(&store,&id,"github:comment:7",b"payload").is_err());
-        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
-        // Disposable fixture explicitly exercises the native receipt primitive;
-        // actual SuperAgent production grants remain read-only.
-        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
-        assert_eq!(reserve(&store,&id,"github:comment:7",b"payload").unwrap(),Reservation::Reserved);
-        assert_eq!(reserve(&store,&id,"github:comment:7",b"payload").unwrap(),Reservation::AlreadyPending);
-        assert!(reserve(&store,&id,"github:comment:7",b"other").is_err());
-        mark_uncertain(&store,&id,"github:comment:7").unwrap();
-        assert_eq!(reserve(&store,&id,"github:comment:7",b"payload").unwrap(),Reservation::RequiresReconciliation);
-        assert!(acknowledge_applied(&store,&id,"github:comment:7",b"other").is_err());
-        acknowledge_applied(&store,&id,"github:comment:7",b"payload").unwrap();
-        assert_eq!(reserve(&store,&id,"github:comment:7",b"payload").unwrap(),Reservation::AlreadyApplied);
-        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
-        store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&id]).unwrap();
-        assert!(reserve(&store,&id,"github:comment:8",b"payload").is_err());
+    fn headless_effect_pages_preserve_all_receipts_and_unresolved_recovery() {
+        let (store, id) = fixture();
+        // Tied timestamps require a composite cursor; the oldest unresolved
+        // receipt must be observable even after hundreds of applied effects.
+        for index in 0..221 {
+            let state = if index % 31 == 0 { "uncertain" } else { "applied" };
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![&id, format!("effect:{index:03}"),
+                    format!("{index:064x}"), state, 10_000 + index / 3],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let mut cursor_at = None;
+        let mut cursor_key: Option<String> = None;
+        let mut observed = Vec::new();
+        let mut pages = 0;
+        loop {
+            let response: serde_json::Value = serde_json::from_str(
+                &superagent::inspect_headless_effect_receipts_page(
+                    &path, &id, cursor_at, cursor_key.as_deref(), false,
+                ).unwrap(),
+            ).unwrap();
+            pages += 1;
+            assert!(pages <= 4, "cursor must advance");
+            assert_eq!(response["totalUnresolved"], 8);
+            assert_eq!(response["observationalOnly"], true);
+            assert_eq!(response["replayed"], false);
+            for receipt in response["receipts"].as_array().unwrap() {
+                observed.push(receipt["effect_key"].as_str().unwrap().to_owned());
+            }
+            if response["nextCursor"].is_null() { break; }
+            cursor_at = response["nextCursor"]["createdAt"].as_i64();
+            cursor_key = response["nextCursor"]["effectKey"].as_str().map(str::to_owned);
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(observed.len(), 221);
+        assert_eq!(observed.first().map(String::as_str), Some("effect:220"));
+        assert_eq!(observed.last().map(String::as_str), Some("effect:000"));
+        let unique: std::collections::HashSet<_> = observed.iter().collect();
+        assert_eq!(unique.len(), 221);
+        let unresolved: serde_json::Value = serde_json::from_str(
+            &superagent::inspect_headless_effect_receipts_page(
+                &path, &id, None, None, true,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(unresolved["receipts"].as_array().unwrap().len(), 8);
+        assert!(unresolved["receipts"].as_array().unwrap().iter()
+            .all(|receipt| receipt["state"] == "uncertain"));
+        assert!(unresolved["nextCursor"].is_null());
+        assert_eq!(unresolved["filter"], "unresolved");
+        let read = Store::open_read_only(&path).unwrap();
+        assert_eq!(unresolved_count(&read, &id).unwrap(), 8);
+        assert!(receipt_history_page(&read, &id, 100, Some((0, "effect:010")), false).is_err());
+        assert!(receipt_history_page(&read, &id, 100, Some((10001, "../bad")), false).is_err());
+        assert!(receipt_history_page(&read, "another-ticket", 100, None, false).is_err());
+        let unchanged: i64 = read.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state='uncertain'",
+            [&id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, 8);
+    }
+
+
+    #[test]
+    fn paused_coordinator_revokes_effect_reservation_without_creating_a_receipt() {
+        let (store, ticket_id) = fixture();
+        let intent = make_intent(&ticket_id, "coordinator pause fence");
+        authorize(&store, &intent).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='co'", []).unwrap();
+        assert!(reserve(&store, &intent).is_err(),
+            "a previously granted effect must not be reserved while the Coordinator is paused");
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 0,
+            "a rejected reservation must not create a pending receipt");
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='co'", []).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved,
+            "restoring native Coordinator availability does not widen the exact grant");
     }
 
     #[test]
-    fn effect_reservation_denies_stale_or_mismatched_mandate_scope(){
+    fn exact_grant_is_required_and_receipts_prevent_replay_and_mismatch() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "payload");
+        assert!(reserve(&store, &intent).is_err());
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        assert!(!has_exact_grant(&store, &intent).unwrap());
+        authorize(&store, &intent).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyPending);
+        let other = make_intent(&id, "other");
+        assert!(reserve(&store, &other).is_err());
+        mark_uncertain(&store, &intent, "write_result_unverified", "not_attempted").unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::RequiresReconciliation);
+        settle_applied(&store, &intent, &RemoteCommentEvidence { id: None, url: None, author: None }).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyApplied);
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        store
+            .db
+            .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
+            .unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyApplied);
+    }
+
+    #[test]
+    fn expired_worker_attempt_cannot_reserve_or_dispatch_an_effect() {
+        // Reservation and dispatch are separate authorization boundaries.
+        for expire_before_reservation in [true, false] {
+            let (store, id) = fixture();
+            let intent = make_intent(&id, "expired-worker-attempt");
+            authorize(&store, &intent).unwrap();
+            if !expire_before_reservation {
+                assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+            }
+            let expired_at = storage::now() - superagent::MAX_ASSIGNMENT_RUN_MS - 1000;
+            let updated = store.db.execute(
+                "UPDATE sa_assignments SET created_at=?2
+                 WHERE ticket_id=?1 AND state='running'",
+                params![&id, expired_at],
+            ).unwrap();
+            assert_eq!(updated, 1);
+            if expire_before_reservation {
+                assert!(reserve(&store, &intent).is_err());
+                assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+            } else {
+                assert!(validate_pending_dispatch(&store, &intent).is_err());
+                assert_eq!(unresolved_count(&store, &id).unwrap(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_mandate_revocation_precedes_grant_authorization() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "race payload");
+        let path = store.path.clone();
+        let revocation_fence = lock_dispatch(&path).unwrap();
+        let (authorize_waiting_tx, authorize_waiting_rx) = mpsc::sync_channel(1);
+        let authorize_intent = intent.clone();
+        let authorizer = thread::spawn(move || {
+            let store = open_effect_store(&path).unwrap();
+            authorize_with_lock_observer(&store, &authorize_intent, || {
+                authorize_waiting_tx.send(()).unwrap();
+            })
+        });
+
+        authorize_waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("grant authorization did not wait behind the revocation fence");
+        store
+            .db
+            .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
+            .unwrap();
+        drop(revocation_fence);
+
+        let error = authorizer.join().unwrap().unwrap_err();
+        assert_eq!(
+            error,
+            "The Ticket, revision, mandate, or active worker no longer permits this effect."
+        );
+        assert!(!has_exact_grant(&store, &intent).unwrap());
+    }
+
+    #[test]
+    fn production_stop_fences_waiting_grant_authorization() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "stop race payload");
+        let stop_path = store.path.clone();
+        let stop_ticket_id = id.clone();
+        let (stop_fenced_tx, stop_fenced_rx) = mpsc::sync_channel(1);
+        let (continue_stop_tx, continue_stop_rx) = mpsc::sync_channel(1);
+        let stopper = thread::spawn(move || {
+            let stop_store = open_effect_store(&stop_path).unwrap();
+            observe_next_dispatch_fence_acquired(move || {
+                stop_fenced_tx.send(()).unwrap();
+                continue_stop_rx.recv().unwrap();
+            });
+            superagent::stop(&stop_store, &stop_ticket_id).map(|(ticket, _)| ticket.state)
+        });
+
+        stop_fenced_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("production Stop did not acquire the dispatch fence");
+
+        let authorize_path = store.path.clone();
+        let authorize_intent = intent.clone();
+        let (authorize_waiting_tx, authorize_waiting_rx) = mpsc::sync_channel(1);
+        let authorizer = thread::spawn(move || {
+            let authorize_store = open_effect_store(&authorize_path).unwrap();
+            observe_next_dispatch_fence_waiting(move || {
+                authorize_waiting_tx.send(()).unwrap();
+            });
+            authorize(&authorize_store, &authorize_intent)
+        });
+
+        authorize_waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("production authorization did not wait behind Stop's dispatch fence");
+
+        continue_stop_tx.send(()).unwrap();
+        assert_eq!(stopper.join().unwrap().unwrap(), "stopped");
+        assert_eq!(
+            authorizer.join().unwrap().unwrap_err(),
+            "The Ticket, revision, mandate, or active worker no longer permits this effect."
+        );
+        assert_eq!(
+            superagent::get_ticket(&store, &id).unwrap().state,
+            "stopped"
+        );
+        assert!(superagent::mandate(&store, &id).unwrap().revoked);
+        assert!(!has_exact_grant(&store, &intent).unwrap());
+    }
+
+    #[test]
+    fn exact_grant_denies_stale_or_mismatched_mandate_scope() {
         for (change, expected) in [
             ("UPDATE sa_mandates SET actor='other' WHERE ticket_id=?1", "actor"),
             ("UPDATE sa_mandates SET project_id='other' WHERE ticket_id=?1", "project"),
             ("UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1", "revision"),
-            ("UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=(SELECT orchestration_id FROM sa_tickets WHERE id=?1)", "policy"),
+            (
+                "UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=(SELECT orchestration_id FROM sa_tickets WHERE id=?1)",
+                "policy",
+            ),
         ] {
-            let (store,id)=fixture();
-            store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
-            store.db.execute(change,[&id]).unwrap();
-            assert!(reserve(&store,&id,"github:issue:stale",b"body").is_err(), "stale {expected} must deny effect reservation");
-            assert_eq!(unresolved_count(&store,&id).unwrap(),0, "denial must not persist a receipt");
+            let (store, id) = fixture();
+            let intent = make_intent(&id, "body");
+            authorize(&store, &intent).unwrap();
+            store.db.execute(change, [&id]).unwrap();
+            assert!(reserve(&store, &intent).is_err(), "stale {expected} must deny effect reservation");
+            assert_eq!(unresolved_count(&store, &id).unwrap(), 0, "denial must not persist a receipt");
         }
 
-        let (store,id)=fixture();
-        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
-        store.db.execute("UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1",[&id]).unwrap();
-        assert!(reserve(&store,&id,"github:issue:finished",b"body").is_err());
-        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "body");
+        authorize(&store, &intent).unwrap();
+        store
+            .db
+            .execute("UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1", [&id])
+            .unwrap();
+        assert!(reserve(&store, &intent).is_err());
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
     }
 
     #[test]
-    fn process_restart_marks_inflight_effect_uncertain_without_replay(){
-        let (store,id)=fixture();
-        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id]).unwrap();
-        assert_eq!(reserve(&store,&id,"github:issue:9",b"body").unwrap(),Reservation::Reserved);
-        let path=store.path.clone();
+    fn exact_grant_is_bound_to_its_assignment_session_and_project() {
+        for (field, value) in [
+            ("assignmentId", "replacement-assignment"),
+            ("sessionId", "replacement-session"),
+            ("projectId", "replacement-project"),
+        ] {
+            let (store, id) = fixture();
+            let intent = make_intent(&id, "bound scope");
+            authorize(&store, &intent).unwrap();
+            let path = format!("$.{field}");
+            store
+                .db
+                .execute(
+                    "UPDATE sa_audit SET detail=json_set(detail,?1,?2)
+                     WHERE ticket_id=?3 AND kind='issue_comment_granted'",
+                    params![path, value, id],
+                )
+                .unwrap();
+            assert!(reserve(&store, &intent).is_err(), "changed {field} must deny dispatch");
+            assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn restart_quarantine_audits_pending_effects_once_per_ticket_without_payloads() {
+        let (store, id) = fixture();
+        for (key, state) in [
+            ("github:comment:private-alpha", "pending"),
+            ("github:comment:private-beta", "pending"),
+            ("github:comment:already-applied", "applied"),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![&id, key, "a".repeat(64), state, storage::now()],
+            ).unwrap();
+        }
+        let path = store.path.clone();
         drop(store);
-        let reopened=Store::open(&path).unwrap();
-        let status:String=reopened.db.query_row(
-            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='github:issue:9'",
-            [&id],|r|r.get(0)
+
+        let reopened = Store::open(&path).unwrap();
+        let states: (i64, i64) = reopened.db.query_row(
+            "SELECT SUM(state='uncertain'),SUM(state='applied')
+             FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&id], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
-        assert_eq!(status,"uncertain");
-        assert_eq!(unresolved_count(&reopened,&id).unwrap(),1);
-        assert!(reserve(&reopened,&id,"github:issue:9",b"body").is_err());
+        assert_eq!(states, (2, 1));
+        let audits: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audits, 1, "a restart quarantines all pending effects in one Ticket audit");
+        let detail: String = reopened.db.query_row(
+            "SELECT detail FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert!(detail.contains("verify remotely"));
+        assert!(!detail.contains("private-alpha"));
+        assert!(!detail.contains("private-beta"));
         drop(reopened);
-        let again=Store::open(&path).unwrap();
-        assert_eq!(unresolved_count(&again,&id).unwrap(),1);
+
+        let again = Store::open(&path).unwrap();
+        let audits: i64 = again.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audits, 1, "later restarts must not duplicate the quarantine audit");
+    }
+
+    #[test]
+    fn restart_quarantine_audit_failure_rolls_back_receipts_and_recovers() {
+        let (store, id) = fixture();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:comment:rollback',?2,'pending',?3,?3)",
+            params![&id, "b".repeat(64), storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER sa_reject_restart_effect_audit
+             BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='restart_effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'simulated quarantine audit failure'); END;",
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        assert!(Store::open(&path).is_err(), "an audit failure cannot silently quarantine");
+        let read = Connection::open_with_flags(
+            &path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        let state: String = read.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:comment:rollback'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "pending", "receipt state must roll back with failed audit");
+        let audits: i64 = read.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audits, 0);
+        drop(read);
+
+        let fix = Connection::open(&path).unwrap();
+        fix.execute_batch("DROP TRIGGER sa_reject_restart_effect_audit;").unwrap();
+        drop(fix);
+        let recovered = Store::open(&path).unwrap();
+        let state: String = recovered.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:comment:rollback'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "uncertain");
+        let audits: i64 = recovered.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audits, 1);
+    }
+
+    #[test]
+    fn restart_dispatcher_reconciles_exact_grant_without_a_new_write() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "body");
+        authorize(&store, &intent).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let state: String = reopened
+            .db
+            .query_row(
+                "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='github:comment:7'",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "uncertain");
+        assert_eq!(unresolved_count(&reopened, &id).unwrap(), 1);
+        assert!(has_exact_grant(&reopened, &intent).unwrap());
+        assert_eq!(reserve(&reopened, &intent).unwrap(), Reservation::RequiresReconciliation);
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let counted_writes = Arc::clone(&writes);
+        let readback_intent = intent.clone();
+        let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+            if is_issue_comment_write(args) {
+                counted_writes.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::workspace::Capture { bytes: Vec::new(), truncated: false })
+            } else {
+                Ok(exact_readback(&readback_intent))
+            }
+        };
+        let status = post_issue_comment_with(&path, &intent, &mut fake_gh).unwrap();
+        assert_eq!(status.state, "applied");
+        assert_eq!(status.reconciliation, "exact-readback");
+        assert_eq!(status.remote_comment_id.as_deref(), Some("901"));
+        assert_eq!(status.remote_comment_url.as_deref(), Some("https://github.com/owner/repo/issues/7#issuecomment-901"));
+        assert_eq!(status.remote_comment_author.as_deref(), Some("panda-reviewer"));
+        assert_eq!(status.uncertainty_reason, None);
+        assert_eq!(status.readback_state.as_deref(), Some("exact"));
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "restart may only read back the exact grant");
+        assert_eq!(unresolved_count(&reopened, &id).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_restart_reconciliation_reuses_existing_grant_without_reauthorizing() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "headless body");
+        authorize(&store, &intent).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+        let path = store.path.clone();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(unresolved_count(&reopened, &id).unwrap(), 1);
+        drop(reopened);
+
+        let mut dispatched = false;
+        let output = superagent::headless_issue_comment_with_dispatch(
+            &path,
+            &id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "headless body",
+            None,
+            |_, dispatched_intent| {
+                dispatched = true;
+                assert_eq!(dispatched_intent, &intent);
+                Ok(EffectStatus {
+                    ticket_id: id.clone(),
+                    ticket_revision: 0,
+                    repository: "owner/repo".into(),
+                    issue_number: 7,
+                    effect_key: "github:comment:7".into(),
+                    payload_sha256: intent.payload_sha256.clone(),
+                    state: "uncertain".into(),
+                    reconciliation: "readback-unavailable".into(),
+                    uncertainty_reason: Some("readback_unavailable".into()),
+                    readback_state: Some("unavailable".into()),
+                    remote_comment_id: None,
+                    remote_comment_url: None,
+                    remote_comment_author: None,
+                })
+            },
+        )
+        .unwrap();
+        assert!(dispatched, "an exact pending grant must reach the read-only dispatcher after restart");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["state"], "uncertain");
+        let after = open_effect_store(&path).unwrap();
+        assert_eq!(unresolved_count(&after, &id).unwrap(), 1);
+    }
+
+    #[test]
+    fn terminal_ticket_cannot_start_a_new_write() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "terminal body");
+        authorize(&store, &intent).unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE sa_tickets SET state='completed',active_assignment_id=NULL,revision=revision+1
+                 WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
+            .unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let counted_writes = Arc::clone(&writes);
+        let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+            if is_issue_comment_write(args) {
+                counted_writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(capture_json(serde_json::json!({ "comments": [] })))
+        };
+        assert!(post_issue_comment_with(&path, &intent, &mut fake_gh).is_err());
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stop_first_forbids_a_write_and_only_reads_an_existing_receipt() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "stop-first body");
+        authorize(&store, &intent).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+        assert_eq!(superagent::stop(&store, &id).unwrap().0.state, "stopped");
+        let path = store.path.clone();
+        drop(store);
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted_writes = Arc::clone(&writes);
+        let counted_reads = Arc::clone(&reads);
+        let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+            if is_issue_comment_write(args) {
+                counted_writes.fetch_add(1, Ordering::SeqCst);
+            } else {
+                counted_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(capture_json(serde_json::json!({ "comments": [] })))
+        };
+        let status = post_issue_comment_with(&path, &intent, &mut fake_gh).unwrap();
+        assert_eq!(status.state, "uncertain");
+        assert_eq!(status.readback_state.as_deref(), Some("missing"));
+        assert_eq!(status.uncertainty_reason.as_deref(), Some("marker_not_found"));
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "Stop-first must forbid a later external write");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "only the existing exact receipt may be read back");
+    }
+
+    #[test]
+    fn bot_reset_first_revokes_before_a_later_readback_without_a_write() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "reset-first body");
+        authorize(&store, &intent).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+        crate::bots::reset(&store, "wo").unwrap();
+        assert_eq!(superagent::get_ticket(&store, &id).unwrap().state, "interrupted");
+        let path = store.path.clone();
+        drop(store);
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted_writes = Arc::clone(&writes);
+        let counted_reads = Arc::clone(&reads);
+        let readback_intent = intent.clone();
+        let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+            if is_issue_comment_write(args) {
+                counted_writes.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::workspace::Capture { bytes: Vec::new(), truncated: false })
+            } else {
+                counted_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(exact_readback(&readback_intent))
+            }
+        };
+        let status = post_issue_comment_with(&path, &intent, &mut fake_gh).unwrap();
+        assert_eq!(status.state, "applied");
+        assert_eq!(status.readback_state.as_deref(), Some("exact"));
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "bot reset must prevent a later write");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "revocation permits readback of the existing receipt");
+    }
+
+    #[test]
+    fn stop_waits_for_the_claimed_write_and_uncertain_receipt_is_never_replayed() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "race payload");
+        authorize(&store, &intent).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let (write_started_tx, write_started_rx) = mpsc::sync_channel(0);
+        let (continue_write_tx, continue_write_rx) = mpsc::sync_channel(0);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let first_write_count = Arc::clone(&writes);
+        let dispatch_path = path.clone();
+        let dispatch_intent = intent.clone();
+        let dispatcher = thread::spawn(move || {
+            let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+                if is_issue_comment_write(args) {
+                    first_write_count.fetch_add(1, Ordering::SeqCst);
+                    write_started_tx.send(()).unwrap();
+                    continue_write_rx.recv().unwrap();
+                    Err("mock timeout after launch".to_string())
+                } else {
+                    Ok(capture_json(serde_json::json!({ "comments": [] })))
+                }
+            };
+            post_issue_comment_with(&dispatch_path, &dispatch_intent, &mut fake_gh)
+        });
+        write_started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let (stop_waiting_tx, stop_waiting_rx) = mpsc::sync_channel(0);
+        let (stop_done_tx, stop_done_rx) = mpsc::sync_channel(1);
+        let stop_path = path.clone();
+        let stop_ticket_id = id.clone();
+        let stopper = thread::spawn(move || {
+            let stopped = (|| -> std::result::Result<String, String> {
+                let store = superagent::open_headless_transition_store(&stop_path)?;
+                let (ticket, _) = superagent::stop_with_lock_observer(
+                    &store,
+                    &stop_ticket_id,
+                    || { let _ = stop_waiting_tx.send(()); },
+                )?;
+                Ok(ticket.state)
+            })();
+            stop_done_tx.send(stopped).unwrap();
+        });
+        stop_waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(stop_done_rx.try_recv().is_err(), "Stop must wait while the write launch fence is held");
+
+        continue_write_tx.send(()).unwrap();
+        assert_eq!(stop_done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(), "stopped");
+        stopper.join().unwrap();
+        let first_status = dispatcher.join().unwrap().unwrap();
+        assert_eq!(first_status.state, "uncertain");
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+
+        let second_write_count = Arc::clone(&writes);
+        let mut fake_gh = move |_: &Path, args: &[&str], _: Duration| {
+            if is_issue_comment_write(args) {
+                second_write_count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(capture_json(serde_json::json!({ "comments": [] })))
+        };
+        let after_stop = post_issue_comment_with(&path, &intent, &mut fake_gh).unwrap();
+        assert_eq!(after_stop.state, "uncertain");
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "a stopped Ticket must never replay the write");
+    }
+
+    #[test]
+    fn dispatch_fence_cross_process_child_holds_lock() {
+        let Ok(directory) = std::env::var("PANDACODE_EFFECT_LOCK_CHILD_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let database_path = directory.join("store.sqlite3");
+        let _fence = lock_dispatch(&database_path).unwrap();
+        std::fs::write(directory.join("ready"), b"ready").unwrap();
+        let release = directory.join("release");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(release.exists(), "parent did not release the cross-process fence test");
+    }
+
+    #[test]
+    fn dispatch_fence_excludes_another_process() {
+        let directory = std::env::temp_dir().join(format!("sa-effect-lock-{}", storage::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("dispatch_fence_cross_process_child_holds_lock")
+            .env("PANDACODE_EFFECT_LOCK_CHILD_DIR", &directory)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready_path = directory.join("ready");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists()
+            && std::time::Instant::now() < deadline
+            && child.try_wait().ok().flatten().is_none()
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let ready = ready_path.exists();
+        let lock_path = directory
+            .join("store.sqlite3")
+            .with_extension("superagent-effect-dispatch.lock");
+        let excluded = ready
+            && OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .ok()
+                .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        let _ = std::fs::write(directory.join("release"), b"release");
+        let child_status = child.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(ready, "child process did not acquire the dispatch fence");
+        assert!(excluded, "a second process acquired an already-held dispatch fence");
+        assert!(child_status.success(), "child process failed while holding the dispatch fence");
+    }
+
+    #[test]
+    fn readback_accepts_only_one_exact_marker_and_body() {
+        let intent = make_intent("ticket_1", "comment text");
+        let exact = serde_json::json!({"comments":[{"body":intent.comment_body}]});
+        assert!(matches!(readback_state(&exact, &intent).unwrap(), Readback::Exact(_)));
+        let absent = serde_json::json!({"comments":[{"body":"other comment"}]});
+        assert_eq!(readback_state(&absent, &intent).unwrap(), Readback::Missing);
+        let conflict = serde_json::json!({"comments":[{"body":format!("{} changed",intent.comment_body)}]});
+        assert_eq!(readback_state(&conflict, &intent).unwrap(), Readback::Conflict);
+        let duplicate = serde_json::json!({"comments":[{"body":intent.comment_body},{"body":intent.comment_body}]});
+        assert_eq!(readback_state(&duplicate, &intent).unwrap(), Readback::Conflict);
+    }
+
+    #[test]
+    fn confirmation_digest_binds_revision_repository_issue_key_and_body() {
+        let base = prepare_issue_comment("ticket_1", 0, "owner/repo", 7, "stable-key", "body").unwrap();
+        for variant in [
+            prepare_issue_comment("ticket_1", 1, "owner/repo", 7, "stable-key", "body").unwrap(),
+            prepare_issue_comment("ticket_1", 0, "other/repo", 7, "stable-key", "body").unwrap(),
+            prepare_issue_comment("ticket_1", 0, "owner/repo", 8, "stable-key", "body").unwrap(),
+            prepare_issue_comment("ticket_1", 0, "owner/repo", 7, "other-key", "body").unwrap(),
+            prepare_issue_comment("ticket_1", 0, "owner/repo", 7, "stable-key", "changed").unwrap(),
+        ] {
+            assert_ne!(base.payload_sha256, variant.payload_sha256);
+        }
     }
 }

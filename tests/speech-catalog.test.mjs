@@ -64,7 +64,7 @@ test("speech catalog header and deterministic formatting", () => {
   assert.equal(catalog.source, "@handy-computer/models");
   assert.equal(catalog.sourceVersion, "0.2.3");
   assert.equal(catalog.engineVersion, "0.4.1");
-  assert.equal(raw, renderSpeechCatalog(catalog), "2-space JSON with a trailing newline");
+  assert.equal(raw.replace(/\r\n/g, "\n"), renderSpeechCatalog(catalog), "2-space JSON with a trailing newline");
   assert.ok(catalog.models.length >= 50, `expected ~59 models, got ${catalog.models.length}`);
 });
 

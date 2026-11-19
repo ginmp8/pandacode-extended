@@ -1,9 +1,10 @@
 import { escape, icon } from './dom';
 import { infoMark } from './tooltip';
+import { renderCapabilityPanel, capabilityClick, capabilitySubmit } from './bot-capability-panel';
 import type { Activity, BotDetail, Channel, Schedule } from './bots';
 import { channelGuide, connectChange, connectClick, connectSection, connectSubmit, kindLabel } from './bots-connect';
 
-export type Tab = 'skills' | 'conversations' | 'memory' | 'schedules' | 'channels' | 'rules' | 'activity';
+export type Tab = 'capabilities' | 'skills' | 'conversations' | 'memory' | 'schedules' | 'channels' | 'rules' | 'activity';
 export interface PanelContext {
   call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   notify(text: string): void;
@@ -36,6 +37,8 @@ let activity: { botId: string; items: Activity[]; done: boolean; loading: boolea
 function threadLabel(detail: BotDetail, channelId: string, externalId: string): string {
   if (channelId === 'desktop') return 'This app';
   if (channelId === 'schedule') return 'Scheduled work';
+  if (channelId === 'superagent')
+    return 'SuperAgent task · ' + (externalId.length > 12 ? '…' + externalId.slice(-8) : externalId);
   const channel = detail.channels.find(item => item.id === channelId);
   const kind = channel ? kindLabel(channel.kind) : 'Removed channel';
   return channel?.kind === 'web' ? kind : `${kind} · ${externalId.length > 14 ? `…${externalId.slice(-8)}` : externalId}`;
@@ -43,11 +46,43 @@ function threadLabel(detail: BotDetail, channelId: string, externalId: string): 
 
 /** Every conversation the bot has: this app, each channel thread, and its scheduled work. Each opens as a task. */
 function conversationsPanel(detail: BotDetail, context: PanelContext): string {
-  const threads = [...detail.threads].sort((a, b) => Number(b.channelId === 'desktop') - Number(a.channelId === 'desktop') || b.updatedAt - a.updatedAt);
+  // The native gateway records SuperAgent WorkItems in bot_threads with the
+  // same bot identity, pinned model, permissions and session ID as any other chat.
+  // Never copy messages into a synthetic SuperAgent transcript.
+  const threads = [...detail.threads].sort((a, b) =>
+    b.updatedAt - a.updatedAt);
+  const assigned = threads.filter(thread => thread.channelId === 'superagent');
+  // Preserve the native bot-chat ordering: "This app" is first regardless
+  // of more recent external/scheduled work. SuperAgent tasks are a separate
+  // read-only grouping, never a replacement for this native behavior.
+  const ordinary = threads.filter(thread => thread.channelId !== 'superagent')
+    .sort((a,b) => Number(b.channelId === 'desktop') -
+      Number(a.channelId === 'desktop') || b.updatedAt - a.updatedAt);
   const web = detail.channels.find(item => item.kind === 'web' && item.enabled);
-  const row = (thread: BotDetail['threads'][number]) => `<li><span class="bots-item-main"><b>${escape(threadLabel(detail, thread.channelId, thread.externalId))}</b><small>${context.running(thread.sessionId) ? 'Working…' : escape(age(thread.updatedAt))}</small></span><button type="button" class="secondary-button" data-open-task="${escape(thread.sessionId)}">Open</button></li>`;
-  return `${threads.length ? `<ul class="bots-items">${threads.map(row).join('')}</ul>` : '<p class="bots-empty-note">No conversations yet. Open chat to start one.</p>'}
-    ${web ? `<div class="bots-callout">${icon('globe')}<span>Also chat from any browser on this computer.</span><button type="button" class="secondary-button" data-web-open="${escape(web.id)}">Open web chat</button></div>` : ''}`;
+  const row = (thread: BotDetail['threads'][number]) =>
+    '<li><span class="bots-item-main"><b>' +
+      escape(threadLabel(detail, thread.channelId, thread.externalId)) +
+      '</b><small>' + (context.running(thread.sessionId) ? 'Working…' : escape(age(thread.updatedAt))) +
+      '</small></span><button type="button" class="secondary-button" data-open-task="' +
+      escape(thread.sessionId) + '">Open chat</button></li>';
+  return '<section class="bots-superagent-threads" aria-label="SuperAgent tasks">' +
+    '<div class="bots-conversations-heading"><h3>SuperAgent tasks</h3><small>' +
+      assigned.length + ' native conversations</small></div>' +
+    '<p>Managed WorkItems appear here in their original bot-owned chats. ' +
+      'Model, skills and tool permissions remain those of the admitted bot profile.</p>' +
+    (assigned.length
+      ? '<ul class="bots-items">' + assigned.map(row).join('') + '</ul>'
+      : '<p class="bots-empty-note">No SuperAgent tasks assigned to this bot yet.</p>') +
+    '</section><section class="bots-ordinary-threads" aria-label="Other bot conversations">' +
+    '<div class="bots-conversations-heading"><h3>Other conversations</h3></div>' +
+    (ordinary.length
+      ? '<ul class="bots-items">' + ordinary.map(row).join('') + '</ul>'
+      : '<p class="bots-empty-note">No other conversations yet. Open chat to start one.</p>') +
+    '</section>' +
+    (web ? '<div class="bots-callout">' + icon('globe') +
+      '<span>Also chat from any browser on this computer.</span>' +
+      '<button type="button" class="secondary-button" data-web-open="' +
+      escape(web.id) + '">Open web chat</button></div>' : '');
 }
 
 function memoryPanel(detail: BotDetail): string {
@@ -185,6 +220,7 @@ function saveCapabilities(target: HTMLElement, context: PanelContext): void {
 export function renderPanel(tab: Tab, detail: BotDetail, context: PanelContext): string {
   switch (tab) {
     case 'skills': return skillsPanel(detail, context);
+    case 'capabilities': return renderCapabilityPanel(detail, context);
     case 'conversations': return conversationsPanel(detail, context);
     case 'memory': return memoryPanel(detail);
     case 'schedules': return schedulesPanel(detail);
@@ -204,7 +240,7 @@ export function panelClick(target: HTMLElement, _tab: Tab, context: PanelContext
   const bot = detail.bot;
   const data = target.dataset;
   const done = async (text: string) => { invalidateActivity(); context.notify(text); await context.reload(); };
-  if (connectClick(target, context)) return;
+  if (connectClick(target, context) || capabilityClick(target, context)) return;
   if (data.openTask) context.openTask(data.openTask);
   else if (data.forget) void context.work(async () => { await context.call('bot_forget', { botId: bot.id, memoryId: data.forget }); await done('Forgotten'); });
   else if (data.runSchedule) void context.work(async () => { await context.call('bot_run_schedule_now', { scheduleId: data.runSchedule }); await done('Started'); });
@@ -236,6 +272,7 @@ export function panelSubmit(form: HTMLFormElement, _tab: Tab, context: PanelCont
   const data = new FormData(form);
   const text = (name: string) => String(data.get(name) ?? '').trim();
   const done = async (message: string) => { invalidateActivity(); context.notify(message); await context.reload(); };
+  if (capabilitySubmit(form, context)) return;
   if (form.matches('.bots-memory')) {
     const content = text('content'); if (!content) return;
     void context.work(async () => { await context.call('bot_remember', { botId: bot.id, content }); await done('Remembered'); });

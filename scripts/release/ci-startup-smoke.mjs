@@ -136,6 +136,19 @@ export async function observeProcess(command, args, { env, cwd, durationMs, expe
   }
 }
 
+// Both launches use one disposable user profile. The first observation
+// terminates the app like an unexpected shutdown; the second catches native
+// startup recovery failures that a first-install-only smoke would miss.
+export async function observeWindowsStartupAndRecovery(executable, env, cwd, observe = observeProcess) {
+  for (const phase of ['initial launch', 'restart after forced termination']) {
+    try {
+      await observe(executable, [], { env, cwd, durationMs: 30_000 });
+    } catch (error) {
+      throw new Error(`Windows packaged ${phase}: ${error.message}`, { cause: error });
+    }
+  }
+}
+
 async function main() {
   const target = process.env.RELEASE_TARGET;
   assertHostedRunner(process.env, target);
@@ -161,9 +174,9 @@ async function main() {
       const names = await readdir(destination);
       const binaries = names.filter(name => name.toLowerCase() === 'pandacode.exe');
       if (names.length > 100 || binaries.length !== 1) throw new Error('NSIS did not install the expected app executable.');
-      await observeProcess(join(destination, binaries[0]), [], { env, cwd: directory, durationMs: 30_000 });
+      await observeWindowsStartupAndRecovery(join(destination, binaries[0]), env, directory);
     }
-    console.log(`${target}: packaged app stayed alive during the startup check (no GUI or agent behavior asserted).`);
+    console.log(`${target}: packaged app survived startup checks (Windows includes same-profile restart; no GUI or agent behavior asserted).`);
   } finally {
     await cleanupSmokeDirectory(directory);
   }

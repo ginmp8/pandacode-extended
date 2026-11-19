@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises';
-import { assertHostedRunner, bundleDirectory, selectPackage, smokeEnvironment, installArguments, observeProcess, linuxStartupCommand, cleanupSmokeDirectory, validatePackageSize } from './ci-startup-smoke.mjs';
+import { assertHostedRunner, bundleDirectory, selectPackage, smokeEnvironment, installArguments, observeProcess, observeWindowsStartupAndRecovery, linuxStartupCommand, cleanupSmokeDirectory, validatePackageSize } from './ci-startup-smoke.mjs';
 
 test('Linux starts Xvfb before the bus so portal services inherit the display', () => {
   assert.deepEqual(linuxStartupCommand('/tmp/build with spaces/PandaCode.AppImage'), { command: 'xvfb-run', args: ['--auto-servernum', '--server-args=-screen 0 1440x940x24', 'dbus-run-session', '--', '/tmp/build with spaces/PandaCode.AppImage'] });
@@ -96,6 +96,33 @@ test('startup observation stops a surviving fixture and bounds installer executi
   }
   await observeProcess(process.execPath, ['-e', 'process.exit(0)'], { ...options, durationMs: 1000, expectExit: true });
   await assert.rejects(observeProcess(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { ...options, expectExit: true }), /timeout/);
+});
+
+test('Windows installer smoke probes first launch and recovery with the same isolated profile', async () => {
+  const env = { APPDATA: 'isolated-app-data' };
+  const cwd = 'isolated-working-directory';
+  const calls = [];
+  await observeWindowsStartupAndRecovery('installed/PandaCode.exe', env, cwd, async (exe, args, options) => {
+    calls.push({ exe, args, options });
+  });
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.exe, 'installed/PandaCode.exe');
+    assert.deepEqual(call.args, []);
+    assert.equal(call.options.env, env);
+    assert.equal(call.options.cwd, cwd);
+    assert.equal(call.options.durationMs, 30_000);
+    assert.equal(call.options.expectExit, undefined);
+  }
+  let attempted = 0;
+  await assert.rejects(
+    observeWindowsStartupAndRecovery('installed/PandaCode.exe', env, cwd, async () => {
+      attempted++;
+      if (attempted === 2) throw new Error('App exited during the startup check (1).');
+    }),
+    /Windows packaged restart after forced termination: App exited/,
+  );
+  assert.equal(attempted, 2);
 });
 
 test('the startup check looks for the installer where the build leaves it', () => {

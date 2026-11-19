@@ -106,6 +106,7 @@ impl Tracker {
                 input: String::new(),
                 output: String::new(),
                 write_paths: Some(paths.clone()),
+                exit_code: None,
             },
         );
         if action == "begin"
@@ -191,6 +192,7 @@ mod tests {
             input: String::new(),
             output: String::new(),
             write_paths: Some(vec!["ours.txt".into()]),
+            exit_code: None,
         };
         tracker.lock().unwrap().observe_tool("native", &native);
         tracker.lock().unwrap().observe_tool(

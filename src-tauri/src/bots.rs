@@ -4,6 +4,7 @@
 //! harness runs, approvals, the queue and history work unchanged.
 
 mod brief;
+pub(crate) mod discovery;
 pub(crate) mod channels;
 pub(crate) mod collaboration;
 pub(crate) mod failover;
@@ -198,6 +199,7 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
     }
     extended::upgrade(db)?;
     collaboration::upgrade(db)?;
+    discovery::upgrade(db)?;
     // Council is an immutable opt-in on an individual message. Separate
     // sidecars preserve older channel/bot schemas, threads and import payloads.
     db.execute_batch(
@@ -436,7 +438,7 @@ fn validate(input: &BotInput) -> Result<BotInput> {
 
 const MAX_BACKUPS: usize = 4;
 
-fn known_provider(provider: &str) -> bool {
+pub(crate) fn known_provider(provider: &str) -> bool {
     matches!(
         provider,
         "claude"
@@ -664,7 +666,11 @@ fn sync_thread_profiles(store: &Store, bot: &Bot, preserve_desktop_model: bool) 
     let mut statement = store.db.prepare("SELECT session_id,channel_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
     let rows = statement.query_map([&bot.id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
     for (session_id, channel_id) in rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())? {
-        sync_thread_profile(store, bot, &session_id, !preserve_desktop_model || channel_id != DESKTOP)?;
+        // An admitted SuperAgent session pins its provider, model and permission mode.
+        // Bot profile edits apply only to future native task sessions.
+        if channel_id != crate::superagent::CHANNEL {
+            sync_thread_profile(store, bot, &session_id, !preserve_desktop_model || channel_id != DESKTOP)?;
+        }
     }
     Ok(())
 }
@@ -698,6 +704,7 @@ fn sync_thread_profile(store: &Store, bot: &Bot, session_id: &str, sync_model: b
 }
 
 pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
+    let _dispatch_fence = crate::superagent::effects::lock_dispatch(&store.path)?;
     store.db.execute("UPDATE bots SET paused=?2,updated_at=?3 WHERE id=?1", params![id, paused, crate::storage::now()]).map_err(|e| e.to_string())?;
     log(store, id, if paused { "paused" } else { "resumed" }, if paused { "Paused" } else { "Resumed" }, json!({}))?;
     get(store, id)
@@ -706,8 +713,9 @@ pub(crate) fn set_paused(store: &Store, id: &str, paused: bool) -> Result<Bot> {
 /// Reset deletes the bot's conversations, memories, schedules and activity together.
 pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
     let bot = get(store, id)?;
+    let dispatch_fence = crate::superagent::effects::lock_dispatch(&store.path)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    crate::superagent::invalidate_bot(store, id, false)?;
+    crate::superagent::invalidate_bot(store, id, false, &dispatch_fence)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     shared_channels::settle_posts(store, &open)?;
@@ -722,7 +730,9 @@ pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
 
 /// Deletes the bot and its records. Its workspace folder stays on disk.
 pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
-    crate::superagent::invalidate_bot(store, id, true)?;
+    let dispatch_fence = crate::superagent::effects::lock_dispatch(&store.path)?;
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    crate::superagent::invalidate_bot(store, id, true, &dispatch_fence)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
     let channels: Vec<String> = {
@@ -730,11 +740,12 @@ pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
         let rows = statement.query_map([id], |r| r.get(0)).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?
     };
+    store.db.execute("DELETE FROM bots WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+    shared_channels::settle_posts(store, &open)?;
+    transaction.commit().map_err(|e| e.to_string())?;
     for channel in channels {
         secrets::remove_all(&channel);
     }
-    store.db.execute("DELETE FROM bots WHERE id=?1", [id]).map_err(|e| e.to_string())?;
-    shared_channels::settle_posts(store, &open)?;
     Ok(())
 }
 
@@ -835,9 +846,12 @@ pub(crate) fn thread_session(store: &Store, bot: &Bot, channel_id: &str, externa
         .map_err(|e| e.to_string())?;
     if let Some(session) = existing {
         if store.session(&session).is_ok() {
-            // A manual model pick in the bot's desktop conversation belongs to that
-            // conversation. Channel and scheduled threads still follow the bot profile.
-            sync_thread_profile(store, bot, &session, channel_id != DESKTOP)?;
+            // Desktop model picks remain local; ordinary channel/schedule threads follow
+            // the bot. A SuperAgent assignment instead retains its admitted session
+            // profile, including mode and reasoning effort, across delivery/retry.
+            if channel_id != crate::superagent::CHANNEL {
+                sync_thread_profile(store, bot, &session, channel_id != DESKTOP)?;
+            }
             store.db.execute("UPDATE bot_threads SET updated_at=?2 WHERE session_id=?1", params![session, crate::storage::now()]).map_err(|e| e.to_string())?;
             return Ok((session, false));
         }

@@ -1,0 +1,310 @@
+import { escape } from './dom';
+import { renderBotMultiSelect } from './superagent-multiselect';
+
+/** Local-only wizard state. It cannot grant permissions or run a model. */
+export interface TeamBuilderBot {
+  id: string;
+  name: string;
+  paused: boolean;
+  avatar?: string;
+  color?: string;
+  projectId?: string;
+  provider?: string;
+  model?: string;
+  mode?: string;
+  skills?: string[];
+}
+export interface TeamBuilderInput {
+  name: string;
+  coordinatorBotId: string;
+  workerBotId: string;
+  workerBotIds: string[];
+  reviewerBotIds: string[];
+  councilRequired: boolean;
+  executionMode: 'approval' | 'full';
+}
+
+export class GuidedTeamBuilder {
+  private visible = false;
+  private step = 1;
+  private error = '';
+  private template = '';
+  private name = '';
+  private coordinatorId = '';
+  private workers: string[] = [];
+  private reviewers: string[] = [];
+  private executionMode: 'approval' | 'full' = 'approval';
+
+  get isOpen(): boolean { return this.visible; }
+
+  reset(): void {
+    this.visible = false;
+    this.step = 1;
+    this.error = '';
+    this.template = '';
+    this.name = '';
+    this.coordinatorId = '';
+    this.workers = [];
+    this.reviewers = [];
+    this.executionMode = 'approval';
+  }
+
+  private allIds(): string[] {
+    return [this.coordinatorId, ...this.workers, ...this.reviewers]
+      .filter(Boolean);
+  }
+
+  private problem(bots: TeamBuilderBot[], throughStep: number): string | null {
+    if (throughStep >= 1 && (!this.name.trim() || this.name.trim().length > 120)) {
+      return 'Choose a Team name between 1 and 120 characters.';
+    }
+    if (throughStep < 2) return null;
+    if (!this.coordinatorId || !this.workers.length) {
+      return 'Choose one Coordinator and at least one Worker.';
+    }
+    if (this.workers.length > 16 || this.reviewers.length > 8) {
+      return 'A Team supports at most 16 Workers and eight Reviewers.';
+    }
+    const members = this.allIds();
+    if (new Set(members).size !== members.length) {
+      return 'Each existing bot must have exactly one role in this Team.';
+    }
+    if (members.some(id => !bots.some(bot => bot.id === id && !bot.paused))) {
+      return 'Remove unavailable or paused bots before saving.';
+    }
+    if (this.reviewers.length === 1) {
+      return 'Required native Council needs at least two selected Reviewers.';
+    }
+    return null;
+  }
+
+  validatedInput(bots: TeamBuilderBot[]): TeamBuilderInput | null {
+    if (!this.visible || this.step !== 5) return null;
+    this.error = this.problem(bots, 4) ?? '';
+    if (this.error) return null;
+    return {
+      name: this.name.trim(),
+      coordinatorBotId: this.coordinatorId,
+      // Kept only as a legacy storage projection. Every Worker is a peer.
+      workerBotId: this.workers[0],
+      workerBotIds: [...this.workers],
+      reviewerBotIds: [...this.reviewers],
+      councilRequired: this.reviewers.length > 0,
+      executionMode: this.executionMode,
+    };
+  }
+
+  handleInput(target: Element): boolean {
+    if (!this.visible || !(target instanceof HTMLInputElement) ||
+        target.name !== 'builderName' || !target.closest('form[data-sa-form="guided-builder"]')) {
+      return false;
+    }
+    this.name = target.value;
+    this.error = '';
+    return true;
+  }
+
+  handleChange(target: Element): boolean {
+    if (!this.visible ||
+        !(target instanceof HTMLInputElement || target instanceof HTMLSelectElement) ||
+        !target.closest('form[data-sa-form="guided-builder"]')) {
+      return false;
+    }
+    switch (target.name) {
+      case 'builderTemplate': {
+        const old = this.template;
+        this.template = target.value;
+        if (!this.name || this.name === old) this.name = this.template;
+        break;
+      }
+      case 'builderCoordinator': this.coordinatorId = target.value; break;
+      case 'builderWorkers':
+      case 'builderReviewers': {
+        if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox' ||
+            !target.hasAttribute('data-sa-multi-option')) return false;
+        const chosen = target.name === 'builderWorkers' ? this.workers : this.reviewers;
+        const limit = target.name === 'builderWorkers' ? 16 : 8;
+        if (target.checked && !chosen.includes(target.value)) {
+          if (chosen.length >= limit) { target.checked = false; return true; }
+          chosen.push(target.value);
+        } else if (!target.checked) {
+          const index = chosen.indexOf(target.value);
+          if (index >= 0) chosen.splice(index, 1);
+        }
+        break;
+      }
+      case 'builderExecutionMode':
+        if (!(target instanceof HTMLInputElement) ||
+            !['approval','full'].includes(target.value)) return false;
+        this.executionMode = target.value as 'approval' | 'full';
+        break;
+      default: return false;
+    }
+    this.error = '';
+    return true;
+  }
+
+  handleClick(target: HTMLButtonElement, bots: TeamBuilderBot[]): boolean {
+    if (target.hasAttribute('data-sa-builder-open')) {
+      this.visible = true;
+      this.step = 1;
+      this.error = '';
+      return true;
+    }
+    if (!this.visible) return false;
+    if (target.hasAttribute('data-sa-builder-step')) {
+      const requestedStep = Number(target.dataset.saBuilderStep);
+      if (Number.isInteger(requestedStep) && requestedStep >= 1 && requestedStep < this.step) {
+        this.step = requestedStep;
+        this.error = '';
+      }
+      return true;
+    }
+    if (target.hasAttribute('data-sa-builder-reviewers')) {
+      this.step = 2;
+      this.error = '';
+      return true;
+    }
+    if (target.hasAttribute('data-sa-builder-cancel')) {
+      this.reset();
+      return true;
+    }
+    if (target.dataset.saMultiClear === 'builderWorkers') {
+      this.workers = []; this.error = ''; return true;
+    }
+    if (target.dataset.saMultiClear === 'builderReviewers') {
+      this.reviewers = []; this.error = ''; return true;
+    }
+    if (target.dataset.saBuilderMove) {
+      const index = this.workers.indexOf(target.dataset.saBuilderMove);
+      const next = index + (target.dataset.saBuilderDirection === 'up' ? -1 : 1);
+      if (index >= 0 && next >= 0 && next < this.workers.length) {
+        [this.workers[index], this.workers[next]] = [this.workers[next], this.workers[index]];
+      }
+      return true;
+    }
+    if (target.hasAttribute('data-sa-builder-next')) {
+      const problem = this.problem(bots, this.step);
+      if (problem) this.error = problem;
+      else { this.step = Math.min(5, this.step + 1); this.error = ''; }
+      return true;
+    }
+    if (target.hasAttribute('data-sa-builder-prev')) {
+      this.step = Math.max(1, this.step - 1);
+      this.error = '';
+      return true;
+    }
+    return false;
+  }
+
+  render(bots: TeamBuilderBot[]): string {
+    const safe = (input: unknown) => escape(String(input ?? ''));
+    if (!this.visible) return '';
+    const selectedBot = (id: string) => bots.find(bot => bot.id === id);
+    const name = (id: string) => selectedBot(id)?.name ?? 'Missing bot';
+    const selectOptions = (selectedId: string, exclude: string[] = []) =>
+      '<option value="">Choose existing bot</option>' +
+      bots.filter(bot => !exclude.includes(bot.id))
+        .map(bot => '<option value="' + safe(bot.id) + '"' +
+          (selectedId === bot.id ? ' selected' : '') +
+          (bot.paused ? ' disabled' : '') + '>' +
+          safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    const steps = ['Purpose', 'Team roles', 'Models and Skills',
+      'Execution and review', 'Preflight and Save'];
+    let content = '';
+    if (this.step === 1) {
+      content = '<label>Scenario template<select name="builderTemplate">' +
+        '<option value="">Custom</option>' +
+        ['Software Development', 'Issue Resolution'].map(value =>
+          '<option value="' + value + '"' + (this.template === value ? ' selected' : '') +
+          '>' + value + '</option>').join('') + '</select></label>' +
+        '<label>Team name<input name="builderName" maxlength="120" required value="' +
+        safe(this.name) + '" placeholder="Scenario-specific Team"></label>' +
+        '<p>One Team can accept multiple Demands. The Coordinator chooses Workers ' +
+        'from their existing Skills, instructions and native project access.</p>';
+    } else if (this.step === 2) {
+      content = '<label>Coordinator<select name="builderCoordinator">' +
+        selectOptions(this.coordinatorId) + '</select></label>' +
+        renderBotMultiSelect({
+          name:'builderWorkers', label:'Workers (1 to 16)',
+          bots, selectedIds:this.workers, limit:16,
+          unavailable:bot => [this.coordinatorId,...this.reviewers].includes(bot.id)
+            ? 'Already assigned' : '',
+        }) +
+        renderBotMultiSelect({
+          name:'builderReviewers', label:'Optional Council Reviewers (up to 8)',
+          bots, selectedIds:this.reviewers, limit:8,
+          unavailable:bot =>
+            [this.coordinatorId,...this.workers].includes(bot.id)
+              ? 'Already assigned' : '',
+        }) +
+        '<p>Every Worker retains independent native project and permission checks.</p>';
+    } else if (this.step === 3) {
+      content = '<p>These are existing bot configurations, not new credentials or grants. ' +
+        'Installed, harness-eligible, invoked and evidence-verified are distinct states.</p>' +
+        '<ol aria-label="Configured Models and Skills">' +
+        this.allIds().map(id => {
+          const bot = selectedBot(id);
+          return '<li>' + safe(name(id)) + ' · ' +
+            safe(bot?.provider ?? 'Unknown harness') + ' / ' +
+            safe(bot?.model ?? 'Unknown model') +
+            ' · Mode ' + safe(bot?.mode ?? 'Unknown') +
+            ' · assigned Skill IDs ' + safe((bot?.skills ?? []).join(', ') || 'None') +
+            '</li>';
+        }).join('') + '</ol>' +
+        '<p>Native Council Reviewers are independent read-only roles. ' +
+        'Skill presence alone does not prove a running harness can invoke it.</p>';
+    } else if (this.step === 4) {
+      content = '<fieldset class="sa-mode-choices"><legend>Execution mode</legend>' +
+        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="approval"' +
+          (this.executionMode === 'approval' ? ' checked' : '') +
+          '><span><strong>With Approval</strong><small>Every completed WorkItem waits for an explicit human decision before dependents advance.</small></span></label>' +
+        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full"' +
+          (this.executionMode === 'full' ? ' checked' : '') +
+          '><span><strong>Full Access</strong><small>Use existing native Full Access for new Worker task sessions. Configured Council reviewers always review.</small></span></label>' +
+        '</fieldset>' +
+        '<p>Configured reviewers are always invoked by native Council. ' +
+        'With Approval additionally requires human acceptance.</p>' +
+        '<p>New sessions use native permissions; existing bot models, skills, preferences and chats are unchanged.</p>' +
+
+        '<p>Saving a Team leaves it Off until explicitly enabled; no request or permission is created by configuration.</p>';
+    } else {
+      const problem = this.problem(bots, 4);
+      content = '<dl><dt>Team</dt><dd>' + safe(this.name.trim()) + '</dd>' +
+        '<dt>Coordinator</dt><dd>' + safe(name(this.coordinatorId)) + '</dd>' +
+        '<dt>Workers</dt><dd>' +
+        this.workers.map(name).map(safe).join(', ') +
+        '</dd><dt>Reviewers</dt><dd>' +
+        (this.reviewers.map(name).map(safe).join(', ') || 'None') + '</dd>' +
+        '<dt>Native Council</dt><dd>' + (this.reviewers.length ? 'Required' : 'Off') +
+        '</dd><dt>Execution mode</dt><dd>' + (this.executionMode === 'full' ? 'Full Access' : 'With Approval') +
+        '</dd><dt>Team state</dt><dd>Off until enabled; no task or tool grants</dd></dl>' +
+        (problem ? '<p role="alert">' + safe(problem) + '</p>' :
+          '<p>Save rechecks all native bot, project and versioned Team guards.</p>') +
+        '<button class="primary-button" type="submit"' +
+        (problem ? ' disabled' : '') + '>Create Team (disabled)</button>';
+    }
+    return '<section class="sa-team-builder" aria-label="Guided Team Builder">' +
+      '<button type="button" class="sa-detail-back" data-sa-builder-cancel>← Cancel team setup</button>' +
+      '<div class="sa-section-head"><div><h2>Create a Team</h2>' +
+      '<p>Step ' + this.step + ' of 5 · configure once, reuse for separate Demands.</p></div></div>' +
+      '<div class="sa-wizard-layout"><nav class="sa-step-nav" aria-label="Team setup progress">' +
+      steps.map((label, index) =>
+        '<button type="button" data-sa-builder-step="' + (index + 1) + '"' +
+        (index >= this.step ? ' disabled' : '') +
+        ' aria-current="' + (index + 1 === this.step ? 'step' : 'false') + '">' +
+        '<span class="sa-step-number">' + (index + 1) + '</span><span>' +
+        safe(label) + '</span></button>').join('') + '</nav>' +
+      '<form class="sa-wizard-form" data-sa-form="guided-builder">' +
+      '<header class="sa-wizard-head"><h3>' + safe(steps[this.step-1]) + '</h3>' +
+      '<p>Choose existing PandaCode bots. This form cannot grant tools or run models.</p></header>' +
+      '<section aria-label="Team setup step"><h4 class="sr-only" tabindex="-1">' +
+      safe(steps[this.step-1]) + '</h4>' + content + '</section>' +
+      (this.error ? '<p role="alert" class="sa-builder-error">' + safe(this.error) + '</p>' : '') +
+      '<footer class="sa-wizard-footer">' +
+      '<button type="button" data-sa-builder-prev' + (this.step === 1 ? ' disabled' : '') +
+      '>Back</button>' +
+      (this.step < 5 ? '<button type="button" class="primary-button" data-sa-builder-next>Next</button>' : '') +
+      '</footer></form></div></section>';
+  }
+}

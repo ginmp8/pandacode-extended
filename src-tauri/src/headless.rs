@@ -6,6 +6,8 @@
 
 use crate::{message_queue, AppState};
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
@@ -25,16 +27,90 @@ enum Command {
     SignOut,
     FullAccess { enabled: bool },
     ExportBots { path: PathBuf },
+    InspectBotCapabilities { bot_id: String, question: Option<String> },
     SyncBots { path: PathBuf },
     PreviewOrchestrations { path: PathBuf },
+    CreateOrchestration { path: PathBuf },
+    ConfigureTeamRoles { orchestration_id: String, expected_revision: i64, path: PathBuf },
+    EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
+    InspectTeamStrategy { orchestration_id: String },
+    InspectDelivery { ticket_id: String },
     ListTickets,
+    ListTicketActivity { ticket_id: String, before_id: Option<i64> },
+    ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
+    ListRecoveryInbox,
+    ListUnresolvedEffects { before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
+    ListDemands {
+        state: String, before_updated_at: Option<i64>, before_id: Option<String>,
+        search_query: Option<String>, project_id: Option<String>,
+    },
+    ListTeamDemands {
+        orchestration_id: String, state: String,
+        before_updated_at: Option<i64>, before_id: Option<String>,
+        search_query: Option<String>, project_id: Option<String>,
+    },
     InspectTicket { ticket_id: String },
+    InspectTicketGraph { ticket_id: String },
+    InspectDemandPlan { ticket_id: String },
+    InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
+    InspectTicketSource { ticket_id: String },
+    InspectSourceHealth { source_id: String },
+    InspectSourceDecisions { source_id: String, paginated: bool, before_sequence: Option<i64>, before_delivery_id: Option<String> },
+    LinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
+    LinkIssuePull { source_id: String, ticket_id: String, issue_key: String, pull_key: String },
+    UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
+    InspectTeamReadiness { orchestration_id: String },
+    PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
+    InspectTeamRoster { orchestration_id: String },
+    ObserveSource { source_id: String },
+    ObserveTeamSources { orchestration_id: String },
+    ObserveCheckRun { source_id: String, check_run_id: i64 },
+    QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
+    RetryTicket { ticket_id: String, expected_revision: i64 },
+    InspectRetryRequest { ticket_id: String, expected_revision: i64 },
     StopTicket { ticket_id: String },
+    StopTicketAtRevision { ticket_id: String, expected_revision: i64 },
+    QuarantineDetachedTicket { ticket_id: String, expected_revision: i64 },
+    QuarantinePendingEffect { ticket_id: String, expected_revision: i64, effect_key: String, payload_sha256: String },
+    QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
+    DisableOrchestration { orchestration_id: String, expected_revision: i64 },
+    RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
+    VerifyDraftPrTarget {
+        ticket_id: String,
+        expected_revision: i64,
+        repository: String,
+        head: String,
+        base: String,
+    },
+    IssueComment {
+        ticket_id: String,
+        expected_revision: i64,
+        repository: String,
+        issue_number: i64,
+        effect_key: String,
+        comment: String,
+        confirmation_hash: Option<String>,
+    },
+}
+
+fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Cannot read objective file: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
+    if bytes.len() > 16 * 1024 {
+        return Err("Objective exceeds the native 16 KiB limit.".into());
+    }
+    let objective = std::str::from_utf8(&bytes)
+        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+    Ok(objective.to_owned())
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -87,6 +163,279 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::InspectTeamStrategy { orchestration_id } = &command {
+                let result=app.path().app_data_dir().map_err(|e|e.to_string())
+                    .and_then(|dir|crate::superagent::strategy::headless_inspect(
+                        &dir.join("kingcode.sqlite3"),orchestration_id,
+                    ));
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Team strategy inspection failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::InspectDelivery { ticket_id } = &command {
+                let result=app.path().app_data_dir().map_err(|e|e.to_string())
+                    .and_then(|directory|crate::superagent::delivery::headless_inspect(
+                        &directory.join("kingcode.sqlite3"),ticket_id,
+                    ));
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("Native delivery inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::VerifyDraftPrTarget {
+                ticket_id, expected_revision, repository, head, base,
+            } = &command {
+                // Use the desktop's live native preflight without a Webview,
+                // startup recovery, effect reservation, or any GitHub write.
+                let result = app.path().app_data_dir()
+                    .map_err(|error| error.to_string())
+                    .and_then(|dir| {
+                        let store = crate::superagent::effects::open_effect_store(
+                            &dir.join("kingcode.sqlite3"),
+                        )?;
+                        let sha = crate::superagent::effects::verify_draft_pull_request_target(
+                            &store, ticket_id, *expected_revision, repository, head, base,
+                        )?;
+                        Ok(serde_json::json!({
+                            "verifiedHeadSha": sha,
+                            "created": false,
+                            "authorizationIssued": false,
+                        }).to_string())
+                    });
+                match result {
+                    Ok(preflight) => { println!("{preflight}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent draft PR preflight failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectRetryRequest { ticket_id, expected_revision } = &command {
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir|crate::superagent::headless_dispatch::inspect(
+                        &dir.join("kingcode.sqlite3"),ticket_id,*expected_revision,
+                    ));
+                match result {
+                    Ok(value)=>{println!("{value}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Headless retry inspection failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::InspectDemandPlan { ticket_id } = &command {
+                // Only inspect the immutable native WorkItem graph. A separate
+                // CLI cannot invoke Store::open startup recovery while another
+                // serve/Desktop process holds live provider sessions.
+                let result=app.path().app_data_dir()
+                    .map_err(|error|error.to_string())
+                    .and_then(|directory| crate::superagent::scheduler::headless_inspect_plan(
+                        &directory.join("kingcode.sqlite3"),ticket_id,
+                    ));
+                match result {
+                    Ok(plan)=>{println!("{plan}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("SuperAgent Demand plan inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTicketGraph { ticket_id } = &command {
+                // The same durable, bounded native Ticket/Assignment graph as the
+                // workspace. Do not run Store::open recovery beside a live host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_ticket_graph(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(graph) => { println!("{graph}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent graph inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTicketEffects { ticket_id, before_created_at, before_key, unresolved_only } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts_page(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                        *before_created_at, before_key.as_deref(), *unresolved_only,
+                    ));
+                match result {
+                    Ok(receipts) => { println!("{receipts}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent effect receipt inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTicketSource { ticket_id } = &command {
+                // No GitHub network, grants, provider launch or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_linked_activity(
+                        &dir.join("kingcode.sqlite3"), ticket_id, 50,
+                    ));
+                match result {
+                    Ok(activity) => { println!("{activity}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectSourceHealth { source_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_inspect_source_integrity(
+                        &dir.join("kingcode.sqlite3"), source_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source health inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectSourceDecisions {
+                source_id, paginated, before_sequence, before_delivery_id,
+            } = &command {
+                // Immutable source-scoped receipts, no GitHub polling, provider
+                // admission, task grant or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if *paginated {
+                            crate::superagent::events::headless_source_decisions_page(
+                                &database, source_id, 50,
+                                *before_sequence, before_delivery_id.as_deref(),
+                            )
+                        } else {
+                            crate::superagent::events::headless_source_decisions(
+                                &database, source_id, 50,
+                            )
+                        }
+                    });
+                match result {
+                    Ok(history) => { println!("{history}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source decision inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::LinkSourceThread { source_id,ticket_id,subject_key } = &command {
+                // Reuse the native context-only link transaction. This command
+                // cannot issue a new Mandate, provider run, or GitHub effect.
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir|crate::superagent::events::headless_link_thread(
+                        &dir.join("kingcode.sqlite3"),source_id,ticket_id,subject_key,
+                    ));
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("SuperAgent source-thread link failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::LinkIssuePull { source_id, ticket_id, issue_key, pull_key } = &command {
+                // Delegate to the same transactional native association used
+                // by Desktop. No GitHub request, grant or provider launch.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_link_issue_pull(
+                        &dir.join("kingcode.sqlite3"), source_id, ticket_id, issue_key, pull_key,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Issue/PR association failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::UnlinkSourceThread { source_id, ticket_id, subject_key } = &command {
+                // One explicit trusted local mutation, no Store::open recovery,
+                // provider launch, grant, GitHub write, or implicit refollow.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_unlink_thread(
+                        &dir.join("kingcode.sqlite3"), source_id, ticket_id, subject_key,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent thread unlink failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTeamReadiness { orchestration_id } = &command {
+                // Read-only on an existing database; do not run startup recovery
+                // against another live headless process. This is not admission.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_team_readiness(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(readiness) => { println!("{readiness}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team readiness inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::PreflightDemand { orchestration_id, coordinated, objective_file } = &command {
+                // The objective is read only from an explicitly supplied local file.
+                // No Ticket, mandate, assignment, provider or startup recovery.
+                let result = read_bounded_objective(objective_file)
+                    .and_then(|objective| app.path().app_data_dir()
+                        .map_err(|e| e.to_string())
+                        .and_then(|dir| crate::superagent::inspect_headless_demand_preflight(
+                            &dir.join("kingcode.sqlite3"), orchestration_id,
+                            &objective, *coordinated,
+                        )));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand preflight failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectBotCapabilities { bot_id, question } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::bots::discovery::inspect_headless(
+                        &dir.join("kingcode.sqlite3"), bot_id, question.as_deref()));
+                match result {
+                    Ok(profile) => { println!("{profile}"); std::process::exit(0) }
+                    Err(error) => { eprintln!("Capability inspection failed: {error}"); std::process::exit(1) }
+                }
+            }
+            if let Command::InspectTeamRoster { orchestration_id } = &command {
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_team_roster(
+                        &dir.join("kingcode.sqlite3"),orchestration_id,
+                    ));
+                match result {
+                    Ok(roster) => { println!("{roster}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team roster inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if matches!(&command, Command::ListTickets) {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -101,27 +450,277 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            let ticket_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
-            if ticket_action {
+            if let Command::ListTicketActivity { ticket_id, before_id } = &command {
+                // Only metadata for the explicitly requested Ticket is returned.
+                // Store::open_read_only never performs restart recovery.
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir|crate::superagent::list_headless_ticket_activity(
+                        &dir.join("kingcode.sqlite3"),ticket_id,*before_id,
+                    ));
+                match result {
+                    Ok(activity)=>{println!("{activity}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("SuperAgent Ticket activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if matches!(&command, Command::ListRecoveryInbox) {
+                // Recovery planning is read-only even beside a live serve host:
+                // no restart settlement, provider replay, or effect acknowledgment.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_recovery_inbox(
+                        &dir.join("kingcode.sqlite3"),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent recovery inbox inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListUnresolvedEffects { before_updated_at, before_ticket_id, before_effect_key } = &command {
+                // Cross-Ticket native receipt inventory; no grant, replay, provider
+                // contact or startup recovery against another live serve host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_unresolved_effects(
+                        &dir.join("kingcode.sqlite3"), *before_updated_at,
+                        before_ticket_id.as_deref(), before_effect_key.as_deref(),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent effect reconciliation inbox failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListReviewInbox { before_updated_at, before_id } = &command {
+                // Native pending-decision cursor; no startup recovery or grants.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if before_updated_at.is_none() {
+                            crate::superagent::list_headless_review_inbox(&database)
+                        } else {
+                            crate::superagent::list_headless_review_inbox_page(
+                                &database, *before_updated_at, before_id.as_deref(),
+                            )
+                        }
+                    });
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent review inbox inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListDemands {
+                state, before_updated_at, before_id, search_query, project_id,
+            } = &command {
+                // Read-only global queue, no startup recovery or task dispatch.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_all_demands_project_searched(
+                        &dir.join("kingcode.sqlite3"), state, *before_updated_at,
+                        before_id.as_deref(), search_query.as_deref(), project_id.as_deref(),
+                    ));
+                match result {
+                    Ok(page) => { println!("{page}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand queue inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTeamDemands {
+                orchestration_id, state, before_updated_at, before_id, search_query, project_id,
+            } = &command {
+                // Read the same source-of-truth Ticket state index as desktop,
+                // without mutating a concurrent live serve process.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_team_demands_project_searched(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, state,
+                        *before_updated_at, before_id.as_deref(), search_query.as_deref(),
+                        project_id.as_deref(),
+                    ));
+                match result {
+                    Ok(page) => { println!("{page}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team Demand inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ObserveSource { source_id } = &command {
+                // The same authenticated Events adapter and policy-revision
+                // transaction as desktop, without Webview or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_source(
+                        &dir.join("kingcode.sqlite3"), source_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ObserveTeamSources { orchestration_id } = &command {
+                // Each GitHub Events Observe source uses its own native
+                // authentication, policy recheck, cursor and immutable receipts.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_team_sources(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team source observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ObserveCheckRun { source_id, check_run_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_check_run(
+                        &dir.join("kingcode.sqlite3"), source_id, *check_run_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Check Run observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::CreateOrchestration { path } = &command {
+                let result=(||->Result<String,String> {
+                    let input:crate::superagent::OrchestrationInput=read_bounded_json_input(path)?;
+                    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+                    crate::superagent::headless_create_orchestration(&dir.join("kingcode.sqlite3"),input)
+                })();
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Team creation failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::ConfigureTeamRoles { orchestration_id,expected_revision,path } = &command {
+                let result=(||->Result<String,String> {
+                    let input:crate::superagent::roster::RosterInput=read_bounded_json_input(path)?;
+                    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+                    crate::superagent::headless_configure_team_roles(
+                        &dir.join("kingcode.sqlite3"),orchestration_id,*expected_revision,input,
+                    )
+                })();
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Team update failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
+                // The objective is a bounded local file, never a command-line
+                // argument or console payload. This command stages but does not run.
+                let result = (|| -> Result<String, String> {
+                    use std::io::Read;
+                    let file = std::fs::File::open(objective_file)
+                        .map_err(|e| format!("Cannot read objective file: {e}"))?;
+                    let mut bytes = Vec::new();
+                    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
+                        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
+                    if bytes.len() > 16 * 1024 {
+                        return Err("Objective exceeds the native 16 KiB limit.".into());
+                    }
+                    let objective = std::str::from_utf8(&bytes)
+                        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_queue_demand(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, objective, request_key,
+                    )
+                })();
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand staging failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            let native_action = matches!(&command,
+                Command::EnableOrchestration { .. } | Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
+                | Command::QuarantineDetachedTicket { .. } | Command::QuarantinePendingEffect { .. }
+                | Command::QuarantineTerminalOrphan { .. }
+                | Command::DisableOrchestration { .. }
+                | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
+            if native_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::EnableOrchestration { orchestration_id,expected_revision } =>
+                                crate::superagent::headless_enable_orchestration(
+                                    &database,orchestration_id,*expected_revision,
+                                ),
+                            Command::RetryTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_dispatch::request(
+                                    &database,ticket_id,*expected_revision,
+                                ),
                             Command::AcceptTicket { ticket_id, expected_revision } =>
                                 crate::superagent::headless_accept_ticket(&database, ticket_id, *expected_revision),
                             Command::RejectTicket { ticket_id, expected_revision, reason } =>
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::StopTicketAtRevision { ticket_id, expected_revision } =>
+                                crate::superagent::headless_stop_ticket_at_revision(
+                                    &database, ticket_id, *expected_revision,
+                                ),
+                            Command::QuarantineDetachedTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_detached_ticket(
+                                    &database, ticket_id, *expected_revision,
+                                ),
+                            Command::QuarantinePendingEffect { ticket_id, expected_revision, effect_key, payload_sha256 } =>
+                                crate::superagent::headless_quarantine_pending_effect(
+                                    &database, ticket_id, *expected_revision, effect_key, payload_sha256,
+                                ),
+                            Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_terminal_orphan(
+                                    &database, ticket_id, *expected_revision,
+                                ),
+                            Command::DisableOrchestration { orchestration_id, expected_revision } =>
+                                crate::superagent::headless_disable_orchestration(
+                                    &database, orchestration_id, *expected_revision,
+                                ),
+                            Command::RenameOrchestration { orchestration_id, expected_revision, name } =>
+                                crate::superagent::headless_rename_orchestration(
+                                    &database, orchestration_id, *expected_revision, name,
+                                ),
+                            Command::IssueComment { ticket_id, expected_revision, repository,
+                                issue_number, effect_key, comment, confirmation_hash } =>
+                                crate::superagent::headless_issue_comment(
+                                    &database, ticket_id, *expected_revision, repository,
+                                    *issue_number, effect_key, comment, confirmation_hash.as_deref(),
+                                ),
                             _ => unreachable!(),
                         }
                     });
                 match result {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
-                        eprintln!("SuperAgent Ticket command failed: {error}");
+                        eprintln!("SuperAgent native command failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -147,8 +746,35 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
-        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
+        Command::InspectOrchestrations | Command::InspectTeamStrategy { .. }
+        | Command::ListTickets | Command::ListTicketActivity { .. }
+        | Command::ListReviewInbox { .. }
+        | Command::ListRecoveryInbox | Command::ListUnresolvedEffects { .. } | Command::ListDemands { .. }
+        | Command::ListTeamDemands { .. }
+        | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
+        | Command::InspectDelivery { .. }
+        | Command::InspectDemandPlan { .. }
+        | Command::InspectTeamReadiness { .. } | Command::PreflightDemand { .. }
+        | Command::InspectTeamRoster { .. }
+        | Command::InspectBotCapabilities { .. }
+        | Command::InspectTicketEffects { .. }
+        | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
+        | Command::InspectSourceDecisions { .. }
+        | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
+        | Command::UnlinkSourceThread { .. }
+        | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
+        | Command::ObserveCheckRun { .. }
+        | Command::QueueDemand { .. }
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+        | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
+        | Command::EnableOrchestration { .. }
+        | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
+        | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
+        | Command::QuarantineDetachedTicket { .. } | Command::QuarantinePendingEffect { .. }
+        | Command::QuarantineTerminalOrphan { .. }
+        | Command::DisableOrchestration { .. }
+        | Command::RenameOrchestration { .. } | Command::VerifyDraftPrTarget { .. }
+        | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -280,6 +906,29 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     }
 }
 
+/// Keeps exactly one current PandaCode runtime on a data directory. Desktop
+/// and headless startup share this lock; Tauri's managed state holds it through
+/// shutdown, before setup_common can open a Store and run restart recovery.
+pub(crate) struct StoreOwnerLock {
+    _file: std::fs::File,
+}
+
+pub(crate) fn acquire_store_owner(data_dir: &Path) -> Result<StoreOwnerLock, String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let path = data_dir.join(".headless-serve.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("could not open the local serve ownership lock: {error}"))?;
+    file.try_lock().map_err(|error| format!(
+        "exclusive ownership of this data directory could not be established ({error}); an existing host may still be active"
+    ))?;
+    Ok(StoreOwnerLock { _file: file })
+}
+
 /// The serve-only services: Ctrl-C/SIGTERM, one status line for journald, native limit
 /// resumes, and the queue the previous run left behind.
 fn start_services(app: tauri::AppHandle) {
@@ -319,22 +968,49 @@ fn start_services(app: tauri::AppHandle) {
             if state.shutdown.load(Ordering::SeqCst) != 0 {
                 break;
             }
-            let expired = match state.store.lock() {
+            // Lock ordering matches admission: running agents first, then Store.
+            // A separate one-shot CLI can revoke a Ticket in the same SQLite
+            // database but cannot reach this process's provider handle directly.
+            // Stop those still-running native sessions on the next bounded tick.
+            let running_sessions = match state.agents.lock() {
+                Ok(agents) => agents.keys().cloned().collect::<Vec<_>>(),
+                Err(error) => {
+                    eprintln!("serve: SuperAgent running session inspection failed: {error}");
+                    continue;
+                }
+            };
+            let cancellations = match state.store.lock() {
                 Ok(store) => crate::superagent::watchdog_expired_assignments(
                     &store, crate::storage::now(),
-                ),
+                ).and_then(|expired| {
+                    let revoked = crate::superagent::headless_cancelled_assignments(
+                        &store, &running_sessions,
+                    )?;
+                    Ok(expired.into_iter().chain(revoked).collect::<BTreeSet<_>>())
+                }),
                 Err(error) => Err(error.to_string()),
             };
-            match expired {
+            match cancellations {
                 Ok(sessions) => for session_id in sessions {
-                    println!("serve: stopping expired SuperAgent assignment {session_id}");
+                    println!("serve: stopping revoked or expired SuperAgent assignment {session_id}");
                     if let Err(error) = crate::stop_session(
                         watchdog.clone(), watchdog.state::<AppState>(), session_id,
                     ).await {
-                        eprintln!("serve: expired SuperAgent session stop failed: {error}");
+                        eprintln!("serve: SuperAgent session stop failed: {error}");
                     }
                 },
                 Err(error) => eprintln!("serve: SuperAgent watchdog failed: {error}"),
+            }
+        }
+    });
+    // Only live serve claims queued retry intents; CLI cannot start providers.
+    let retries=app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            if retries.state::<AppState>().shutdown.load(Ordering::SeqCst)!=0 {break;}
+            if let Err(error)=crate::superagent::headless_dispatch::drain_one(retries.clone()).await {
+                eprintln!("serve: headless retry inspection required: {error}");
             }
         }
     });
@@ -355,6 +1031,21 @@ fn start_services(app: tauri::AppHandle) {
             for session_id in due {
                 if state.agents.lock().map(|agents| agents.contains_key(&session_id)).unwrap_or(true) {
                     continue;
+                }
+                // Generic limit recovery must not start another turn on an
+                // old SuperAgent assignment. Its mandate and the one-shot
+                // provider attempt cannot be silently renewed.
+                let ordinary_session = match state.store.lock() {
+                    Ok(store) => crate::superagent::has_task_assignment_history(&store, &session_id),
+                    Err(error) => Err(error.to_string()),
+                };
+                match ordinary_session {
+                    Ok(false) => {}
+                    Ok(true) => continue,
+                    Err(error) => {
+                        eprintln!("serve: skipping usage-limit resume after native session lookup failed: {error}");
+                        continue;
+                    }
                 }
                 println!("serve: resuming {session_id} at its usage-limit reset");
                 if let Err(error) = crate::send_message(
@@ -404,6 +1095,14 @@ pub(crate) fn drain_queue(app: tauri::AppHandle, session_id: String) {
                 return;
             }
             let Ok(store) = state.store.lock() else { return };
+            // A settled or interrupted SuperAgent assignment remains a task
+            // forever. Never reinterpret its old session as a generic queued
+            // conversation after the native bot-thread link disappears.
+            if crate::superagent::has_task_assignment_history(&store, &session_id)
+                .unwrap_or(true)
+            {
+                return;
+            }
             // Bot conversations drain through the bot gateway.
             if crate::bots::owner_of(&store, &session_id).ok().flatten().is_some() {
                 return;
@@ -475,6 +1174,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     let mut import: Option<PathBuf> = None;
     let mut sign_in = false;
     let mut command = Command::Serve;
+    let mut confirmation_hash: Option<String> = None;
     let mut ops = 0;
     let mut index = 0;
     while index < args.len() {
@@ -496,6 +1196,24 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::FullAccess { enabled: false };
                 ops += 1;
             }
+            "--inspect-bot-capabilities" | "--ask-bot-capability" => {
+                let ask = args[index] == "--ask-bot-capability";
+                let id = args.get(index + 1)
+                    .ok_or("Capability inspection requires an exact Bot ID.")?;
+                validate_ticket_id(id)?;
+                let question = if ask {
+                    let question = args.get(index + 2)
+                        .ok_or("Capability question is required.")?;
+                    if question.trim().is_empty() || question.len() > 400
+                        || question.starts_with("--") {
+                        return Err("Ask one bounded capability question.".into());
+                    }
+                    Some(question.clone())
+                } else { None };
+                command = Command::InspectBotCapabilities { bot_id: id.clone(), question };
+                ops += 1;
+                index += if ask { 2 } else { 1 };
+            }
             "--export-bots" => {
                 let value = args
                     .get(index + 1)
@@ -503,6 +1221,31 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ExportBots { path: PathBuf::from(value) };
                 ops += 1;
                 index += 1;
+            }
+            "--create-orchestration" => {
+                let file=args.get(index+1).ok_or("--create-orchestration requires a Team JSON file.")?;
+                command=Command::CreateOrchestration {path:PathBuf::from(file)};
+                ops+=1;index+=1;
+            }
+            "--configure-team-roles" => {
+                let id=args.get(index+1).ok_or("--configure-team-roles requires a Team ID.")?;
+                validate_orchestration_id(id)?;
+                let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
+                let file=args.get(index+3).ok_or("--configure-team-roles requires JSON file.")?;
+                command=Command::ConfigureTeamRoles {
+                    orchestration_id:id.clone(),expected_revision:parse_positive_revision(revision)?,
+                    path:PathBuf::from(file),
+                };
+                ops+=1;index+=3;
+            }
+            "--enable-orchestration" => {
+                let id=args.get(index+1).ok_or("--enable-orchestration requires Team ID.")?;
+                validate_orchestration_id(id)?;
+                let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
+                command=Command::EnableOrchestration {
+                    orchestration_id:id.clone(),expected_revision:parse_positive_revision(revision)?,
+                };
+                ops+=1;index+=2;
             }
             "--preview-orchestrations" => {
                 let value = args.get(index + 1)
@@ -529,9 +1272,448 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::InspectOrchestrations;
                 ops += 1;
             }
+            "--inspect-delivery" => {
+                let id=args.get(index+1).ok_or("--inspect-delivery requires a Ticket ID.")?;
+                validate_ticket_id(id)?;
+                command=Command::InspectDelivery { ticket_id:id.clone() };
+                ops+=1;index+=1;
+            }
+            "--inspect-team-strategy" => {
+                let id=args.get(index+1).ok_or("--inspect-team-strategy requires Team ID.")?;
+                validate_orchestration_id(id)?;
+                command=Command::InspectTeamStrategy {orchestration_id:id.clone()};
+                ops+=1;index+=1;
+            }
             "--list-tickets" => {
                 command = Command::ListTickets;
                 ops += 1;
+            }
+            "--list-ticket-activity" => {
+                let ticket_id=args.get(index+1)
+                    .ok_or("--list-ticket-activity needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let before_id=if args.get(index+2).map(String::as_str)==Some("--before") {
+                    let value=args.get(index+3)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    let cursor=value.parse::<i64>().ok().filter(|id|*id>0)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    index+=2;
+                    Some(cursor)
+                } else {None};
+                command=Command::ListTicketActivity{
+                    ticket_id:ticket_id.clone(),before_id,
+                };
+                ops+=1;
+                index+=1;
+            }
+            "--list-recovery-inbox" => {
+                command = Command::ListRecoveryInbox;
+                ops += 1;
+            }
+            "--list-unresolved-effects" => {
+                let (before_updated_at,before_ticket_id,before_effect_key) =
+                    if args.get(index+1).map(String::as_str)==Some("--before") {
+                        let at=args.get(index+2)
+                            .ok_or("--before needs timestamp, Ticket ID and effect key.")?
+                            .parse::<i64>().ok().filter(|at| *at>0)
+                            .ok_or("Unresolved effect timestamp must be positive.")?;
+                        let ticket=args.get(index+3)
+                            .ok_or("--before needs a Ticket ID.")?;
+                        validate_ticket_id(ticket)?;
+                        let effect=args.get(index+4)
+                            .ok_or("--before needs an effect key.")?;
+                        validate_effect_key(effect)?;
+                        index+=4;
+                        (Some(at),Some(ticket.clone()),Some(effect.clone()))
+                    } else {(None,None,None)};
+                command=Command::ListUnresolvedEffects {
+                    before_updated_at,before_ticket_id,before_effect_key,
+                };
+                ops+=1;
+            }
+            "--list-review-inbox" => {
+                let (before_updated_at, before_id) =
+                    if args.get(index + 1).map(String::as_str) == Some("--before") {
+                        let updated_at = args.get(index + 2)
+                            .ok_or("--before needs a positive millisecond timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("Review cursor timestamp must be positive.")?;
+                        let id = args.get(index + 3)
+                            .ok_or("--before needs the previous page's last Ticket ID.")?;
+                        validate_ticket_id(id)?;
+                        index += 3;
+                        (Some(updated_at), Some(id.clone()))
+                    } else { (None, None) };
+                command = Command::ListReviewInbox { before_updated_at, before_id };
+                ops += 1;
+            }
+            "--list-demands" => {
+                let state = args.get(index + 1)
+                    .ok_or_else(|| format!("--list-demands needs a native Ticket state or all.\n\n{}", help()))?;
+                if !matches!(state.as_str(), "all" | "queued" | "running" |
+                    "waiting_approval" | "waiting_review" | "blocked" | "completed" |
+                    "failed" | "stopped" | "interrupted" | "inconclusive") {
+                    return Err("Choose an exact native Ticket state or all.".into());
+                }
+                let (before_updated_at, before_id) =
+                    if args.get(index + 2).map(String::as_str) == Some("--before") {
+                        let timestamp = args.get(index + 3)
+                            .ok_or("--before needs a positive millisecond timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("--before needs a positive millisecond timestamp.")?;
+                        let cursor_id = args.get(index + 4)
+                            .ok_or("--before needs the previous page's last Ticket ID.")?;
+                        validate_ticket_id(cursor_id)?;
+                        index += 3;
+                        (Some(timestamp), Some(cursor_id.clone()))
+                    } else { (None, None) };
+                let mut search_query = None;
+                let mut project_id = None;
+                loop {
+                    match args.get(index + 2).map(String::as_str) {
+                        Some("--search") if search_query.is_none() => {
+                            let query = args.get(index + 3)
+                                .ok_or("--search needs a 1 to 128 byte objective fragment.")?;
+                            if query.trim().is_empty() || query.len() > 128
+                                || query.starts_with("--") || query.chars().any(char::is_control) {
+                                return Err("--search needs 1 to 128 non-control UTF-8 bytes.".into());
+                            }
+                            search_query = Some(query.clone());
+                            index += 2;
+                        }
+                        Some("--project") if project_id.is_none() => {
+                            let value = args.get(index + 3)
+                                .ok_or("--project needs an exact admitted native Project ID.")?;
+                            validate_project_id(value)?;
+                            project_id = Some(value.clone());
+                            index += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                command = Command::ListDemands {
+                    state: state.clone(), before_updated_at, before_id,
+                    search_query, project_id,
+                };
+                ops += 1;
+                index += 1;
+            }
+            "--list-team-demands" => {
+                let id = args.get(index + 1)
+                    .ok_or_else(|| format!("--list-team-demands needs a Team ID and state.\n\n{}", help()))?;
+                validate_orchestration_id(id)?;
+                let state = args.get(index + 2)
+                    .ok_or_else(|| format!("--list-team-demands needs a state.\n\n{}", help()))?;
+                if !matches!(state.as_str(), "all" | "queued" | "running" |
+                    "waiting_approval" | "waiting_review" | "blocked" | "completed" |
+                    "failed" | "stopped" | "interrupted" | "inconclusive") {
+                    return Err("Choose an exact native Ticket state or all.".into());
+                }
+                let (before_updated_at, before_id) =
+                    if args.get(index + 3).map(String::as_str) == Some("--before") {
+                        let timestamp = args.get(index + 4)
+                            .ok_or("--before needs a positive millisecond timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("--before needs a positive millisecond timestamp.")?;
+                        let cursor_id = args.get(index + 5)
+                            .ok_or("--before needs the previous page's last Ticket ID.")?;
+                        validate_ticket_id(cursor_id)?;
+                        index += 3;
+                        (Some(timestamp), Some(cursor_id.clone()))
+                    } else { (None, None) };
+                let mut search_query = None;
+                let mut project_id = None;
+                loop {
+                    match args.get(index + 3).map(String::as_str) {
+                        Some("--search") if search_query.is_none() => {
+                            let query = args.get(index + 4)
+                                .ok_or("--search needs a bounded objective fragment.")?;
+                            if query.is_empty() || query.len() > 128 || query.trim() != query
+                                || query.starts_with("--") || query.chars().any(char::is_control) {
+                                return Err("--search requires a nonempty, bounded literal fragment.".into());
+                            }
+                            search_query = Some(query.clone());
+                            index += 2;
+                        }
+                        Some("--project") if project_id.is_none() => {
+                            let value = args.get(index + 4)
+                                .ok_or("--project needs an exact admitted native Project ID.")?;
+                            validate_project_id(value)?;
+                            project_id = Some(value.clone());
+                            index += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                command = Command::ListTeamDemands {
+                    orchestration_id: id.clone(), state: state.clone(),
+                    before_updated_at, before_id, search_query, project_id,
+                };
+                ops += 1;
+                index += 2;
+            }
+            "--inspect-team-roster" => {
+                let value=args.get(index+1)
+                    .ok_or_else(||format!("--inspect-team-roster needs a Team ID.\n\n{}",help()))?;
+                validate_orchestration_id(value)?;
+                command=Command::InspectTeamRoster{orchestration_id:value.clone()};
+                ops+=1;
+                index+=1;
+            }
+            "--inspect-team-readiness" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-team-readiness needs a Team ID.\n\n{}", help()))?;
+                validate_orchestration_id(value)?;
+                command = Command::InspectTeamReadiness { orchestration_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--preflight-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--preflight-demand needs Team ID, mode and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let mode = args.get(index + 2)
+                    .ok_or("--preflight-demand needs direct or coordinated mode.")?;
+                let coordinated = match mode.as_str() {
+                    "direct" => false,
+                    "coordinated" => true,
+                    _ => return Err("Choose direct or coordinated Demand preflight mode.".into()),
+                };
+                let path = args.get(index + 3)
+                    .ok_or("--preflight-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::PreflightDemand {
+                    orchestration_id:orchestration_id.clone(),
+                    coordinated, objective_file:PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--inspect-source-health" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-source-health needs a source ID.")?;
+                validate_ticket_id(id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                command = Command::InspectSourceHealth { source_id: id.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--inspect-source-decisions" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-source-decisions needs a source ID.")?;
+                validate_ticket_id(id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                let mut paginated = false;
+                let mut before_sequence = None;
+                let mut before_delivery_id = None;
+                match args.get(index + 2).map(String::as_str) {
+                    Some("--page") => {
+                        paginated = true;
+                        index += 1;
+                    }
+                    Some("--before") => {
+                        let sequence = args.get(index + 3)
+                            .ok_or("--before requires a positive source sequence and delivery ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("--before requires a positive source sequence.")?;
+                        let delivery_id = args.get(index + 4)
+                            .ok_or("--before requires the previous page's delivery ID.")?;
+                        validate_ticket_id(delivery_id)?;
+                        before_sequence = Some(sequence);
+                        before_delivery_id = Some(delivery_id.clone());
+                        paginated = true;
+                        index += 3;
+                    }
+                    _ => {}
+                }
+                command = Command::InspectSourceDecisions {
+                    source_id: id.clone(), paginated, before_sequence, before_delivery_id,
+                };
+                ops += 1;
+                index += 1;
+            }
+            "--observe-source" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
+                validate_ticket_id(value).map_err(|_| "Provide a bounded alphanumeric source ID.".to_owned())?;
+                command = Command::ObserveSource { source_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--observe-team-sources" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-team-sources needs a Team ID.\n\n{}", help()))?;
+                validate_orchestration_id(value)?;
+                command = Command::ObserveTeamSources { orchestration_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--observe-check-run" => {
+                let source_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-check-run needs a source ID and Check Run ID.\n\n{}", help()))?;
+                validate_ticket_id(source_id)
+                    .map_err(|_| "Provide a bounded alphanumeric source ID.".to_owned())?;
+                let raw_id = args.get(index + 2)
+                    .ok_or("--observe-check-run needs a positive Check Run ID.")?;
+                let check_run_id = raw_id.parse::<i64>().ok().filter(|id| *id > 0)
+                    .ok_or("--observe-check-run needs a positive Check Run ID.")?;
+                command = Command::ObserveCheckRun { source_id: source_id.clone(), check_run_id };
+                ops += 1;
+                index += 2;
+            }
+            "--queue-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--queue-demand needs a Team ID, request key and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let request_key = args.get(index + 2)
+                    .ok_or("--queue-demand needs a stable request key.")?;
+                if request_key.is_empty() || request_key.len() > 128
+                    || !request_key.bytes().all(|c| c.is_ascii_alphanumeric()
+                        || matches!(c, b'-' | b'_' | b'.')) {
+                    return Err("Provide a bounded alphanumeric request key.".into());
+                }
+                let path = args.get(index + 3)
+                    .ok_or("--queue-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::QueueDemand {
+                    orchestration_id: orchestration_id.clone(),
+                    request_key: request_key.clone(), objective_file: PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--inspect-ticket-source" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket-source needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::InspectTicketSource { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--link-source-thread" => {
+                let source_id=args.get(index+1)
+                    .ok_or("--link-source-thread needs a source ID, Ticket ID and thread key.")?;
+                let ticket_id=args.get(index+2)
+                    .ok_or("--link-source-thread needs a Ticket ID.")?;
+                let subject_key=args.get(index+3)
+                    .ok_or("--link-source-thread needs issue:123 or pull:123.")?;
+                validate_ticket_id(source_id).map_err(
+                    |_|"Provide a bounded source ID.".to_owned()
+                )?;
+                validate_ticket_id(ticket_id)?;
+                if !crate::superagent::events::valid_thread_key(subject_key) {
+                    return Err("Provide an exact issue:123 or pull:123 thread key.".into());
+                }
+                command=Command::LinkSourceThread {
+                    source_id:source_id.clone(),ticket_id:ticket_id.clone(),
+                    subject_key:subject_key.clone(),
+                };
+                ops+=1;
+                index+=3;
+            }
+            "--link-issue-pull" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--link-issue-pull needs a source ID, Ticket ID, issue key and PR key.")?;
+                let ticket_id = args.get(index + 2)
+                    .ok_or("--link-issue-pull needs a Ticket ID.")?;
+                let issue_key = args.get(index + 3)
+                    .ok_or("--link-issue-pull needs an exact issue:123 key.")?;
+                let pull_key = args.get(index + 4)
+                    .ok_or("--link-issue-pull needs an exact pull:123 key.")?;
+                validate_ticket_id(source_id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                validate_ticket_id(ticket_id)?;
+                if !issue_key.starts_with("issue:")
+                    || !crate::superagent::events::valid_thread_key(issue_key)
+                    || !pull_key.starts_with("pull:")
+                    || !crate::superagent::events::valid_thread_key(pull_key)
+                {
+                    return Err("Provide exact issue:123 and pull:123 keys.".into());
+                }
+                command = Command::LinkIssuePull {
+                    source_id: source_id.clone(),
+                    ticket_id: ticket_id.clone(),
+                    issue_key: issue_key.clone(),
+                    pull_key: pull_key.clone(),
+                };
+                ops += 1;
+                index += 4;
+            }
+            "--unlink-source-thread" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--unlink-source-thread needs source ID, Ticket ID and exact thread key.")?;
+                let ticket_id = args.get(index + 2)
+                    .ok_or("--unlink-source-thread needs a Ticket ID.")?;
+                let subject_key = args.get(index + 3)
+                    .ok_or("--unlink-source-thread needs an exact issue:123 or pull:123 key.")?;
+                validate_ticket_id(source_id).map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                validate_ticket_id(ticket_id)?;
+                if !crate::superagent::events::valid_thread_key(subject_key) {
+                    return Err("Provide an exact issue:123 or pull:123 thread key.".into());
+                }
+                command = Command::UnlinkSourceThread {
+                    source_id:source_id.clone(),ticket_id:ticket_id.clone(),
+                    subject_key:subject_key.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--inspect-ticket-effects" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(value)?;
+                let mut before_created_at = None;
+                let mut before_key = None;
+                let mut unresolved_only = false;
+                index += 1;
+                while let Some(flag) = args.get(index + 1) {
+                    match flag.as_str() {
+                        "--unresolved-only" if !unresolved_only => {
+                            unresolved_only = true;
+                            index += 1;
+                        }
+                        "--before" if before_created_at.is_none() => {
+                            let timestamp = args.get(index + 2)
+                                .ok_or("--before requires a positive millisecond timestamp and effect key.")?;
+                            let effect_key = args.get(index + 3)
+                                .ok_or("--before requires the previous page's last effect key.")?;
+                            let created_at = timestamp.parse::<i64>()
+                                .map_err(|_| "Provide a positive effect receipt timestamp.")?;
+                            if created_at <= 0 {
+                                return Err("Provide a positive effect receipt timestamp.".into());
+                            }
+                            validate_effect_key(effect_key)?;
+                            before_created_at = Some(created_at);
+                            before_key = Some(effect_key.clone());
+                            index += 3;
+                        }
+                        _ => break,
+                    }
+                }
+                command = Command::InspectTicketEffects {
+                    ticket_id: value.clone(), before_created_at, before_key, unresolved_only,
+                };
+                ops += 1;
+            }
+            "--inspect-demand-plan" => {
+                let ticket_id=args.get(index+1)
+                    .ok_or("--inspect-demand-plan needs the exact root Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                command=Command::InspectDemandPlan{ticket_id:ticket_id.clone()};
+                ops+=1;
+                index+=1;
+            }
+            "--inspect-ticket-graph" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket-graph needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::InspectTicketGraph { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
             }
             "--inspect-ticket" => {
                 let value = args.get(index + 1)
@@ -570,12 +1752,193 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--disable-orchestration" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--disable-orchestration needs an orchestration ID.\n\n{}", help()))?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--disable-orchestration needs an expected revision.\n\n{}", help()))?;
+                command = Command::DisableOrchestration {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
+            "--rename-orchestration" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--rename-orchestration needs a Team ID, revision and new name.\\n\\n{}", help()))?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--rename-orchestration needs an expected policy revision.")?;
+                let name = args.get(index + 3)
+                    .ok_or("--rename-orchestration needs a quoted new Team name.")?;
+                if name.is_empty() || name.trim() != name || name.starts_with("--")
+                    || name.len()>120 || name.chars().any(char::is_control) {
+                    return Err("Provide a bounded Team name (quote names with spaces).".into());
+                }
+                command = Command::RenameOrchestration {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?, name: name.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--quarantine-detached-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-detached-ticket needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-detached-ticket needs a Ticket revision.")?;
+                command = Command::QuarantineDetachedTicket {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_positive_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
+            "--quarantine-pending-effect" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-pending-effect needs a Ticket ID, revision, effect key and SHA-256.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-pending-effect needs an expected Ticket revision.")?;
+                let effect_key = args.get(index + 3)
+                    .ok_or("--quarantine-pending-effect needs an exact effect key.")?;
+                validate_effect_key(effect_key)?;
+                let payload_sha256 = args.get(index + 4)
+                    .ok_or("--quarantine-pending-effect needs the exact payload SHA-256.")?;
+                if payload_sha256.len() != 64
+                    || !payload_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return Err("Provide the exact lowercase SHA-256 from the receipt.".into());
+                }
+                command = Command::QuarantinePendingEffect {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    effect_key: effect_key.clone(),
+                    payload_sha256: payload_sha256.clone(),
+                };
+                ops += 1;
+                index += 4;
+            }
+            "--quarantine-terminal-orphan" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-terminal-orphan needs a Ticket revision.")?;
+                command = Command::QuarantineTerminalOrphan {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_positive_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
+            "--retry-ticket" | "--inspect-retry-request" => {
+                let inspect=args[index]=="--inspect-retry-request";
+                let ticket_id=args.get(index+1).ok_or("Headless retry requires a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision=args.get(index+2).ok_or("Headless retry requires a Ticket revision.")?;
+                let expected_revision=parse_ticket_revision(revision)?;
+                if expected_revision == 0 {
+                    return Err("Headless retry requires a positive Ticket revision.".into());
+                }
+                command=if inspect {
+                    Command::InspectRetryRequest {ticket_id:ticket_id.clone(),expected_revision}
+                } else {
+                    Command::RetryTicket {ticket_id:ticket_id.clone(),expected_revision}
+                };
+                ops+=1;
+                index+=2;
+            }
+            "--stop-ticket-at-revision" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--stop-ticket-at-revision needs a Ticket ID and expected revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--stop-ticket-at-revision needs an expected Ticket revision.")?;
+                command = Command::StopTicketAtRevision {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--stop-ticket" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
                 validate_ticket_id(ticket_id)?;
                 command = Command::StopTicket { ticket_id: ticket_id.clone() };
                 ops += 1;
+                index += 1;
+            }
+            "--verify-draft-pr-target" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--verify-draft-pr-target needs Ticket ID, revision, repository, head and base.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--verify-draft-pr-target needs an expected Ticket revision.")?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let repository = args.get(index + 3)
+                    .ok_or("--verify-draft-pr-target needs an owner/name repository.")?;
+                crate::superagent::effects::validate_repository(repository)?;
+                let head = args.get(index + 4)
+                    .ok_or("--verify-draft-pr-target needs a pushed head branch.")?;
+                let base = args.get(index + 5)
+                    .ok_or("--verify-draft-pr-target needs a base branch.")?;
+                if head.is_empty() || base.is_empty() || head == base
+                    || head.len() > 200 || base.len() > 200
+                    || head.starts_with('-') || base.starts_with('-')
+                    || head.chars().any(char::is_control)
+                    || base.chars().any(char::is_control)
+                {
+                    return Err("Choose distinct bounded head and base branches.".into());
+                }
+                command = Command::VerifyDraftPrTarget {
+                    ticket_id: ticket_id.clone(), expected_revision,
+                    repository: repository.clone(), head: head.clone(), base: base.clone(),
+                };
+                ops += 1;
+                index += 5;
+            }
+            "--issue-comment" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--issue-comment needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--issue-comment needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let repository = args.get(index + 3)
+                    .ok_or_else(|| format!("--issue-comment needs an owner/name repository.\n\n{}", help()))?;
+                crate::superagent::effects::validate_repository(repository)?;
+                let issue = args.get(index + 4)
+                    .ok_or_else(|| format!("--issue-comment needs an issue number.\n\n{}", help()))?;
+                let issue_number = parse_issue_number(issue)?;
+                let effect_key = args.get(index + 5)
+                    .ok_or_else(|| format!("--issue-comment needs a stable effect key.\n\n{}", help()))?;
+                crate::superagent::effects::validate_effect_key(effect_key)?;
+                let comment = args.get(index + 6)
+                    .ok_or_else(|| format!("--issue-comment needs the exact comment body.\n\n{}", help()))?;
+                command = Command::IssueComment {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision,
+                    repository: repository.clone(),
+                    issue_number,
+                    effect_key: effect_key.clone(),
+                    comment: comment.clone(),
+                    confirmation_hash: None,
+                };
+                ops += 1;
+                index += 6;
+            }
+            "--confirm-issue-comment" => {
+                if confirmation_hash.is_some() {
+                    return Err("Provide --confirm-issue-comment only once.".into());
+                }
+                let value = args.get(index + 1)
+                    .ok_or_else(|| "--confirm-issue-comment needs the reviewed SHA-256 value.".to_string())?;
+                confirmation_hash = Some(parse_confirmation_hash(value)?);
                 index += 1;
             }
             "--sync-bots" => {
@@ -609,6 +1972,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             help()
         ));
     }
+    if let Some(confirmation_hash) = confirmation_hash {
+        match &mut command {
+            Command::IssueComment { confirmation_hash: value, .. } => {
+                *value = Some(confirmation_hash);
+            }
+            _ => return Err("--confirm-issue-comment only works with --issue-comment.".into()),
+        }
+    }
     if matches!(command, Command::SyncBots { .. }) && name.is_some() {
         return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
     }
@@ -627,11 +1998,55 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     Ok((command, import))
 }
 
+/// Parse bounded operator-owned JSON before passing it to native Team validation.
+fn read_bounded_json_input<T: serde::de::DeserializeOwned>(
+    path:&std::path::Path,
+)->Result<T,String> {
+    use std::io::Read;
+    let file=std::fs::File::open(path)
+        .map_err(|e|format!("Cannot open local Team JSON: {e}"))?;
+    let mut data=Vec::new();
+    file.take(64*1024+1).read_to_end(&mut data)
+        .map_err(|e|format!("Cannot read local Team JSON: {e}"))?;
+    if data.len()>64*1024 {
+        return Err("Team JSON exceeds the 64 KiB input limit.".into());
+    }
+    serde_json::from_slice(&data).map_err(|e|format!("Invalid Team JSON: {e}"))
+}
+
 fn validate_ticket_id(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128
         || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
     {
         return Err("Provide a bounded alphanumeric ticket ID.".into());
+    }
+    Ok(())
+}
+
+fn validate_orchestration_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded alphanumeric orchestration ID.".into());
+    }
+    Ok(())
+}
+
+fn validate_project_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded exact native Project ID.".into());
+    }
+    Ok(())
+}
+
+fn validate_effect_key(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric()
+            || matches!(c, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("Provide the bounded effect key from nextCursor.".into());
     }
     Ok(())
 }
@@ -645,15 +2060,42 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     Ok(revision)
 }
 
+// Team policy changes and quarantine transitions require a persisted
+// revision; ticket creation itself may legitimately begin at revision zero.
+fn parse_positive_revision(value: &str) -> Result<i64, String> {
+    let revision = parse_ticket_revision(value)?;
+    if revision == 0 {
+        return Err("This headless transition requires a positive persisted revision.".into());
+    }
+    Ok(revision)
+}
+
+fn parse_issue_number(value: &str) -> Result<i64, String> {
+    let number = value.parse::<i64>()
+        .map_err(|_| "Provide a positive GitHub issue number.".to_string())?;
+    if number <= 0 {
+        return Err("Provide a positive GitHub issue number.".into());
+    }
+    Ok(number)
+}
+
+fn parse_confirmation_hash(value: &str) -> Result<String, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Provide the 64-character SHA-256 value from the issue-comment preview.".into());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--inspect-bot-capabilities <bot-id> | --ask-bot-capability <bot-id> <question>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --verify-draft-pr-target <id> <revision> <owner/name> <head> <base> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
 under `xvfb-run -a pandacode serve …` (a display is required to start, none is used).
 
+  --help, -h             Show this help and exit.
   --sign-in              First run: sign in with the GitHub device flow, enable hosting, then serve.
   --sign-out             Forget the Connect sign-in on this server and exit.
   --full-access          Let remote devices pick Full access (no approvals); exits after saving.
@@ -662,6 +2104,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --import-bots <file>   Create/update bots, channels, schedules and rules from a JSON file
                          (docs/headless.md), then serve. Re-applying a file converges.
   --export-bots <file>   Write every bot's configuration (no secrets) to a JSON file and exit.
+  --inspect-bot-capabilities <bot-id>
+                         Read a live sanitized bot capability profile as JSON; exit.
+  --ask-bot-capability <bot-id> <question>
+                         Return a read-only capability answer as JSON; no work runs.
   --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
                          import once, report results and exit (does not start serving).
   --preview-orchestrations <file>
@@ -673,13 +2119,118 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Export portable SuperAgent presets without tickets or secrets; exit.
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
+  --inspect-team-strategy <id>
+                         Read immutable Team strategy and native capability limits.
+  --inspect-delivery <ticket-id>
+                         Inspect receipt-backed progress and sanitized local Git hashes;
+                         never claim actual delivery without test/CI/publication proof.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-ticket-activity <id> [--before <audit-id>]
+                         Page up to 100 redacted audit event metadata rows by ID.
+                         No private details or provider/restart actions are exposed.
+  --list-review-inbox [--before <ms> <ticket-id>]
+                         Page pending human/Council decisions across Teams using
+                         nextCursor; redact objectives; never approve; exit.
+  --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
+                         identify stale native runs and uncertain remote effects, read-only; exit.
+  --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>]
+                         Page pending/uncertain effect receipts across Tickets;
+                         no provider contact, replay or acknowledgment; exit.
+  --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
+                         Page the global native Demand queue across Teams, read-only and redacted.
+                         Search and admitted-project filters run before keyset pagination;
+  --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
+                         Page up to 200 native Demands for one Team and exact Ticket state
+                         (or all). Next page uses returned nextCursor; no private evidence
+                         or startup recovery; exit.
+  --inspect-team-roster <id>
+                         Inspect ordered native Team members, configured models, harnesses and
+                         assigned Skill IDs without provider admission or Library trust scanning.
+  --inspect-team-readiness <id>
+                         Inspect a Team's read-only native manual admission preflight;
+                         live sessions and policy must be rechecked on actual admission.
+  --preflight-demand <team-id> <direct|coordinated> <objective-file>
+                         Read-only check against bounded local objective; no Ticket or mandate
+                         is created, and any later admission rechecks native state.
+  --inspect-source-health <id>
+                         Inspect native source cursor, stored receipts and policy without
+                         GitHub access, writes or restart recovery; exit.
+  --inspect-source-decisions <id> [--page | --before <sequence> <delivery-id>]
+                         Read 50 source-scoped decisions. Legacy command returns an array;
+                         --page returns nextCursor, --before follows the exact keyset.
+                         No GitHub polling, startup recovery, worker admission or writes; exit.
+  --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
+                         No Auto, inferred task, webhook or external write.
+  --observe-team-sources <team-id>
+                         Observe each enabled GitHub Events source of a Team once.
+                         Off and Checks-only sources make no requests; failure is nonzero.
+  --observe-check-run <id> <check-run-id>
+                         Verify one completed GitHub Checks API result for an Observe source;
+                         record a durable receipt, never approve a Ticket or invoke Auto.
+  --queue-demand <team-id> <request-key> <objective-file>
+                         Persist a blocked, read-only manual Ticket from a local UTF-8 file
+                         (max 16 KiB). Does not grant tools or dispatch a provider.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
+  --inspect-ticket-graph <id>
+                         Inspect bounded native Ticket/attempt topology without task
+                         objectives, results, inferred subagents or Council verdicts; exit.
+  --inspect-ticket-effects <id>
+                         List up to 100 native effect receipt keys, payload digests and
+                         states; never replay or mark applied; exit.
+  --inspect-ticket-source <id>
+                          Read up to 50 verified linked source receipts without GitHub polling,
+                          task execution or startup recovery; exit.
+  --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>
+                         Attach local Ticket context with native policy checks,
+                         without GitHub access, effect grant or provider execution.
+  --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123>
+                         Associate the explicitly linked Issue with a PR in the same
+                         Team/repository, without remote authentication or grants; exit.
+  --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123>
+                         Revoke only this explicit Ticket/GitHub context link, retain immutable
+                         receipts and audit, without starting a worker or provider; exit.
   --accept-ticket <id> <revision>
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
-  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
+  --create-orchestration <file>
+                         Create an Off Team from bounded local JSON.
+  --configure-team-roles <id> <revision> <file>
+                         Edit future-only role policy using revision CAS and native guards.
+  --enable-orchestration <id> <revision>
+                         Explicit Manual enable; never dispatch a provider.
+  --retry-ticket <id> <revision>
+                         Persist a read-only retry intent; live serve owns dispatch.
+  --inspect-retry-request <id> <revision>
+                         Inspect the native retry receipt without process recovery.
+  --stop-ticket <id>    Emergency revoke of a Ticket mandate without prior revision.
+  --stop-ticket-at-revision <id> <revision>
+                         Revoke only the observed Ticket revision; stale input cannot revoke.
+  --quarantine-detached-ticket <id> <revision>
+                         Revoke a running Ticket with one proven missing native session;
+                         mark pending effects uncertain without provider replay.
+  --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256>
+                         Mark one exact pending receipt uncertain with durable audit;
+                         no provider call, remote retry, or task completion.
+  --quarantine-terminal-orphan <id> <revision>
+                         Quarantine a running assignment on a terminal Ticket;
+                         revoke its mandate, preserve uncertain effects and never replay.
+  --disable-orchestration <id> <revision>
+                         Turn a Team Off and atomically revoke its mandates;
+                         live provider calls may finish but native authority stays revoked.
+  --verify-draft-pr-target <id> <revision> <owner/name> <head> <base>
+                         Read-only: verify the active Ticket worker checkout, clean local
+                         head, pushed remote SHA, repository and base branch. Never creates
+                         a PR, reserves an effect, or grants authorization.
+  --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
+                         Prepare one exact scoped GitHub issue comment, then confirm
+                         its SHA-256 on a second invocation; uncertain effects are reconciled.
+  --confirm-issue-comment <sha256>
+                         Required for the first authorized issue-comment dispatch.
+  --rename-orchestration <id> <revision> <name>
+                         Explicit local, revision-guarded Team rename only while disabled
+                         and all Tickets/effects are settled; does not change bots, roles
+                         or task authorization. Quote names with spaces."
         .into()
 }
 
@@ -694,6 +2245,170 @@ mod tests {
     /// The command half of a parse, for tests that don't care about the import path.
     fn parsed(flags: &str) -> Result<Command, String> {
         parse(&argv(flags)).map(|(command, _)| command)
+    }
+
+    #[test]
+    fn inspect_source_decisions_requires_one_bounded_read_only_operation() {
+        assert_eq!(parsed("--inspect-source-decisions source_123"),
+            Ok(Command::InspectSourceDecisions {
+                source_id:"source_123".into(), paginated:false,
+                before_sequence:None, before_delivery_id:None,
+            }));
+        assert_eq!(parsed("--inspect-source-decisions source_123 --page"),
+            Ok(Command::InspectSourceDecisions {
+                source_id:"source_123".into(), paginated:true,
+                before_sequence:None, before_delivery_id:None,
+            }));
+        assert_eq!(parsed("--inspect-source-decisions source_123 --before 200 receipt_123"),
+            Ok(Command::InspectSourceDecisions {
+                source_id:"source_123".into(), paginated:true,
+                before_sequence:Some(200), before_delivery_id:Some("receipt_123".into()),
+            }));
+        for invalid in [
+            "--inspect-source-decisions",
+            "--inspect-source-decisions ../private",
+            "--inspect-source-decisions source_123 --observe-source source_123",
+            "--inspect-source-decisions source_123 --stop-ticket ticket_1",
+            "--inspect-source-decisions source_123 --before",
+            "--inspect-source-decisions source_123 --before 0 receipt_123",
+            "--inspect-source-decisions source_123 --before 10",
+            "--inspect-source-decisions source_123 --before 10 ../private",
+            "--inspect-source-decisions source_123 --page --before 10 receipt_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+    }
+
+    #[test]
+    fn native_headless_team_admin_requires_bounded_explicit_inputs() {
+        assert_eq!(parsed("--create-orchestration team.json"),
+            Ok(Command::CreateOrchestration {path:PathBuf::from("team.json")}));
+        assert_eq!(parsed("--configure-team-roles team_1 2 roles.json"),
+            Ok(Command::ConfigureTeamRoles {
+                orchestration_id:"team_1".into(),expected_revision:2,
+                path:PathBuf::from("roles.json"),
+            }));
+        assert_eq!(parsed("--enable-orchestration team_1 2"),
+            Ok(Command::EnableOrchestration {
+                orchestration_id:"team_1".into(),expected_revision:2,
+            }));
+        for invalid in ["--create-orchestration","--configure-team-roles",
+            "--configure-team-roles team_1 2","--configure-team-roles ../bad 2 roles.json",
+            "--configure-team-roles team_1 nope roles.json",
+            "--configure-team-roles team_1 0 roles.json","--enable-orchestration",
+            "--enable-orchestration team_1 0",
+            "--enable-orchestration team_1 2 --disable-orchestration team_1 2"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn draft_pr_preflight_is_exact_revision_scoped_and_exclusive() {
+        assert_eq!(parsed("--verify-draft-pr-target ticket_1 3 acme/repo feature/main main"),
+            Ok(Command::VerifyDraftPrTarget {
+                ticket_id: "ticket_1".into(), expected_revision: 3,
+                repository: "acme/repo".into(), head: "feature/main".into(),
+                base: "main".into(),
+            }));
+        for invalid in [
+            "--verify-draft-pr-target",
+            "--verify-draft-pr-target ../unsafe 3 acme/repo feature main",
+            "--verify-draft-pr-target ticket_1 -1 acme/repo feature main",
+            "--verify-draft-pr-target ticket_1 3 bad-repository feature main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo main main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo --force main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature main --stop-ticket ticket_1",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature main --confirm-issue-comment aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn headless_delivery_inspection_is_read_only_and_ticket_scoped() {
+        assert_eq!(parsed("--inspect-delivery ticket_1"),
+            Ok(Command::InspectDelivery {ticket_id:"ticket_1".into()}));
+        for invalid in ["--inspect-delivery",
+            "--inspect-delivery ../escape",
+            "--inspect-delivery ticket_1 --stop-ticket ticket_1"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn headless_retry_flags_are_revision_bound_and_exclusive() {
+        assert_eq!(parsed("--retry-ticket ticket_1 2"),
+            Ok(Command::RetryTicket {ticket_id:"ticket_1".into(),expected_revision:2}));
+        assert_eq!(parsed("--inspect-retry-request ticket_1 2"),
+            Ok(Command::InspectRetryRequest {ticket_id:"ticket_1".into(),expected_revision:2}));
+        for invalid in ["--retry-ticket","--retry-ticket ticket_1",
+            "--retry-ticket ../escape 2","--retry-ticket ticket_1 0",
+            "--retry-ticket ticket_1 2 --stop-ticket ticket_1",
+            "--inspect-retry-request","--inspect-retry-request ticket_1 nope"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn detached_quarantine_requires_exact_revision_and_exclusive_cli_action() {
+        assert_eq!(parsed("--quarantine-detached-ticket ticket_123 7"),
+            Ok(Command::QuarantineDetachedTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 7,
+            }));
+        for invalid in [
+            "--quarantine-detached-ticket",
+            "--quarantine-detached-ticket ticket_123",
+            "--quarantine-detached-ticket ticket_123 0",
+            "--quarantine-detached-ticket ticket_123 nope",
+            "--quarantine-detached-ticket ../unsafe 7",
+            "--quarantine-detached-ticket ticket_123 7 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn pending_effect_quarantine_requires_exact_identity_and_exclusive_cli_action() {
+        let digest = "a".repeat(64);
+        let valid = format!("--quarantine-pending-effect ticket_123 8 github:comment:1 {digest}");
+        assert_eq!(parsed(&valid), Ok(Command::QuarantinePendingEffect {
+            ticket_id: "ticket_123".into(),
+            expected_revision: 8,
+            effect_key: "github:comment:1".into(),
+            payload_sha256: digest.clone(),
+        }));
+        for invalid in [
+            "--quarantine-pending-effect",
+            "--quarantine-pending-effect ticket_123 8",
+            "--quarantine-pending-effect ../unsafe 8 github:comment:1",
+            "--quarantine-pending-effect ticket_123 -1 github:comment:1",
+            "--quarantine-pending-effect ticket_123 8 ../effect",
+            "--quarantine-pending-effect ticket_123 8 github:comment:1 bad",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert!(parsed(&format!(
+            "--quarantine-pending-effect ticket_123 8 github:comment:1 {}",
+            "A".repeat(64),
+        )).is_err(), "noncanonical SHA-256 must be denied");
+        assert!(parsed(&format!("{valid} --stop-ticket ticket_123")).is_err());
+    }
+
+    #[test]
+    fn terminal_orphan_quarantine_requires_exact_revision_and_exclusive_cli_action() {
+        assert_eq!(parsed("--quarantine-terminal-orphan ticket_123 7"),
+            Ok(Command::QuarantineTerminalOrphan {
+                ticket_id: "ticket_123".into(), expected_revision: 7,
+            }));
+        for invalid in [
+            "--quarantine-terminal-orphan",
+            "--quarantine-terminal-orphan ticket_123",
+            "--quarantine-terminal-orphan ticket_123 0",
+            "--quarantine-terminal-orphan ticket_123 nope",
+            "--quarantine-terminal-orphan ../unsafe 7",
+            "--quarantine-terminal-orphan ticket_123 7 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -724,7 +2439,338 @@ mod tests {
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--inspect-team-strategy team_123"),
+            Ok(Command::InspectTeamStrategy {orchestration_id:"team_123".into()}));
+        for invalid in ["--inspect-team-strategy","--inspect-team-strategy ../unsafe",
+            "--inspect-team-strategy team_123 --stop-ticket ticket_123"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-ticket-activity ticket_123"),
+            Ok(Command::ListTicketActivity {
+                ticket_id:"ticket_123".into(),before_id:None,
+            }));
+        assert_eq!(parsed("--list-ticket-activity ticket_123 --before 55"),
+            Ok(Command::ListTicketActivity {
+                ticket_id:"ticket_123".into(),before_id:Some(55),
+            }));
+        for invalid in [
+            "--list-ticket-activity",
+            "--list-ticket-activity ../unsafe",
+            "--list-ticket-activity ticket_123 --before",
+            "--list-ticket-activity ticket_123 --before 0",
+            "--list-ticket-activity ticket_123 --before bad",
+            "--list-ticket-activity ticket_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox {
+            before_updated_at: None, before_id: None,
+        }));
+        assert_eq!(parsed("--list-review-inbox --before 12345 review_001"),
+            Ok(Command::ListReviewInbox {
+                before_updated_at: Some(12345), before_id: Some("review_001".into()),
+            }));
+        for invalid in [
+            "--list-review-inbox --before",
+            "--list-review-inbox --before 0 review_001",
+            "--list-review-inbox --before -1 review_001",
+            "--list-review-inbox --before 12345 ../private",
+            "--list-review-inbox --before 12345",
+            "--list-review-inbox --before 12345 review_001 --stop-ticket review_001",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
+        assert_eq!(parsed("--list-unresolved-effects"), Ok(Command::ListUnresolvedEffects {
+            before_updated_at:None,before_ticket_id:None,before_effect_key:None,
+        }));
+        assert_eq!(parsed("--list-unresolved-effects --before 1000 ticket_1 github:issue:42"),
+            Ok(Command::ListUnresolvedEffects {
+                before_updated_at:Some(1000),before_ticket_id:Some("ticket_1".into()),
+                before_effect_key:Some("github:issue:42".into()),
+            }));
+        for invalid in [
+            "--list-unresolved-effects --before",
+            "--list-unresolved-effects --before 0 ticket_1 github:issue:42",
+            "--list-unresolved-effects --before 1000 ../ticket github:issue:42",
+            "--list-unresolved-effects --before 1000 ticket_1 ../effect",
+            "--list-unresolved-effects --before 1000 ticket_1",
+            "--list-unresolved-effects --stop-ticket ticket_1",
+            "--list-unresolved-effects --before 1000 ticket_1 github:issue:42 --before 999 ticket_1 github:issue:41",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--inspect-demand-plan ticket_123"),
+            Ok(Command::InspectDemandPlan { ticket_id: "ticket_123".into() }));
+        for invalid in ["--inspect-demand-plan", "--inspect-demand-plan ../outside",
+                        "--inspect-demand-plan ticket_123 --stop-ticket ticket_123"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
+        assert_eq!(parsed("--inspect-source-health source_123"),
+            Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
+        for invalid in ["--inspect-source-health", "--inspect-source-health ../private",
+                        "--inspect-source-health source_123 --observe-source source_123"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
+        assert_eq!(parsed("--list-demands all"),
+            Ok(Command::ListDemands {
+                state:"all".into(),before_updated_at:None,before_id:None,search_query:None,project_id:None,
+            }));
+        assert_eq!(parsed("--list-demands blocked --before 2000 ticket_099 --search needle"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_099".into()),search_query:Some("needle".into()),project_id:None,
+            }));
+        for invalid in [
+            "--list-demands", "--list-demands ALL", "--list-demands ../unsafe",
+            "--list-demands blocked --search", "--list-demands blocked --search --stop-ticket",
+            "--list-demands blocked --before", "--list-demands blocked --before 0 ticket_099",
+            "--list-demands blocked --before 2000 ../escape",
+            "--list-demands blocked --search needle --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-team-demands team_123 blocked"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:None,before_id:None,search_query:None,project_id:None,
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 all"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"all".into(),
+                before_updated_at:None,before_id:None,search_query:None,project_id:None,
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),search_query:None,project_id:None,
+            }));
+        for invalid in [
+            "--list-team-demands team_123 blocked --before",
+            "--list-team-demands team_123 blocked --before 2",
+            "--list-team-demands team_123 blocked --before 0 ticket_099",
+            "--list-team-demands team_123 blocked --before -1 ticket_099",
+            "--list-team-demands team_123 blocked --before nope ticket_099",
+            "--list-team-demands team_123 blocked --before 2000 ../unsafe",
+            "--list-team-demands team_123 blocked --before 2000 ticket_099 --stop-ticket t",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--list-team-demands team_123 blocked --search retry"),
+            Ok(Command::ListTeamDemands { orchestration_id:"team_123".into(),
+                state:"blocked".into(),before_updated_at:None,before_id:None,
+                search_query:Some("retry".into()),project_id:None }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099 --search retry"),
+            Ok(Command::ListTeamDemands { orchestration_id:"team_123".into(),
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_099".into()),search_query:Some("retry".into()),project_id:None }));
+        assert!(parsed("--list-team-demands team_123 blocked --search").is_err());
+        assert!(parsed("--list-team-demands team_123 blocked --search --stop-ticket").is_err());
+        assert!(parsed("--list-team-demands").is_err());
+        assert!(parsed("--list-team-demands team_123").is_err());
+        assert!(parsed("--list-team-demands team_123 BLOCKED").is_err());
+        assert!(parsed("--list-team-demands ../unsafe running").is_err());
+        assert!(parsed("--list-team-demands team_123 running --stop-ticket task").is_err());
+
+        assert_eq!(parsed("--list-demands blocked --project archived --search needle"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:None,before_id:None,
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        assert_eq!(parsed("--list-demands blocked --before 2000 ticket_099 --search needle --project archived"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_099".into()),
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099 --project archived --search needle"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        for invalid in [
+            "--list-demands blocked --project",
+            "--list-demands blocked --project ../outside",
+            "--list-demands blocked --project --search private",
+            "--list-demands blocked --project archived --project another",
+            "--list-demands blocked --project archived --stop-ticket ticket_123",
+            "--list-team-demands team_123 blocked --project",
+            "--list-team-demands team_123 blocked --project ../outside",
+            "--list-team-demands team_123 blocked --project archived --project another",
+            "--list-team-demands team_123 blocked --project archived --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--inspect-team-roster team_123"),
+            Ok(Command::InspectTeamRoster{orchestration_id:"team_123".into()}));
+        for invalid in [
+            "--inspect-team-roster",
+            "--inspect-team-roster ../unsafe",
+            "--inspect-team-roster team_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(),"{invalid}"); }
+        assert_eq!(parsed("--preflight-demand team_123 direct objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(),coordinated:false,
+                objective_file:PathBuf::from("objective.txt"),
+            }));
+        assert_eq!(parsed("--preflight-demand team_123 coordinated objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(),coordinated:true,
+                objective_file:PathBuf::from("objective.txt"),
+            }));
+        for invalid in [
+            "--preflight-demand",
+            "--preflight-demand ../unsafe direct objective.txt",
+            "--preflight-demand team_123 automatic objective.txt",
+            "--preflight-demand team_123 direct",
+            "--preflight-demand team_123 direct --stop-ticket",
+            "--preflight-demand team_123 direct objective.txt --stop-ticket ticket_1",
+        ] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+        assert_eq!(parsed("--inspect-team-readiness team_123"),
+            Ok(Command::InspectTeamReadiness { orchestration_id: "team_123".into() }));
+        assert!(parsed("--inspect-team-readiness").is_err());
+        assert!(parsed("--inspect-team-readiness ../other").is_err());
+        assert!(parsed("--inspect-team-readiness team_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--observe-source source_123"),
+            Ok(Command::ObserveSource { source_id: "source_123".into() }));
+        assert!(parsed("--observe-source").is_err());
+        assert!(parsed("--observe-source ../untrusted").is_err());
+        assert!(parsed("--observe-source source_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--observe-team-sources team_123"),
+            Ok(Command::ObserveTeamSources { orchestration_id:"team_123".into() }));
+        for invalid in [
+            "--observe-team-sources",
+            "--observe-team-sources ../unsafe",
+            "--observe-team-sources team_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--observe-check-run source_123 456"),
+            Ok(Command::ObserveCheckRun { source_id:"source_123".into(), check_run_id:456 }));
+        for invalid in [
+            "--observe-check-run",
+            "--observe-check-run source_123",
+            "--observe-check-run ../outside 456",
+            "--observe-check-run source_123 0",
+            "--observe-check-run source_123 -1",
+            "--observe-check-run source_123 nope",
+            "--observe-check-run source_123 9223372036854775808",
+            "--observe-check-run source_123 456 --stop-ticket task",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--queue-demand team_123 request.1 /tmp/objective.txt"),
+            Ok(Command::QueueDemand {
+                orchestration_id:"team_123".into(), request_key:"request.1".into(),
+                objective_file:PathBuf::from("/tmp/objective.txt"),
+            }));
+        for invalid in [
+            "--queue-demand", "--queue-demand team_123",
+            "--queue-demand team_123 key",
+            "--queue-demand ../other key /tmp/objective.txt",
+            "--queue-demand team_123 ../key /tmp/objective.txt",
+            "--queue-demand team_123 key --stop-ticket",
+            "--queue-demand team_123 key /tmp/objective.txt --stop-ticket ticket",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--inspect-ticket-source ticket_123"),
+            Ok(Command::InspectTicketSource { ticket_id: "ticket_123".into() }));
+        assert!(parsed("--inspect-ticket-source").is_err());
+        assert!(parsed("--inspect-ticket-source ../unsafe").is_err());
+        assert!(parsed("--inspect-ticket-source ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--link-source-thread source_123 ticket_123 issue:42"),
+            Ok(Command::LinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"issue:42".into(),
+            }));
+        for invalid in [
+            "--link-source-thread",
+            "--link-source-thread source_123",
+            "--link-source-thread source_123 ticket_123",
+            "--link-source-thread ../bad ticket_123 issue:42",
+            "--link-source-thread source_123 ticket_123 issue:0",
+            "--link-source-thread source_123 ticket_123 issue:42 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+        assert_eq!(parsed("--link-issue-pull source_123 ticket_123 issue:42 pull:99"),
+            Ok(Command::LinkIssuePull {
+                source_id: "source_123".into(), ticket_id: "ticket_123".into(),
+                issue_key: "issue:42".into(), pull_key: "pull:99".into(),
+            }));
+        for invalid in [
+            "--link-issue-pull",
+            "--link-issue-pull source_123",
+            "--link-issue-pull source_123 ticket_123 issue:42",
+            "--link-issue-pull ../unsafe ticket_123 issue:42 pull:99",
+            "--link-issue-pull source_123 ../unsafe issue:42 pull:99",
+            "--link-issue-pull source_123 ticket_123 pull:42 pull:99",
+            "--link-issue-pull source_123 ticket_123 issue:42 issue:99",
+            "--link-issue-pull source_123 ticket_123 issue:0 pull:99",
+            "--link-issue-pull source_123 ticket_123 issue:42 pull:0",
+            "--link-issue-pull source_123 ticket_123 issue:42 pull:99 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--unlink-source-thread source_123 ticket_123 issue:42"),
+            Ok(Command::UnlinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"issue:42".into(),
+            }));
+        assert_eq!(parsed("--unlink-source-thread source_123 ticket_123 pull:99"),
+            Ok(Command::UnlinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"pull:99".into(),
+            }));
+        for invalid in [
+            "--unlink-source-thread",
+            "--unlink-source-thread source_123",
+            "--unlink-source-thread source_123 ticket_123",
+            "--unlink-source-thread ../unsafe ticket_123 issue:42",
+            "--unlink-source-thread source_123 ../unsafe issue:42",
+            "--unlink-source-thread source_123 ticket_123 issue:0",
+            "--unlink-source-thread source_123 ticket_123 issue:01",
+            "--unlink-source-thread source_123 ticket_123 pull:abc",
+            "--unlink-source-thread source_123 ticket_123 issue:42 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: None,
+                before_key: None, unresolved_only: false,
+            }));
+        assert_eq!(parsed("--inspect-ticket-effects ticket_123 --before 1000 github:issue:42 --unresolved-only"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: Some(1000),
+                before_key: Some("github:issue:42".into()), unresolved_only: true,
+            }));
+        assert_eq!(parsed("--inspect-ticket-effects ticket_123 --unresolved-only --before 1000 github:issue:42"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: Some(1000),
+                before_key: Some("github:issue:42".into()), unresolved_only: true,
+            }));
+        assert!(parsed("--inspect-ticket-effects").is_err());
+        assert!(parsed("--inspect-ticket-effects ../unsafe").is_err());
+        for invalid in [
+            "--inspect-ticket-effects ticket_123 --before",
+            "--inspect-ticket-effects ticket_123 --before 1000",
+            "--inspect-ticket-effects ticket_123 --before 0 github:issue:42",
+            "--inspect-ticket-effects ticket_123 --before nope github:issue:42",
+            "--inspect-ticket-effects ticket_123 --before 1000 ../unsafe",
+            "--inspect-ticket-effects ticket_123 --unresolved-only --unresolved-only",
+            "--inspect-ticket-effects ticket_123 --before 1000 github:issue:42 --before 999 github:issue:41",
+            "--inspect-ticket-effects ticket_123 --unresolved-only --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert!(parsed("--inspect-ticket-effects ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--inspect-ticket-graph ticket_123"),
+            Ok(Command::InspectTicketGraph { ticket_id: "ticket_123".into() }));
+        for invalid in [
+            "--inspect-ticket-graph",
+            "--inspect-ticket-graph ../outside",
+            "--inspect-ticket-graph ticket_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-ticket ticket_123"),
             Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
         assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
@@ -737,6 +2783,20 @@ mod tests {
         assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
             ticket_id: "ticket_123".into(),
         }));
+        assert_eq!(parsed("--stop-ticket-at-revision ticket_123 4"),
+            Ok(Command::StopTicketAtRevision {
+                ticket_id: "ticket_123".into(), expected_revision: 4,
+            }));
+        for invalid in [
+            "--stop-ticket-at-revision",
+            "--stop-ticket-at-revision ticket_123",
+            "--stop-ticket-at-revision ../unsafe 4",
+            "--stop-ticket-at-revision ticket_123 nope",
+            "--stop-ticket-at-revision ticket_123 -1",
+            "--stop-ticket-at-revision ticket_123 4 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--accept-ticket ticket_123").is_err());
         assert!(parsed("--accept-ticket ticket_123 nope").is_err());
         assert!(parsed("--accept-ticket ../outside 1").is_err());
@@ -744,6 +2804,29 @@ mod tests {
         assert!(parsed("--reject-ticket ticket_123 1 --sign-out").is_err());
         assert!(parsed("--stop-ticket").is_err());
         assert!(parsed("--stop-ticket ticket_123 --list-tickets").is_err());
+        assert_eq!(parsed("--disable-orchestration team_123 3"), Ok(Command::DisableOrchestration {
+            orchestration_id: "team_123".into(), expected_revision: 3,
+        }));
+        assert!(parsed("--disable-orchestration team_123").is_err());
+        assert!(parsed("--disable-orchestration team_123 nope").is_err());
+        assert!(parsed("--disable-orchestration ../team 3").is_err());
+        assert!(parsed("--disable-orchestration team_123 3 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--rename-orchestration team_123 3 Renamed"),
+            Ok(Command::RenameOrchestration {
+                orchestration_id: "team_123".into(), expected_revision: 3,
+                name: "Renamed".into(),
+            }));
+        for invalid in [
+            "--rename-orchestration",
+            "--rename-orchestration team_123",
+            "--rename-orchestration team_123 3",
+            "--rename-orchestration team_123 nope Renamed",
+            "--rename-orchestration ../unsafe 3 Renamed",
+            "--rename-orchestration team_123 3 --stop-ticket",
+            "--rename-orchestration team_123 3 Renamed --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--accept-ticket ticket_123 1 --import-bots bots.json").is_err());
         assert!(parsed("--inspect-ticket").is_err());
         assert!(parsed("--inspect-ticket ../outside").is_err());
@@ -763,6 +2846,75 @@ mod tests {
     }
 
     #[test]
+    fn shared_runtime_store_lock_rejects_a_second_process_until_shutdown() {
+        let dir = StoreOwnerTestDir::new();
+        let first = acquire_store_owner(dir.path()).unwrap();
+        assert_child_lock_result(dir.path(), false);
+        drop(first);
+        assert_child_lock_result(dir.path(), true);
+    }
+
+    struct StoreOwnerTestDir(PathBuf);
+
+    impl StoreOwnerTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("pandacode-headless-owner-{}", crate::storage::id()));
+            let dir = Self(path);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            dir
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for StoreOwnerTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_child_lock_result(dir: &std::path::Path, expected_success: bool) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("headless::tests::store_owner_lock_child_probe")
+            .arg("--nocapture")
+            .env("PANDACODE_STORE_LOCK_PROBE_DIR", dir)
+            .env(
+                "PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS",
+                expected_success.to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child lock probe failed (expected acquisition: {expected_success}):\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("headless::tests::store_owner_lock_child_probe ... ok"),
+            "child lock probe did not run successfully:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    #[test]
+    fn store_owner_lock_child_probe() {
+        let Ok(dir) = std::env::var("PANDACODE_STORE_LOCK_PROBE_DIR") else {
+            return;
+        };
+        let expected_success =
+            std::env::var("PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS").unwrap() == "true";
+        let acquired = acquire_store_owner(std::path::Path::new(&dir));
+        assert_eq!(acquired.is_ok(), expected_success);
+        drop(acquired);
+    }
+
+    #[test]
     fn import_bots_is_a_modifier_not_an_op() {
         let (_, import) = parse(&argv("--import-bots bots.json")).unwrap();
         assert_eq!(import, Some(PathBuf::from("bots.json")));
@@ -774,8 +2926,29 @@ mod tests {
     }
 
     #[test]
+    fn capability_inspection_flags_are_exclusive_read_only_commands() {
+        assert_eq!(parsed("--inspect-bot-capabilities bot_123"),
+            Ok(Command::InspectBotCapabilities { bot_id: "bot_123".into(), question: None }));
+        assert_eq!(parsed("--ask-bot-capability bot_123 skills"),
+            Ok(Command::InspectBotCapabilities { bot_id: "bot_123".into(), question: Some("skills".into()) }));
+        assert!(parsed("--inspect-bot-capabilities").is_err());
+        assert!(parsed("--ask-bot-capability bot_123").is_err());
+        assert!(parsed("--inspect-bot-capabilities bot_123 --list-tickets").is_err());
+    }
+
+    #[test]
     fn help_mentions_every_flag() {
         let text = help();
+        let usage = text
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap();
+        for alias in ["--help", "-h"] {
+            assert_eq!(parse(&argv(alias)), Err(text.clone()), "{alias} is accepted by parse");
+            assert!(usage.contains(alias), "{alias} is in Usage");
+            assert!(text.lines().any(|line| line.starts_with("  --help, -h") && line.contains(alias)), "{alias} has a help detail");
+        }
+        assert!(usage.contains("--preview-orchestrations <file>"));
         for flag in [
             "--sign-in",
             "--sign-out",
@@ -784,20 +2957,187 @@ mod tests {
             "--device-name",
             "--import-bots",
             "--export-bots",
+            "--inspect-bot-capabilities",
+            "--ask-bot-capability",
             "--preview-orchestrations",
             "--import-orchestrations",
             "--export-orchestrations",
             "--inspect-orchestrations",
             "--list-tickets",
+            "--list-review-inbox",
+            "--list-recovery-inbox",
+            "--list-demands",
+            "--inspect-team-readiness",
+            "--inspect-team-roster",
             "--inspect-ticket",
+            "--inspect-ticket-graph",
+            "--inspect-demand-plan",
+            "--inspect-ticket-effects",
+            "--inspect-ticket-source",
+            "--unlink-source-thread",
+            "--observe-source",
+            "--observe-check-run",
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",
+            "--disable-orchestration",
+            "--rename-orchestration",
             "--sync-bots",
             "xvfb-run",
         ] {
             assert!(text.contains(flag), "{flag}");
         }
+    }
+
+    fn issue_comment_fixture() -> (PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-headless-issue-comment-{}.sqlite3",
+            crate::storage::id()
+        ));
+        let store = crate::storage::Store::open(&path).unwrap();
+        let now = crate::storage::now();
+        // If a regression reaches the real dispatcher, this absent checkout fails before `gh`.
+        let workspace = path.with_extension("no-checkout");
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,path) VALUES('p','P',?1)",
+                [workspace.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+        for (id, name) in [("co", "Coordinator"), ("wo", "Worker")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
+                    rusqlite::params![id, name, crate::storage::now()],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,
+                    enabled,policy_revision,created_at,updated_at)
+                 VALUES('orchestration','Headless issue comment test','co','wo','p',1,1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                    project_id,worker_bot_id,policy_revision,state,revision,active_assignment_id,
+                    created_at,updated_at)
+                 VALUES('ticket','orchestration','test','Confirm a GitHub comment','local-user',
+                    'manual','p','wo',1,'running',0,'assignment',?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,
+                    project_id,expires_at,created_at)
+                 VALUES('ticket','local-user','headless-test-auth',1,'p',?1,?2)",
+                rusqlite::params![now + 600_000, now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                    created_at,updated_at)
+                 VALUES('assignment','ticket','wo','headless-test-session','running',1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        drop(store);
+        (path, "ticket".into())
+    }
+
+    #[test]
+    fn first_issue_comment_requires_an_exact_confirmation_before_dispatch() {
+        let (path, ticket_id) = issue_comment_fixture();
+        let missing_dispatch_calls = std::cell::Cell::new(0);
+
+        let missing = crate::superagent::headless_issue_comment_with_dispatch(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            None,
+            |_, _| {
+                missing_dispatch_calls.set(missing_dispatch_calls.get() + 1);
+                Err("unexpected issue-comment dispatch".to_owned())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("Explicit local confirmation is required"),
+            "{missing}"
+        );
+        assert!(missing.contains("--confirm-issue-comment"), "{missing}");
+        assert_eq!(
+            missing_dispatch_calls.get(),
+            0,
+            "missing confirmation must not invoke the dispatcher"
+        );
+
+        let wrong_confirmation = "0".repeat(64);
+        let mismatched_dispatch_calls = std::cell::Cell::new(0);
+        let mismatched = crate::superagent::headless_issue_comment_with_dispatch(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            Some(&wrong_confirmation),
+            |_, _| {
+                mismatched_dispatch_calls.set(mismatched_dispatch_calls.get() + 1);
+                Err("unexpected issue-comment dispatch".to_owned())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched,
+            "The issue-comment confirmation hash does not match this exact payload."
+        );
+        assert_eq!(
+            mismatched_dispatch_calls.get(),
+            0,
+            "mismatched confirmation must not invoke the dispatcher"
+        );
+
+        let store = crate::superagent::effects::open_effect_store(&path).unwrap();
+        let grants: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipts: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            grants, 0,
+            "failed confirmation must not create a native grant"
+        );
+        assert_eq!(
+            receipts, 0,
+            "failed confirmation must not reserve a remote effect receipt"
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -618,6 +618,7 @@ fn four_concurrent_task_streams_persist_independent_responses_and_tool_results()
                             input: sid.clone(),
                             output: format!("{sid}:{}", "output ".repeat(512)),
                 write_paths: None,
+                exit_code: None,
                         });
                         let start = Instant::now();
                         save_agent_activity(

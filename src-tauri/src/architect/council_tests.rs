@@ -1227,7 +1227,7 @@ fn sub_workers_cannot_convene() {
     let (_run, actor) = running_worker(&state, &sid, "w", "src");
     let coordination::Actor::Worker { id, attempt } = actor else { panic!("a worker") };
     let team = saved(&state, &sid);
-    let refused = dispatch_as(&state, &sid, team.generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[reviewer_assignment("r", "ux")]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), None).unwrap_err();
+    let refused = dispatch_as(&state, &sid, team.generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[reviewer_assignment("r", "ux")]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), None, false).unwrap_err();
     assert!(refused.contains("lead"), "{refused}");
 }
 

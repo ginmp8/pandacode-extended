@@ -165,7 +165,7 @@ pub struct RunConfig {
 }
 
 /// A read-only prompt or flag alone cannot safely constrain a reviewer.
-fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), String> {
+fn enforce_reviewer_policy(config: &RunConfig, host: Option<&ToolHost>) -> Result<(), String> {
     use crate::architect::reviewer_security::{ReviewerPhase, ReviewerToolPolicy};
     if !config.reviewer_boundary {
         return if config.reviewer_policy.is_none() { Ok(()) }
@@ -193,10 +193,12 @@ fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), Str
         return Err("read_only_policy_violation: reviewer cannot inherit writable checkout, goals, skills or mutable Codex settings.".into());
     }
     match policy {
-        ReviewerToolPolicy::NativeReadOnly if has_host => {
-            Err("read_only_policy_violation: default review must not expose host tools.".into())
+        ReviewerToolPolicy::NativeReadOnly if host.is_some_and(|host| {
+            config.provider != "codex" || !host_tools::is_superagent_write_only(host)
+        }) => {
+            Err("read_only_policy_violation: read-only tasks may expose only the exact SuperAgent file-write tool.".into())
         }
-        ReviewerToolPolicy::Scoped(scope) if scope.phase != ReviewerPhase::Review || !has_host => {
+        ReviewerToolPolicy::Scoped(scope) if scope.phase != ReviewerPhase::Review || host.is_none() => {
             Err("policy_unsupported: granted native tools must be present in the review phase.".into())
         }
         _ => Ok(()),
@@ -241,6 +243,10 @@ pub struct ToolActivity {
     /// An empty list denotes a command whose write targets are not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_paths: Option<Vec<String>>,
+    /// Only a structured exit status reported by the native provider. Missing
+    /// statuses must never be interpreted as an executed passing test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 // The serializer stops as soon as the preview fills: no multi-megabyte temporary
@@ -1735,6 +1741,7 @@ impl Protocol {
             input: String::new(),
             output: String::new(),
             write_paths: None,
+            exit_code: None,
         });
         if let Some(name) = name.filter(|name| !name.is_empty()) {
             tool.name = limited(name, 256);
@@ -1766,6 +1773,19 @@ impl Protocol {
         event.tool = Some(tool);
         step.events.push(event);
     }
+    /// Annotate the exact native tool event with a structured process exit code.
+    /// Model text, a tool's completed label and stdout cannot fabricate this.
+    fn native_exit_code(&mut self, id: &str, exit: Option<i64>, step: &mut Step) {
+        let Some(code) = exit.and_then(|value| i32::try_from(value).ok()) else { return; };
+        let Some(tool) = self.tools.get_mut(id) else { return; };
+        tool.exit_code = Some(code);
+        if let Some(event) = step.events.iter_mut().rev()
+            .find(|event| event.tool.as_ref().is_some_and(|value| value.id == id))
+        {
+            event.tool = Some(tool.clone());
+        }
+    }
+
     fn tool_paths(&mut self, id: &str, paths: Option<Vec<String>>, step: &mut Step) {
         let Some(paths) = paths else { return; };
         let mut bounded = Vec::new();
@@ -1845,6 +1865,7 @@ impl Protocol {
                 };
                 self.tool_update(id, Some("Command"), Some(status), input, output, step);
                 self.tool_paths(id, Some(vec![]), step);
+                self.native_exit_code(id, item["exitCode"].as_i64(), step);
             }
             "fileChange" => {
                 let (input, output) = if let Some(changes) = item["changes"].as_array() {
@@ -3668,7 +3689,7 @@ async fn run_inner(
         return Err("Unknown permission mode".into());
     }
     review_supported(&config.provider, &config.mode)?;
-    enforce_reviewer_policy(&config, host.is_some())?;
+    enforce_reviewer_policy(&config, host.as_ref())?;
     if config.reviewer_boundary && crate::cloud_agents::transport::is_cloud(&config.session_id) {
         return Err("read_only_unsupported: cloud reviewer isolation is not verified.".into());
     }
@@ -3864,7 +3885,7 @@ async fn run_process_with_tools(
     image_blocks: Vec<Value>,
     host: Option<ToolHost>,
 ) -> Result<(), String> {
-    enforce_reviewer_policy(&config, host.is_some())?;
+    enforce_reviewer_policy(&config, host.as_ref())?;
     let mcp_tool_names: HashSet<String> = {
         host.as_ref()
             .into_iter()
@@ -4373,14 +4394,19 @@ mod tests {
         cfg.mode = "plan".into();
         cfg.reviewer_boundary = true;
         cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        let ordinary_host = ToolHost {
+            tools:vec![json!({"type":"function","name":"pandacode_test","description":"test","inputSchema":{"type":"object"}})],
+            handler:Arc::new(|_,args|Box::pin(async move {Ok(args)})),
+            approval_tools:HashSet::new(),
+        };
         for (provider, _) in PROVIDERS {
             cfg.provider = provider.into();
-            assert!(enforce_reviewer_policy(&cfg, false).is_ok(), "{provider}");
-            assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"), "{provider}");
+            assert!(enforce_reviewer_policy(&cfg, None).is_ok(), "{provider}");
+            assert!(enforce_reviewer_policy(&cfg, Some(&ordinary_host)).unwrap_err().contains("read_only_policy_violation"), "{provider}");
         }
         cfg.provider = "codex".into();
         cfg.mode = "full".into();
-        assert!(enforce_reviewer_policy(&cfg, false).is_err());
+        assert!(enforce_reviewer_policy(&cfg, None).is_err());
         cfg.mode = "plan".into();
         let grant = ReviewerCapabilityGrant {
             tool: "pandacode_github_issue".into(), action: "create".into(),
@@ -4390,14 +4416,131 @@ mod tests {
         cfg.reviewer_policy = Some(ReviewerToolPolicy::from_user_grants(
             ReviewerPhase::Review, "user-grant-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
         ).unwrap());
-        assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("policy_unsupported"));
-        assert!(enforce_reviewer_policy(&cfg, true).is_ok());
+        assert!(enforce_reviewer_policy(&cfg, None).unwrap_err().contains("policy_unsupported"));
+        assert!(enforce_reviewer_policy(&cfg, Some(&ordinary_host)).is_ok());
         cfg.provider = "claude".into();
-        assert!(enforce_reviewer_policy(&cfg, true).is_ok());
+        assert!(enforce_reviewer_policy(&cfg, Some(&ordinary_host)).is_ok());
         cfg.provider = "zcode".into();
-        assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("policy_unsupported"));
+        assert!(enforce_reviewer_policy(&cfg, Some(&ordinary_host)).unwrap_err().contains("policy_unsupported"));
         cfg.reviewer_boundary = false;
-        assert!(enforce_reviewer_policy(&cfg, false).is_err());
+        assert!(enforce_reviewer_policy(&cfg, None).is_err());
+    }
+
+    #[test]
+    fn superagent_bounded_spawn_tool_does_not_expose_shell_mcp_or_extra_tools() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        let spawn=json!({
+            "type":"function",
+            "name":crate::superagent::subagents::TOOL_NAME,
+            "description":"Native read-only, mandate-bound child request",
+            "inputSchema":{
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "parentTicketId":{"type":"string","enum":["parent"]},
+                    "rootTicketId":{"type":"string","enum":["root"]},
+                    "workerBotId":{"type":"string","enum":["worker"]},
+                    "key":{"type":"string","maxLength":64},
+                    "objective":{"type":"string","maxLength":4096}
+                },
+                "required":["parentTicketId","rootTicketId","workerBotId","key","objective"]
+            }
+        });
+        let make=|tools:Vec<Value>|ToolHost {
+            tools,handler:Arc::new(|_,args|Box::pin(async move{Ok(args)})),
+            approval_tools:HashSet::new(),
+        };
+        let mut config=config("codex");
+        config.mode="plan".into();
+        config.reviewer_boundary=true;
+        config.reviewer_policy=Some(ReviewerToolPolicy::NativeReadOnly);
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![spawn.clone()]))).is_ok());
+        let write=json!({
+            "type":"function",
+            "name":crate::superagent::write_grants::TOOL_NAME,
+            "inputSchema":{
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "grantId":{"type":"string","enum":["approved-grant"]},
+                    "path":{"type":"string","enum":["src/allowed.rs"]},
+                    "content":{"type":"string",
+                        "maxLength":crate::superagent::write_grants::MAX_CONTENT_BYTES}
+                },
+                "required":["grantId","path","content"]
+            }
+        });
+        assert!(enforce_reviewer_policy(&config,
+            Some(&make(vec![write.clone(),spawn.clone()]))).is_ok());
+        let mut malicious=spawn.clone();
+        malicious["inputSchema"]["additionalProperties"]=json!(true);
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![malicious])))
+            .is_err(),"unbounded child input schema must be rejected");
+        assert!(enforce_reviewer_policy(&config,
+            Some(&make(vec![spawn.clone(),spawn.clone()])))
+            .is_err(),"duplicate native spawn tools must be rejected");
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![
+            spawn.clone(),json!({"type":"function","name":"mcp_exec"}),
+        ]))).is_err(),"foreign host tools must remain denied");
+        config.provider="claude".into();
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![spawn]))).is_err(),
+            "unsupported harnesses never inherit native child authorization");
+    }
+
+    #[test]
+    fn superagent_write_tool_is_codex_only_and_native_shell_approval_stays_denied() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        fn write_host(extra_shell: bool) -> ToolHost {
+            let mut tools = vec![json!({
+                "type":"function",
+                "name":crate::superagent::write_grants::TOOL_NAME,
+                "description":"Write only an exact user-authorized project file.",
+                "inputSchema":{
+                    "type":"object",
+                    "properties":{
+                        "grantId":{"type":"string","enum":["grant"]},
+                        "path":{"type":"string","enum":["src/main.rs"]},
+                        "content":{"type":"string","maxLength":crate::superagent::write_grants::MAX_CONTENT_BYTES}
+                    },
+                    "required":["grantId","path","content"],
+                    "additionalProperties":false
+                }
+            })];
+            if extra_shell {
+                tools.push(json!({"type":"function","name":"shell_exec","description":"shell","inputSchema":{"type":"object"}}));
+            }
+            ToolHost {
+                tools,
+                handler: Arc::new(|_,args| Box::pin(async move { Ok(args) })),
+                approval_tools: HashSet::new(),
+            }
+        }
+
+        let mut cfg = config("codex");
+        cfg.mode = "plan".into();
+        cfg.reviewer_boundary = true;
+        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        assert!(enforce_reviewer_policy(&cfg,Some(&write_host(false))).is_ok());
+        assert!(enforce_reviewer_policy(&cfg,Some(&write_host(true))).unwrap_err().contains("read_only_policy_violation"));
+        assert!(enforce_reviewer_policy(&cfg,Some(&ToolHost {
+            tools:vec![json!({"type":"function","name":"shell_exec","description":"shell","inputSchema":{"type":"object"}})],
+            handler:Arc::new(|_,args|Box::pin(async move {Ok(args)})),
+            approval_tools:HashSet::new(),
+        })).unwrap_err().contains("read_only_policy_violation"));
+
+        cfg.provider = "claude".into();
+        assert!(enforce_reviewer_policy(&cfg,Some(&write_host(false))).unwrap_err().contains("read_only_policy_violation"));
+
+        let mut codex = config("codex");
+        codex.mode = "plan".into();
+        codex.reviewer_boundary = true;
+        codex.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        let mut protocol = Protocol::new(codex);
+        assert_eq!(protocol.codex_permissions(true)["sandboxPolicy"]["type"],"readOnly");
+        let shell = protocol.receive(json!({
+            "id":79,"method":"item/commandExecution/requestApproval",
+            "params":{"command":"touch forbidden.txt"}
+        })).unwrap();
+        assert_eq!(shell.write[0]["result"]["decision"],"decline");
+        assert!(shell.events.iter().all(|event|event.kind!="approval"));
     }
 
     #[test]
@@ -4529,7 +4672,7 @@ mod tests {
             cfg.reviewer_boundary = true;
             cfg.reviewer_policy = Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
             cfg.mode = "plan".into();
-            assert!(enforce_reviewer_policy(&cfg, false).is_ok());
+            assert!(enforce_reviewer_policy(&cfg, None).is_ok());
             let mut command = Command::new(provider);
             configure_command(&mut command, &cfg);
             let args: Vec<_> = command.as_std().get_args()
@@ -5781,6 +5924,7 @@ mod tests {
         let done=p.receive(json!({"method":"item/completed","params":{"item":{"type":"commandExecution","id":"cmd1","status":"completed","aggregatedOutput":"test failed: expected 4, got 5","exitCode":1}}})).unwrap();
         let tool = activity(&done);
         assert_eq!(tool["status"], "failed");
+        assert_eq!(tool["exitCode"], 1);
         assert!(tool["input"].as_str().unwrap().contains("/tmp/project"));
         assert!(tool["output"]
             .as_str()

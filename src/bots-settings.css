@@ -180,3 +180,14 @@ dialog.bot-settings-dialog{width:min(880px,calc(100vw - 32px));max-height:88dvh}
 .bs-communication-examples p{margin:10px 0 4px;font-size:var(--text-sm);color:var(--muted)}
 .bs-communication-examples code{display:block;overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px;color:var(--text);padding:8px;background:var(--ds-fill);border-radius:var(--radius-sm)}
 .bs-communication-examples small{display:block;margin-top:12px;line-height:1.5;color:var(--muted)}
+
+/* SuperAgent work uses the bot's original Conversations tab and native thread IDs. */
+.bots-superagent-threads,.bots-ordinary-threads{display:grid;gap:10px;margin-bottom:18px}
+.bots-conversations-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.bots-conversations-heading h3{margin:0;font-size:var(--text-sm);font-weight:650;color:var(--text)}
+.bots-conversations-heading small{font-size:var(--text-xs);color:var(--muted)}
+.bots-superagent-threads>p{color:var(--muted);font-size:var(--text-sm);margin:0;line-height:1.5}
+.bots-superagent-threads .bots-items,.bots-ordinary-threads .bots-items{margin:0}
+.bots-superagent-threads .bots-items li{border-color:var(--ds-border-strong);background:var(--ds-card-inner)}
+.bots-superagent-threads .bots-items b{overflow-wrap:anywhere}
+@media(max-width:600px){.bots-conversations-heading{align-items:flex-start;flex-direction:column;gap:4px}}

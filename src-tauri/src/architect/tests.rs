@@ -910,6 +910,7 @@ fn fixture() -> (Store, TeamSnapshot) {
         .unwrap();
     let team = TeamSnapshot {
         session_id: parent.id,
+        superagent_review: None,
         tool_catalog_version: TOOL_CATALOG_VERSION,
         config: config(),
         status: "running".into(),
@@ -3081,7 +3082,7 @@ fn ranked_picks_say_their_tier() {
 fn sub_call(state: &AppState, sid: &str, caller: &str, name: &str, args: Value) -> Result<Value> {
     let team = load(&state.store.lock().unwrap(), sid)?.unwrap();
     let attempt = team.workers.iter().find(|w| w.id == caller).unwrap().attempt;
-    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None).map(|x| x.0)
+    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None, false).map(|x| x.0)
 }
 fn team_of(state: &AppState, sid: &str) -> TeamSnapshot {
     load(&state.store.lock().unwrap(), sid).unwrap().unwrap()
@@ -3866,7 +3867,7 @@ fn finish_silent(state: &AppState, prepared: &crate::PreparedRun) {
 fn tool_after_text(state: &AppState, sid: &str, text: &str, tool: &str) {
     let store = state.store.lock().unwrap();
     let assistant = std::sync::Mutex::new(text.to_owned());
-    let mut event = crate::AgentEvent { session_id: sid.into(), kind: "tool".into(), text: "Read".into(), request_id: None, data: None, tool: Some(crate::providers::ToolActivity { id: tool.into(), name: "Read".into(), status: "running".into(), input: String::new(), output: String::new(), write_paths: None }) };
+    let mut event = crate::AgentEvent { session_id: sid.into(), kind: "tool".into(), text: "Read".into(), request_id: None, data: None, tool: Some(crate::providers::ToolActivity { id: tool.into(), name: "Read".into(), status: "running".into(), input: String::new(), output: String::new(), write_paths: None, exit_code: None }) };
     crate::save_agent_activity(&store, &assistant, &mut event, None).unwrap();
 }
 

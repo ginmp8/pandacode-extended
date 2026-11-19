@@ -102,7 +102,7 @@ export interface BotsView { dispose(): void; refresh(): void; agent(sessionId: s
 export type Section = Tab | 'profile' | 'shared-channels';
 
 /** The settings nav, like the app's own Settings. Activity also holds conversations and rules. */
-type Nav = 'profile' | 'skills' | 'channels' | 'shared-channels' | 'schedules' | 'memory' | 'activity';
+type Nav = 'profile' | 'skills' | 'capabilities' | 'channels' | 'shared-channels' | 'schedules' | 'memory' | 'activity';
 const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
   { id: 'profile', label: 'Profile', icon: 'bot', text: 'Who the bot is, how it works and what runs it.' },
   { id: 'channels', label: 'Connections', icon: 'globe', text: 'Talk to it from a browser, Telegram, Slack, Discord or WhatsApp.' },
@@ -110,6 +110,7 @@ const SECTIONS: { id: Nav; label: string; icon: string; text: string }[] = [
   { id: 'schedules', label: 'Schedules', icon: 'refresh', text: 'Recurring or one-off work the bot starts on its own.' },
   { id: 'memory', label: 'Memory', icon: 'leaf', text: 'Kept across conversations. The bot adds its own as it learns.' },
   { id: 'skills', label: 'Skills', icon: 'widget', text: 'Library skills and MCP servers this bot uses, by reference. Nothing is copied.' },
+  { id: 'capabilities', label: 'Capabilities', icon: 'search', text: 'Discoverable configuration and limitations. A profile never grants permission.' },
   { id: 'activity', label: 'Activity', icon: 'activity', text: 'Conversations, approval rules and everything the bot did.' },
 ];
 const navFor = (section: Section): Nav => section === 'conversations' || section === 'rules' ? 'activity' : section;

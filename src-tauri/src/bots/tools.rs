@@ -22,13 +22,17 @@ pub(crate) fn catalog() -> Vec<Value> {
         spec("bot_list_schedules", "List this bot's schedules with IDs, timing and whether they are on.", json!({}), &[]),
         spec("bot_cancel_schedule", "Delete one of this bot's schedules by ID (from bot_list_schedules).", json!({"scheduleId": id}), &["scheduleId"]),
         spec("bot_notify", "Message the user now, on the channel they last used (and the desktop app). Use for results, reminders, or decisions they need to make; do not use it to chat.", json!({"text": {"type":"string","maxLength":4000}}), &["text"]),
+        spec("bot_inspect_capabilities", "Read another local bot's current declared capability profile without starting work. A restricted bot cannot be inspected. This is not permission to execute on its behalf.", json!({"to":{"type":"string","maxLength":80}}), &["to"]),
+        spec("bot_ask_capability", "Ask one bounded capability-only question about another local bot's skills, tools, instructions summary, scope, model, permissions, limits or availability. This does not send work or execute tools.", json!({"to":{"type":"string","maxLength":80},"question":{"type":"string","maxLength":400}}), &["to","question"]),
         spec("bot_message_bot", "Send a short work request to another bot by exact name or ID. The other bot sends an update back here. Set freshContext: true to give this assignment a new conversation instead of reusing the recipient's desktop context; previous work and queues remain untouched. Do not message yourself; collaboration chains stop after three bot-to-bot hops.", json!({"to":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":8000},"freshContext":{"type":"boolean"}}), &["to","text"]),
         spec("bot_post_channel", "Post an informational update as yourself to a local Shared Channel you belong to. No bots are activated, even if the text contains @mentions. Use idempotencyKey again when retrying an uncertain invocation.", json!({"channel":{"type":"string","maxLength":80},"text":{"type":"string","maxLength":16384},"idempotencyKey":{"type":"string","maxLength":128}}), &["channel","text"]),
         spec("bot_request_channel", "Explicitly assign work in a local Shared Channel to one or two distinct other members, using their exact names or IDs. The assigned bots run through their own queues; their results return to this bot conversation, not to unrelated channels. No implicit lead or broadcast. Self/cyclic routing and chains beyond three hops are rejected. Reuse idempotencyKey for safe retries.", json!({"channel":{"type":"string","maxLength":80},"recipients":{"type":"array","items":{"type":"string","maxLength":80},"minItems":1,"maxItems":2},"text":{"type":"string","maxLength":16384},"idempotencyKey":{"type":"string","maxLength":128}}), &["channel","recipients","text"]),
     ]
 }
 
-/// Bot tools act only on the bot that owns the task, so harnesses need not ask before using them.
+/// Bot tool calls inherit the native session owner's identity. Discovery is
+/// read-only and independently checks target visibility and collaboration ancestry;
+/// it never grants tools, tasks or project access to the caller.
 pub(crate) fn self_scoped(name: &str) -> bool {
     name.starts_with("pandacode_bot_") && names().iter().any(|known| known == name)
 }
@@ -37,9 +41,27 @@ fn names() -> Vec<String> {
     catalog().iter().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect()
 }
 
+/// A SuperAgent Assignment is NOT an ordinary bot conversation. Its native
+/// read-only Mandate never authorizes bot memory, schedules, notifications,
+/// channel posts or delegation. Recheck immediately before dispatch too:
+/// removing a tool from the advertised catalog alone is not a security fence.
+pub(crate) fn ensure_ambient_bot_tool_permission(
+    store: &crate::storage::Store, session_id: &str,
+) -> Result<()> {
+    if crate::superagent::read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent assignments cannot invoke ambient bot tools.".into());
+    }
+    Ok(())
+}
+
 /// Adds bot tools when the task belongs to a bot; otherwise returns the host unchanged.
 pub(crate) fn with_bot(base: Option<ToolHost>, app: tauri::AppHandle, session_id: String, stopped: Arc<AtomicBool>) -> Option<ToolHost> {
-    let owned = app.state::<AppState>().store.lock().ok().and_then(|store| owner_of(&store, &session_id).ok().flatten()).is_some();
+    let owned = app.state::<AppState>().store.lock().ok().and_then(|store| {
+        // A blocked, revoked, or active SuperAgent session must not advertise
+        // the bot's ordinary self-scoped tools, even if it has a bot_threads row.
+        ensure_ambient_bot_tool_permission(&store, &session_id).ok()?;
+        owner_of(&store, &session_id).ok().flatten()
+    }).is_some();
     if !owned {
         return base;
     }
@@ -70,7 +92,11 @@ pub(crate) fn with_bot(base: Option<ToolHost>, app: tauri::AppHandle, session_id
 
 pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &str, args: &Value) -> Result<Value> {
     let state = app.state::<AppState>();
-    let (bot, source_thread) = owner_of(&*state.store.lock().map_err(|e| e.to_string())?, session_id)?.ok_or("This task no longer belongs to a bot.")?;
+    let (bot, source_thread) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        ensure_ambient_bot_tool_permission(&store, session_id)?;
+        owner_of(&store, session_id)?.ok_or("This task no longer belongs to a bot.")?
+    };
     let string = |key: &str| args[key].as_str().unwrap_or_default().to_owned();
     if name == "pandacode_bot_post_channel" {
         let posted = {
@@ -86,6 +112,27 @@ pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &st
             .iter().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         return collaboration::request(app, &bot, &source_thread, &string("channel"),
             &recipients, &string("text"), args["idempotencyKey"].as_str()).await;
+    }
+    if name == "pandacode_bot_inspect_capabilities" || name == "pandacode_bot_ask_capability" {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        ensure_ambient_bot_tool_permission(&store, session_id)?;
+        // Authoritative owner is recovered from this session, never from input.
+        let requester = owner_of(&store, session_id)?.ok_or("Bot owner is unavailable.")?.0;
+        let target = super::discovery::resolve(&store, string("to").trim())?;
+        // Reuse cross-channel/direct collaboration ancestry and the three-hop limit.
+        let route = collaboration::route(&store, session_id, &requester.id)?;
+        route.to(&requester.id, &target.id)?;
+        let topic = if name == "pandacode_bot_ask_capability" { "question" } else { "profile" };
+        let result = if topic == "question" {
+            super::discovery::answer(&store, &target.id, Some(&requester.id), &string("question"))?
+        } else {
+            super::discovery::inspect(&store, &target.id, Some(&requester.id))?
+        };
+        // Audit metadata only: never persist the question or returned profile.
+        super::log(&store, &requester.id, "capability_discovery",
+            "Read local bot capability metadata",
+            json!({"targetId":target.id,"operation":topic}))?;
+        return Ok(result);
     }
     if name == "pandacode_bot_message_bot" {
         let requested = string("to").trim().to_owned();
@@ -181,6 +228,25 @@ mod tests {
         assert_eq!(next_message_hop("scout", "writer", 0).unwrap(), 1);
         assert_eq!(next_message_hop("writer", "ledger", 2).unwrap(), 3);
         assert!(next_message_hop("ledger", "scout", 3).is_err());
+    }
+
+    #[test]
+    fn capability_tools_are_bounded_and_do_not_offer_execution() {
+        let tools = catalog();
+        for name in ["pandacode_bot_inspect_capabilities", "pandacode_bot_ask_capability"] {
+            assert!(self_scoped(name));
+            assert!(tools.iter().any(|item| item["name"] == name));
+        }
+        assert!(validate_spec(&tools, "pandacode_bot_inspect_capabilities",
+            &json!({"to":"target"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"What skills are configured?"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"test","execute":true})).is_err());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"x".repeat(401)})).is_err());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target"})).is_err());
     }
 
     #[test]

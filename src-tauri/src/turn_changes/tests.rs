@@ -61,6 +61,7 @@ fn write_tool(tracker: &mut Tracker, id: &str, status: &str, paths: &[&str]) {
             input: String::new(),
             output: String::new(),
             write_paths: Some(paths.iter().map(|p| (*p).into()).collect()),
+            exit_code: None,
         },
     );
 }

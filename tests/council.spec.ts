@@ -487,6 +487,10 @@ test('"Turn on for new threads" starts Council with the first send of a new thre
   await page.keyboard.press('Escape');
   await page.locator('.new-task-button').click();
   await composerSettled(page);
+  // The composer may stabilize before the new thread finishes loading.
+  // This class reflects an empty, not-running, fully loaded local task.
+  await expect(page.locator('.conversation-pane')).toHaveClass(/new-task-page/);
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Add a search box');
   await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
   await expect.poll(() => calls(page)).toEqual([{ target: 9, maxRounds: 10, reviewers: 0 }]);
@@ -913,15 +917,23 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue','');
+  const dot = () => button(page).locator('.council-glyph').evaluate(node => {
+    const marker = getComputedStyle(node, '::after');
+    // "normal" and "none" are both unrendered CSS content values.
+    // Require the six-pixel cue itself, not merely a non-"none" style.
+    return marker.content === '""' && marker.width === '6px' && marker.height === '6px';
+  });
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=passed');
+  await expect(button(page)).toHaveAccessibleName(/^Council: Passed/);
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=accepted');
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue','');
   await expect.poll(dot).toBe(false);
 });
 

@@ -165,6 +165,22 @@ async function mountNativeFixture(page: Page, options: {
       ) as never;
       if(command==='superagent_strategy_get')return policy() as never;
       if(command==='superagent_roster')return roster() as never;
+      if(command==='superagent_capability_candidates'){
+        reads.push({command,args});
+        if(args.orchestrationId!==cfg.id)throw Error('Wrong Team');
+        return {orchestrationId:cfg.id,policyRevision:cfg.policyRevision,
+          observedAt:Date.now(),excludedByPrivacyPreference:1,truncated:false,
+          selectionApplied:false,authorizationGranted:false,
+          disclaimer:'Declared metadata only',candidates:[{
+            botId:'worker2',name:'Worker Two',suggestedRole:'worker',
+            alreadyAssigned:false,declaredMatchScore:3,matchedTerms:['testing'],
+            evidenceSources:['assigned_skill_reference'],status:'declared_match',
+            projectScope:{projectId:'project-1',status:'project_reference_only'},
+            permissionMode:{value:'ask',status:'not_an_execution_grant'},
+            availability:{status:'configured_not_running',paused:false},
+            executionEligibility:'not_verified',sourceConfidence:'declarations_only',
+          }]} as never;
+      }
       if(command==='superagent_all_demands'){
         const query=(args.query ?? args) as {orchestrationId?:string;archived?:boolean};
         demandQueries.push(query as Record<string,unknown>);
@@ -320,6 +336,32 @@ test('Team wizard selects peer Workers from multiple projects with native bot im
   await council.getByRole('button',{name:'Done'}).click();
   await wizard.getByRole('button',{name:'Next'}).click();
   await expect(wizard.getByText(/Worker Two/).first()).toBeVisible();
+});
+
+test('capability matching stages a Worker only after explicit native roster save',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page);
+  await openTeam(host,'Native Team');
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
+  const load=host.getByRole('button',{name:'Load native members'});
+  if(await load.count())await load.click();
+  const fit=host.getByRole('region',{name:'Bot capability matching'});
+  await expect(fit).toBeVisible();
+  await fit.getByRole('textbox',{name:'Work objective'}).fill('Rust testing');
+  await fit.getByRole('button',{name:'Compare current capabilities'}).click();
+  await expect(fit).toContainText('Worker Two');
+  await expect(fit).toContainText('Execution eligibility not verified');
+  expect(await page.evaluate(()=>(window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
+  await fit.getByRole('button',{name:'Stage as Worker'}).click();
+  const workers=host.locator('details[data-sa-multi="workers"]');
+  await expect(workers.locator('input[data-sa-multi-option][value="worker2"]')).toBeChecked();
+  expect(await page.evaluate(()=>(window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
+  await host.getByRole('button',{name:'Save configured roles'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>}).saFixtureMutations);
+  expect(calls.at(-1)?.command).toBe('superagent_roster_update');
+  expect((calls.at(-1)?.args.input as {workerBotIds:string[]}).workerBotIds).toEqual(['worker','worker2']);
 });
 
 test('native Team role picker preserves checked bots and saves ordered IDs only on submit',async({page})=>{

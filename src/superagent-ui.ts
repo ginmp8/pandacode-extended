@@ -1585,6 +1585,8 @@ export function mountSuperagent(
       const next = target.dataset.saView;
       if (!['teams','runs','review','sources','portable'].includes(next)) return;
       workspaceView = next as typeof workspaceView;
+      // A decision staged in another view is no longer an active user intent.
+      if (next !== 'review') { globalAcceptance = null; globalRejection = null; }
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
       return;

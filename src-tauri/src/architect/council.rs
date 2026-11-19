@@ -1688,10 +1688,14 @@ fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -
     }
     Some((direct.len(), automatic))
 }
-fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
+pub(super) fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
     if config.mode() != "m3" { return true; }
     m3_source_counts(team, config, round).is_some_and(|(direct, automatic)|
         direct == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers)
+}
+
+fn m3_rounds_match(team: &TeamSnapshot, config: &CouncilConfig, through_round: usize) -> bool {
+    (1..=through_round).all(|round| m3_sources_match(team, config, round))
 }
 
 /// S3 may reserve adversarial reviewers only after a genuinely settled,
@@ -1719,6 +1723,13 @@ fn s3_phase_one_preflight(team: &TeamSnapshot, config: &CouncilConfig, view: &Ro
 pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: Option<&str>) -> Result<usize> {
     let view = Rounds::of(team, config);
     let latest = view.latest;
+    // A corrupted M3 source roster cannot mint another native reviewer seat.
+    // A valid but incomplete roster can still dispatch its missing reviewers.
+    if config.mode() == "m3"
+        && (1..=latest).any(|round| m3_source_counts(team, config, round).is_none())
+    {
+        return Err("M3 reviewer sources differ from the frozen Council roster; start a new task cycle.".into());
+    }
     let current = latest > 0 && !stale(team, latest) && !reconfigured(team, latest);
     let replaced = replaces.is_some_and(|id| in_round(team, latest).any(|(w, _)| w.id == id));
     let done = view.complete(latest);
@@ -1945,7 +1956,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
         return true;
     }
     // A restored round beyond the frozen ceiling cannot authorize a terminal pass.
-    if view.latest > config.max_rounds {
+    if view.latest > config.max_rounds || !m3_rounds_match(team, config, view.latest) {
         return false;
     }
     // Forced escalation is not an exception to severe-finding correction.
@@ -2007,7 +2018,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
         return true;
     }
     // An extra persisted round cannot bypass the frozen S2 attempt budget.
-    if view.latest > config.max_rounds {
+    if view.latest > config.max_rounds || !m3_rounds_match(team, config, view.latest) {
         return false;
     }
     if !independent_review_attempts(team, view.latest) { return false; }
@@ -2964,6 +2975,10 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
+    } else if config.mode() == "m3"
+        && (1..=round).any(|r| m3_source_counts(team, config, r).is_none())
+    {
+        "fixing"
     } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && !severe_findings(team, round) && low.is_some_and(|low| low >= config.target)
         && forced_escalation_satisfied(team, config, view)
         && automatic_escalation_satisfied(team, config, view)

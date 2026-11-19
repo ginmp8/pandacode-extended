@@ -2480,6 +2480,71 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
 
 
 #[test]
+fn m3_root_never_admits_forged_partial_sources_in_any_strategy() {
+    for strategy in [
+        council::CouncilExecutionStrategy::Parallel,
+        council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase,
+    ] {
+        let mut config = on(9.0, 3, 0);
+        config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+        config.automatic_reviewers = 1;
+        config.strategy = strategy;
+        let mut team = team_with(config, vec![]);
+        let mut direct = seat("m3-direct", 1, None, SINCE + 1);
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
+            direct.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some("selected-reviewer".into());
+        binding.roster_bot_ids = vec!["selected-reviewer".into()];
+        binding.required_reviewers = Some(2);
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: "Selected reviewer".into(), role: "Security".into(),
+            instructions: String::new(), goals: String::new(), soul: String::new(),
+            reasoning_effort: String::new(), skill_ids: vec![],
+        });
+        direct.reviewer_binding = Some(binding);
+        team.workers.push(direct);
+        assert_eq!(council::status(&team).unwrap().state, "dispatch");
+        assert_eq!(council::round_for(&team, team.config.council.as_ref().unwrap(), None).unwrap(), 1);
+        for invalid in ["unbound", "foreign"] {
+            let mut corrupted = team.clone();
+            if invalid == "unbound" {
+                corrupted.workers[0].reviewer_binding = None;
+            } else {
+                corrupted.workers[0].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
+                    Some("foreign-reviewer".into());
+            }
+            assert_ne!(council::status(&corrupted).unwrap().state, "dispatch",
+                "{strategy:?}/{invalid} must not advertise native reviewer admission");
+            assert!(council::round_for(
+                &corrupted, corrupted.config.council.as_ref().unwrap(), None,
+            ).is_err(), "{strategy:?}/{invalid} must not issue another reviewer slot");
+        }
+        let mut automatic = seat("m3-automatic", 1, None, SINCE + 2);
+        automatic.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+            &team, &automatic.id, automatic.created_at, &automatic.provider,
+            &automatic.model, automatic.council.as_ref().unwrap(),
+        ));
+        team.workers.push(automatic);
+        assert_eq!(council::status(&team).unwrap().state, "dispatch",
+            "a valid, unfinished M3 roster must still allow its native review");
+        assert_eq!(council::round_for(
+            &team, team.config.council.as_ref().unwrap(), None,
+        ).unwrap(), 1);
+        let mut duplicated = team.clone();
+        duplicated.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
+            Some("selected-reviewer".into());
+        assert_ne!(council::status(&duplicated).unwrap().state, "dispatch",
+            "{strategy:?} may not mistake two selected bots for one direct and one automatic seat");
+        assert!(council::round_for(
+            &duplicated, duplicated.config.council.as_ref().unwrap(), None,
+        ).is_err());
+    }
+}
+
+#[test]
 fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
     let nested = |bot: &str| council::CouncilNestedReviewer {
         bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
@@ -3094,6 +3159,71 @@ fn forced_m3_root_rechecks_both_authenticated_native_rounds() {
     ).unwrap();
     assert!(!mixed_native_authority_current(&store, &team),
         "the terminal wave cannot launder a revoked first-wave native reviewer");
+}
+
+#[test]
+fn m3_on_demand_s2_rechecks_first_wave_sources_before_native_terminal_approval() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let mut config = on(9.0, 2, 0);
+    config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+    config.automatic_reviewers = 1;
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let mut team = team_with(config, Vec::new());
+    team.session_id = sid.clone();
+    team.changed_at = 0;
+    for round in 1..=2 {
+        for (source, score) in [
+            ("direct", if round == 1 { 6.0 } else { 9.8 }),
+            ("automatic", 9.7),
+        ] {
+            let mut reviewer = seat(
+                &format!("m3-s2-{round}-{source}"), round, Some(score),
+                SINCE + (round * 2) as i64 + (source == "automatic") as i64,
+            );
+            reviewer.council.as_mut().unwrap().lens = source.into();
+            let session = store.create_session(
+                &project, &reviewer.provider, &reviewer.model, "plan",
+            ).unwrap();
+            reviewer.session_id = session.id;
+            store.message(&reviewer.session_id, "assistant",
+                &format!("Independent native reviewer callback.\nCouncil score: {score}/10")
+            ).unwrap();
+            let mut binding = reviewer_security::ReviewerBinding::native(
+                &team, &reviewer.id, reviewer.created_at,
+                &reviewer.provider, &reviewer.model,
+                reviewer.council.as_ref().unwrap(),
+            );
+            // A historical first wave with two selected-bot identities
+            // is not the configured M3 direct+automatic source roster.
+            if source == "direct" || round == 1 {
+                binding.reviewer_bot_id = Some("selected-reviewer".into());
+                binding.roster_bot_ids = vec!["selected-reviewer".into()];
+                binding.required_reviewers = Some(2);
+                binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+                    name: "Selected reviewer".into(), role: "Security".into(),
+                    instructions: String::new(), goals: String::new(),
+                    soul: String::new(), reasoning_effort: String::new(),
+                    skill_ids: vec![],
+                });
+            }
+            reviewer.reviewer_binding = Some(binding);
+            team.workers.push(reviewer);
+        }
+    }
+    assert!(!council::m3_sources_match(&team, team.config.council.as_ref().unwrap(), 1));
+    assert!(council::m3_sources_match(&team, team.config.council.as_ref().unwrap(), 2));
+    for worker in &team.workers {
+        reviewer_security::record_native_authority(
+            &store, &sid, worker.reviewer_binding.as_ref().unwrap(),
+        ).unwrap();
+    }
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "a corrected second wave cannot launder a duplicate original source");
+    assert!(!mixed_native_authority_current(&store, &team),
+        "native grants and scored callbacks cannot replace the frozen M3 source allocation");
+    assert!(!verified_council_pass(&store, &team));
 }
 
 #[test]

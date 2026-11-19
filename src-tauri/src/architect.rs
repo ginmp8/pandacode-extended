@@ -722,6 +722,9 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
         (rounds, config.reviewer_bot_ids.len() + config.automatic_reviewers)
     };
     rounds.into_iter().all(|round| {
+        if mode == "m3" && !council::m3_sources_match(team, config, round) {
+            return false;
+        }
         let eligible = team.workers.iter().filter(|worker| {
             worker.created_at >= team.council_since
                 && worker.council.as_ref().is_some_and(|seat|

@@ -1267,19 +1267,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ' · Ticket ' + safe(inspectedTicket) +
         (ticketDetails?.archived ? ' · Archived' : '') + '</p></div>' +
       attentionPanel +
+      '<h3>Native execution timeline</h3>' +
       '<ol class="sa-run-milestones" aria-label="Native Run lifecycle">' +
-        '<li><span>01 · Admission</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket?'success':'neutral') +
+        '"><span>01 · Admission</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket ? 'Native Ticket recorded' : 'Loading native record') +
           '</strong></li>' +
-        '<li><span>02 · Assignment</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket &&
+          ticketDetails.assignments.length>0?'info':'neutral') +
+        '"><span>02 · Assignment</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket
             ? ticketDetails.assignments.length + ' recorded attempts' : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>03 · WorkItems</span><strong>' +
+        '<li data-native-tone="' + (workPlanLoaded && workPlan?.ticketId===inspectedTicket
+          ? (workPlan.items.some(item=>item.state==='blocked')?'danger' :
+             workPlan.items.length>0 && workPlan.items.every(item=>item.state==='completed' &&
+               Boolean(item.evidenceSha256))?'success' :
+             workPlan.items.some(item=>item.state==='running')?'info' :
+             workPlan.items.some(item=>item.state==='waiting_review')?'warning' : 'neutral')
+          : 'neutral') + '"><span>03 · WorkItems</span><strong>' +
           (workPlanLoaded && workPlan?.ticketId === inspectedTicket
             ? workPlan.items.length + ' native WorkItems' : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>04 · Review</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket
+          ? nativeTone(ticketDetails.ticket.state) : 'neutral') +
+        '"><span>04 · Review</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket
             ? ticketDetails.finalizationGate === 'council_required' ? 'Council required' :
               ticketDetails.ticket.state === 'waiting_approval' ? 'Human approval pending' :
@@ -1287,10 +1299,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               'No verified verdict shown'
             : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>05 · Delivery</span><strong>' +
+        '<li data-native-tone="' + (deliveryLoaded && delivery?.ticketId===inspectedTicket &&
+          delivery.externalDeliveryVerified?'success':'neutral') +
+        '"><span>05 · Delivery</span><strong>' +
           (deliveryLoaded && delivery?.ticketId === inspectedTicket
             ? safe(delivery.deliveryState) : 'Not inspected') +
           '</strong></li></ol>' +
+      '<details class="sa-ux-accordion"><summary>Worker activity · ' +
+        (ticketDetails?.ticket.id===inspectedTicket?ticketDetails.assignments.length:'—') +
+        ' native attempts' + icon('chevron') + '</summary>' +
+        '<div class="sa-ux-accordion-body">' +
+        (ticketDetails?.ticket.id===inspectedTicket && ticketDetails.assignments.length
+          ? ticketDetails.assignments.map(item=>
+            '<div class="sa-activity-row"><div><strong>' +
+            safe(botName(item.botId)) + '</strong><small>Attempt ' + item.attempt +
+            ' · Updated ' + safe(activityTime(item.updatedAt)) + '</small></div>' +
+            nativeBadge(item.state) + '</div>').join('')
+          : '<p>No native Worker attempts loaded for this Demand.</p>') +
+        '</div></details>' +
       '<div class="sa-title"><h4>Native Ticket</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.filter(ticket => ticket.id === inspectedTicket).map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +

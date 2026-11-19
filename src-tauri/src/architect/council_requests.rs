@@ -486,7 +486,8 @@ pub(crate) fn admit_native_task(
         store, session_id, project_id, assignment_key, artifact_sha256, storage::id(),
     )?;
     let existing: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2
+         AND kind='council_native_task' AND worker_id=?1",
         params![session_id, key], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(raw) = existing {
@@ -542,7 +543,7 @@ pub(crate) fn admit_native_task(
         // won the reservation; a different assignment must still fail closed.
         return resolve_native_admission_collision(
             store, session_id, project_id, assignment_key, artifact_sha256,
-        ).or_else(|_| Err("council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".into()));
+        ).map_err(|_| "council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".to_owned());
     }
     Ok(candidate)
 }

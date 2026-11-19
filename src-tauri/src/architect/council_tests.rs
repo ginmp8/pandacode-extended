@@ -2566,6 +2566,27 @@ fn all_21_modes_and_strategies_create_frozen_native_task_reservations_without_a_
             assert_eq!(inspected.strategy, strategy);
             assert!(!inspected.verified_pass && !verified_council_pass(&store, &root),
                 "{mode}/{strategy:?} cannot pass from reservation-only state");
+            // The reusable native task boundary must be operational in every
+            // source/strategy combination without converting mere reservations
+            // (including child reservations) into a synthetic terminal pass.
+            let project = store.session(&sid).unwrap().project_id;
+            let artifact = "d".repeat(64);
+            let request = council_requests::admit_native_task(
+                &store, &sid, &project, "matrix-task", &artifact,
+            ).unwrap();
+            let task = council_requests::inspect_native_task(
+                &store, &sid, &project, "matrix-task", &artifact, &request.request_id,
+            ).unwrap();
+            assert_eq!(task.request, request, "{mode}/{strategy:?}");
+            assert!(!task.native.verified_pass, "{mode}/{strategy:?}");
+            let denied = council_requests::record_native_terminal(
+                &store, &sid, &project, "matrix-task", &artifact, &request.request_id,
+            ).unwrap_err();
+            assert!(denied.contains("no independently verified root Council pass"),
+                "{mode}/{strategy:?}: {denied}");
+            assert!(council_requests::read_native_terminal(
+                &store, &sid, &project, "matrix-task", &artifact, &request.request_id,
+            ).is_err(), "{mode}/{strategy:?} cannot expose an unissued terminal receipt");
         }
     }
 }
@@ -6819,6 +6840,33 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
         &store, &sid, &project, "assignment-1", &artifact,
     ).unwrap();
     assert_eq!(first, repeat);
+    // A foreign request row cannot inherit the task-bound identity even if
+    // its JSON payload is byte-for-byte identical to a valid Council request.
+    for (kind, owner) in [
+        ("unrelated_task", sid.as_str()),
+        ("council_native_task", "foreign-request-owner"),
+    ] {
+        store.db.execute(
+            "UPDATE architect_requests SET kind=?1,worker_id=?2
+             WHERE parent_session_id=?3 AND key='native-council-task:assignment-1'",
+            rusqlite::params![kind, owner, sid],
+        ).unwrap();
+        let denied = council_requests::admit_native_task(
+            &store, &sid, &project, "assignment-1", &artifact,
+        ).unwrap_err();
+        assert!(denied.contains("council_task_conflict"), "{kind}/{owner}: {denied}");
+        assert!(council_requests::inspect_native_task(
+            &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
+        ).is_err());
+        store.db.execute(
+            "UPDATE architect_requests SET kind='council_native_task',worker_id=?1
+             WHERE parent_session_id=?1 AND key='native-council-task:assignment-1'",
+            rusqlite::params![sid],
+        ).unwrap();
+        assert_eq!(council_requests::admit_native_task(
+            &store, &sid, &project, "assignment-1", &artifact,
+        ).unwrap(), first);
+    }
     // Also exercise the atomic insertion loser's read-back path directly:
     // same immutable task returns the winner, not a second request ID.
     assert_eq!(council_requests::resolve_native_admission_collision(

@@ -132,7 +132,7 @@ export async function invokeSuperagent<T>(
           status:bot.paused ? 'unavailable' : matchedTerms.length ? 'declared_match' : 'no_matching_declaration',
           projectScope:{projectId:bot.projectId,status:'project_reference_only'},
           permissionMode:{value:bot.mode ?? 'ask',status:'not_an_execution_grant'},
-          availability:{status:bot.paused?'unavailable':'configured_not_running',paused:bot.paused},
+          availability:{status:bot.paused?'unavailable':'not_paused_runtime_unknown',paused:bot.paused},
           executionEligibility:'not_verified', sourceConfidence:'declarations_only',
         }];
       }).sort((a,b) => b.declaredMatchScore-a.declaredMatchScore || a.name.localeCompare(b.name));

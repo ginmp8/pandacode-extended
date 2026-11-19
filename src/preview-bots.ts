@@ -277,7 +277,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
         model: { value: bot.model, status: 'current' },
         permissionMode: { value: bot.mode, status: 'not_an_execution_grant' },
         projectScope: { projectId: bot.projectId, status: 'project_reference_only' },
-        availability: { status: bot.paused ? 'unavailable' : 'configured_not_running', paused: bot.paused },
+        availability: { status: bot.paused ? 'unavailable' : 'not_paused_runtime_unknown', paused: bot.paused },
         executionLimits: { status: 'unknown' }, visibility: prefs.visibility,
         configurationUpdatedAt: bot.updatedAt, observedAt: Date.now(), cacheStatus: 'live' };
       break;

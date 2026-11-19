@@ -1670,11 +1670,11 @@ fn stale(team: &TeamSnapshot, round: usize) -> bool {
 /// substitute for the frozen source roster. This snapshot check never grants
 /// reviewer authority; native issued grants remain mandatory at dispatch and
 /// final settlement.
-// A partially admitted M3/M7 root round may still need another legitimate seat.
+// A partially admitted composed root round may still need another legitimate seat.
 // Reject over-quota, repeated, unknown or unbound sources before advertising
 // further dispatch; the complete quorum check below also requires every seat.
 fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Option<(usize, usize)> {
-    if !matches!(config.mode(), "m3" | "m7") { return Some((0, 0)); }
+    if !matches!(config.mode(), "m3" | "m5" | "m6" | "m7") { return Some((0, 0)); }
     let mut direct = std::collections::HashSet::new();
     let mut automatic = 0usize;
     let mut worker_ids = std::collections::HashSet::new();
@@ -1705,7 +1705,7 @@ fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -
     Some((direct.len(), automatic))
 }
 pub(super) fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
-    if !matches!(config.mode(), "m3" | "m7") { return true; }
+    if !matches!(config.mode(), "m3" | "m5" | "m6" | "m7") { return true; }
     m3_source_counts(team, config, round).is_some_and(|(direct, automatic)|
         direct == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers)
 }
@@ -1741,7 +1741,7 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     let latest = view.latest;
     // A corrupted M3 source roster cannot mint another native reviewer seat.
     // A valid but incomplete roster can still dispatch its missing reviewers.
-    if matches!(config.mode(), "m3" | "m7")
+    if matches!(config.mode(), "m3" | "m5" | "m6" | "m7")
         && (1..=latest).any(|round| m3_source_counts(team, config, round).is_none())
     {
         return Err("Mixed Council reviewer sources differ from the frozen Council roster; start a new task cycle.".into());
@@ -1790,7 +1790,7 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
             return Ok(2);
         }
     }
-    // An invalid M3/M7 direct+automatic roster cannot create extra S3 first-phase seats
+    // An invalid composed root-source roster cannot create extra S3 first-phase seats
     // merely because the numeric round is incomplete. Recovery must correct
     // the corrupted task snapshot; it cannot mint new reviewer authority.
     if config.strategy == CouncilExecutionStrategy::TwoPhase && latest == 1

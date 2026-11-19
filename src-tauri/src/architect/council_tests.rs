@@ -2690,6 +2690,122 @@ fn m7_partial_root_roster_rejects_foreign_and_duplicate_sources_before_new_dispa
 }
 
 #[test]
+fn nested_m5_m6_root_source_integrity_gates_all_strategies() {
+    // A child composite occupies its own parent seat. The existing root
+    // automatic/direct source cannot be silently substituted during S1/S2/S3.
+    for strategy in [
+        council::CouncilExecutionStrategy::Parallel,
+        council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase,
+    ] {
+        for direct_source in [false, true] {
+            let mode = if direct_source { "m6" } else { "m5" };
+            let mut config = on(9.0, 3, 0);
+            config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+                bot_id: "child-reviewer".into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 3,
+            }];
+            if direct_source {
+                config.reviewer_bot_ids = vec!["direct-reviewer".into()];
+            } else {
+                config.automatic_reviewers = 1;
+            }
+            config.strategy = strategy;
+            assert_eq!(config.mode(), mode);
+            config.validate().unwrap();
+            let mut team = team_with(config, vec![]);
+            let mut root = seat("nested-root", 1, None, SINCE + 1);
+            let mut binding = reviewer_security::ReviewerBinding::native(
+                &team, &root.id, root.created_at, &root.provider, &root.model,
+                root.council.as_ref().unwrap(),
+            );
+            if direct_source {
+                binding.reviewer_bot_id = Some("direct-reviewer".into());
+                binding.roster_bot_ids = vec!["direct-reviewer".into()];
+                binding.required_reviewers = Some(2);
+                binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+                    name: "Direct reviewer".into(), role: "Security".into(),
+                    instructions: String::new(), goals: String::new(),
+                    soul: String::new(), reasoning_effort: String::new(),
+                    skill_ids: vec![],
+                });
+            }
+            root.reviewer_binding = Some(binding);
+            team.workers.push(root);
+            assert!(council::round_for(
+                &team, team.config.council.as_ref().unwrap(), None,
+            ).is_ok(), "{mode}/{strategy:?} must admit the valid frozen root source");
+
+            for corruption in [
+                "unbound", "wrong_source", "foreign_cycle", "foreign_model",
+                "foreign_revision", "foreign_round", "empty_worker", "empty_session",
+            ] {
+                let mut corrupt = team.clone();
+                match corruption {
+                    "unbound" => corrupt.workers[0].reviewer_binding = None,
+                    "wrong_source" => {
+                        let grant = corrupt.workers[0].reviewer_binding.as_mut().unwrap();
+                        if direct_source {
+                            grant.reviewer_bot_id = None;
+                            grant.snapshot.bot_context = None;
+                        } else {
+                            grant.reviewer_bot_id = Some("unknown-reviewer".into());
+                            grant.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+                                name: "Unknown".into(), role: "Review".into(),
+                                instructions: String::new(), goals: String::new(),
+                                soul: String::new(), reasoning_effort: String::new(),
+                                skill_ids: vec![],
+                            });
+                        }
+                    }
+                    "foreign_cycle" => corrupt.workers[0].reviewer_binding.as_mut().unwrap()
+                        .council_cycle_id = "other:cycle".into(),
+                    "foreign_model" => corrupt.workers[0].reviewer_binding.as_mut().unwrap()
+                        .snapshot.model = "other-model".into(),
+                    "foreign_revision" => corrupt.workers[0].reviewer_binding.as_mut().unwrap()
+                        .artifact_revision = "other-revision".into(),
+                    "foreign_round" => corrupt.workers[0].reviewer_binding.as_mut().unwrap()
+                        .round = 2,
+                    "empty_worker" => corrupt.workers[0].id.clear(),
+                    "empty_session" => corrupt.workers[0].session_id.clear(),
+                    _ => unreachable!(),
+                }
+                assert!(!council::m3_sources_match(
+                    &corrupt, corrupt.config.council.as_ref().unwrap(), 1,
+                ), "{mode}/{strategy:?}/{corruption} must not satisfy frozen sources");
+                let denial = council::round_for(
+                    &corrupt, corrupt.config.council.as_ref().unwrap(), None,
+                ).unwrap_err();
+                assert!(denial.contains("Mixed Council reviewer sources"),
+                    "{mode}/{strategy:?}/{corruption} must prevent new reviewer admission: {denial}");
+            }
+            let mut over_quota = team.clone();
+            let mut extra = seat("extra-root", 1, None, SINCE + 2);
+            let mut extra_binding = reviewer_security::ReviewerBinding::native(
+                &team, &extra.id, extra.created_at, &extra.provider, &extra.model,
+                extra.council.as_ref().unwrap(),
+            );
+            if direct_source {
+                extra_binding.reviewer_bot_id = Some("direct-reviewer".into());
+                extra_binding.roster_bot_ids = vec!["direct-reviewer".into()];
+                extra_binding.required_reviewers = Some(2);
+                extra_binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+                    name: "Duplicate".into(), role: "Security".into(),
+                    instructions: String::new(), goals: String::new(),
+                    soul: String::new(), reasoning_effort: String::new(),
+                    skill_ids: vec![],
+                });
+            }
+            extra.reviewer_binding = Some(extra_binding);
+            over_quota.workers.push(extra);
+            assert!(council::round_for(
+                &over_quota, over_quota.config.council.as_ref().unwrap(), None,
+            ).is_err(), "{mode}/{strategy:?} must reject a second root source without a seat");
+        }
+    }
+}
+
+#[test]
 fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
     let nested = |bot: &str| council::CouncilNestedReviewer {
         bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,

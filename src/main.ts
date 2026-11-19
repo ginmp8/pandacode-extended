@@ -2845,7 +2845,6 @@ function renderComposer(): void {
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
-    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
     if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;

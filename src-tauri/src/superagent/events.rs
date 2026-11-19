@@ -592,6 +592,19 @@ pub(crate) fn headless_inspect_source_integrity(
         .map_err(|e| e.to_string())
 }
 
+/// The trusted local headless operator can enable or revoke an exact GitHub
+/// Observe source using the same native revision guard as the desktop UI.
+/// This changes only source policy: no GitHub request, provider run, Ticket,
+/// permission grant or external effect is issued by this command.
+pub(crate) fn headless_set_source_mode(
+    database_path: &std::path::Path, source_id: &str,
+    expected_revision: i64, mode: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(database_path)?;
+    let updated = set_mode(&store, source_id, expected_revision, mode)?;
+    serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
+}
+
 /// Headless has the same source-scoped, bounded decision history as desktop.
 /// This reads immutable metadata only and cannot invoke GitHub, providers,
 /// restart recovery or issue a task grant.
@@ -4147,6 +4160,42 @@ mod tests {
         assert_eq!(list_decisions(&store,&on.id,10).unwrap().len(),1);
         let tasks: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r|r.get(0)).unwrap();
         assert_eq!(tasks,0);
+    }
+
+    #[test]
+    fn headless_source_revocation_is_revision_bound_and_restart_durable_without_work() {
+        let (store, path) = fixture();
+        let initial = create_source(&store, "orch", "test/fixture", "trusted-bot", "issues.opened").unwrap();
+        let other = create_source(&store, "orch", "test/fixture", "trusted-bot", "issues.closed").unwrap();
+        assert_eq!(initial.mode, "off");
+        assert!(headless_set_source_mode(&path, &initial.id, initial.policy_revision, "auto").is_err());
+        let enabled: EventSource = serde_json::from_str(&headless_set_source_mode(
+            &path, &initial.id, initial.policy_revision, "observe",
+        ).unwrap()).unwrap();
+        assert_eq!(enabled.mode, "observe");
+        assert_eq!(enabled.policy_revision, initial.policy_revision + 1);
+        let same: EventSource = serde_json::from_str(&headless_set_source_mode(
+            &path, &initial.id, enabled.policy_revision, "observe",
+        ).unwrap()).unwrap();
+        assert_eq!(same.policy_revision, enabled.policy_revision);
+        assert!(headless_set_source_mode(&path, &initial.id, initial.policy_revision, "off").is_err());
+        assert_eq!(source(&store, &initial.id).unwrap().mode, "observe");
+        let disabled: EventSource = serde_json::from_str(&headless_set_source_mode(
+            &path, &initial.id, enabled.policy_revision, "off",
+        ).unwrap()).unwrap();
+        assert_eq!(disabled.mode, "off");
+        assert_eq!(disabled.policy_revision, enabled.policy_revision + 1);
+        assert!(headless_observe_source(&path, &initial.id).unwrap_err().contains("Source is Off"));
+        assert!(headless_set_source_mode(&path, &initial.id, enabled.policy_revision, "observe").is_err());
+        assert!(headless_set_source_mode(&path, "missing-source", 1, "observe").is_err());
+        assert_eq!(source(&store, &other.id).unwrap().mode, "off");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(source(&reopened, &initial.id).unwrap().mode, "off");
+        assert_eq!(source(&reopened, &initial.id).unwrap().policy_revision, disabled.policy_revision);
+        assert_eq!(source(&reopened, &other.id).unwrap().mode, "off");
     }
 
     #[test]

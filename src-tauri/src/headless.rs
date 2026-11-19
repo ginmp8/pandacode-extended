@@ -66,6 +66,7 @@ enum Command {
     InspectTeamReadiness { orchestration_id: String },
     PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
+    SetSourceMode { source_id: String, expected_revision: i64, mode: String },
     ObserveSource { source_id: String },
     ObserveTeamSources { orchestration_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
@@ -597,6 +598,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent Team Demand inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::SetSourceMode { source_id, expected_revision, mode } = &command {
+                // Trusted local operator action; the native source policy CAS
+                // is shared with desktop and revokes Observe immediately.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_set_source_mode(
+                        &dir.join("kingcode.sqlite3"), source_id, *expected_revision, mode,
+                    ));
+                match result {
+                    Ok(source) => { println!("{source}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source policy change failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -1577,6 +1594,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--set-source-mode" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--set-source-mode needs a source ID, expected revision and off or observe.")?;
+                validate_ticket_id(source_id)
+                    .map_err(|_| "Provide a bounded alphanumeric source ID.".to_owned())?;
+                let revision = args.get(index + 2)
+                    .ok_or("--set-source-mode needs an expected source policy revision.")?
+                    .parse::<i64>().ok().filter(|value| *value > 0)
+                    .ok_or("Provide a positive expected source policy revision.")?;
+                let mode = args.get(index + 3)
+                    .ok_or("--set-source-mode needs off or observe.")?;
+                if mode != "off" && mode != "observe" {
+                    return Err("Only off or observe is supported; Auto has no native grant.".into());
+                }
+                command = Command::SetSourceMode {
+                    source_id: source_id.clone(), expected_revision: revision, mode: mode.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--observe-source" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
@@ -2146,7 +2183,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2217,6 +2254,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                           Read 50 source-scoped decisions. Legacy command returns an array;
                           --page returns nextCursor, --before follows the exact keyset.
                           No GitHub polling, startup recovery, worker admission or writes; exit.
+  --set-source-mode <id> <revision> <off|observe>
+                         Enable or immediately revoke a native GitHub Observe source with
+                         optimistic policy revision; no GitHub call or task execution; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
   --observe-team-sources <team-id>
@@ -2463,6 +2503,22 @@ mod tests {
             "--list-team-unresolved-effects team_123 --before 1000 ticket_1 ../effect",
             "--list-team-unresolved-effects team_123 --before 1000 ticket_1",
             "--list-team-unresolved-effects team_123 --stop-ticket ticket_1",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--set-source-mode source_123 2 observe"),
+            Ok(Command::SetSourceMode {
+                source_id: "source_123".into(), expected_revision: 2, mode: "observe".into(),
+            }));
+        assert_eq!(parsed("--set-source-mode source_123 4 off"),
+            Ok(Command::SetSourceMode {
+                source_id: "source_123".into(), expected_revision: 4, mode: "off".into(),
+            }));
+        for invalid in [
+            "--set-source-mode", "--set-source-mode source_123",
+            "--set-source-mode source_123 1", "--set-source-mode ../private 1 off",
+            "--set-source-mode source_123 0 off", "--set-source-mode source_123 -1 observe",
+            "--set-source-mode source_123 nope off", "--set-source-mode source_123 1 auto",
+            "--set-source-mode source_123 1 full", "--set-source-mode source_123 1 Observe",
+            "--set-source-mode source_123 1 off --observe-source source_123",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));

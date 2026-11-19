@@ -3586,8 +3586,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let cfg = configuration(store, &ticket.orchestration_id)?;
     // The immutable Ticket selects the executing Worker; the Team's legacy
     // first-member projection is not the authority for callback settlement.
+    let selected_worker_id = ticket_worker(store, &task_id)?;
     let role_current = assignment_role_authorized(
-        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &ticket.worker_bot_id,
+        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &selected_worker_id,
     )?;
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1

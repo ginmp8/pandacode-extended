@@ -54,6 +54,7 @@ enum Command {
         ticket_id: String, paginated: bool, before_at: Option<i64>,
         before_source_id: Option<String>, before_delivery_id: Option<String>,
     },
+    ListTicketSourceLinks { ticket_id: String },
     InspectSourceHealth { source_id: String },
     InspectSourceDecisions {
         source_id: String, paginated: bool,
@@ -227,6 +228,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(activity) => { println!("{activity}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTicketSourceLinks { ticket_id } = &command {
+                // The desktop and detached CLI read the same exact native links.
+                // This never polls GitHub, authorizes a task or runs restart recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_ticket_thread_links(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(links) => { println!("{links}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source thread link inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -757,7 +774,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::PreflightDemand { .. }
         | Command::InspectTicketEffects { .. }
-        | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
+        | Command::InspectTicketSource { .. } | Command::ListTicketSourceLinks { .. }
+        | Command::InspectSourceHealth { .. }
         | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
@@ -1631,6 +1649,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--list-ticket-source-links" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--list-ticket-source-links needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::ListTicketSourceLinks { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--link-source-thread" => {
                 let source_id = args.get(index + 1)
                     .ok_or("--link-source-thread needs source ID, Ticket ID and exact thread key.")?;
@@ -2164,6 +2190,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                           Read 50 linked receipts with native keyset pagination;
                           --page returns nextCursor, --before continues from that cursor.
                           No GitHub polling, task execution or startup recovery; exit.
+  --list-ticket-source-links <ticket-id>
+                         Inspect exact native source/thread associations for one Ticket,
+                         including links without events. No provider, GitHub call,
+                         task authority or startup recovery; exit.
   --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>
                           Add an exact operator-asserted source/Ticket context link through
                           native policy; no provider, grant, GitHub call or task launch.
@@ -2655,6 +2685,13 @@ mod tests {
             "--inspect-ticket-source ticket_123 --before 5000 source_1",
             "--inspect-ticket-source ticket_123 --page --before 5000 source_1 receipt_1",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-ticket-source-links ticket_123"),
+            Ok(Command::ListTicketSourceLinks { ticket_id: "ticket_123".into() }));
+        for invalid in [
+            "--list-ticket-source-links",
+            "--list-ticket-source-links ../unsafe",
+            "--list-ticket-source-links ticket_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--link-source-thread source_123 ticket_123 issue:42"),
             Ok(Command::LinkSourceThread {
                 source_id:"source_123".into(),ticket_id:"ticket_123".into(),
@@ -2991,6 +3028,7 @@ mod tests {
             "--inspect-ticket-graph",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
+            "--list-ticket-source-links",
             "--inspect-source-decisions",
             "--link-source-thread",
             "--unlink-source-thread",

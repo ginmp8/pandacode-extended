@@ -2208,6 +2208,18 @@ pub(crate) fn headless_linked_activity_page(
         .map_err(|e| e.to_string())
 }
 
+/// Read the operator's exact native Ticket/source associations in headless mode.
+/// Unlike receipt activity, this includes manually linked threads with no
+/// authenticated events yet. The read-only Store must not interrupt a live
+/// server through startup recovery, nor infer source authority from a link.
+pub(crate) fn headless_ticket_thread_links(
+    path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(path)?;
+    serde_json::to_string_pretty(&list_thread_links(&store, ticket_id)?)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn superagent_source_thread_activity(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -2243,6 +2255,48 @@ pub async fn superagent_source_thread_links(
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn headless_source_links_are_ticket_scoped_read_only_and_restart_durable() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "source-links-a", "orch");
+        insert_manual_ticket(&store, "source-links-b", "orch");
+        let src = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        link_thread(&store, &src.id, "source-links-a", "issue:42").unwrap();
+        link_thread(&store, &src.id, "source-links-b", "issue:43").unwrap();
+        let audits_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get(0),
+        ).unwrap();
+        let links: serde_json::Value = serde_json::from_str(
+            &headless_ticket_thread_links(&path, "source-links-a").unwrap(),
+        ).unwrap();
+        let records = links.as_array().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["ticketId"], "source-links-a");
+        assert_eq!(records[0]["sourceId"], src.id);
+        assert_eq!(records[0]["subjectKey"], "issue:42");
+        assert_eq!(records[0]["repository"], "owner/repo");
+        assert!(headless_ticket_thread_links(&path, "unknown-ticket").is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), audits_before, "Headless inspection must never change task audit");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0, "Source inspection cannot grant task authority");
+        unlink_thread(&store, &src.id, "source-links-a", "issue:42").unwrap();
+        let empty: serde_json::Value = serde_json::from_str(
+            &headless_ticket_thread_links(&path, "source-links-a").unwrap(),
+        ).unwrap();
+        assert_eq!(empty.as_array().unwrap().len(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let retained: serde_json::Value = serde_json::from_str(
+            &headless_ticket_thread_links(&path, "source-links-b").unwrap(),
+        ).unwrap();
+        assert_eq!(retained[0]["subjectKey"], "issue:43");
+        assert_eq!(list_thread_links(&reopened, "source-links-a").unwrap().len(), 0);
+    }
 
     #[test]
     fn pr_payload_identity_conflicts_never_link_or_advance_authenticated_observe() {

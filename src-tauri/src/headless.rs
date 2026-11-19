@@ -33,6 +33,7 @@ enum Command {
     ListTickets,
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
+    ListTeamReviewInbox { orchestration_id: String, before_updated_at: Option<i64>, before_id: Option<String> },
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListTeamRecoveryInbox { orchestration_id: String, before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListUnresolvedEffects { before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
@@ -502,6 +503,24 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListTeamReviewInbox {
+                orchestration_id, before_updated_at, before_id,
+            } = &command {
+                // Detached native review observation never performs grants or approval.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_team_review_inbox_page(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                        *before_updated_at, before_id.as_deref(),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team review inbox inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListDemands {
                 state, before_updated_at, before_id, search_query, project_id,
             } = &command {
@@ -729,7 +748,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox { .. }
+        Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox { .. } | Command::ListTeamReviewInbox { .. }
         | Command::ListRecoveryInbox { .. } | Command::ListTeamRecoveryInbox { .. }
         | Command::ListUnresolvedEffects { .. }
         | Command::ListTeamUnresolvedEffects { .. } | Command::ListDemands { .. }
@@ -1308,6 +1327,28 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     } else { (None, None) };
                 command = Command::ListReviewInbox { before_updated_at, before_id };
                 ops += 1;
+            }
+            "--list-team-review-inbox" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--list-team-review-inbox needs a Team ID.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let (before_updated_at, before_id) =
+                    if args.get(index + 2).map(String::as_str) == Some("--before") {
+                        let updated_at = args.get(index + 3)
+                            .ok_or("--before needs a positive millisecond timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("Team review cursor timestamp must be positive.")?;
+                        let id = args.get(index + 4)
+                            .ok_or("--before needs the previous page's last Ticket ID.")?;
+                        validate_ticket_id(id)?;
+                        index += 3;
+                        (Some(updated_at), Some(id.clone()))
+                    } else { (None, None) };
+                command = Command::ListTeamReviewInbox {
+                    orchestration_id: orchestration_id.clone(), before_updated_at, before_id,
+                };
+                ops += 1;
+                index += 1;
             }
             "--list-demands" => {
                 let state = args.get(index + 1)
@@ -2029,7 +2070,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2061,6 +2102,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-review-inbox [--before <ms> <ticket-id>]
                          Page pending human/Council decisions across Teams using
                          nextCursor; redact objectives; never approve; exit.
+  --list-team-review-inbox <team-id> [--before <ms> <ticket-id>]
+                          Page native pending decisions for one Team only. No Council
+                          verdict, provider launch, recovery, task grant or approval.
   --list-recovery-inbox [--before <priority> <ms> <ticket-id>]
                          Page native recovery/decision Tickets across Teams by stable priority
                          then update time and ID; no provider or remote replay; exit.
@@ -2244,6 +2288,25 @@ mod tests {
             "--list-review-inbox --before 12345 ../private",
             "--list-review-inbox --before 12345",
             "--list-review-inbox --before 12345 review_001 --stop-ticket review_001",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-team-review-inbox team_123"),
+            Ok(Command::ListTeamReviewInbox {
+                orchestration_id:"team_123".into(),
+                before_updated_at:None, before_id:None,
+            }));
+        assert_eq!(parsed("--list-team-review-inbox team_123 --before 12345 review_001"),
+            Ok(Command::ListTeamReviewInbox {
+                orchestration_id:"team_123".into(),
+                before_updated_at:Some(12345), before_id:Some("review_001".into()),
+            }));
+        for invalid in [
+            "--list-team-review-inbox",
+            "--list-team-review-inbox ../unsafe",
+            "--list-team-review-inbox team_123 --before",
+            "--list-team-review-inbox team_123 --before 0 review_001",
+            "--list-team-review-inbox team_123 --before 12345 ../private",
+            "--list-team-review-inbox team_123 --before 12345",
+            "--list-team-review-inbox team_123 --stop-ticket review_001",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox {
             before_priority:None,before_updated_at:None,before_id:None
@@ -2918,6 +2981,7 @@ mod tests {
             "--list-tickets",
             "--list-ticket-activity",
             "--list-review-inbox",
+            "--list-team-review-inbox",
             "--list-recovery-inbox",
             "--list-team-unresolved-effects",
             "--list-demands",

@@ -642,6 +642,15 @@ fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
 fn list_review_inbox_page(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_review_inbox_page_scoped(store, limit, before_updated_at, before_id, None)
+}
+
+/// Apply Team scope in SQLite before LIMIT. A Team cursor is valid only while
+/// its anchor is still a pending Ticket in that exact Team and revision clock.
+fn list_review_inbox_page_scoped(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
     if !(1..=200).contains(&limit) {
         return Err("Review inbox page size must be between 1 and 200.".into());
     }
@@ -653,25 +662,39 @@ fn list_review_inbox_page(
     {
         return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
     }
+    if let Some(team_id) = orchestration_id {
+        configuration(store, team_id)?;
+        if let (Some(at), Some(ticket_id)) = (before_updated_at, before_id) {
+            let visible: i64 = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_tickets
+                  WHERE id=?1 AND updated_at=?2 AND orchestration_id=?3
+                    AND state IN ('waiting_approval','waiting_review'))",
+                params![ticket_id, at, team_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if visible != 1 {
+                return Err("Review cursor is stale or outside the selected Team; refresh the inbox.".into());
+            }
+        }
+    }
     let mut stmt = store.db.prepare(
         "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE t.state IN ('waiting_approval','waiting_review')
-           AND (?2 IS NULL OR t.updated_at < ?2
-                OR (t.updated_at=?2 AND t.id < ?3))
+           AND (?2 IS NULL OR t.updated_at < ?2 OR (t.updated_at=?2 AND t.id < ?3))
+           AND (?4 IS NULL OR t.orchestration_id=?4)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
-        id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
-        state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
-        project_id: row.get(6)?,
-    })).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id],
+        |row| Ok(DemandIndex {
+            id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
+            state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+            project_id: row.get(6)?,
+        }),
+    ).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
-/// Bounded read-only headless projection of the same native cross-Team review
-/// states as the desktop. A state is not evidence of Council approval or
-/// permission to accept; a separate, current native revision check is required.
+/// Bounded observational projection. Review-pending never means passed.
 pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Result<String> {
     list_headless_review_inbox_page(database_path, None, None)
 }
@@ -679,14 +702,36 @@ pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Res
 pub(crate) fn list_headless_review_inbox_page(
     database_path: &std::path::Path, before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<String> {
+    list_headless_review_inbox_page_scoped(database_path, None, before_updated_at, before_id)
+}
+
+pub(crate) fn list_headless_team_review_inbox_page(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_review_inbox_page_scoped(
+        database_path, Some(orchestration_id), before_updated_at, before_id,
+    )
+}
+
+fn list_headless_review_inbox_page_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
-    let items = list_review_inbox_page(&store, 200, before_updated_at, before_id)?;
+    // Page and lookahead share one read-only SQLite snapshot.
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let items = list_review_inbox_page_scoped(
+        &store, 200, before_updated_at, before_id, orchestration_id,
+    )?;
     let cursor = items.last().map(|item| (item.updated_at, item.id.clone()));
-    // Check an actual following row; a full page alone does not prove more.
     let may_have_more = match cursor.as_ref() {
-        Some((time, id)) => !list_review_inbox_page(&store, 1, Some(*time), Some(id))?.is_empty(),
+        Some((time, id)) => !list_review_inbox_page_scoped(
+            &store, 1, Some(*time), Some(id), orchestration_id,
+        )?.is_empty(),
         None => false,
     };
+    snapshot.commit().map_err(|e| e.to_string())?;
     let next_cursor = if may_have_more {
         cursor.map(|(updated_at, ticket_id)| serde_json::json!({
             "updatedAt": updated_at, "ticketId": ticket_id,
@@ -709,14 +754,18 @@ pub(crate) fn list_headless_review_inbox_page(
             "acceptanceAuthorizedByThisCommand": false
         })
     }).collect::<Vec<_>>();
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut response = serde_json::json!({
         "tickets": entries,
         "limit": 200,
         "mayHaveMore": may_have_more,
         "nextCursor": next_cursor,
         "observationalOnly": true,
         "startupRecoveryPerformed": false
-    })).map_err(|e| e.to_string())
+    });
+    if let Some(team_id) = orchestration_id {
+        response["orchestrationId"] = serde_json::json!(team_id);
+    }
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
 }
 
 /// Immutable native assignment history, including completed and failed attempts.
@@ -7021,6 +7070,89 @@ mod tests {
         assert!(list_headless_review_inbox_page(&path, None, Some(&id)).is_err());
         assert!(list_headless_review_inbox_page(&path, Some(at), Some("../bad")).is_err());
         assert!(list_headless_review_inbox_page(&path, Some(0), Some(&id)).is_err());
+    }
+
+    #[test]
+    fn headless_team_review_inbox_scopes_before_paging_and_rejects_foreign_cursors() {
+        let store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Other review Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        for index in 0..208_i64 {
+            let team = if index < 205 { &first } else { &second };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                         source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'PRIVATE TEAM REVIEW','local-user','manual',?4,
+                        'worker',?5,?6,100000,100000)",
+                params![format!("team-review-{index:03}"),team.id,
+                    format!("team-review-key-{index:03}"),team.project_id,
+                    team.policy_revision,
+                    if index % 2 == 0 { "waiting_approval" } else { "waiting_review" }],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        let first_team_id = first.id.clone();
+        let second_team_id = second.id.clone();
+        let first_text = list_headless_team_review_inbox_page(
+            &path, &first_team_id, None, None,
+        ).unwrap();
+        let first_page: serde_json::Value = serde_json::from_str(&first_text).unwrap();
+        assert_eq!(first_page["tickets"].as_array().unwrap().len(), 200);
+        assert_eq!(first_page["mayHaveMore"], true);
+        assert_eq!(first_page["orchestrationId"].as_str(), Some(first_team_id.as_str()));
+        let at = first_page["nextCursor"]["updatedAt"].as_i64().unwrap();
+        let id = first_page["nextCursor"]["ticketId"].as_str().unwrap().to_owned();
+        assert!(list_headless_team_review_inbox_page(
+            &path, &second_team_id, Some(at), Some(&id),
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, "unknown-team", None, None,
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), Some("team-review-205"),
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), None,
+        ).is_err());
+        drop(store);
+        let next_text = list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), Some(&id),
+        ).unwrap();
+        let next: serde_json::Value = serde_json::from_str(&next_text).unwrap();
+        assert_eq!(next["tickets"].as_array().unwrap().len(), 5);
+        assert_eq!(next["mayHaveMore"], false);
+        assert!(next["nextCursor"].is_null());
+        let mut seen = std::collections::HashSet::new();
+        for page in [&first_page, &next] {
+            for row in page["tickets"].as_array().unwrap() {
+                assert_eq!(row["orchestrationId"].as_str(), Some(first_team_id.as_str()));
+                assert_eq!(row["nativeCouncilPassVerifiedByThisCommand"], false);
+                assert_eq!(row["acceptanceAuthorizedByThisCommand"], false);
+                assert!(seen.insert(row["ticketId"].as_str().unwrap().to_owned()));
+            }
+        }
+        assert_eq!(seen.len(), 205);
+        let other_text = list_headless_team_review_inbox_page(
+            &path, &second_team_id, None, None,
+        ).unwrap();
+        let other: serde_json::Value = serde_json::from_str(&other_text).unwrap();
+        assert_eq!(other["tickets"].as_array().unwrap().len(), 3);
+        assert!(!first_text.contains("PRIVATE TEAM REVIEW"));
+        assert!(!next_text.contains("PRIVATE TEAM REVIEW"));
+        let after = Store::open_read_only(&path).unwrap();
+        let audit_after: i64 = after.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_before, audit_after);
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(0), Some(&id),
+        ).is_err());
     }
 
     #[test]

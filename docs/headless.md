@@ -541,6 +541,8 @@ pandacode serve --list-ticket-activity <ticket-id>
 pandacode serve --list-ticket-activity <ticket-id> --before <audit-id>
 pandacode serve --list-review-inbox
 pandacode serve --list-review-inbox --before <updated-at-ms> <ticket-id>
+pandacode serve --list-team-review-inbox <team-id>
+pandacode serve --list-team-review-inbox <team-id> --before <updated-at-ms> <ticket-id>
 pandacode serve --list-recovery-inbox
 pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
@@ -618,6 +620,19 @@ A pending native Council review is never represented as a pass. This command
 opens existing SQLite read-only and cannot perform provider dispatch, recovery,
 review acceptance, external effects or policy grants. Use a separate current
 Ticket inspection before any explicitly authorized native human decision.
+
+### Team-scoped native review inbox (read-only)
+
+`pandacode serve --list-team-review-inbox <team-id>` uses the same actual
+pending decision states as the global inbox, but filters by the native Team
+**before** applying its 200-row limit. Pass the returned
+`nextCursor.updatedAt` and `nextCursor.ticketId` with `--before` to page.
+Unknown Teams, foreign-Team cursors, stale/non-pending anchors and malformed
+timestamps or IDs fail explicitly rather than silently skipping reviews. The
+output includes a Team ID and redacted Ticket revision, state and next action.
+It cannot invoke Council, prove reviewer approval, start recovery, execute a
+provider, issue grants or accept Tickets. Re-inspect the current native
+revision before an explicitly authorized decision.
 
 ### Cross-Team recovery and reconciliation inbox (read-only)
 

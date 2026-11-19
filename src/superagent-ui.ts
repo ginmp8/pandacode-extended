@@ -1,4 +1,5 @@
 import './superagent.css';
+import './superagent-reference-ux.css';
 import './superagent-multiselect.css';
 import { escape, icon } from './dom';
 import { botAvatarHtml } from './bot-avatars';
@@ -237,6 +238,28 @@ function roleUnavailableForChange(
   return reviewerDraft.includes(bot.id);
 }
 
+/** Native status colors are presentation only, never runtime verification. */
+function nativeTone(state:string):'info'|'warning'|'danger'|'success'|'neutral' {
+  if (['queued','running','working'].includes(state)) return 'info';
+  if (['waiting_approval','waiting_review'].includes(state)) return 'warning';
+  if (['blocked','failed','interrupted','inconclusive'].includes(state)) return 'danger';
+  if (['completed','enabled'].includes(state)) return 'success';
+  return 'neutral';
+}
+function nativeLabel(state:string):string {
+  const labels:Record<string,string>={
+    queued:'Queued',running:'Working',waiting_approval:'Awaiting approval',
+    waiting_review:'Council pending',blocked:'Needs attention',failed:'Failed',
+    interrupted:'Interrupted',inconclusive:'Inconclusive',completed:'Completed',
+    stopped:'Stopped',enabled:'Enabled',off:'Off',
+  };
+  return labels[state] ?? state.split('_').join(' ');
+}
+function nativeBadge(state:string, label=nativeLabel(state)):string {
+  return '<span class="sa-native-state" data-native-tone="' + nativeTone(state) +
+    '"><span class="sa-native-state-dot" aria-hidden="true"></span>' +
+    escape(label) + '</span>';
+}
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
@@ -442,20 +465,41 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const visibleTeams = presets.filter(item =>
       item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
       (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
-    const list = visibleTeams.map(item =>
-      '<li class="sa-item"><span class="sa-team-tile">' + icon('team') +
-      '</span><div><strong>' + safe(item.name) + '</strong><small>' +
-      safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
-      '</small><small class="sa-role-counts" aria-label="Configured member counts">' +
-      safe(roleSummary(item)) + '</small></div>' +
-      '<div class="sa-team-row-meta"><span class="sa-team-state">' +
-      (item.enabled ? 'Enabled' : 'Off') + '</span>' +
-      '<small class="sa-counts">' + (item.ticketCount ?? 0) + ' runs</small>' +
-      '<small class="sa-last-activity">' + safe(activityTime(item.lastActivityAt)) +
-      '</small></div><button type="button" data-sa-select="' + safe(item.id) +
-      '" aria-current="' + (item.id === selected) + '">Details ' + icon('chevron') +
-      '</button><button type="button" data-sa-team-tasks="' + safe(item.id) +
-      '">Team tasks</button></li>').join('');
+    const botPortrait = (id:string) => {
+      const bot=bots.find(candidate=>candidate.id===id);
+      return botAvatarHtml(bot?.avatar ?? '',bot?.name ?? 'Missing bot',
+        'sa-ux-avatar',bot?.color ?? '');
+    };
+    const list = visibleTeams.map(item => {
+      const members=[item.coordinatorBotId,...(item.workerBotIds?.length
+        ? item.workerBotIds : [item.workerBotId])];
+      const count=typeof item.ticketCount==='number' && Number.isInteger(item.ticketCount)
+        ? item.ticketCount.toLocaleString() : '—';
+      const workers=typeof item.workerCount==='number'
+        ? item.workerCount : Math.max(0,members.length-1);
+      return '<li class="sa-item sa-team-card">' +
+        '<div class="sa-team-card-top"><span class="sa-ux-avatar-stack" ' +
+          'aria-label="Configured team members">' +
+          members.slice(0,4).map(botPortrait).join('') + '</span>' +
+          nativeBadge(item.enabled?'enabled':'off') + '</div>' +
+        '<div class="sa-team-card-body"><strong>' + safe(item.name) + '</strong>' +
+          '<small>Coordinator · ' + safe(botName(item.coordinatorBotId)) + '</small>' +
+          '<small class="sa-role-counts" aria-label="Configured member counts">' +
+          safe(roleSummary(item)) + '</small></div>' +
+        '<div class="sa-team-card-foot"><span class="sa-team-card-count">' +
+          '<strong>' + count + '</strong> Demands</span>' +
+          '<span>' + workers + ' Workers' +
+          (typeof item.runningCount==='number' ? ' · ' + item.runningCount + ' running' : '') +
+          '</span></div>' +
+        '<div class="sa-team-card-actions">' +
+          '<button type="button" data-sa-select="' + safe(item.id) +
+          '" aria-current="' + (item.id === selected) + '">Details ' +
+          icon('chevron') + '</button>' +
+          '<button type="button" data-sa-team-tasks="' + safe(item.id) +
+          '">Team tasks</button>' +
+          '<small class="sa-last-activity">Updated ' +
+          safe(activityTime(item.lastActivityAt)) + '</small></div></li>';
+    }).join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
@@ -969,7 +1013,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandGroups.concat(unmatched.length ? [{label:'Other states',states:[]}] : [])
           .map(group=>{
             const entries=group.states.length ? items.filter(item=>group.states.includes(item.state)) : unmatched;
-            return '<section class="sa-demand-column" aria-label="' + safe(group.label) + ' Demands">' +
+            return '<section class="sa-demand-column" data-native-tone="' +
+               (group.label==='Awaiting decision'?'warning':group.label==='Needs attention'?'danger':
+                 group.label==='Finished or stopped'?'success':'info') +
+               '" aria-label="' + safe(group.label) + ' Demands">' +
               '<h4>' + safe(group.label) + ' <span class="sa-demand-count">' +
               entries.length + '</span></h4><ul class="sa-tickets">' +
               (entries.map(item=>demandCard(item,scope)).join('') ||
@@ -1511,7 +1558,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</select></label></div>' +
       '<p class="sa-list-caption" role="status">' + visibleTeams.length + ' of ' +
         presets.length + ' Teams</p>' +
-      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
+      '<ul class="sa-list sa-ux-team-grid">' + (list || '<li class="sa-empty">' +
       (presets.length ? 'No Teams match these filters.' : 'No Teams created yet.') +
       '</li>') + '</ul></section>' : '');
     const portablePanel = '<section class="sa-pane sa-portable-panel"><h3>Import / export</h3>' +
@@ -1542,7 +1589,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             : 'Loading native policy') + '</p></div>' +
         '<div class="sa-detail-actions">' +
         '<button type="button" class="sa-enable-toggle" data-sa-enable="' + safe(chosen.id) +
-        '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '">' +
+        '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') +
+         '" aria-pressed="' + chosen.enabled + '">' +
         (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-team-tab="demands">' + icon('kanban') +
         ' Team tasks</button>' +

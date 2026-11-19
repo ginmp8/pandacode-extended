@@ -2533,6 +2533,23 @@ fn m3_root_never_admits_forged_partial_sources_in_any_strategy() {
         assert_eq!(council::round_for(
             &team, team.config.council.as_ref().unwrap(), None,
         ).unwrap(), 1);
+        // Partially issued M3/M7 rounds cannot dispatch a fresh reviewer if
+        // two selected sources alias the same native worker or session.
+        for alias in ["worker", "session", "empty_worker", "empty_session"] {
+            let mut corrupted = team.clone();
+            match alias {
+                "worker" => corrupted.workers[1].id = corrupted.workers[0].id.clone(),
+                "session" => corrupted.workers[1].session_id = corrupted.workers[0].session_id.clone(),
+                "empty_worker" => corrupted.workers[1].id.clear(),
+                "empty_session" => corrupted.workers[1].session_id.clear(),
+                _ => unreachable!(),
+            }
+            let denied = council::round_for(
+                &corrupted, corrupted.config.council.as_ref().unwrap(), None,
+            ).unwrap_err();
+            assert!(denied.contains("Mixed Council reviewer sources"),
+                "{strategy:?}/{alias} must reject aliased native reviewer identities: {denied}");
+        }
         let mut duplicated = team.clone();
         duplicated.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
             Some("selected-reviewer".into());
@@ -2606,6 +2623,23 @@ fn m7_partial_root_roster_rejects_foreign_and_duplicate_sources_before_new_dispa
         // the root round reservation, so do not assume a fixed round here.
         assert!(council::round_for(&team, team.config.council.as_ref().unwrap(), None).is_ok(),
             "{strategy:?} must keep a valid M7 parent roster dispatchable");
+        // Partially issued M3/M7 rounds cannot dispatch a fresh reviewer if
+        // two selected sources alias the same native worker or session.
+        for alias in ["worker", "session", "empty_worker", "empty_session"] {
+            let mut corrupted = team.clone();
+            match alias {
+                "worker" => corrupted.workers[1].id = corrupted.workers[0].id.clone(),
+                "session" => corrupted.workers[1].session_id = corrupted.workers[0].session_id.clone(),
+                "empty_worker" => corrupted.workers[1].id.clear(),
+                "empty_session" => corrupted.workers[1].session_id.clear(),
+                _ => unreachable!(),
+            }
+            let denied = council::round_for(
+                &corrupted, corrupted.config.council.as_ref().unwrap(), None,
+            ).unwrap_err();
+            assert!(denied.contains("Mixed Council reviewer sources"),
+                "{strategy:?}/{alias} must reject aliased native reviewer identities: {denied}");
+        }
         let mut duplicate = team.clone();
         duplicate.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
             Some("selected-reviewer".into());

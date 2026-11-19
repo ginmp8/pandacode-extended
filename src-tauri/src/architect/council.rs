@@ -1677,7 +1677,17 @@ fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -
     if !matches!(config.mode(), "m3" | "m7") { return Some((0, 0)); }
     let mut direct = std::collections::HashSet::new();
     let mut automatic = 0usize;
+    let mut worker_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
     for (worker, _) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
+        // A source label cannot make two root seats independent when their
+        // native worker or session identity is shared, empty or forged.
+        if worker.id.is_empty() || worker.session_id.is_empty()
+            || !worker_ids.insert(worker.id.as_str())
+            || !session_ids.insert(worker.session_id.as_str())
+        {
+            return None;
+        }
         let binding = worker.reviewer_binding.as_ref()?;
         match binding.reviewer_bot_id.as_deref() {
             Some(bot_id) if config.reviewer_bot_ids.iter().any(|id| id == bot_id)

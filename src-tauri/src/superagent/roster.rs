@@ -488,6 +488,8 @@ pub struct EffectiveMember {
     pub reasoning_effort:String,
     pub project_id:String,
     pub paused:bool,
+    /// False only when the referenced existing Bot has been removed.
+    pub present:bool,
     pub skills:Vec<EffectiveSkill>,
     /// Local, attributable configuration issues; not an execution capability verdict.
     pub configuration_issues:Vec<String>,
@@ -515,8 +517,32 @@ fn effective_team(
     let config=configuration(store,id)?;
     let roster=read(store,id)?;
     let mut members=Vec::new();
+    let mut missing_member_ids=HashSet::new();
     let mut add=|role:&str,position:usize,bot_id:&str|->Result<()> {
-        let bot=bots::get(store,bot_id)?;
+        let bot=match bots::get(store,bot_id) {
+            Ok(bot)=>bot,
+            Err(error)=>{
+                // Only a truly missing Bot can be represented as an unavailable
+                // member. Propagate corrupt/unreadable profile errors as errors.
+                let exists:i64=store.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM bots WHERE id=?1)",
+                    [bot_id],|row|row.get(0),
+                ).map_err(|e|e.to_string())?;
+                if exists!=0 {return Err(error);}
+                missing_member_ids.insert(bot_id.to_owned());
+                members.push(EffectiveMember {
+                    role:role.into(),position,bot_id:bot_id.into(),
+                    name:"Missing bot".into(),provider:"unavailable".into(),
+                    model:"unavailable".into(),mode:"unavailable".into(),
+                    reasoning_effort:String::new(),project_id:"unavailable".into(),
+                    paused:false,present:false,skills:Vec::new(),
+                    configuration_issues:vec![
+                        "Configured bot no longer exists; replace it in the disabled Team before admission.".into(),
+                    ],
+                });
+                return Ok(());
+            }
+        };
         let skills:Vec<EffectiveSkill>=bot.skills.iter().map(|skill_id| {
             let state=library.get(skill_id);
             EffectiveSkill {
@@ -557,7 +583,7 @@ fn effective_team(
             role:role.into(),position,bot_id:bot.id,name:bot.name,
             provider:bot.provider,model:bot.model,mode:bot.mode,
             reasoning_effort:bot.reasoning_effort,
-            project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
+            project_id:bot.project_id,paused:bot.paused,present:true,skills,configuration_issues,
         });
         Ok(())
     };
@@ -588,6 +614,12 @@ fn effective_team(
         );
     }
     for member in &members {
+        if missing_member_ids.contains(&member.bot_id) {
+            manual_admission_blockers.push(format!(
+                "{} bot no longer exists; native admission is unavailable.",member.role,
+            ));
+            continue;
+        }
         if (member.role=="coordinator" || (member.role=="worker" && member.position==0))
             && member.paused {
             manual_admission_blockers.push(format!(
@@ -1234,6 +1266,7 @@ mod tests {
         assert!(view.manual_admission_blockers.iter()
             .any(|reason|reason.contains("Multi-role Team")));
         assert!(!view.grants_issued);
+        assert!(view.members.iter().all(|member|member.present));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
 
@@ -1255,6 +1288,56 @@ mod tests {
             .any(|reason|reason.contains("Team is disabled")));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+
+    #[test]
+    fn removed_worker_remains_visible_in_native_team_policy_without_execution_authority() {
+        let path=std::env::temp_dir().join(format!("sa-missing-member-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('missing-project','Fixture','/tmp/sa-missing')",[],
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'missing-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config=super::super::create_configuration(&store,super::super::NewOrchestration {
+            name:"Missing Worker Team".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let enabled=super::super::change_enabled(
+            &store,&config.id,config.policy_revision,true,
+        ).unwrap();
+        // Removing a Bot must not destroy a durable Team's identity, nor make
+        // its effective-policy inspector fail before the user can diagnose it.
+        store.db.execute("DELETE FROM bots WHERE id='worker'",[]).unwrap();
+        let report=effective_team(&store,&config.id,&HashMap::new()).unwrap();
+        assert!(report.enabled);
+        assert_eq!(report.policy_revision,enabled.policy_revision);
+        assert_eq!(report.members.len(),2);
+        assert!(report.members[0].present);
+        assert!(!report.members[1].present);
+        assert_eq!(report.members[1].bot_id,"worker");
+        assert_eq!(report.members[1].role,"worker");
+        assert!(report.members[1].configuration_issues.iter()
+            .any(|reason|reason.contains("no longer exists")));
+        assert!(report.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("worker bot no longer exists")));
+        assert!(!report.grants_issued);
+        assert!(bots::get(&store,"worker").is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persisted=effective_team(&reopened,&config.id,&HashMap::new()).unwrap();
+        assert_eq!(persisted.members[1].bot_id,"worker");
+        assert!(!persisted.members[1].present);
+        assert!(persisted.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("worker bot no longer exists")));
     }
 
     #[test]

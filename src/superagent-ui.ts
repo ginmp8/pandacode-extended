@@ -23,7 +23,7 @@ interface EffectiveSkill {
 interface EffectiveMember {
   role:string; position:number; botId:string; name:string;
   provider:string; model:string; mode:string; reasoningEffort:string; projectId:string;
-  paused:boolean; skills:EffectiveSkill[]; configurationIssues?:string[];
+  paused:boolean; present?:boolean; skills:EffectiveSkill[]; configurationIssues?:string[];
 }
 interface EffectiveTeam {
   orchestrationId:string; policyRevision:number; enabled:boolean;
@@ -792,7 +792,8 @@ export function mountSuperagent(
           ' · Bot mode ' + safe(member.mode) +
           ' · Reasoning effort ' + safe(member.reasoningEffort || 'not specified') +
           ' · Project ' + safe(member.projectId) +
-          (member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
+          (member.present === false ? ' · Missing bot (not executable)' :
+            member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
           '<section class="sa-member-issues" aria-label="Local configuration checks">' +
           (member.configurationIssues?.length
             ? '<p>Native configuration issues:</p><ul>' +
@@ -803,7 +804,9 @@ export function mountSuperagent(
             ' · Safety ' + safe(skill.safetyStatus) +
             ' · Harness eligibility ' + safe(skill.harnessEligibility) +
             ' · Invocation/evidence ' + safe(skill.invocationEvidence) + '</li>').join('') ||
-            '<li>No bot-assigned Skills</li>') + '</ul></li>').join('') + '</ol></section>'
+            '<li>' + (member.present === false
+              ? 'Skill inventory unavailable for missing bot' : 'No bot-assigned Skills') +
+            '</li>') + '</ul></li>').join('') + '</ol></section>'
       : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +

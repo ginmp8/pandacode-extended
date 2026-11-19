@@ -1115,6 +1115,7 @@ export function mountSuperagent(
       }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
+        selectedDemandWorkerId = ''; demandPreflight = null;
         inspectedTicket = ''; threadLinks = [];
         linkedDecisions = []; linkedDecisionsLoaded = false; linkedDecisionsHasMore = false; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
@@ -1452,6 +1453,7 @@ export function mountSuperagent(
         });
         if (created.enabled) throw new Error('New Team did not remain disabled.');
         selected = created.id; workspaceView = 'teams';
+        selectedDemandWorkerId = ''; demandPreflight = null;
         roleRoster = null; workerOrder = []; reviewerDraft = []; sourcesLoaded = false; sources = [];
         await reload();
         feedback = 'Disabled Team duplicated. No prior Tickets, source grants or approvals were copied.';
@@ -1775,6 +1777,7 @@ export function mountSuperagent(
         reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
       if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
       selected = demand.orchestrationId;
+      selectedDemandWorkerId = ''; demandPreflight = null;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
@@ -1857,7 +1860,8 @@ export function mountSuperagent(
       const c = presets.find(item => item.id === target.dataset.saDelete);
       if (c) ask('Delete unused preset ' + c.name + '? Ticket history cannot be deleted.', async () => {
         await call('superagent_delete',{ orchestrationId:c.id, expectedRevision:c.policyRevision });
-        selected = ''; await reload();
+        selected = ''; selectedDemandWorkerId = ''; demandPreflight = null;
+        await reload();
       });
       return;
     }
@@ -2278,7 +2282,8 @@ export function mountSuperagent(
         draftPresetPurpose = ''; draftPresetStrategy = 'balanced';
         draftCoordinatorBotId = ''; draftWorkerBotId = '';
         draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
-        selected = created.id; workspaceView = 'runs'; await reload();
+        selected = created.id; selectedDemandWorkerId = ''; demandPreflight = null;
+        workspaceView = 'runs'; await reload();
       });
     }
     if (form.dataset.saForm === 'reject') {

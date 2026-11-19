@@ -59,6 +59,7 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
     (window as unknown as {saDirectCalls:typeof calls}).saDirectCalls=calls;
     const team={id:'team',name:'Team',coordinatorBotId:'coordinator',
       workerBotId:'worker-a',enabled:true,policyRevision:2,workerCount:2,reviewerCount:0};
+    const other={...team,id:'another-team',name:'Other team'};
     mountSuperagent(host,async(command,args)=>{
       calls.push({command,args});
       if(command==='bots_list') return [
@@ -66,10 +67,11 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
         {id:'worker-a',name:'Worker A',paused:false},
         {id:'worker-b',name:'Worker B',paused:false},
       ] as never;
-      if(command==='superagent_list') return [team] as never;
+      if(command==='superagent_list') return [team,other] as never;
       if(command==='superagent_tickets') return [] as never;
       if(command==='superagent_roster') return {
-        orchestrationId:'team',policyRevision:2,coordinatorBotId:'coordinator',
+        orchestrationId:(args as {orchestrationId:string}).orchestrationId,
+        policyRevision:2,coordinatorBotId:'coordinator',
         workerBotIds:['worker-a','worker-b'],reviewerBotIds:[],
         maxWorkerAttempts:2,purpose:'',strategy:'balanced',executionReady:false,
       } as never;
@@ -107,6 +109,12 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
   expect((submitted[0].args as {workerBotId:string}).workerBotId).toBe('worker-b');
   expect(calls.some(call=>call.command==='superagent_submit'
     || call.command==='superagent_submit_coordinated')).toBe(false);
+  // Choosing a different Team must never carry an old Worker selection forward,
+  // even when that same bot is a valid member of both native rosters.
+  await host.locator('[data-sa-select="another-team"]').click();
+  await host.getByRole('button',{name:'Load configured Workers'}).click();
+  await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toHaveValue('');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });
 
 test('new multi-role Team draft survives workspace redraw and submits exact native roster', async ({page}) => {

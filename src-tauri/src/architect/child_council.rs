@@ -277,6 +277,19 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     if root.council_since <= 0 || config.nested_bot_reviewers.is_empty() {
         return Ok(());
     }
+    // Restart preflight must not adopt an unselected child reservation from
+    // this immutable cycle. Per-choice validation alone misses foreign rows.
+    let prefix = format!("native-council-child:{}:", root.council_since);
+    let reserved: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child'
+         AND substr(key,1,length(?2))=?2",
+        params![&root.session_id, prefix],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if reserved != config.nested_bot_reviewers.len() as i64 {
+        return Err("child_council_revoked: native child reservation roster changed; start a fresh Council task.".into());
+    }
     for choice in &config.nested_bot_reviewers {
         match read(store, root, choice) {
             Ok(Some(_)) => {}

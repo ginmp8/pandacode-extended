@@ -6255,6 +6255,68 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
 }
 
 #[test]
+fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for id in ["roster-security", "roster-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![id, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["roster-security", "roster-architecture"]
+            .into_iter().map(|id| council::CouncilNestedReviewer {
+                bot_id: id.into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Verify the restart child roster", None, None,
+    ).unwrap();
+    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        child_council::require_resumable_child_cycles(&store, &started).unwrap();
+        let genuine_key = format!(
+            "native-council-child:{}:roster-security", started.council_since
+        );
+        let extra_key = format!(
+            "native-council-child:{}:unselected-bot", started.council_since
+        );
+        // Copy valid-looking JSON under a different, unowned native session.
+        // Per-choice inspection still finds both real reservations, but
+        // the cycle now has an unauthorized third child record.
+        assert_eq!(store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             SELECT parent_session_id,?2,kind,content,'foreign-child-session'
+             FROM architect_requests
+             WHERE parent_session_id=?1 AND key=?3 AND kind='council_child'",
+            rusqlite::params![sid, extra_key, genuine_key],
+        ).unwrap(), 1);
+        let denied = child_council::require_resumable_child_cycles(
+            &store, &started,
+        ).unwrap_err();
+        assert!(denied.contains("child reservation roster changed"), "{denied}");
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, extra_key],
+        ).unwrap(), 1);
+        child_council::require_resumable_child_cycles(&store, &started).unwrap();
+    }
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+        "denied preflight must not alter the native root Council");
+}
+
+#[test]
 fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.

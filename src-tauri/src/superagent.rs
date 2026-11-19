@@ -5782,14 +5782,16 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; coordinated dispatch is denied.".into());
     }
-    let (ticket,launch,coordinator_id) = {
+    let (ticket,launch,coordinator_id,capability_context) = {
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let cfg = configuration(&store, &orchestration_id)?;
         let busy = active_manual_conflict(&store,&active,&cfg.coordinator_bot_id,&cfg.project_id)?;
         let (ticket,launch) = admit_role(&mut store,&orchestration_id,&objective,&request_key,busy,true)?;
-        (ticket,launch,cfg.coordinator_bot_id)
+        let capability_context = bots::discovery::team_planning_context(&store,&orchestration_id)
+            .unwrap_or_else(|_| "\n\nTeam capability metadata unavailable; do not infer missing details.".into());
+        (ticket,launch,cfg.coordinator_bot_id,capability_context)
     };
     if !launch { return Ok(ticket); }
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -5798,7 +5800,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
         thread: ticket.id.clone(),
         sender_id: "local-user".into(),
         sender_name: "Manual coordination".into(),
-        text: initial_manual_packet(&ticket, true),
+        text: format!("{}{}", initial_manual_packet(&ticket, true), capability_context),
         trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
     if let Err(error) = delivered {

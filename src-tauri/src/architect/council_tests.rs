@@ -1298,6 +1298,117 @@ fn required_project_json_syntax_uses_host_bytes_not_reviewer_claims() {
 }
 
 #[test]
+fn required_project_toml_syntax_uses_host_bytes_not_reviewer_claims() {
+    let (state, sid) = state_fixture();
+    let folder = std::env::temp_dir().join(format!("native-council-toml-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("Cargo.toml");
+    std::fs::write(&path, b"[package\n").unwrap();
+    let checkout = folder.to_string_lossy().into_owned();
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "toml-proof".into(), lens: "File valid TOML: Cargo.toml".into(),
+        required: true, target: 9.0, evidence_required: true,
+        native_evidence: Some(council::CouncilCriterionNativeEvidence {
+            kind: "reviewed_file_toml_valid".into(), skill_id: String::new(),
+            path: Some("Cargo.toml".into()), expected_sha256: None, expected_text: None,
+        }),
+    }];
+    config.validate().unwrap();
+    let mut wrong_extension = config.clone();
+    wrong_extension.criteria[0].native_evidence.as_mut().unwrap().path = Some("Cargo.json".into());
+    assert!(wrong_extension.validate().is_err(), "TOML evidence requires a TOML checkout path");
+    for field in ["digest", "fragment", "skill", "lens", "path"] {
+        let mut invalid = config.clone();
+        match field {
+            "digest" => invalid.criteria[0].native_evidence.as_mut().unwrap().expected_sha256 =
+                Some("0".repeat(64)),
+            "fragment" => invalid.criteria[0].native_evidence.as_mut().unwrap().expected_text =
+                Some("true".into()),
+            "skill" => invalid.criteria[0].native_evidence.as_mut().unwrap().skill_id =
+                "unassigned".into(),
+            "lens" => invalid.criteria[0].lens = "Unrelated lens".into(),
+            "path" => invalid.criteria[0].native_evidence.as_mut().unwrap().path =
+                Some("../outside.toml".into()),
+            _ => unreachable!(),
+        }
+        assert!(invalid.validate().is_err(), "invalid TOML check policy: {field}");
+    }
+    let mut team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&sid, &checkout]).unwrap();
+        for (i, id) in ["toml-a", "toml-b"].iter().enumerate() {
+            let root = store.session(&sid).unwrap();
+            let reviewer_session = store.create_session(&root.project_id, "codex", "", &root.mode).unwrap();
+            store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+                rusqlite::params![&reviewer_session.id, &checkout]).unwrap();
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                rusqlite::params![&sid, id, &reviewer_session.id],
+            ).unwrap();
+            let mut worker = seat(id, 1, Some(9.8), SINCE + i as i64 + 1);
+            worker.status = "running".into();
+            worker.session_id = reviewer_session.id;
+            worker.council.as_mut().unwrap().lens = "File valid TOML: Cargo.toml".into();
+            let binding = reviewer_security::ReviewerBinding::native(
+                &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+                worker.council.as_ref().unwrap(),
+            );
+            reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+            worker.reviewer_binding = Some(binding);
+            team.workers.push(worker);
+        }
+        save(&store, &mut team).unwrap();
+    }
+    assert!(team.workers.iter().all(|worker|
+        reviewer_skill_evidence::file_tool_eligible(&team, worker)));
+    let first = coordination::Actor::Worker { id: "toml-a".into(), attempt: 1 };
+    let err = reviewer_skill_evidence::dispatch_state(&state, &sid, team.generation,
+        &first, "pandacode_reviewer_file_verify",
+        json!({"criterionId":"toml-proof"})).unwrap_err();
+    assert!(err.contains("invalid syntax"), "malformed TOML must fail closed: {err}");
+    let unfinished = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert!(unfinished.workers.iter().all(|worker|
+        worker.reviewer_binding.as_ref().unwrap().skill_evidence.is_empty()),
+        "failed parsing must not persist any successful host receipt");
+    std::fs::write(&path, vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+    let oversized = reviewer_skill_evidence::dispatch_state(&state, &sid, team.generation,
+        &first, "pandacode_reviewer_file_verify",
+        json!({"criterionId":"toml-proof"})).unwrap_err();
+    assert!(oversized.contains("size limit"), "unbounded project input must fail: {oversized}");
+    std::fs::write(&path, b"[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+    for id in ["toml-a", "toml-b"] {
+        let actor = coordination::Actor::Worker { id: id.into(), attempt: 1 };
+        let (receipt, changed) = reviewer_skill_evidence::dispatch_state(
+            &state, &sid, team.generation, &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"toml-proof"})).unwrap();
+        assert_eq!(receipt["checkKind"], "reviewed_file_toml_valid");
+        assert_eq!(receipt["nativeTomlSyntaxVerified"], true);
+        assert_eq!(receipt["nativeFileDigestVerified"], false);
+        assert_eq!(receipt["nativeTextMatchVerified"], false);
+        assert!(changed.is_some());
+        assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, team.generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"toml-proof"})).unwrap().1.is_none());
+    }
+    let mut verified = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    for worker in &mut verified.workers { worker.status = "completed".into(); }
+    assert_eq!(council::status(&verified).unwrap().state, "passed");
+    assert_eq!(council::inspection(&verified, false).unwrap()
+        .criterion_observations[0].state, "reviewed_file_toml_verified");
+    verified.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
+        .get_mut("criterion-file:toml-proof").unwrap().check_kind = Some("model_claim".into());
+    assert_eq!(council::status(&verified).unwrap().state, "fixing");
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(folder).unwrap();
+}
+
+#[test]
 fn required_text_fragment_uses_bounded_native_host_receipts_not_model_claims() {
     let (state, sid) = state_fixture();
     let folder = std::env::temp_dir().join(format!("native-council-text-{}", uuid::Uuid::new_v4()));

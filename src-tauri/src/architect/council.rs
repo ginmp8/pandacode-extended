@@ -293,6 +293,16 @@ impl CouncilConfig {
                             return Err("Council JSON syntax evidence requires one repository-relative JSON file and its matching required lens.".into());
                         }
                     }
+                    "reviewed_file_toml_valid" => {
+                        let path = check.path.as_deref().unwrap_or("");
+                        if !check.skill_id.is_empty() || !valid_evidence_path(path)
+                            || !path.ends_with(".toml")
+                            || check.expected_sha256.is_some() || check.expected_text.is_some()
+                            || !same_lens(&criterion.lens, &format!("File valid TOML: {path}"))
+                        {
+                            return Err("Council TOML syntax evidence requires one repository-relative TOML file and its matching required lens.".into());
+                        }
+                    }
                     "reviewed_file_text_contains" => {
                         let path = check.path.as_deref().unwrap_or("");
                         let fragment = check.expected_text.as_deref().unwrap_or("");
@@ -604,7 +614,7 @@ pub struct CouncilCriterionObservation {
     pub root_scored_seats: usize,
     pub lowest_root_score: Option<f64>,
     /// optional | awaiting_review | missing_root_score | below_target |
-    /// native_evidence_unverified | pinned_input_integrity_verified | reviewed_file_sha256_verified | reviewed_file_text_contains_verified | reviewed_file_json_verified | root_scores_observed
+    /// native_evidence_unverified | pinned_input_integrity_verified | reviewed_file_sha256_verified | reviewed_file_text_contains_verified | reviewed_file_json_verified | reviewed_file_toml_verified | root_scores_observed
     pub state: &'static str,
 }
 fn criterion_observations(
@@ -630,6 +640,7 @@ fn criterion_observations(
                         Some("reviewed_file_sha256") => "reviewed_file_sha256_verified",
                         Some("reviewed_file_text_contains") => "reviewed_file_text_contains_verified",
                         Some("reviewed_file_json_valid") => "reviewed_file_json_verified",
+                        Some("reviewed_file_toml_valid") => "reviewed_file_toml_verified",
                         _ => "pinned_input_integrity_verified",
                     }
                 } else { "native_evidence_unverified" }
@@ -1325,6 +1336,7 @@ fn native_criterion_check_verified(
     if check.kind == "reviewed_file_sha256"
         || check.kind == "reviewed_file_text_contains"
         || check.kind == "reviewed_file_json_valid"
+        || check.kind == "reviewed_file_toml_valid"
     {
         let expected = check.expected_sha256.as_deref();
         if check.kind == "reviewed_file_sha256" && expected.is_none() { return false; }

@@ -1514,7 +1514,7 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
   await confirm.getByRole('button',{name:'Confirm'}).click();
   await expect(host.getByRole('alert')).toContainText('Demand changed before confirmation');
   let calls=await page.evaluate(()=>
-    (window as unknown as {saRetryTrace:Trace[]}).saRetryTrace);
+    (window as unknown as {saRetryTrace:{command:string;args?:Record<string,unknown>}[]}).saRetryTrace);
   expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(0);
   await page.evaluate(()=>(window as unknown as {saRetryMode:(v:string)=>void})
     .saRetryMode('native-denied'));

@@ -111,7 +111,7 @@ pub(crate) fn inspect(store: &Store, target_id: &str, requester: Option<&str>) -
             .unwrap_or(Value::Null) };
     let summary = if published.is_empty() { Value::Null } else { Value::String(published) };
     let status = if paused { "unavailable" } else if !supported { "configuration_invalid" }
-        else { "configured_not_running" };
+        else { "not_paused_runtime_unknown" };
     Ok(json!({
         "schemaVersion": 1,
         "botId":bot.id,
@@ -293,7 +293,7 @@ pub(crate) fn recommend_candidates(store: &Store, orchestration_id: &str,
             Err(error) => return Err(error),
         };
         let (score, matches, evidence) = declared_fit(&profile, &words);
-        let configured = profile["availability"]["status"] == "configured_not_running";
+        let configured = profile["availability"]["status"] == "not_paused_runtime_unknown";
         let role = declared_role(&profile);
         candidates.push(json!({
             "botId":bot.id,

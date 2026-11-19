@@ -177,7 +177,7 @@ async function mountNativeFixture(page: Page, options: {
             evidenceSources:['assigned_skill_reference'],status:'declared_match',
             projectScope:{projectId:'project-1',status:'project_reference_only'},
             permissionMode:{value:'ask',status:'not_an_execution_grant'},
-            availability:{status:'configured_not_running',paused:false},
+            availability:{status:'not_paused_runtime_unknown',paused:false},
             executionEligibility:'not_verified',sourceConfidence:'declarations_only',
           }]} as never;
       }

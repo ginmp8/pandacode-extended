@@ -1554,23 +1554,45 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'View this Team\'s Demands & Tasks</button></div>' +
         '</section>' + teamActivity + '</div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
+    const visibleReviews=reviewQueue.filter(item=>reviewTab==='all' ||
+      (reviewTab==='human' && item.state==='waiting_approval') ||
+      (reviewTab==='council' && item.state==='waiting_review'));
+    const reviewTabOptions=[
+      ['all','All requests',reviewQueue.length],
+      ['human','Needs my decision',reviewHuman.length],
+      ['council','Council pending',reviewCouncil.length],
+    ] as const;
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
-      '<h3>Review inbox · All Teams</h3><button type="button" data-sa-load-review-inbox>' +
-      'Refresh review inbox</button></header>' +
-      '<p>Up to 200 recently updated native Tickets requiring human acceptance or ' +
-      'awaiting Council. A waiting Council verdict cannot be manually treated as passed. ' +
-      'Open a Demand to inspect its native Team and revision before deciding.</p>' +
+      '<div><h3>Review inbox · All Teams</h3><p>Human decisions and native Council ' +
+      'reviews are separate; a pending or advisory Council verdict is never a pass.</p></div>' +
+      '<button type="button" data-sa-load-review-inbox>Refresh review inbox</button></header>' +
+      '<p>Up to 200 recently updated native Tickets. Open a Demand to inspect ' +
+      'its Team, exact revision, authorization and evidence before acting.</p>' +
+      '<div class="sa-review-tabs" role="group" aria-label="Review inbox filters">' +
+      reviewTabOptions.map(([key,label,count])=>
+        '<button type="button" data-sa-review-tab="' + key +
+        '" aria-pressed="' + (reviewTab===key) + '">' + safe(label) +
+        ' (' + (reviewQueueLoaded?count:'—') + ')</button>').join('') + '</div>' +
       (!reviewQueueLoaded ? '<p role="status">Load native review queue to inspect all Teams.</p>' :
-        '<ul class="sa-tickets">' + (reviewQueue.map(item =>
-          '<li><div><strong>' + safe(item.objective) + '</strong><small>' +
-          safe(presets.find(team => team.id === item.orchestrationId)?.name ?? 'Unknown Team') +
-          ' · ' + safe(item.state === 'waiting_approval' ? 'Human decision' :
-            'Awaiting native Council (not approved)') + ' · Revision ' +
-          item.revision + '</small></div><button type="button" data-sa-open-demand="' +
-          safe(item.id) + '">Open demand</button></li>').join('') ||
-          '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>') +
-      '</section>';
+        '<div class="sa-review-items">' +
+        (visibleReviews.map(item=>
+          '<article class="sa-review-card"><div class="sa-review-main">' +
+          '<div class="sa-demand-meta">' + nativeBadge(item.state) +
+          '<span>Ticket ' + safe(item.id.slice(0,8)) + '</span></div>' +
+          '<h4>' + safe(item.objective) + '</h4>' +
+          '<p>' + (item.state==='waiting_approval'
+            ? 'Human decision required · review native evidence before accepting or rejecting.'
+            : 'Awaiting native Council (not approved) · no manual Council pass.') + '</p>' +
+          '<small>' +
+          safe(presets.find(team=>team.id===item.orchestrationId)?.name ?? 'Unknown Team') +
+          ' · Revision ' + item.revision + ' · Updated ' +
+          safe(activityTime(item.updatedAt)) + '</small></div>' +
+          '<button type="button" data-sa-open-demand="' + safe(item.id) + '">' +
+          (item.state==='waiting_approval'?'Review evidence':'Inspect Demand') +
+          ' ' + icon('chevron') + '</button></article>').join('') ||
+          '<p class="sa-empty">No native review requests match this filter.</p>') +
+        '</div>') + '</section>';
     const selectedTeamReview = chosen
       ? '<section class="sa-pane" aria-label="Review inbox"><h3>Review inbox · ' + safe(chosen.name) +
         '</h3><p>Only native Tickets awaiting explicit human evidence acceptance; advisory Council is not a verified pass.</p>' +
@@ -2352,6 +2374,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       host.querySelector<HTMLButtonElement>(
         '[data-sa-member-inspect="' + CSS.escape(memberInspectBotId) + '"]',
       )?.focus({preventScroll:true});
+      return;
+    }
+    if (target.dataset.saReviewTab) {
+      const tab=target.dataset.saReviewTab;
+      if (!['all','human','council'].includes(tab)) return;
+      reviewTab=tab as typeof reviewTab;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-review-tab="' + tab + '"]')
+        ?.focus({preventScroll:true});
       return;
     }
     if (target.dataset.saView) {

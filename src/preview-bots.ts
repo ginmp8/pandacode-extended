@@ -14,6 +14,9 @@ const failoverAsks = new Map<string, FailoverAsk>();
 const sharedChannels = new Map<string, SharedChannelDetail>();
 const channelHistoryOverrides = new Map<string, Map<string, 'include' | 'exclude'>>();
 const capabilityPreferences = new Map<string, { visibility: string; summary: string }>();
+export function previewCapabilityVisibility(id: string): string {
+  return capabilityPreferences.get(id)?.visibility ?? 'local_bots';
+}
 let activityId = 1;
 /** Ordinary tasks started with a bot, and those that have had its brief. */
 const taskBots = new Map<string, string>(), taskBriefed = new Set<string>();

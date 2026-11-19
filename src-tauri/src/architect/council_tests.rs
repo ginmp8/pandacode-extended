@@ -7221,6 +7221,30 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
             .unwrap_err().contains("child_council_denied"));
     }
     assert_eq!(distinct.len(), 4);
+    // Swapping two genuine sibling sessions preserves parent ownership, native
+    // grants, provider/model, and per-child session counts. It must nevertheless
+    // fail before either reviewer can launch, report or become root evidence.
+    {
+        let store = state.store.lock().unwrap();
+        let child_id = &inspected[0].child_session_id;
+        let mut child = load(&store, child_id).unwrap().unwrap();
+        let original_sessions = [
+            child.workers[0].session_id.clone(),
+            child.workers[1].session_id.clone(),
+        ];
+        child.workers[0].session_id = original_sessions[1].clone();
+        child.workers[1].session_id = original_sessions[0].clone();
+        save(&store, &mut child).unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let denial = child_council::inspect(&store, &root).unwrap_err();
+        assert!(denial.contains("native leaf identity no longer matches issued ownership"),
+            "{denial}");
+        child.workers[0].session_id = original_sessions[0].clone();
+        child.workers[1].session_id = original_sessions[1].clone();
+        save(&store, &mut child).unwrap();
+        assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2,
+            "restoring exact native issuance must preserve legitimate child reviews");
+    }
     let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     assert!(distinct.contains(&launch.sid), "only an admitted child leaf is scheduled");
     {

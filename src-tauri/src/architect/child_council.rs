@@ -814,6 +814,20 @@ fn validate_admitted(
     for (index, leaf) in team.workers.iter().enumerate() {
         let expected_round = if index < choice.child_reviewers { 1 } else { 2 };
         let session = store.session(&leaf.session_id)?;
+        // Parent ownership alone cannot authenticate a leaf's identity: two
+        // sibling sessions might be swapped in the mutable TeamSnapshot while
+        // both still belong to this child and carry individually valid grants.
+        // Require the exact native-issued worker-to-session association before
+        // accepting a callback, another dispatch or a composite receipt.
+        let issued_mapping: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers
+             WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",
+            params![record.child_session_id, leaf.id, leaf.session_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if issued_mapping != 1 {
+            return Err("child_council_stale: native leaf identity no longer matches issued ownership.".into());
+        }
         // A persisted running worker is not authority to resume an interrupted
         // or failed native session after restart. Reject before any callback,
         // sibling launch, composite receipt or root approval.

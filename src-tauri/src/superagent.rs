@@ -2758,6 +2758,51 @@ fn manual_preflight(
     })
 }
 
+// Native roster membership is not a grant. Explicit direct Worker admission
+// rechecks current identity, local harness eligibility and checkout scope.
+fn direct_team_member(store:&Store,config:&Orchestration,id:&str)->Result<bots::Bot> {
+    let members=roster::read(store,&config.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
+        return Err("Configured Council reviewers need native task-bound review.".into());
+    }
+    if !members.worker_bot_ids.iter().any(|worker|worker==id) {
+        return Err("Selected Worker is not a configured Team member.".into());
+    }
+    let worker=bots::get(store,id)?;
+    if worker.paused || worker.project_id!=config.project_id {
+        return Err("Selected Worker is paused or outside the Team project.".into());
+    }
+    if let Some(issue)=roster::member_execution_issue(&worker) {
+        return Err(issue.into());
+    }
+    Ok(worker)
+}
+
+fn manual_preflight_worker(
+    store:&Store,config_id:&str,objective:&str,worker_id:&str,busy:bool,
+)->Result<ManualPreflight> {
+    let objective=objective.trim();
+    if objective.is_empty() || objective.len()>MAX_OBJECTIVE_BYTES || objective.contains('\0') {
+        return Err("A nonempty, bounded objective is required.".into());
+    }
+    let config=configuration(store,config_id)?;
+    let worker=direct_team_member(store,&config,worker_id)?;
+    let reason=if !execution_permitted(config.enabled,crate::feature_controls::get().bots_paused) {
+        Some("Team is disabled or bots are globally paused.".to_owned())
+    } else if let Some(reason)=manual_enable_blocker(store,&config)? {
+        Some(reason)
+    } else if busy || manual_candidate_occupied(store,&worker.id,&config.project_id,&worker.project_id)? {
+        Some("Selected Worker or checkout is occupied; no implicit queue is created.".into())
+    } else {None};
+    Ok(ManualPreflight {
+        orchestration_id:config.id,policy_revision:config.policy_revision,
+        project_id:config.project_id,selected_bot_id:worker.id,
+        selected_role:"worker".into(),eligible:reason.is_none(),
+        reason,can_stage_blocked:false,allowed_tools:Vec::new(),
+        allowed_side_effects:false,attempt_budget_ms:MAX_ASSIGNMENT_RUN_MS,
+    })
+}
+
 /// Native manual request with a stable dedup key. A blocked request remains
 /// auditable and must be explicitly retried; no background inference or launch.
 fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool) -> Result<(Ticket, bool)> {
@@ -2780,6 +2825,19 @@ fn admit_role_with_staging(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_staging_member(
+        store,config_id,objective,request_key,busy,coordinate,headless_staging,None,
+    )
+}
+
+fn admit_role_with_staging_member(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+    selected_worker_id: Option<&str>,
+) -> Result<(Ticket, bool)> {
+    if selected_worker_id.is_some() && (coordinate || headless_staging) {
+        return Err("Explicit Worker selection supports direct local read-only Demands only.".into());
+    }
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -2796,6 +2854,13 @@ fn admit_role_with_staging(
         let ticket = get_ticket(store, &existing)?;
         if ticket.objective != objective {
             return Err("The manual-request key is already bound to another objective.".into());
+        }
+        if let Some(worker_id)=selected_worker_id {
+            let config=configuration(store,config_id)?;
+            direct_team_member(store,&config,worker_id)?;
+            if ticket.worker_bot_id!=worker_id {
+                return Err("Manual request key already belongs to another selected Worker.".into());
+            }
         }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
@@ -2824,13 +2889,18 @@ fn admit_role_with_staging(
     if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
         return Err("Orchestration is disabled or bots are globally paused.".into());
     }
-    // A previously-enabled or externally corrupted multi-role roster cannot
-    // silently fall back to the primary Worker, regardless of UI preflight.
-    if roster::has_additional_members(store, config_id)? {
-        return Err("Multi-member Team requires native scoped role admission; manual dispatch denied.".into());
+    // No legacy caller may silently select the first Worker of a multi-member Team.
+    // Reviewer-backed Teams remain unsupported until real task-scoped Council exists.
+    let members=roster::read(store,config_id)?;
+    if !members.reviewer_bot_ids.is_empty()
+        || (selected_worker_id.is_none() && members.worker_bot_ids.len()>1) {
+        return Err("Multi-member Team requires explicit supported Worker selection or native Council.".into());
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = bots::get(store, &config.worker_bot_id)?;
+    let worker = match selected_worker_id {
+        Some(id)=>direct_team_member(store,&config,id)?,
+        None=>bots::get(store,&config.worker_bot_id)?,
+    };
     if coordinator.paused || worker.paused || worker.project_id != config.project_id {
         return Err("A selected bot is paused, missing or outside the worker project scope.".into());
     }
@@ -2848,6 +2918,9 @@ fn admit_role_with_staging(
     // Otherwise a worker retry could bypass missing coordinator evidence.
     if coordinate && (busy || occupied) {
         return Err("Coordinator is busy; retry this explicit manual request later.".into());
+    }
+    if selected_worker_id.is_some() && (busy || occupied) {
+        return Err("Selected Worker or checkout is occupied; no Demand was admitted.".into());
     }
     let blocked = busy || occupied || headless_staging;
     let ticket_id = storage::id();
@@ -3833,7 +3906,8 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
 /// This is an explanation of current local eligibility, never a grant or
 /// reservation. The same native checks are repeated when enabling with CAS.
 fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
-    if roster::has_additional_members(store, &current.id)? {
+    let members=roster::read(store,&current.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
         return Ok(Some(
             "Configured multi-member Teams cannot run without native scoped admission.".into(),
         ));
@@ -3856,6 +3930,18 @@ fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Optio
     }
     for bot in [&coordinator, &worker] {
         if let Some(issue) = roster::member_execution_issue(bot) {
+            return Ok(Some(issue.into()));
+        }
+    }
+    for id in members.worker_bot_ids.iter().skip(1) {
+        let candidate=match bots::get(store,id) {
+            Ok(bot)=>bot,
+            Err(_)=>return Ok(Some("Configured Team Worker bot is unavailable.".into())),
+        };
+        if candidate.paused || candidate.project_id!=current.project_id {
+            return Ok(Some("Configured Team Worker is paused or outside its project scope.".into()));
+        }
+        if let Some(issue)=roster::member_execution_issue(&candidate) {
             return Ok(Some(issue.into()));
         }
     }
@@ -4279,6 +4365,64 @@ fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
         "Read-only assignment. Report evidence and remaining gaps; do not claim task approval."
     };
     format!("SuperAgent ticket {}\n\n{}\n\n{}", ticket.id, ticket.objective, instructions)
+}
+
+#[tauri::command]
+pub async fn superagent_preflight_worker(
+    window:tauri::WebviewWindow,state:State<'_,AppState>,
+    orchestration_id:String,objective:String,worker_bot_id:String,
+)->Result<ManualPreflight> {
+    require_main_window(&window)?;
+    let active:Vec<String>=state.agents.lock().map_err(|e|e.to_string())?
+        .keys().cloned().collect();
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    let config=configuration(&store,&orchestration_id)?;
+    let worker=direct_team_member(&store,&config,&worker_bot_id)?;
+    let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
+    manual_preflight_worker(&store,&orchestration_id,&objective,&worker.id,busy)
+}
+
+#[tauri::command]
+pub async fn superagent_submit_to_worker(
+    window:tauri::WebviewWindow,app:tauri::AppHandle,
+    state:State<'_,AppState>,orchestration_id:String,
+    objective:String,request_key:String,worker_bot_id:String,
+)->Result<Ticket> {
+    require_main_window(&window)?;
+    if crate::feature_controls::get().bots_paused {
+        return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
+    }
+    let (ticket,launch,selected)={
+        let active:Vec<String>=state.agents.lock().map_err(|e|e.to_string())?
+            .keys().cloned().collect();
+        let mut store=state.store.lock().map_err(|e|e.to_string())?;
+        let config=configuration(&store,&orchestration_id)?;
+        let worker=direct_team_member(&store,&config,&worker_bot_id)?;
+        let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
+        let check=manual_preflight_worker(
+            &store,&orchestration_id,&objective,&worker.id,busy,
+        )?;
+        if !check.eligible {
+            return Err(check.reason.unwrap_or_else(||"Selected Worker is unavailable.".into()));
+        }
+        let (ticket,launch)=admit_role_with_staging_member(
+            &mut store,&orchestration_id,&objective,&request_key,busy,false,false,Some(&worker.id),
+        )?;
+        (ticket,launch,worker.id)
+    };
+    if !launch {return Ok(ticket);}
+    let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
+        bot_id:selected,channel_id:CHANNEL.into(),thread:ticket.id.clone(),
+        sender_id:"local-user".into(),sender_name:"Manual task".into(),
+        text:initial_manual_packet(&ticket,false),trusted:true,
+        image_ids:None,moodboard_ids:None,
+    }).await;
+    if let Err(error)=delivered {
+        if let Ok(store)=state.store.lock() {let _=fail_launch(&store,&ticket.id,&error);}
+        return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
+    }
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    get_ticket(&store,&ticket.id)
 }
 
 #[tauri::command]
@@ -9765,6 +9909,90 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(worker_attempts, 0, "no unsupported Worker may be admitted");
+    }
+
+    #[test]
+    fn explicit_secondary_worker_is_admitted_only_with_native_read_only_scope() {
+        let mut store=fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('second','Second','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let team=create_configuration(&store,NewOrchestration {
+            name:"Direct member".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let roles=roster::set(&store,&team.id,team.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],
+            reviewer_bot_ids:vec![],
+        }).unwrap();
+        let team=change_enabled(&store,&team.id,roles.policy_revision,true).unwrap();
+        let preflight=manual_preflight_worker(&store,&team.id,"Read safely","second",false).unwrap();
+        assert!(preflight.eligible);
+        assert!(preflight.allowed_tools.is_empty());
+        assert!(!preflight.allowed_side_effects);
+        let (ticket,launch)=admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("second"),
+        ).unwrap();
+        assert!(launch);
+        assert_eq!(ticket.worker_bot_id,"second");
+        let assignment=assignments(&store,&ticket.id,10).unwrap();
+        assert_eq!(assignment[0].bot_id,"second");
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+        assert_eq!(roster::ticket_profile(&store,&ticket.id).unwrap().unwrap().members.len(),3);
+        assert!(!manual_preflight_worker(&store,&team.id,"Second demand","worker",false).unwrap().eligible);
+        assert!(admit(&mut store,&team.id,"Unselected","legacy-request",false).is_err());
+        let (repeated,launched)=admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("second"),
+        ).unwrap();
+        assert_eq!(repeated.id,ticket.id);
+        assert!(!launched);
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("worker"),
+        ).unwrap_err().contains("another selected Worker"));
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Out of team","new-key",false,false,false,Some("router"),
+        ).is_err());
+        stop(&store,&ticket.id).unwrap();
+        assert!(read_only_policy(&store,&session).is_err());
+        assert!(!on_run_finished(&store,&session,true,"stale success").unwrap());
+        let path=store.path.clone();drop(store);
+        let persisted=Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&persisted,&ticket.id).unwrap().worker_bot_id,"second");
+    }
+
+    #[test]
+    fn direct_member_rejects_reviewers_and_paused_secondary_workers() {
+        let mut store=fixture();
+        for id in ["second","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team=create_configuration(&store,NewOrchestration {
+            name:"Guarded Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let roles=roster::set(&store,&team.id,team.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],reviewer_bot_ids:vec![],
+        }).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='second'",[]).unwrap();
+        assert!(change_enabled(&store,&team.id,roles.policy_revision,true).is_err());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='second'",[]).unwrap();
+        let reviewers=roster::set(&store,&team.id,roles.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        }).unwrap();
+        assert!(change_enabled(&store,&team.id,reviewers.policy_revision,true).is_err());
+        assert!(manual_preflight_worker(&store,&team.id,"Task","second",false).is_err());
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Task","guarded",false,false,false,Some("second"),
+        ).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
 
     #[test]

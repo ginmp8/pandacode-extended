@@ -133,6 +133,7 @@ export function mountSuperagent(
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
   let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
+  let selectedDemandWorkerId = '';
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
@@ -681,7 +682,8 @@ export function mountSuperagent(
       preflightObjective === demandObjective.trim() && preflightMode === demandMode &&
       demandPreflight.selectedRole === (demandMode === 'coordinated' ? 'coordinator' : 'worker') &&
       demandPreflight.selectedBotId === (demandMode === 'coordinated'
-        ? chosen.coordinatorBotId : chosen.workerBotId));
+        ? chosen.coordinatorBotId :
+          ((chosen.workerCount ?? 1) > 1 ? selectedDemandWorkerId : chosen.workerBotId)));
     // A preview is a read-only observation, never a grant or authorization.
     const manualAdmissionReady = Boolean(chosen?.enabled && preflightCurrent &&
       demandPreflight && (demandPreflight.eligible || demandPreflight.canStageBlocked === true) &&
@@ -708,7 +710,7 @@ export function mountSuperagent(
     // fields from legacy previews retain the conservative multi-member fence.
     const enableBlocker = chosen && !chosen.enabled
       ? chosen.manualEnableBlocker || (
-        (chosen.workerCount ?? 1) > 1 || (chosen.reviewerCount ?? 0) > 0
+        (chosen.reviewerCount ?? 0) > 0
           ? 'Configured multi-member Teams cannot run without native scoped admission.'
           : null)
       : null;
@@ -739,6 +741,19 @@ export function mountSuperagent(
       (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
       '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
       '>Worker directly</option></select></label>' +
+      ((chosen.workerCount ?? 1) > 1
+        ? (roleRoster?.orchestrationId !== chosen.id
+          ? '<p>Load the native Team roster before choosing an executor.</p>' +
+            '<button type="button" data-sa-role-load>Load configured Workers</button>'
+          : '<label>Worker for this Demand<select name="demandWorkerId" required>' +
+            '<option value="">Choose a configured Worker</option>' +
+            roleRoster.workerBotIds.map(id =>
+              '<option value="' + safe(id) + '"' +
+              (selectedDemandWorkerId === id ? ' selected' : '') + '>' +
+              safe(botName(id)) + '</option>').join('') +
+            '</select></label><p>Only explicitly selected direct read-only Workers are supported. ' +
+            'Reviewer-backed and coordinated multi-Worker execution remain unavailable.</p>')
+        : '') +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (manualAdmissionReady ? '' : ' disabled') +
       '>' + (demandPreflight?.canStageBlocked && preflightCurrent
@@ -1297,6 +1312,15 @@ export function mountSuperagent(
       });
       return;
     }
+    if (target instanceof HTMLSelectElement && target.name === 'demandWorkerId' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
+      selectedDemandWorkerId = target.value;
+      demandPreflight = null;
+      render();
+      host.querySelector<HTMLSelectElement>('form[data-sa-form="run"] select[name="demandWorkerId"]')
+        ?.focus({preventScroll:true});
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.name === 'mode' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
@@ -1506,16 +1530,27 @@ export function mountSuperagent(
       const chosen = current();
       const objective = form?.querySelector<HTMLTextAreaElement>('textarea[name="objective"]')?.value.trim() ?? '';
       const coordinated = form?.querySelector<HTMLSelectElement>('select[name="mode"]')?.value !== 'direct';
+      const isMulti = (chosen?.workerCount ?? 1) > 1;
       if (!chosen || !objective) return;
+      if (isMulti && (coordinated || roleRoster?.orchestrationId !== chosen.id ||
+          !roleRoster.workerBotIds.includes(selectedDemandWorkerId))) {
+        error = 'Choose a configured Worker and direct dispatch for this read-only Demand.';
+        render(); return;
+      }
+      const workerId = isMulti ? selectedDemandWorkerId : chosen.workerBotId;
       demandPreflight = null;
       void work(async () => {
-        const snapshot = await call<ManualPreflight>('superagent_preflight', {
-          orchestrationId: chosen.id, objective, coordinated,
-        });
+        const snapshot = isMulti
+          ? await call<ManualPreflight>('superagent_preflight_worker', {
+            orchestrationId:chosen.id,objective,workerBotId:workerId,
+          })
+          : await call<ManualPreflight>('superagent_preflight', {
+            orchestrationId:chosen.id,objective,coordinated,
+          });
         if (snapshot.orchestrationId !== chosen.id ||
             snapshot.policyRevision !== chosen.policyRevision ||
             snapshot.selectedRole !== (coordinated ? 'coordinator' : 'worker') ||
-            snapshot.selectedBotId !== (coordinated ? chosen.coordinatorBotId : chosen.workerBotId) ||
+            snapshot.selectedBotId !== (coordinated ? chosen.coordinatorBotId : workerId) ||
             snapshot.allowedTools.length !== 0 || snapshot.allowedSideEffects) {
           demandPreflight = null;
           throw new Error('Native preflight identity, policy or read-only scope changed. Refresh the Team.');
@@ -1799,6 +1834,7 @@ export function mountSuperagent(
       if (selected === target.dataset.saSelect) { render(); return; }
       const next = target.dataset.saSelect;
       selected = next;
+      selectedDemandWorkerId = ''; demandPreflight = null;
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
@@ -2257,13 +2293,18 @@ export function mountSuperagent(
     if (form.dataset.saForm === 'run') {
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
       const coordinated = data.get('mode') !== 'direct';
-      const command = coordinated ? 'superagent_submit_coordinated' : 'superagent_submit';
+      const isMulti=(selectedConfig?.workerCount ?? 1)>1;
+      const workerId=isMulti ? selectedDemandWorkerId : selectedConfig?.workerBotId ?? '';
+      const command = coordinated ? 'superagent_submit_coordinated'
+        : isMulti ? 'superagent_submit_to_worker' : 'superagent_submit';
       const reviewed = demandPreflight;
+      if (isMulti && (coordinated || roleRoster?.orchestrationId !== selectedConfig?.id ||
+          !roleRoster.workerBotIds.includes(workerId))) return;
       if (!selectedConfig?.enabled || !objective || !reviewed ||
           reviewed.orchestrationId !== selectedConfig.id ||
           reviewed.policyRevision !== selectedConfig.policyRevision ||
           reviewed.selectedRole !== (coordinated ? 'coordinator' : 'worker') ||
-          reviewed.selectedBotId !== (coordinated ? selectedConfig.coordinatorBotId : selectedConfig.workerBotId) ||
+          reviewed.selectedBotId !== (coordinated ? selectedConfig.coordinatorBotId : workerId) ||
           preflightObjective !== objective ||
           preflightMode !== (coordinated ? 'coordinated' : 'direct') ||
           (!reviewed.eligible && !reviewed.canStageBlocked) ||
@@ -2281,6 +2322,7 @@ export function mountSuperagent(
           : '? Native admission will recheck scope and availability.') +
         ' No write grant is issued.', async () => {
         if (selected !== selectedConfig.id || demandPreflight !== reviewed ||
+            (isMulti && selectedDemandWorkerId !== workerId) ||
             demandObjective.trim() !== objective ||
             preflightObjective !== objective ||
             preflightMode !== (coordinated ? 'coordinated' : 'direct')) {
@@ -2288,9 +2330,13 @@ export function mountSuperagent(
         }
         // A cached preview never confers authority. Fresh native preflight is
         // followed by the native submit's own authorization and lease checks.
-        const latest = await call<ManualPreflight>('superagent_preflight', {
-          orchestrationId:selectedConfig.id,objective,coordinated,
-        });
+        const latest = isMulti
+          ? await call<ManualPreflight>('superagent_preflight_worker', {
+            orchestrationId:selectedConfig.id,objective,workerBotId:workerId,
+          })
+          : await call<ManualPreflight>('superagent_preflight', {
+            orchestrationId:selectedConfig.id,objective,coordinated,
+          });
         if ((!latest.eligible && !latest.canStageBlocked) ||
             latest.eligible !== reviewed.eligible ||
             Boolean(latest.canStageBlocked) !== Boolean(reviewed.canStageBlocked) ||
@@ -2304,7 +2350,9 @@ export function mountSuperagent(
           demandPreflight = null;
           throw new Error('Native admission scope or availability changed. Review a fresh preflight.');
         }
-        await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });
+        await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key,
+          ...(isMulti ? {workerBotId:workerId} : {}),
+        });
         taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
         await reload();
       });

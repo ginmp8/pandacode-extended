@@ -49,6 +49,66 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
 
 
 
+test('explicit secondary Worker selection uses native preflight and read-only task admission', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-direct-worker-test';
+    document.body.appendChild(host);
+    const calls:Array<{command:string;args:unknown}>=[];
+    (window as unknown as {saDirectCalls:typeof calls}).saDirectCalls=calls;
+    const team={id:'team',name:'Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker-a',enabled:true,policyRevision:2,workerCount:2,reviewerCount:0};
+    mountSuperagent(host,async(command,args)=>{
+      calls.push({command,args});
+      if(command==='bots_list') return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker-a',name:'Worker A',paused:false},
+        {id:'worker-b',name:'Worker B',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [team] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_roster') return {
+        orchestrationId:'team',policyRevision:2,coordinatorBotId:'coordinator',
+        workerBotIds:['worker-a','worker-b'],reviewerBotIds:[],
+        maxWorkerAttempts:2,purpose:'',strategy:'balanced',executionReady:false,
+      } as never;
+      if(command==='superagent_preflight_worker') return {
+        orchestrationId:'team',policyRevision:2,projectId:'project',
+        selectedBotId:(args as {workerBotId:string}).workerBotId,selectedRole:'worker',
+        eligible:true,reason:null,canStageBlocked:false,
+        allowedTools:[],allowedSideEffects:false,attemptBudgetMs:60000,
+      } as never;
+      if(command==='superagent_submit_to_worker') return {
+        id:'task',orchestrationId:'team',objective:'Inspect safely',state:'running',
+        revision:1,evidence:null,
+      } as never;
+      throw Error('Unexpected command '+command);
+    });
+  });
+  const host=page.locator('#sa-direct-worker-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await host.getByRole('button',{name:'Load configured Workers'}).click();
+  const workers=host.getByRole('combobox',{name:'Worker for this Demand'});
+  await workers.selectOption('worker-b');
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect safely');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(host.getByRole('region',{name:'Native demand preflight'}))
+    .toContainText('Worker B');
+  await host.getByRole('button',{name:'Dispatch manually'}).click();
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saDirectCalls:Array<{command:string;args:unknown}>}).saDirectCalls);
+  const submitted=calls.filter(call=>call.command==='superagent_submit_to_worker');
+  expect(submitted).toHaveLength(1);
+  expect((submitted[0].args as {workerBotId:string}).workerBotId).toBe('worker-b');
+  expect(calls.some(call=>call.command==='superagent_submit'
+    || call.command==='superagent_submit_coordinated')).toBe(false);
+});
+
 test('new multi-role Team draft survives workspace redraw and submits exact native roster', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

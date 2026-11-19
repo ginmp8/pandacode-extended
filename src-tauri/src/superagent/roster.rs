@@ -313,7 +313,6 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
                 "coordinator"=>index==0 && member.position==0,
                 "worker"=>index>0 && reviewers==0 && workers<MAX_WORKERS
                     && member.position==workers
-                    && (workers>0 || member.bot_id==primary_worker)
                     && member.project_id==ticket_project,
                 "reviewer"=>index>0 && workers>0 && reviewers<MAX_REVIEWERS
                     && member.position==reviewers,
@@ -328,8 +327,10 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
                 _=>{},
             }
         }
-        if workers==0 {
-            return Err("Admitted Team profile is missing its primary Worker.".into());
+        if workers==0 || !members.iter().any(|member|
+            member.role=="worker" && member.bot_id==primary_worker
+        ) {
+            return Err("Admitted Team profile has no matching selected Worker.".into());
         }
         Ok(AdmittedTeamProfile{policy_revision,captured_at,members})
     }).transpose()

@@ -6819,6 +6819,14 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
         &store, &sid, &project, "assignment-1", &artifact,
     ).unwrap();
     assert_eq!(first, repeat);
+    // Also exercise the atomic insertion loser's read-back path directly:
+    // same immutable task returns the winner, not a second request ID.
+    assert_eq!(council_requests::resolve_native_admission_collision(
+        &store, &sid, &project, "assignment-1", &artifact,
+    ).unwrap(), first);
+    assert!(council_requests::resolve_native_admission_collision(
+        &store, &sid, &project, "assignment-1", &"b".repeat(64),
+    ).unwrap_err().contains("council_task_conflict"));
     assert_eq!(first.schema_version, 1);
     // Different assignment keys or artifact digests must never share one
     // task-bound Council verdict, even if both are admitted before dispatch.
@@ -7025,6 +7033,22 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap(), receipt);
+    // Simulate the losing native consumer after its stale CAS: only a
+    // genuinely identical winning terminal proof is idempotently reusable.
+    assert_eq!(council_requests::resolve_native_terminal_collision(
+        &store, &sid, &project, "native-approved-task", &artifact,
+        &request.request_id, &receipt,
+    ).unwrap(), receipt);
+    let mut forged_winner = receipt.clone();
+    forged_winner.policy_sha256 = "0".repeat(64);
+    assert!(council_requests::resolve_native_terminal_collision(
+        &store, &sid, &project, "native-approved-task", &artifact,
+        &request.request_id, &forged_winner,
+    ).unwrap_err().contains("council_task_conflict"));
+    assert!(council_requests::resolve_native_terminal_collision(
+        &store, &sid, "foreign-project", "native-approved-task", &artifact,
+        &request.request_id, &receipt,
+    ).is_err(), "a foreign consumer cannot reuse a native settlement");
     // Old v1 records remain readable only when their existing native proof
     // revalidates. A v2 receipt cannot silently change a task/policy pin.
     let original_raw: String = store.db.query_row(
@@ -7078,6 +7102,10 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert!(council_requests::read_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).is_err());
+    assert!(council_requests::resolve_native_terminal_collision(
+        &store, &sid, &project, "native-approved-task", &artifact,
+        &request.request_id, &receipt,
+    ).is_err(), "an old receipt cannot win a CAS race after objective drift");
 }
 
 

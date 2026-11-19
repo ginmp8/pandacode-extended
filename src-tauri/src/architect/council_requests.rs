@@ -456,6 +456,25 @@ fn native_task_record(
     Ok((raw, record))
 }
 
+/// After an atomic admission loses to another writer, return the winning
+/// request only when every immutable task pin still matches. The winning
+/// request ID is persisted by the other writer and must never be regenerated.
+pub(super) fn resolve_native_admission_collision(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str,
+) -> Result<NativeTaskCouncilRequest> {
+    let (_, existing) = native_task_record(store, session_id, assignment_key)
+        .map_err(|_| "council_task_conflict: no matching native task admission winner.".to_string())?;
+    let current = native_task_candidate(
+        store, session_id, project_id, assignment_key, artifact_sha256,
+        existing.request.request_id.clone(),
+    )?;
+    if existing.request != current {
+        return Err("council_task_conflict: native task admission winner has different task, cycle, policy or artifact.".into());
+    }
+    Ok(existing.request)
+}
+
 /// Existing architect_requests provides task-scoped, cascade-deleted storage.
 /// This is a native-only operation; it does not launch or grant reviewers.
 pub(crate) fn admit_native_task(
@@ -518,7 +537,12 @@ pub(crate) fn admit_native_task(
         params![session_id, key, body, &candidate.cycle_id],
     ).map_err(|e| format!("council_task_conflict: {e}"))?;
     if inserted != 1 {
-        return Err("council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".into());
+        // SELECT and INSERT are not one transaction across independently
+        // opened SQLite connections. A concurrent identical caller may have
+        // won the reservation; a different assignment must still fail closed.
+        return resolve_native_admission_collision(
+            store, session_id, project_id, assignment_key, artifact_sha256,
+        ).or_else(|_| Err("council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".into()));
     }
     Ok(candidate)
 }
@@ -596,6 +620,23 @@ fn native_terminal_expected(
     })
 }
 
+/// A losing compare-and-swap may observe an identical receipt written by the
+/// winning task consumer. Revalidate its current native Council proof before
+/// treating that concurrent settlement as an idempotent success.
+pub(super) fn resolve_native_terminal_collision(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: &str,
+    expected: &NativeTaskCouncilReceipt,
+) -> Result<NativeTaskCouncilReceipt> {
+    let winner = read_native_terminal(
+        store, session_id, project_id, assignment_key, artifact_sha256, request_id,
+    ).map_err(|_| "council_task_conflict: concurrent terminal settlement has no valid matching proof.".to_string())?;
+    if !native_receipt_matches(&winner, expected) {
+        return Err("council_task_conflict: concurrent terminal settlement changed the native evidence.".into());
+    }
+    Ok(winner)
+}
+
 /// Durable one-winner terminal result, checked against the live native gate.
 /// This never publishes, approves on behalf of a user or dispatches a callback.
 pub(crate) fn record_native_terminal(
@@ -619,7 +660,10 @@ pub(crate) fn record_native_terminal(
         params![updated, session_id, native_task_key(assignment_key)?, raw],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
-        return Err("council_task_conflict: concurrent terminal settlement changed the request.".into());
+        return resolve_native_terminal_collision(
+            store, session_id, project_id, assignment_key, artifact_sha256,
+            request_id, &expected,
+        );
     }
     Ok(expected)
 }

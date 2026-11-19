@@ -1937,6 +1937,7 @@ test('native-backed attempt inspector shows recorded sessions and run budgets wi
     const {mountSuperagent} = await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
     host.id='sa-native-attempt-test'; document.body.appendChild(host);
+    (window as unknown as {saChatTargets: unknown[]}).saChatTargets = [];
     mountSuperagent(host, async command => {
       if(command==='bots_list') return [
         {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
@@ -1964,6 +1965,8 @@ test('native-backed attempt inspector shows recorded sessions and run budgets wi
         activity:[]
       } as never;
       throw new Error('Unexpected native command: '+command);
+    }, async route => {
+      (window as unknown as {saChatTargets: unknown[]}).saChatTargets.push(route);
     });
   });
   const host=page.locator('#sa-native-attempt-test');
@@ -1976,6 +1979,21 @@ test('native-backed attempt inspector shows recorded sessions and run budgets wi
   await expect(inspector).toContainText('Recorded (not a tool grant)');
   await expect(inspector).toContainText('Not recorded');
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+  await inspector.getByRole('button',{name:'Open native chat'}).click();
+  expect(await page.evaluate(() =>
+    (window as unknown as {saChatTargets: unknown[]}).saChatTargets)).toEqual([
+    {teamId:'team',ticketId:'ticket',assignmentId:'attempt-one',botId:'worker',sessionId:'session-one'}
+  ]);
+  await expect(host).toHaveAttribute('aria-busy','false');
+  // Forged data attributes must not navigate to an unverified attempt.
+  await page.evaluate(() => {
+    const host = document.querySelector('#sa-native-attempt-test')!;
+    const forged = document.createElement('button');
+    forged.dataset.saOpenAssignmentChat = 'other-ticket-attempt';
+    host.append(forged); forged.click(); forged.remove();
+  });
+  expect(await page.evaluate(() =>
+    (window as unknown as {saChatTargets: unknown[]}).saChatTargets)).toHaveLength(1);
   await inspector.getByRole('button',{name:'Close attempt'}).click();
   await expect(inspector).toHaveCount(0);
 });

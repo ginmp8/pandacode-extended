@@ -112,7 +112,14 @@ interface SourceIntegrity {
   observationalOnly: boolean;
 }
 
-export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
+type NativeAssignmentChatRoute = {
+  teamId: string; ticketId: string; assignmentId: string; botId: string; sessionId: string;
+};
+type OpenNativeAssignmentChat = (route: NativeAssignmentChatRoute) => Promise<void>;
+
+export function mountSuperagent(
+  host: HTMLElement, call: Call, openAssignmentChat?: OpenNativeAssignmentChat,
+): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
@@ -291,7 +298,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<h5>Attempt ' + attempt.attempt + ' · ' + safe(attempt.state) + '</h5>' +
         '<p>Native Ticket/Assignment snapshot; not provider liveness, a review verdict or a grant.</p>' +
         '<dl><dt>Bot</dt><dd>' + safe(botName(attempt.botId)) + '</dd>' +
-        '<dt>Session</dt><dd><code>' + safe(attempt.sessionId) + '</code></dd>' +
+        '<dt>Session</dt><dd><code>' + safe(attempt.sessionId) + '</code>' +
+        (openAssignmentChat
+          ? ' <button type="button" data-sa-open-assignment-chat="' + safe(attempt.id) +
+            '">Open native chat</button>' : ' · Native chat navigation unavailable') +
+        '</dd>' +
         '<dt>Current Ticket assignment</dt><dd>' +
         (insight ? (insight.currentAssignment ? 'Yes' : 'No') : 'Unavailable') + '</dd>' +
         '<dt>Native mandate</dt><dd>' +
@@ -1855,6 +1866,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedAssignmentId = assignmentId;
       render();
       host.querySelector<HTMLElement>('.sa-assignment-inspector')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.dataset.saOpenAssignmentChat) {
+      // Navigation is only offered for a currently selected, native Ticket-bound
+      // assignment. The host independently rechecks the native bot thread.
+      const snapshot = ticketDetails;
+      const assignment = snapshot?.assignments.find(item =>
+        item.id === target.dataset.saOpenAssignmentChat);
+      if (!openAssignmentChat || !snapshot || snapshot.ticket.id !== inspectedTicket ||
+          snapshot.ticket.orchestrationId !== selected || !assignment ||
+          assignment.id !== inspectedAssignmentId || !assignment.botId ||
+          !assignment.sessionId) return;
+      void work(() => openAssignmentChat({
+        teamId: selected, ticketId: snapshot.ticket.id,
+        assignmentId: assignment.id, botId: assignment.botId,
+        sessionId: assignment.sessionId,
+      }));
       return;
     }
     if (target.dataset.saInspectAssignment) {

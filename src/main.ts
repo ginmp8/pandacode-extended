@@ -6318,7 +6318,38 @@ async function showSuperagent(): Promise<void> {
     else {
       const { mountSuperagent } = await import('./superagent-ui');
       if (!superagentShown) return;
-      superagentMount = mountSuperagent(host, call);
+      superagentMount = mountSuperagent(host, call, async route => {
+        // A UI-selected session is not authority. Recheck its exact native
+        // Ticket/attempt and bot ownership before leaving Orchestrations.
+        const snapshot = await call<{
+          ticket: { id: string; orchestrationId: string };
+          assignments: Array<{ id: string; botId: string; sessionId: string; attempt: number }>;
+        }>('superagent_snapshot', { ticketId: route.ticketId, limit: 50 });
+        const assignment = snapshot.assignments.find(item =>
+          item.id === route.assignmentId && item.botId === route.botId &&
+          item.sessionId === route.sessionId);
+        if (!assignment || snapshot.ticket.id !== route.ticketId ||
+            snapshot.ticket.orchestrationId !== route.teamId) {
+          throw new Error('The native Ticket assignment changed. Refresh its evidence.');
+        }
+        const owned = await call<{
+          threads: Array<{ channelId: string; externalId: string; sessionId: string }>;
+        }>('bot_detail', { botId: route.botId });
+        const threadIds = assignment.attempt === 1
+          ? [route.ticketId, route.ticketId + ':attempt:1']
+          : [route.ticketId + ':attempt:' + assignment.attempt,
+             route.ticketId + ':worker:' + assignment.attempt];
+        if (!owned.threads.some(thread => thread.channelId === 'superagent' &&
+            thread.sessionId === route.sessionId && threadIds.includes(thread.externalId))) {
+          throw new Error('The native bot conversation is missing or belongs to another assignment.');
+        }
+        await reloadSessions();
+        if (!state.sessions.some(item => item.id === route.sessionId)) {
+          throw new Error('This native bot conversation is no longer available.');
+        }
+        closeSuperagent(false);
+        await selectSession(route.sessionId, true);
+      });
     }
   } catch (cause) {
     if (superagentShown) {

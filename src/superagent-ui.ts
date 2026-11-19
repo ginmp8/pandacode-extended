@@ -126,6 +126,8 @@ export function mountSuperagent(
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false, reviewQueueHasMore = false;
   let reviewTeamFilter = '';
+  // Human rejection is scoped to one native review receipt, never to a board label.
+  let globalRejection: {id:string; teamId:string; revision:number; evidence:string | null; filter:string} | null = null;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
@@ -927,8 +929,32 @@ export function mountSuperagent(
           ' · ' + safe(item.state === 'waiting_approval' ? 'Human decision' :
             'Awaiting native Council (not approved)') + ' · Revision ' +
           item.revision + '</small></div><button type="button" data-sa-open-demand="' +
-          safe(item.id) + '">Open demand</button></li>').join('') ||
+          safe(item.id) + '">Open demand</button>' +
+          (item.state === 'waiting_approval'
+            ? '<button type="button" data-sa-global-reject="' + safe(item.id) +
+              '">Reject evidence</button>' : '') + '</li>').join('') ||
           '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>' +
+          (globalRejection && reviewQueue.some(row => row.id === globalRejection.id &&
+              row.orchestrationId === globalRejection.teamId &&
+              row.revision === globalRejection.revision && row.state === 'waiting_approval')
+            ? '<form data-sa-form="global-review-reject" class="sa-global-review-reject" ' +
+              'aria-label="Reject native Demand evidence"><h4>Reject Demand ' +
+              safe(globalRejection.id) + '</h4><p>Original Team ' +
+              safe(presets.find(team => team.id === globalRejection.teamId)?.name ?? 'Unknown') +
+              ' · Revision ' + globalRejection.revision +
+              '. This is a negative human decision, not a Council verdict or a retry.</p>' +
+              '<p>Native Worker evidence excerpt (up to 2,000 characters):</p>' +
+              '<blockquote class="sa-evidence-excerpt">' +
+              safe(globalRejection.evidence?.slice(0, 2000) || 'No evidence recorded') +
+              '</blockquote>' +
+              (globalRejection.evidence && globalRejection.evidence.length > 2000
+                ? '<p>Evidence truncated. Open Demand to inspect the complete native record.</p>' : '') +
+              '<label>Reason for rejecting evidence<textarea name="reason" rows="3" ' +
+              'maxlength="500" required></textarea></label>' +
+              '<div class="sa-actions"><button type="submit" class="primary-button">' +
+              'Review rejection</button><button type="button" ' +
+              'data-sa-global-reject-cancel>Cancel rejection</button></div></form>'
+            : '') +
           '<p role="status">' + reviewQueue.length + ' native pending decisions loaded.</p>' +
           (reviewQueueHasMore ? '<button type="button" data-sa-load-older-reviews>' +
             'Load older pending decisions</button>' : '')) +
@@ -1109,6 +1135,7 @@ export function mountSuperagent(
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
     reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
+    globalRejection = null;
     demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -1246,6 +1273,7 @@ export function mountSuperagent(
         target.value = reviewTeamFilter; return;
       }
       reviewTeamFilter = teamId;
+      globalRejection = null;
       reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
       render();
       void work(async () => {
@@ -1645,8 +1673,31 @@ export function mountSuperagent(
       });
       return;
     }
+    if (target.hasAttribute('data-sa-global-reject-cancel')) {
+      globalRejection = null; render(); return;
+    }
+    if (target.dataset.saGlobalReject) {
+      const row = reviewQueue.find(item => item.id === target.dataset.saGlobalReject);
+      if (!row || row.state !== 'waiting_approval' || busy ||
+          (reviewTeamFilter && row.orchestrationId !== reviewTeamFilter)) return;
+      void work(async () => {
+        // Index rows are untrusted until an exact native Ticket snapshot agrees.
+        const snapshot = await call<TicketDetails>('superagent_snapshot',
+          {ticketId:row.id, limit:1});
+        if (snapshot.ticket.id !== row.id ||
+            snapshot.ticket.orchestrationId !== row.orchestrationId ||
+            snapshot.ticket.revision !== row.revision ||
+            snapshot.ticket.state !== 'waiting_approval') {
+          throw new Error('Native review decision changed; refresh the inbox before rejecting.');
+        }
+        globalRejection = {id:row.id, teamId:row.orchestrationId,
+          revision:row.revision, evidence:snapshot.ticket.evidence, filter:reviewTeamFilter};
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-load-review-inbox')) {
       void work(async () => {
+        globalRejection = null;
         reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
         reviewQueue = await fetchReviewPage(reviewTeamFilter);
         reviewQueueHasMore = reviewQueue.length === 200;
@@ -2202,6 +2253,62 @@ export function mountSuperagent(
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'global-review-reject') {
+      const currentDecision = globalRejection;
+      const reason = String(data.get('reason') ?? '').trim();
+      if (!currentDecision || currentDecision.filter !== reviewTeamFilter ||
+          workspaceView !== 'review' ||
+          !reviewQueue.some(item => item.id === currentDecision.id &&
+            item.orchestrationId === currentDecision.teamId &&
+            item.revision === currentDecision.revision &&
+            item.state === 'waiting_approval')) return;
+      if (!reason || new TextEncoder().encode(reason).length > 500 ||
+          Array.from(reason).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+        error = 'Enter a nonempty rejection reason of at most 500 bytes without control characters.';
+        render(); return;
+      }
+      ask('Reject native evidence for Demand ' + currentDecision.id +
+        ' at revision ' + currentDecision.revision +
+        '? This records a negative human decision and blocks the Ticket; it cannot approve or run work.', async () => {
+        if (globalRejection !== currentDecision || workspaceView !== 'review' ||
+            currentDecision.filter !== reviewTeamFilter) {
+          throw new Error('Review selection changed before confirmation.');
+        }
+        const fresh = await call<TicketDetails>('superagent_snapshot',
+          {ticketId:currentDecision.id, limit:1});
+        if (fresh.ticket.id !== currentDecision.id ||
+            fresh.ticket.orchestrationId !== currentDecision.teamId ||
+            fresh.ticket.revision !== currentDecision.revision ||
+            fresh.ticket.state !== 'waiting_approval' ||
+            fresh.ticket.evidence !== currentDecision.evidence) {
+          throw new Error('Native review evidence changed before confirmation; refresh the inbox.');
+        }
+        try {
+          const rejected = await call<Ticket>('superagent_reject', {
+            ticketId:currentDecision.id,
+            expectedRevision:currentDecision.revision, reason,
+          });
+          if (rejected.id !== currentDecision.id ||
+              rejected.orchestrationId !== currentDecision.teamId ||
+              rejected.revision !== currentDecision.revision + 1 ||
+              rejected.state !== 'blocked') {
+            throw new Error('Native rejection returned an inconsistent Ticket; inspect the latest history.');
+          }
+          feedback = 'Native evidence rejection recorded for Demand ' + currentDecision.id +
+            '. It remains blocked until separately authorized recovery.';
+        } finally {
+          // Even a failed native call may have committed a decision before an
+          // IPC error. Clear stale controls and re-read the native inbox.
+          globalRejection = null;
+          reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
+          const updated = await fetchReviewPage(reviewTeamFilter);
+          reviewQueue = updated;
+          reviewQueueHasMore = updated.length === 200;
+          reviewQueueLoaded = true;
+        }
       });
       return;
     }

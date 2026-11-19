@@ -3001,3 +3001,110 @@ test('Demand inspector preserves native admitted Team identity across revisions 
     (window as unknown as {admissionHistoryCalls:()=>string[]}).admissionHistoryCalls());
   expect(calls.some(command=>/submit|dispatch|accept|effect|grant|reserve/.test(command))).toBe(false);
 });
+
+
+test('cross-Team native review rejection is evidence-bound, revision-guarded and never a Council pass', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-global-rejection-test';document.body.appendChild(host);
+    type Mode='stale-first'|'stale-confirm'|'native-denied'|'valid';
+    type Trace={command:string;args?:Record<string,unknown>};
+    const trace:Trace[]=[];
+    let mode:Mode='stale-first',reads=0;
+    let decision={id:'human-review',orchestrationId:'team-b',objective:'Review release evidence',
+      state:'waiting_approval',revision:7,updatedAt:2000,
+      evidence:'Evidence <img src=x onerror=alert(1)> not executable'};
+    (window as unknown as {saGlobalReviewTest:{trace:Trace[];setMode:(next:Mode)=>void}})
+      .saGlobalReviewTest={trace,setMode:next=>{mode=next;reads=0;}};
+    mountSuperagent(host,async(command,args)=>{
+      trace.push({command,args});
+      if(command==='bots_list')return [
+        {id:'lead',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:true,policyRevision:2},
+        {id:'team-b',name:'Performance',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:true,policyRevision:3},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_review_inbox')return [
+        ...(decision.state==='waiting_approval'?[{...decision}]:[]),
+        {id:'council-review',orchestrationId:'team-a',objective:'Council pending',
+          state:'waiting_review',revision:4,updatedAt:1000},
+      ] as never;
+      if(command==='superagent_snapshot'){
+        if(args?.ticketId!=='human-review')throw Error('Foreign Ticket read');
+        reads++;
+        const stale=mode==='stale-first'||(mode==='stale-confirm'&&reads>=2);
+        return {ticket:{...decision,revision:decision.revision+(stale?1:0)},
+          mandate:{actor:'operator',authorizationId:'manual',policyRevision:3,projectId:'project',
+            expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+          assignments:[],activity:[]} as never;
+      }
+      if(command==='superagent_reject'){
+        if(mode==='native-denied')throw Error('Native revision CAS denied');
+        if(args?.ticketId!==decision.id||args?.expectedRevision!==decision.revision||
+            args?.reason!=='Incorrect evidence')throw Error('Unexpected native rejection');
+        decision={...decision,state:'blocked',revision:decision.revision+1};
+        return {...decision} as never;
+      }
+      throw Error('Unexpected native operation: '+command);
+    });
+  });
+  const host=page.locator('#sa-global-rejection-test');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(inbox.getByRole('button',{name:'Reject evidence'})).toHaveCount(1);
+  await inbox.getByRole('button',{name:'Reject evidence'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native review decision changed');
+  await expect(inbox.getByRole('form',{name:'Reject native Demand evidence'})).toHaveCount(0);
+  await page.evaluate(()=>
+    (window as unknown as {saGlobalReviewTest:{setMode:(next:string)=>void}})
+      .saGlobalReviewTest.setMode('stale-confirm'));
+  await inbox.getByRole('button',{name:'Reject evidence'}).click();
+  const form=inbox.getByRole('form',{name:'Reject native Demand evidence'});
+  await expect(form).toContainText('Performance');
+  await expect(form).toContainText('Evidence <img src=x onerror=alert(1)> not executable');
+  await expect(form.locator('img')).toHaveCount(0);
+  await form.getByRole('textbox',{name:'Reason for rejecting evidence'}).fill('Incorrect evidence');
+  await form.getByRole('button',{name:'Review rejection'}).click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('alert')).toContainText('evidence changed before confirmation');
+  let calls=await page.evaluate(()=>
+    (window as unknown as {saGlobalReviewTest:{trace:{command:string}[]}})
+      .saGlobalReviewTest.trace);
+  expect(calls.some(item=>item.command==='superagent_reject')).toBe(false);
+  await form.getByRole('button',{name:'Cancel rejection'}).click();
+  await page.evaluate(()=>
+    (window as unknown as {saGlobalReviewTest:{setMode:(next:string)=>void}})
+      .saGlobalReviewTest.setMode('native-denied'));
+  await inbox.getByRole('button',{name:'Reject evidence'}).click();
+  await form.getByRole('textbox',{name:'Reason for rejecting evidence'}).fill('Incorrect evidence');
+  await form.getByRole('button',{name:'Review rejection'}).click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native revision CAS denied');
+  await expect(inbox.getByRole('button',{name:'Reject evidence'})).toHaveCount(1);
+  await page.evaluate(()=>
+    (window as unknown as {saGlobalReviewTest:{setMode:(next:string)=>void}})
+      .saGlobalReviewTest.setMode('valid'));
+  await inbox.getByRole('button',{name:'Reject evidence'}).click();
+  await form.getByRole('textbox',{name:'Reason for rejecting evidence'}).fill('Incorrect evidence');
+  await form.getByRole('button',{name:'Review rejection'}).click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(inbox.getByRole('button',{name:'Reject evidence'})).toHaveCount(0);
+  await expect(inbox).toContainText('Awaiting native Council (not approved)');
+  await expect(host.getByRole('status').filter({hasText:'Native evidence rejection recorded'})).toBeVisible();
+  calls=await page.evaluate(()=>
+    (window as unknown as {saGlobalReviewTest:{trace:{command:string;args?:Record<string,unknown>}[]}})
+      .saGlobalReviewTest.trace);
+  expect(calls.filter(item=>item.command==='superagent_reject')).toHaveLength(2);
+  expect(calls.filter(item=>item.command==='superagent_reject')[1]?.args)
+    .toMatchObject({ticketId:'human-review',expectedRevision:7,reason:'Incorrect evidence'});
+  expect(calls.some(item=>/superagent_accept|dispatch|effect_reserve|council_pass/.test(item.command)))
+    .toBe(false);
+});

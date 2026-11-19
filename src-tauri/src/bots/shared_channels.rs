@@ -381,6 +381,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     let Some((cycle_id, original_revision, source_message_id)) = cycle else { return Ok(None) };
     let original = council_request(store, &source_message_id)?.map(|request| request.council);
     let team = crate::architect::load(store, session_id)?;
+    let request_current = crate::architect::council_requests::channel_request_is_current(
+        store, delivery_id, session_id,
+    );
     let proof: Option<(i64, i64, i64, String)> = store.db.query_row(
         "SELECT council_since,dispatch_revision,changed_at,reason
          FROM extended_channel_council_acceptances
@@ -390,8 +393,18 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     ).optional().map_err(|e| e.to_string())?;
     let (state, round, target, lowest, revision, notice, reviewers, acceptance_reason) = if let Some(team) = team {
         let status = team.council_status.as_ref();
-        let original_matches = original.as_ref() == team.config.council.as_ref()
-            && original_revision == format!("cycle:{}",team.council_since);
+        let original_matches = request_current
+            && original.as_ref() == team.config.council.as_ref()
+            && original_revision == format!("cycle:{}", team.council_since);
+        // A newly admitted delivery has no native cycle yet. Show a pending
+        // label only for its original, authenticated, empty Council task.
+        let pending_admission = request_current
+            && original.as_ref() == team.config.council.as_ref()
+            && original_revision == "0"
+            && team.council_since == 0
+            && team.workers.is_empty()
+            && status.is_none()
+            && matches!(delivery_status, "queued" | "in_progress");
         let authorized_exception = original_matches && proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
             team.council_accepted == Some(*since) && team.council_since == *since
                 && team.dispatch_revision as i64 == *dispatch && team.changed_at == *changed
@@ -401,7 +414,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         // Channel row must obey the same live gate as its final callback.
         let native_pass = original_matches
             && crate::architect::verified_council_pass(store, &team);
-        let state = if !original_matches {
+        let state = if pending_admission {
+            "Reviewing"
+        } else if !original_matches {
             "Inconclusive"
         } else {
             match team.status.as_str() {
@@ -471,8 +486,8 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         // Never expose task-private reviewer identities, skill provenance or
         // cached scores when the frozen Channel Council policy has drifted.
         let reviewers = if original_matches { reviewers } else { Vec::new() };
-        let note = (!original_matches)
-            .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
+        let note = (!original_matches && !pending_admission)
+            .then(|| "Council settings, request or cycle differ from this channel delivery; approval is unavailable.".to_string())
             .or_else(|| (team.status == "interrupted")
                 .then(|| "PandaCode restarted during Council review. Open the Council report and resume this task; no result has been approved.".to_string()))
             .or_else(|| (status.is_some_and(|s| s.state == "passed") && !native_pass)

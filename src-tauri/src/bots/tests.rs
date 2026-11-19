@@ -191,8 +191,15 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     assert_ne!(first.council.as_ref().unwrap().session_id,second.council.as_ref().unwrap().session_id);
     assert!(owned.iter().any(|(_,sid)| sid == &first.council.as_ref().unwrap().session_id));
     assert!(owned.iter().any(|(_,sid)| sid == &second.council.as_ref().unwrap().session_id));
-    assert_eq!(first.council.as_ref().unwrap().state,"Reviewing");
-    assert_eq!(second.council.as_ref().unwrap().state,"Reviewing");
+    let tampered = first.council.as_ref().unwrap();
+    assert_eq!(tampered.state, "Inconclusive",
+        "an altered native request cannot appear to be actively reviewing");
+    assert!(tampered.reviewers.is_empty() && tampered.lowest.is_none());
+    assert!(tampered.notice.as_deref().unwrap_or_default().contains("differ"));
+    let pending = second.council.as_ref().unwrap();
+    assert_eq!(pending.state, "Reviewing",
+        "an authenticated, empty task is pending until its native cycle starts");
+    assert!(pending.reviewers.is_empty() && pending.lowest.is_none());
     // Stopping one delivery cannot mark its sibling stopped or passed.
     f.store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",
@@ -433,6 +440,13 @@ fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
         params![contexts[0].1,serde_json::to_string(&team).unwrap()],
     ).unwrap();
+    let unbound = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let unbound_view = unbound.messages.iter().find(|m| m.id == contexts[0].0)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(unbound_view.state, "Inconclusive");
+    assert!(unbound_view.reviewers.is_empty() && unbound_view.lowest.is_none(),
+        "unbound native reviewer data must stay private");
+    shared_channels::bind_delivery_cycle(&f.store, &contexts[0].1, team.council_since).unwrap();
     let details = shared_channels::detail(&f.store,&channel.id,100).unwrap();
     let first_skills = &details.messages.iter().find(|m| m.id==contexts[0].0)
         .unwrap().council.as_ref().unwrap().reviewers[0].skills;
@@ -1441,6 +1455,26 @@ fn channel_council_inspector_requires_owning_delivery_and_frozen_cycle() {
     let valid_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
     assert_eq!(valid_list.messages.iter().find(|message| message.id == delivery_id)
         .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+    // A modified objective is as stale as a modified Council policy.
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='Different task'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    let stale_objective = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let objective_view = stale_objective.messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(objective_view.state, "Inconclusive");
+    assert!(objective_view.lowest.is_none() && objective_view.reviewers.is_empty());
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='Review task'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    assert_eq!(shared_channels::detail(&f.store, &channel.id, 100).unwrap()
+        .messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+
     let mut changed_council = council.clone();
     changed_council.target = 8.0;
     f.store.db.execute(

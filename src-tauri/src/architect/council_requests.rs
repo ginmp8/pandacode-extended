@@ -144,9 +144,11 @@ pub(crate) fn admit_channel(store: &Store, delivery_id: &str) -> Result<CouncilT
     Ok(candidate)
 }
 
-/// Native-only scoped read; callers must know this request's exact delivery
-/// and session, which are revalidated against persisted ownership and pins.
-pub(crate) fn inspect_channel(store: &Store, request_id: &str, delivery_id: &str, session_id: &str) -> Result<CouncilTaskInspection> {
+/// Recheck the frozen native delivery identity without constructing an entire
+/// Council inspector. Compact Channel rows use this same authority boundary.
+fn validated_channel_request(
+    store: &Store, request_id: &str, delivery_id: &str, session_id: &str,
+) -> Result<CouncilTaskReviewRequest> {
     let raw: String = store.db.query_row(
         "SELECT context_json FROM extended_council_task_requests
          WHERE request_id=?1 AND delivery_id=?2 AND session_id=?3",
@@ -164,6 +166,29 @@ pub(crate) fn inspect_channel(store: &Store, request_id: &str, delivery_id: &str
     if current != recorded {
         return Err("council_task_stale: source, objective, cycle or policy has changed.".into());
     }
+    Ok(recorded)
+}
+
+/// Read-only and fail-closed. A stale, missing or malformed native request
+/// cannot expose task-private reviewer data through a Channel summary.
+pub(crate) fn channel_request_is_current(store: &Store, delivery_id: &str, session_id: &str) -> bool {
+    let issued: Option<String> = match store.db.query_row(
+        "SELECT request_id FROM extended_council_task_requests
+         WHERE delivery_id=?1 AND session_id=?2",
+        params![delivery_id,session_id], |row| row.get(0),
+    ).optional() {
+        Ok(issued) => issued,
+        Err(_) => return false,
+    };
+    issued.as_deref().is_some_and(|request_id| {
+        validated_channel_request(store, request_id, delivery_id, session_id).is_ok()
+    })
+}
+
+/// Native-only scoped read; callers must know this request's exact delivery
+/// and session, which are revalidated against persisted ownership and pins.
+pub(crate) fn inspect_channel(store: &Store, request_id: &str, delivery_id: &str, session_id: &str) -> Result<CouncilTaskInspection> {
+    let recorded = validated_channel_request(store, request_id, delivery_id, session_id)?;
     let native = super::council_inspection_state(store, session_id)?
         .ok_or("council_task_denied: native task inspection is unavailable.")?;
     Ok(CouncilTaskInspection { request: recorded, native })

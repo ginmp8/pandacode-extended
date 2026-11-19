@@ -408,6 +408,22 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         {
             return Err("child_council_revoked: child session cannot resume; start a fresh Council task.".into());
         }
+        // Pause advances the root generation without reissuing child grants.
+        // Revalidate the entire original native admission at its issued
+        // generation, including immutable objective, child configuration,
+        // task-only history, real leaf ownership and read-only grants.
+        // The resumed root must not adopt a mutable child TeamSnapshot.
+        let mut issued_root = root.clone();
+        issued_root.generation = child_team.generation;
+        match read(store, &issued_root, choice) {
+            Ok(Some(current)) if current == frozen_record => {}
+            Ok(_) => return Err(
+                "child_council_revoked: native child admission changed during Pause.".into()
+            ),
+            Err(reason) => return Err(format!(
+                "child_council_revoked: native child admission cannot resume ({reason})."
+            )),
+        }
     }
     for leaf_id in leaf_sessions(store, &root.session_id)? {
         let session = store.session(&leaf_id)?;

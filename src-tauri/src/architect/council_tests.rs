@@ -5267,6 +5267,26 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
     // discard an active agent; this fixture has no live agent processes.
     let paused = control_state(&state, &sid, "pause").unwrap();
     let frozen_root = serde_json::to_value(&paused).unwrap();
+    // A paused root retains the original child issuance generation. A
+    // forged task objective in the stopped child must not regain native
+    // reviewer authority through ordinary Resume.
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::require_unrevoked_child_sessions_on_resume(&store, &root).is_ok(),
+            "an unchanged paused child should remain resumable");
+        let mut child = load(&store, &old_child).unwrap().unwrap();
+        let original_objective = child.objective.clone();
+        child.objective = "Unrelated mutable chat objective".into();
+        save(&store, &mut child).unwrap();
+        let denied = child_council::require_unrevoked_child_sessions_on_resume(&store, &root)
+            .unwrap_err();
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+        child.objective = original_objective;
+        save(&store, &mut child).unwrap();
+        assert!(child_council::require_unrevoked_child_sessions_on_resume(&store, &root).is_ok(),
+            "restoring authentic child state preserves valid Pause/Resume");
+    }
     {
         let store = state.store.lock().unwrap();
         let mut child = load(&store, &old_child).unwrap().unwrap();

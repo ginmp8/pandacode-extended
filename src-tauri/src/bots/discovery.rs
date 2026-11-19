@@ -390,14 +390,16 @@ pub async fn superagent_capability_candidates(window: tauri::WebviewWindow,
 pub async fn bot_capability_profile(window: tauri::WebviewWindow,
     state: State<'_, AppState>, bot_id: String) -> Result<Value> {
     super::guard_main(&window)?;
-    inspect(&state.store.lock().map_err(|e| e.to_string())?, &bot_id, None)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    inspect(&store, &bot_id, None)
 }
 
 #[tauri::command]
 pub async fn bot_capability_question(window: tauri::WebviewWindow,
     state: State<'_, AppState>, bot_id: String, question: String) -> Result<Value> {
     super::guard_main(&window)?;
-    answer(&state.store.lock().map_err(|e| e.to_string())?, &bot_id, None, &question)
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    answer(&store, &bot_id, None, &question)
 }
 
 #[tauri::command]
@@ -405,9 +407,8 @@ pub async fn bot_capability_preferences_set(app: tauri::AppHandle,
     window: tauri::WebviewWindow, state: State<'_, AppState>,
     bot_id: String, visibility: String, summary: String) -> Result<Value> {
     super::guard_main(&window)?;
-    let changed = set_preferences(
-        &state.store.lock().map_err(|e| e.to_string())?, &bot_id, &visibility, &summary,
-    )?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let changed = set_preferences(&store, &bot_id, &visibility, &summary)?;
     let _ = app.emit("bots-changed", ());
     Ok(changed)
 }

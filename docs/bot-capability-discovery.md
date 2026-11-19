@@ -17,6 +17,12 @@ Raw instructions, hidden prompts, private memories, unrelated chats, environment
 - Bot conversations: `pandacode_bot_inspect_capabilities({to})`, `pandacode_bot_ask_capability({to,question})`. Session identity is recovered natively and collaboration ancestry/three-hop limits apply.
 - Headless: `pandacode serve --inspect-bot-capabilities <bot-id>` or `--ask-bot-capability <bot-id> <question>` prints read-only JSON without normal task startup/recovery.
 
+## SuperAgent planning
+
+The Team editor can compare discoverable candidates against an explicit objective. Ranking uses exact terms from declared role, the explicitly published summary and assigned Skill references. It does not infer abilities from bot names or prior conversation text. Results explain match terms, provenance, unknown execution eligibility and Project scope. Suggestions can be staged as Workers or Reviewers, but roles are not changed until the user saves through the existing revision-checked native roster API.
+
+When a coordinated Demand is admitted, its Coordinator also receives a bounded, read-only snapshot of the current configured Team members. Opted-out bots contribute no profile details. The packet is labelled untrusted context; the existing read-only mandate remains authoritative. No ambient bot tools are enabled for SuperAgent Coordinator sessions.
+
 ## Persistence and audit
 
 SQLite schema v70 stores per-bot visibility and an explicit published summary in a foreign-key sidecar; no new execution permission tier exists. Profile responses are generated fresh, not cached in native code. Peer logs contain target ID and operation type only, never the question text, private prompts or response body.

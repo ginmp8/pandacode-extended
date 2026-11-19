@@ -30,7 +30,9 @@ pub(crate) fn catalog() -> Vec<Value> {
     ]
 }
 
-/// Bot tools act only on the bot that owns the task, so harnesses need not ask before using them.
+/// Bot tool calls inherit the native session owner's identity. Discovery is
+/// read-only and independently checks target visibility and collaboration ancestry;
+/// it never grants tools, tasks or project access to the caller.
 pub(crate) fn self_scoped(name: &str) -> bool {
     name.starts_with("pandacode_bot_") && names().iter().any(|known| known == name)
 }
@@ -226,6 +228,25 @@ mod tests {
         assert_eq!(next_message_hop("scout", "writer", 0).unwrap(), 1);
         assert_eq!(next_message_hop("writer", "ledger", 2).unwrap(), 3);
         assert!(next_message_hop("ledger", "scout", 3).is_err());
+    }
+
+    #[test]
+    fn capability_tools_are_bounded_and_do_not_offer_execution() {
+        let tools = catalog();
+        for name in ["pandacode_bot_inspect_capabilities", "pandacode_bot_ask_capability"] {
+            assert!(self_scoped(name));
+            assert!(tools.iter().any(|item| item["name"] == name));
+        }
+        assert!(validate_spec(&tools, "pandacode_bot_inspect_capabilities",
+            &json!({"to":"target"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"What skills are configured?"})).is_ok());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"test","execute":true})).is_err());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target","question":"x".repeat(401)})).is_err());
+        assert!(validate_spec(&tools, "pandacode_bot_ask_capability",
+            &json!({"to":"target"})).is_err());
     }
 
     #[test]

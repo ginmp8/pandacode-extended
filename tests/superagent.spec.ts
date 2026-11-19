@@ -3195,7 +3195,7 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
   await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
   await expect(host.getByRole('alert')).toContainText('evidence changed before confirmation');
   let calls=await page.evaluate(()=>
-    (window as unknown as {saGlobalAcceptTest:{trace:Trace[]}}).saGlobalAcceptTest.trace);
+    (window as unknown as {saGlobalAcceptTest:{trace:{command:string;args?:Record<string,unknown>}[]}}).saGlobalAcceptTest.trace);
   expect(calls.some(item=>item.command==='superagent_accept')).toBe(false);
   await form.getByRole('button',{name:'Cancel acceptance'}).click();
   await setMode('native-denied');
@@ -3212,7 +3212,7 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
   await expect(inbox).toContainText('Awaiting native Council (not approved)');
   await expect(host.getByRole('status').filter({hasText:'Native human acceptance recorded'})).toBeVisible();
   calls=await page.evaluate(()=>
-    (window as unknown as {saGlobalAcceptTest:{trace:Trace[]}}).saGlobalAcceptTest.trace);
+    (window as unknown as {saGlobalAcceptTest:{trace:{command:string;args?:Record<string,unknown>}[]}}).saGlobalAcceptTest.trace);
   expect(calls.filter(item=>item.command==='superagent_accept')).toHaveLength(2);
   expect(calls.filter(item=>item.command==='superagent_accept')[1]?.args)
     .toMatchObject({ticketId:'human-review',expectedRevision:7});

@@ -368,8 +368,15 @@ pub(super) fn skipped_skill_status(reason: &str) -> &'static str {
 
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String, String)> = store.db.query_row(
-        "SELECT cycle_id,artifact_revision,source_message_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
-        [delivery_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        "SELECT c.cycle_id,c.artifact_revision,c.source_message_id
+         FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d
+           ON d.id=c.delivery_id AND d.channel_id=c.channel_id
+              AND d.message_id=c.source_message_id AND d.bot_id=c.executor_bot_id
+         JOIN bot_threads t
+           ON t.session_id=d.session_id AND t.external_id='channel-council:' || d.id
+         WHERE c.delivery_id=?1 AND d.session_id=?2",
+        params![delivery_id,session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((cycle_id, original_revision, source_message_id)) = cycle else { return Ok(None) };
     let original = council_request(store, &source_message_id)?.map(|request| request.council);
@@ -394,7 +401,10 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         // Channel row must obey the same live gate as its final callback.
         let native_pass = original_matches
             && crate::architect::verified_council_pass(store, &team);
-        let state = match team.status.as_str() {
+        let state = if !original_matches {
+            "Inconclusive"
+        } else {
+            match team.status.as_str() {
             "stopped" => "Stopped",
             "failed" => "Failed",
             "interrupted" => "Paused",
@@ -409,8 +419,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 Some("waiting" | "reviewing" | "dispatch") => "Reviewing",
                 _ => "Inconclusive",
             },
+            }
         };
-        let reviewers = team.workers.iter().filter_map(|worker| {
+        let reviewers: Vec<ChannelCouncilReviewer> = team.workers.iter().filter_map(|worker| {
             worker.council.as_ref().map(|seat| {
                 let mut skills_out = Vec::new();
                 if let Some(binding) = worker.reviewer_binding.as_ref() {
@@ -457,6 +468,9 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 }
             })
         }).collect();
+        // Never expose task-private reviewer identities, skill provenance or
+        // cached scores when the frozen Channel Council policy has drifted.
+        let reviewers = if original_matches { reviewers } else { Vec::new() };
         let note = (!original_matches)
             .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
             .or_else(|| (team.status == "interrupted")
@@ -467,7 +481,8 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
                 .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));
         // Do not present an unverified cached score as a verified result.
-        let lowest = status.and_then(|s| if s.state == "passed" && !native_pass {
+        let lowest = status.and_then(|s| if !original_matches
+            || (s.state == "passed" && !native_pass) {
             None
         } else { s.lowest });
         (state.to_owned(), status.map_or(0, |s| s.round),

@@ -1428,6 +1428,61 @@ fn channel_council_inspector_requires_owning_delivery_and_frozen_cycle() {
     assert_eq!(inspection["sessionId"], session_id);
     assert_eq!(inspection["verifiedPass"], false, "a read-only report is not an approval");
 
+    // A drifted policy cannot disclose reviewer details or cached scores
+    // through the compact Channel view while the inspector refuses it.
+    team.council_status = Some(crate::architect::CouncilStatus {
+        state: "reviewing".into(), round: 1, lowest: Some(8.0), target: 9.0,
+        stale: false, notice: None,
+    });
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![session_id,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    let valid_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    assert_eq!(valid_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+    let mut changed_council = council.clone();
+    changed_council.target = 8.0;
+    f.store.db.execute(
+        "UPDATE extended_channel_council_requests SET council_json=?2 WHERE message_id=?1",
+        params![message_id,serde_json::to_string(&changed_council).unwrap()],
+    ).unwrap();
+    let stale_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let stale_view = stale_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(stale_view.state, "Inconclusive");
+    assert_eq!(stale_view.lowest, None, "stale policy must hide scores");
+    assert!(stale_view.reviewers.is_empty(), "stale policy must hide reviewer identities");
+    assert!(stale_view.notice.as_deref().unwrap_or_default().contains("differ"));
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_requests SET council_json=?2 WHERE message_id=?1",
+        params![message_id,serde_json::to_string(&council).unwrap()],
+    ).unwrap();
+
+    // A link into another Channel's message must never disclose the task.
+    let foreign_message = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Unrelated task','in_progress',?3)",
+        params![foreign_message,unrelated.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET source_message_id=?2
+         WHERE delivery_id=?1", params![delivery_id,foreign_message],
+    ).unwrap();
+    let foreign_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    assert!(foreign_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.is_none());
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET source_message_id=?2
+         WHERE delivery_id=?1", params![delivery_id,message_id],
+    ).unwrap();
+    assert!(shared_channels::detail(&f.store, &channel.id, 100).unwrap()
+        .messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.is_some());
+
     assert!(shared_channels::inspect_channel_delivery(&f.store, &unrelated.id, &delivery_id)
         .unwrap_err().contains("does not belong"));
     assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, "foreign-delivery")

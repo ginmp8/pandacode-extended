@@ -4028,7 +4028,7 @@ pub(crate) fn activity(app: &tauri::AppHandle, sid: &str, admission: Option<&Adm
         if let Some(team) = record_activity(&store, sid, admission) {
             emit(app, &team);
         }
-    }
+    };
 }
 pub(crate) fn completed(
     app: &tauri::AppHandle,

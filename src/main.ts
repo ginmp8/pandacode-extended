@@ -2813,12 +2813,35 @@ function renderComposer(): void {
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
+    // Channel events redraw the composer while Council settings may be open.
+    // Capture its live keyboard/scroll state before removing the old popover.
+    const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
+    const councilWasOpen = oldCouncilPanel?.matches(':popover-open') ?? false;
+    const councilControls = 'button, input, select, textarea, summary';
+    const councilFocusedIndex = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      ? [...oldCouncilPanel.querySelectorAll<HTMLElement>(councilControls)].indexOf(document.activeElement as HTMLElement)
+      : -1;
+    const councilScrollTop = councilWasOpen ? oldCouncilPanel?.scrollTop ?? 0 : 0;
+    const promptWasFocused = document.activeElement === oldChannelComposer?.querySelector('#shared-channel-prompt');
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
-      restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
-    }
+    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    if (!posting) restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
     bindSharedChannelCouncil(channelComposer);
+    if (!posting && councilWasOpen && channelComposer) {
+      const nextTrigger = channelComposer.querySelector<HTMLElement>('.bc-council-trigger');
+      const nextPanel = channelComposer.querySelector<HTMLElement>('.bc-council-panel');
+      if (nextTrigger && nextPanel) {
+        toggleSharedChannelCouncil(nextTrigger);
+        if (councilFocusedIndex >= 0) {
+          const focus = [...nextPanel.querySelectorAll<HTMLElement>(councilControls)][councilFocusedIndex];
+          if (focus?.getClientRects().length && !focus.matches(':disabled')) focus.focus({ preventScroll: true });
+        } else if (promptWasFocused) {
+          channelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.focus({ preventScroll: true });
+        }
+        nextPanel.scrollTop = councilScrollTop;
+      }
+    }
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');

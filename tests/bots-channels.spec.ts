@@ -90,6 +90,42 @@ test.describe('shared bot channels', () => {
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   });
 
+  test('channel Council retains the open popover, keyboard focus and scroll during an unrelated channel update', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 320, height: 460 });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    const lens = panel.locator('input[name="councilCriterionLens"]').first();
+    await lens.fill('Project privacy boundary');
+    await lens.focus();
+    const scrollTop = await panel.evaluate(element => {
+      element.scrollTop = Math.min(80, element.scrollHeight - element.clientHeight);
+      return element.scrollTop;
+    });
+    expect(scrollTop).toBeGreaterThan(0);
+
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old =>
+      document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+
+    const restored = page.locator('#shared-channel-composer');
+    const restoredPanel = restored.getByRole('dialog', { name: 'Council' });
+    await expect(restoredPanel).toBeVisible();
+    await expect(restored.getByRole('button', { name: 'Council: on' })).toHaveAttribute('aria-expanded', 'true');
+    await expect(restoredPanel.locator('input[name="councilCriterionLens"]').first()).toHaveValue('Project privacy boundary');
+    await expect(restoredPanel.locator('input[name="councilCriterionLens"]').first()).toBeFocused();
+    await expect.poll(() => restoredPanel.evaluate(element => element.scrollTop)).toBe(scrollTop);
+    await page.keyboard.press('Escape');
+    await expect(restoredPanel).toBeHidden();
+    await expect(restored.getByRole('button', { name: 'Council: on' })).toBeFocused();
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
     test.setTimeout(60_000);

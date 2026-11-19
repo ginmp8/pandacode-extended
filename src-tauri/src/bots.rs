@@ -4,6 +4,7 @@
 //! harness runs, approvals, the queue and history work unchanged.
 
 mod brief;
+pub(crate) mod discovery;
 pub(crate) mod channels;
 pub(crate) mod collaboration;
 pub(crate) mod failover;
@@ -198,6 +199,7 @@ pub(crate) fn upgrade(db: &rusqlite::Connection) -> Result<()> {
     }
     extended::upgrade(db)?;
     collaboration::upgrade(db)?;
+    discovery::upgrade(db)?;
     // Council is an immutable opt-in on an individual message. Separate
     // sidecars preserve older channel/bot schemas, threads and import payloads.
     db.execute_batch(

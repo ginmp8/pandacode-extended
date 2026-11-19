@@ -4169,32 +4169,39 @@ mod tests {
         let other = create_source(&store, "orch", "test/fixture", "trusted-bot", "issues.closed").unwrap();
         assert_eq!(initial.mode, "off");
         assert!(headless_set_source_mode(&path, &initial.id, initial.policy_revision, "auto").is_err());
-        let enabled: EventSource = serde_json::from_str(&headless_set_source_mode(
+        let enabled_json: serde_json::Value = serde_json::from_str(&headless_set_source_mode(
             &path, &initial.id, initial.policy_revision, "observe",
         ).unwrap()).unwrap();
-        assert_eq!(enabled.mode, "observe");
+        assert_eq!(enabled_json["mode"].as_str(), Some("observe"));
+        let enabled = source(&store, &initial.id).unwrap();
         assert_eq!(enabled.policy_revision, initial.policy_revision + 1);
-        let same: EventSource = serde_json::from_str(&headless_set_source_mode(
+        let same: serde_json::Value = serde_json::from_str(&headless_set_source_mode(
             &path, &initial.id, enabled.policy_revision, "observe",
         ).unwrap()).unwrap();
-        assert_eq!(same.policy_revision, enabled.policy_revision);
+        assert_eq!(same["policyRevision"].as_i64(), Some(enabled.policy_revision));
+        let receipt = observe(&store, &event("revoked-existing-receipt", &enabled, 7)).unwrap();
+        assert_eq!(receipt.decision, "observed_permitted");
         assert!(headless_set_source_mode(&path, &initial.id, initial.policy_revision, "off").is_err());
         assert_eq!(source(&store, &initial.id).unwrap().mode, "observe");
-        let disabled: EventSource = serde_json::from_str(&headless_set_source_mode(
+        let disabled_json: serde_json::Value = serde_json::from_str(&headless_set_source_mode(
             &path, &initial.id, enabled.policy_revision, "off",
         ).unwrap()).unwrap();
-        assert_eq!(disabled.mode, "off");
+        assert_eq!(disabled_json["mode"].as_str(), Some("off"));
+        let disabled = source(&store, &initial.id).unwrap();
+        assert_eq!(disabled.last_sequence, 7);
         assert_eq!(disabled.policy_revision, enabled.policy_revision + 1);
         assert!(headless_observe_source(&path, &initial.id).unwrap_err().contains("Source is Off"));
         assert!(headless_set_source_mode(&path, &initial.id, enabled.policy_revision, "observe").is_err());
         assert!(headless_set_source_mode(&path, "missing-source", 1, "observe").is_err());
         assert_eq!(source(&store, &other.id).unwrap().mode, "off");
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         drop(store);
         let reopened = Store::open_read_only(&path).unwrap();
         assert_eq!(source(&reopened, &initial.id).unwrap().mode, "off");
         assert_eq!(source(&reopened, &initial.id).unwrap().policy_revision, disabled.policy_revision);
+        assert_eq!(source(&reopened, &initial.id).unwrap().last_sequence, 7);
+        assert_eq!(list_decisions(&reopened, &initial.id, 10).unwrap().len(), 1);
         assert_eq!(source(&reopened, &other.id).unwrap().mode, "off");
     }
 

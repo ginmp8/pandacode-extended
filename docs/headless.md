@@ -518,10 +518,22 @@ not mark a healthy worker as interrupted.
 ### Authenticated GitHub Observe from headless (local operator)
 
 ```sh
+pandacode serve --set-source-mode <source-id> <expected-policy-revision> observe
+pandacode serve --set-source-mode <source-id> <expected-policy-revision> off
 pandacode serve --observe-source <source-id>
 pandacode serve --observe-team-sources <team-id>
 pandacode serve --observe-check-run <source-id> <check-run-id>
 ```
+
+The local operator can first enable or revoke an existing exact source using
+`--set-source-mode`. This reuses the desktop's native optimistic policy
+revision guard; the expected revision is available from
+`--inspect-source-health`. A stale revision or unsupported `auto` mode
+fails without changing policy. Disabling a source is durable across restarts
+and prevents in-flight Observe requests from committing receipts after a
+policy change. Changing mode performs no GitHub request, grants no worker
+permissions and does not create or run a Demand. Existing source receipts
+and cursors are preserved for audit and safe reactivation.
 
 An explicit, one-shot CLI invocation polls a previously configured **Observe**
 source through the same authenticated native GitHub Events adapter, bounded

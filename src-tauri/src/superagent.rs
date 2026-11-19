@@ -2566,6 +2566,10 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             "SELECT t.id,t.revision FROM sa_tickets t
              WHERE t.state='running' AND (
                t.active_assignment_id IS NULL
+               -- A lost Team cannot be authorized by the normal watchdog
+               -- INNER JOIN; quarantine its still-running Ticket as well.
+               OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                             WHERE o.id=t.orchestration_id)
                OR (SELECT COUNT(*) FROM sa_assignments a
                    WHERE a.ticket_id=t.id AND a.state='running')<>1
                OR NOT EXISTS(SELECT 1 FROM sa_assignments a
@@ -2596,6 +2600,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                active_assignment_id=NULL,revision=revision+1,updated_at=?3
              WHERE id=?1 AND revision=?2 AND state='running' AND (
                active_assignment_id IS NULL
+               OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                             WHERE o.id=sa_tickets.orchestration_id)
                OR (SELECT COUNT(*) FROM sa_assignments a
                    WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
                OR NOT EXISTS(SELECT 1 FROM sa_assignments a
@@ -2623,7 +2629,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
              VALUES(?1,'watchdog_orphan_interrupted',
-               'Running Ticket lost unique active Assignment; all task authority revoked without replay',?2)",
+               'Running Ticket lost its Team or unique active Assignment; all task authority revoked without replay',?2)",
             params![&ticket_id,now],
         ).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -8334,7 +8340,7 @@ mod tests {
 
     #[test]
     fn watchdog_quarantines_unlinked_running_tickets_without_replaying_provider_effects() {
-        for fault in ["missing-link", "wrong-link", "assignment-not-running"] {
+        for fault in ["missing-link", "wrong-link", "assignment-not-running", "team-missing"] {
             let mut store = fixture();
             let config = enabled(&store);
             let (ticket, started) = admit(
@@ -8369,6 +8375,15 @@ mod tests {
                         "UPDATE sa_assignments SET state='interrupted'
                          WHERE ticket_id=?1", [&ticket.id],
                     ).unwrap();
+                }
+                "team-missing" => {
+                    // Simulate a pre-existing corrupt/legacy database; normal
+                    // foreign keys forbid this deletion during healthy operation.
+                    store.db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+                    store.db.execute(
+                        "DELETE FROM sa_orchestrations WHERE id=?1", [&config.id],
+                    ).unwrap();
+                    store.db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
                 }
                 _ => unreachable!(),
             }

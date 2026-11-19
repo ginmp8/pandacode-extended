@@ -818,6 +818,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
+        | Command::SetSourceMode { .. }
         | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
         | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. } | Command::QueueSelectedWorkerDemand { .. }

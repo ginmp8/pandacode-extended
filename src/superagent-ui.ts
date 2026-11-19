@@ -1485,7 +1485,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const memberRow = (id: string, role: string, order = '') => {
       const bot=bots.find(candidate=>candidate.id===id);
       const name=bot?.name ?? id;
-      const inspectedAssignment=ticketDetails?.ticket.orchestrationId===chosen?.id
+      const inspectedAssignment=ticketDetails && ticketDetails.ticket.orchestrationId===chosen?.id
         ? ticketDetails.assignments.find(item=>item.botId===id) : null;
       return '<button type="button" class="sa-member-row" data-sa-member-inspect="' +
         safe(id) + '" aria-pressed="' + (id === inspectedMemberId) + '">' +

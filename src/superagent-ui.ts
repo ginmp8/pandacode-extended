@@ -162,6 +162,10 @@ export function mountSuperagent(
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   let linkedDecisionsHasMore = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
+  // SQLite lower() folds ASCII only. Match the native literal-substring filter
+  // without locale-sensitive case conversion that would reject valid UTF-8.
+  const nativeCaseFold = (value: string): string =>
+    value.replace(/[A-Z]/g, character => character.toLowerCase());
   const fetchDemandPage = async (query: DemandQuery): Promise<DemandIndex[]> => {
     const page = await call<DemandIndex[]>('superagent_all_demands', {query});
     // A first page is untrusted until its native filter scope and identities
@@ -169,8 +173,9 @@ export function mountSuperagent(
     // Continuations additionally validate their cursor against the last row.
     if (!query.beforeId) {
       const seen = new Set<string>();
+      const searchNeedle = query.searchQuery ? nativeCaseFold(query.searchQuery.trim()) : '';
       if (!Array.isArray(page) || page.length > (query.limit ?? 200) ||
-          page.some(item => {
+          page.some((item, index) => {
             if (!item || typeof item.id !== 'string' ||
                 !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
                 typeof item.orchestrationId !== 'string' ||
@@ -178,6 +183,11 @@ export function mountSuperagent(
                 !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
                 !Number.isSafeInteger(item.revision) || item.revision < 0 ||
                 typeof item.objective !== 'string' ||
+                typeof item.state !== 'string' ||
+                typeof item.projectId !== 'string' ||
+                (query.searchQuery && !nativeCaseFold(item.objective).includes(searchNeedle)) ||
+                (index > 0 && !(item.updatedAt < page[index - 1].updatedAt ||
+                  (item.updatedAt === page[index - 1].updatedAt && item.id < page[index - 1].id))) ||
                 (query.orchestrationId && item.orchestrationId !== query.orchestrationId) ||
                 (query.stateFilter && item.state !== query.stateFilter) ||
                 (query.projectId && item.projectId !== query.projectId) ||
@@ -1659,6 +1669,8 @@ export function mountSuperagent(
                   (team && item.orchestrationId !== team) ||
                   (state && item.state !== state) ||
                   (project && item.projectId !== project) ||
+                  (search && (typeof item.objective !== 'string' ||
+                    !nativeCaseFold(item.objective).includes(nativeCaseFold(search)))) ||
                   known.has(item.id) || pageIds.has(item.id)) return true;
               pageIds.add(item.id);
               return false;

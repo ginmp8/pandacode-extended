@@ -1563,6 +1563,85 @@ test('native Demand first page denies foreign Team, state, project and duplicate
   expect(calls.some(command => /submit|dispatch|stop|grant|accept/.test(command))).toBe(false);
 });
 
+
+test('Demand search rejects out-of-scope native rows and unordered first pages without exposing controls', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-demand-search-identity';
+    document.body.appendChild(host);
+    type Mode='wrong-first'|'unordered-first'|'valid-first'|'wrong-next'|'valid-next';
+    let mode:Mode='wrong-first';
+    const calls:string[]=[];
+    (window as unknown as {saSetSearchMode:(value:Mode)=>void}).saSetSearchMode =
+      value => { mode=value; };
+    (window as unknown as {saScopeCommands:string[]}).saScopeCommands=calls;
+    const demand=(index:number,objective:string)=>({
+      id:'demand-'+index,orchestrationId:'team',objective,state:'blocked',
+      revision:1,updatedAt:2000-index,projectId:'project',
+    });
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Search Team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:false,policyRevision:1,projectId:'project',
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as Record<string,unknown> | undefined;
+        if(query?.searchQuery!=='NEEDLE') return [] as never;
+        if(!query.beforeId) {
+          if(mode==='wrong-first')return [demand(0,'Unrelated task')] as never;
+          if(mode==='unordered-first')return [
+            demand(1,'Needle older'),demand(0,'NEEDLE newer'),
+          ] as never;
+          return Array.from({length:200},(_,i)=>demand(i,'Needle '+i)) as never;
+        }
+        if(query.beforeId!=='demand-199'||query.beforeUpdatedAt!==1801)
+          throw Error('Wrong native continuation cursor');
+        if(mode==='wrong-next')return [demand(200,'Unrelated next page')] as never;
+        return [demand(200,'Needle page 201')] as never;
+      }
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-demand-search-identity');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  const search=global.getByRole('searchbox',{name:'Search Demands by objective'});
+  await search.fill('NEEDLE');
+  await search.press('Enter');
+  const scopeError='Native Demand index returned invalid, duplicate or out-of-scope records';
+  await expect(host.getByRole('alert')).toContainText(scopeError);
+  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await page.evaluate(()=>(window as unknown as {saSetSearchMode:(value:string)=>void})
+    .saSetSearchMode('unordered-first'));
+  await search.press('Enter');
+  await expect(host.getByRole('alert')).toContainText(scopeError);
+  await expect(global.getByRole('button',{name:'Open demand'})).toHaveCount(0);
+  await page.evaluate(()=>(window as unknown as {saSetSearchMode:(value:string)=>void})
+    .saSetSearchMode('valid-first'));
+  await search.press('Enter');
+  await expect(global).toContainText('200 native Demands loaded.');
+  await page.evaluate(()=>(window as unknown as {saSetSearchMode:(value:string)=>void})
+    .saSetSearchMode('wrong-next'));
+  await global.getByRole('button',{name:'Load older Demands'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native Demand page overlaps');
+  await expect(global).toContainText('200 native Demands loaded.');
+  await page.evaluate(()=>(window as unknown as {saSetSearchMode:(value:string)=>void})
+    .saSetSearchMode('valid-next'));
+  await global.getByRole('button',{name:'Load older Demands'}).click();
+  await expect(global).toContainText('201 native Demands loaded.');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saScopeCommands:string[]}).saScopeCommands);
+  expect(calls.filter(command=>command==='superagent_all_demands')).toHaveLength(5);
+  expect(calls.some(command=>/submit|dispatch|stop|accept|grant|reserve/.test(command))).toBe(false);
+});
+
 test('native Team filter pages independently and resets pagination when changing Teams', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

@@ -260,6 +260,20 @@ function nativeBadge(state:string, label=nativeLabel(state)):string {
     '"><span class="sa-native-state-dot" aria-hidden="true"></span>' +
     escape(label) + '</span>';
 }
+interface NativeMetric {
+  label:string; value:string|number;
+  tone?:'neutral'|'warning'|'danger'|'success';
+  note?:string;
+}
+function nativeMetricStrip(metrics:NativeMetric[]):string {
+  return '<div class="sa-ux-metrics" role="group" aria-label="Native workspace metrics">' +
+    metrics.map(metric=>'<section class="sa-ux-metric" data-metric-tone="' +
+      (metric.tone ?? 'neutral') + '"><span class="sa-ux-metric-label">' +
+      escape(metric.label) + '</span><strong class="sa-ux-metric-value">' +
+      escape(String(metric.value)) + '</strong>' +
+      (metric.note ? '<small class="sa-ux-metric-note">' + escape(metric.note) + '</small>' : '') +
+      '</section>').join('') + '</div>';
+}
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
@@ -272,6 +286,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let demandProjectFilter = '', demandProjectDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
+  let reviewTab:'all'|'human'|'council'='all';
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' = 'teams';
@@ -470,6 +485,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return botAvatarHtml(bot?.avatar ?? '',bot?.name ?? 'Missing bot',
         'sa-ux-avatar',bot?.color ?? '');
     };
+    const allCountsAvailable=presets.every(item=>typeof item.runningCount==='number' &&
+      typeof item.blockedCount==='number');
+    const reviewHuman=reviewQueue.filter(item=>item.state==='waiting_approval');
+    const reviewCouncil=reviewQueue.filter(item=>item.state==='waiting_review');
+    const teamsMetrics=nativeMetricStrip([
+      {label:'Configured Teams',value:presets.length},
+      {label:'Running Demands',value:allCountsAvailable
+        ? presets.reduce((sum,item)=>sum+(item.runningCount ?? 0),0) : '—',
+        note:allCountsAvailable?'Native Team counters':'Counts unavailable'},
+      {label:'Human decisions',value:reviewQueueLoaded?reviewHuman.length:'—',
+        tone:'warning',note:reviewQueueLoaded?'Loaded native queue':'Open Review inbox to load'},
+      {label:'Needs attention',value:allCountsAvailable
+        ? presets.reduce((sum,item)=>sum+(item.blockedCount ?? 0),0) : '—',
+        tone:'danger',note:allCountsAvailable?'Native Team counters':'Counts unavailable'},
+    ]);
     const list = visibleTeams.map(item => {
       const members=[item.coordinatorBotId,...(item.workerBotIds?.length
         ? item.workerBotIds : [item.workerBotId])];
@@ -1039,6 +1069,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const scopedTeamDemands=chosen
       ? teamDemands.filter(item=>item.orchestrationId===chosen.id && Boolean(item.archived)===teamArchived)
       : [];
+    const currentTeamCounts=teamDemandsLoaded && !teamArchived ? scopedTeamDemands : null;
+    const teamMetrics=nativeMetricStrip([
+      {label:'Loaded Demands',value:currentTeamCounts?.length ?? '—',
+        note:'Current native Team page'},
+      {label:'Working',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['queued','running'].includes(item.state)).length : '—'},
+      {label:'Awaiting decision',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['waiting_approval','waiting_review'].includes(item.state)).length : '—',
+        tone:'warning'},
+      {label:'Needs attention',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['blocked','failed','interrupted','inconclusive'].includes(item.state)).length : '—',
+        tone:'danger'},
+    ]);
     const teamDemandsPanel=chosen ? '<section class="sa-pane sa-team-demands" ' +
       'aria-label="Team Demands and Tasks"><header><div><h3>Demands & Tasks · ' +
       safe(chosen.name) + '</h3><p>Only work owned by this Team. Expand a Demand to see its ' +
@@ -1065,6 +1108,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (teamDemandsHasMore
           ? '<button type="button" data-sa-load-older-team-demands>Load older Team Demands</button>'
           : '')) + '</section>' : '';
+    const loadedGlobal=allDemandsLoaded?allDemands:null;
+    const demandsMetrics=nativeMetricStrip([
+      {label:'Loaded Demands',value:loadedGlobal?.length ?? '—',
+        note:'Filtered native index; not lifetime total'},
+      {label:'Working',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['queued','running'].includes(item.state)).length : '—'},
+      {label:'Awaiting decision',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['waiting_approval','waiting_review'].includes(item.state)).length : '—',
+        tone:'warning'},
+      {label:'Needs attention',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['blocked','failed','interrupted','inconclusive'].includes(item.state)).length : '—',
+        tone:'danger'},
+    ]);
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
       (demandTeamFilter ? 'Refresh selected Team' : 'Refresh all Teams') + '</button></header>' +
@@ -1663,13 +1719,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       '<div class="sa-layout">' + navigation + '<div class="sa-stage">' +
       (workspaceView === 'teams' ?
-        (guidedBuilder.isOpen ? guidedBuilder.render(bots) : directory) : '') +
-      (workspaceView === 'team' ? teamView : '') +
+        (guidedBuilder.isOpen ? guidedBuilder.render(bots) : teamsMetrics + directory) : '') +
+      (workspaceView === 'team' ? teamMetrics + teamView : '') +
       (workspaceView === 'runs'
         ? '<div class="sa-section-head"><div><h2>Demands / Runs</h2>' +
           '<p>Track native WorkItems, approvals and evidence across Teams.</p></div>' +
           '<button type="button" class="primary-button" data-sa-create-demand>New Demand</button></div>' +
-          globalDemands : '') +
+          demandsMetrics + globalDemands : '') +
       (workspaceView === 'new-demand'
         ? '<div class="sa-section-head"><div><h2>Assign a Demand</h2>' +
           '<p>Describe the expected result, then review the native execution policy.</p></div></div>' +
@@ -1692,7 +1748,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</dd></dl></aside></div>' : '') +
       (workspaceView === 'run'
         ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +
-      (workspaceView === 'review' ? reviewPanel : '') +
+      (workspaceView === 'review' ? nativeMetricStrip([
+        {label:'Human decisions',value:reviewQueueLoaded?reviewHuman.length:'—',
+          tone:'warning'},
+        {label:'Council pending',value:reviewQueueLoaded?reviewCouncil.length:'—'},
+        {label:'Teams with requests',value:reviewQueueLoaded
+          ? new Set(reviewQueue.map(item=>item.orchestrationId)).size:'—'},
+        {label:'Loaded requests',value:reviewQueueLoaded?reviewQueue.length:'—',
+          note:'Up to 200 native Tickets'},
+      ]) + reviewPanel : '') +
       '</div></div></div>';
     // During native hydration, local-only draft fields remain editable.
     // Stateful commands and controls must stay inert until the snapshot loads.

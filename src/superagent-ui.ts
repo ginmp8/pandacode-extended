@@ -1675,10 +1675,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
       '<p class="sa-nav-label">Workspace</p>' +
       ([
-        ['teams','Teams','team'],['runs','Demands / Runs','kanban'],['review','Review inbox','archive'],
+        ['teams','Teams','team'],['team','Team workspace','kanban'],
+        ['runs','Demands / Runs','kanban'],['review','Review inbox','archive'],
       ] as const).map(([id,label,glyph]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        ((workspaceView === id || (workspaceView === 'team' && id === 'teams') ||
+        ((workspaceView === id ||
           (id === 'runs' && (workspaceView === 'new-demand' || workspaceView === 'run'))) ? 'page' : 'false') +
         '">' + icon(glyph) + '<span>' + label + '</span></button>').join('') +
       '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
@@ -1698,7 +1699,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (!presets.length ? ' disabled' : '') + '>' + icon(glyph) +
         '<span>' + label + '</span></button>').join('') +
       '</nav>';
-    const directory = '<div class="sa-section-head"><div><h2>Teams</h2>' +
+    const directory = '<div class="sa-section-head"><div><h2>Your Teams</h2>' +
       '<p>Each Team is a reusable SuperAgent made from existing PandaCode bots.</p></div>' +
       (presets.length ? '<button class="primary-button" type="button" data-sa-builder-open>' +
         icon('plus') + ' New Team</button>' : '') + '</div>' +
@@ -2482,10 +2483,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.dataset.saView) {
       const next = target.dataset.saView;
-      if (!['teams','runs','review'].includes(next)) return;
+      if (!['teams','team','runs','review'].includes(next)) return;
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      if (next === 'team' && selected && !teamDemandsLoaded)
+        void work(async()=>{await refreshTeamDemands(selected);});
       if (next === 'runs' && !allDemandsLoaded)
         host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
       if (next === 'review' && !reviewQueueLoaded)

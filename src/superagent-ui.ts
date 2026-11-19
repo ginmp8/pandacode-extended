@@ -3,6 +3,7 @@ import './superagent-multiselect.css';
 import { escape, icon } from './dom';
 import { botAvatarHtml } from './bot-avatars';
 import { GuidedTeamBuilder } from './superagent-team-builder';
+import { renderCapabilityFit, type CapabilityFitResult } from './superagent-capability-fit';
 import {
   renderBotMultiSelect, filterBotMultiSelect,
   captureBotMultiSelectState, restoreBotMultiSelectState,
@@ -290,6 +291,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let workerOrder: string[] = [];
   let reviewerDraft: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
+  let capabilityFit: CapabilityFitResult | null = null;
+  let capabilityObjective = '';
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let sourceIntegrity: SourceIntegrity | null = null;
@@ -1247,6 +1250,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Invocation/evidence ' + safe(skill.invocationEvidence) + '</li>').join('') ||
             '<li>No bot-assigned Skills</li>') + '</ul></li>').join('') + '</ol></section>'
       : '';
+    const fitPanel = chosen && roleRoster && roleRoster.orchestrationId === chosen.id ?
+      renderCapabilityFit(capabilityFit?.orchestrationId === chosen.id &&
+        capabilityFit.policyRevision === chosen.policyRevision ? capabilityFit : null,
+        capabilityObjective, workerOrder, reviewerDraft, chosen.enabled) : '';
     const strategyPane = chosen
       ? '<section class="sa-pane" aria-label="Team runtime strategy">' +
         '<header><h3>Resource strategy and native capability</h3>' +
@@ -1322,7 +1329,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 (roleRoster.councilRequired ? 'Independent Council is required.' : 'Human approval policy is available.') +
                 ' Execution eligibility and any active file grants are verified during native admission.</p>' +
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
-            effectivePolicy) +
+            effectivePolicy + fitPanel) +
         '</section>' : '';
     const memberWorkers = chosen
       ? (chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId]) : [];
@@ -1742,6 +1749,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
+      capabilityFit = null;
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -2415,6 +2423,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         workerOrder=[...roleRoster.workerBotIds];
         reviewerDraft=[...roleRoster.reviewerBotIds];
       });
+      return;
+    }
+    if (target.dataset.saAddCandidate) {
+      const cfg = current();
+      const botId = target.dataset.saAddCandidate;
+      const role = target.dataset.saCandidateRole;
+      const candidate = capabilityFit?.candidates.find(item => item.botId === botId);
+      if (!cfg || cfg.enabled || !roleRoster || roleRoster.policyRevision !== cfg.policyRevision ||
+          !capabilityFit || capabilityFit.orchestrationId !== cfg.id ||
+          capabilityFit.policyRevision !== cfg.policyRevision ||
+          !candidate || candidate.status === 'unavailable' ||
+          cfg.coordinatorBotId === botId ||
+          (role !== 'worker' && role !== 'reviewer') ||
+          workerOrder.includes(botId) || reviewerDraft.includes(botId)) return;
+      if (role === 'worker' && workerOrder.length < 16) workerOrder.push(botId);
+      else if (role === 'reviewer' && reviewerDraft.length < 8) reviewerDraft.push(botId);
+      else return;
+      feedback = 'Bot staged for ' + role + ' role. Save configured roles to apply native checks.';
+      render();
       return;
     }
     if (target.hasAttribute('data-sa-strategy-load')) {
@@ -3102,6 +3129,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'capability-scan') {
+      const cfg = current();
+      const objective = String(data.get('objective') ?? '').trim();
+      if (!cfg || !roleRoster || cfg.id !== roleRoster.orchestrationId) return;
+      if (!objective || objective.length > 2000 || /[\x00-\x1f\x7f]/.test(objective)) {
+        error = 'Enter a one-line capability objective up to 2000 characters.';
+        render(); return;
+      }
+      capabilityObjective = objective;
+      void work(async () => {
+        const matches = await call<CapabilityFitResult>('superagent_capability_candidates', {
+          orchestrationId: cfg.id, objective,
+        });
+        if (selected !== cfg.id || matches.orchestrationId !== cfg.id ||
+            matches.policyRevision !== cfg.policyRevision) {
+          capabilityFit = null;
+          throw new Error('Team policy changed. Reload before selecting candidates.');
+        }
+        capabilityFit = matches;
       });
       return;
     }

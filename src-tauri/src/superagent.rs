@@ -2826,15 +2826,24 @@ fn admit_role_with_staging(
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
 ) -> Result<(Ticket, bool)> {
     admit_role_with_staging_member(
-        store,config_id,objective,request_key,busy,coordinate,headless_staging,None,
+        store,config_id,objective,request_key,busy,
+        ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id:None },
     )
+}
+
+/// Bundle manual admission policy dimensions rather than expanding the
+/// provider entrypoint with separately positioned authority flags.
+struct ManualAdmissionOptions<'a> {
+    coordinate: bool,
+    headless_staging: bool,
+    selected_worker_id: Option<&'a str>,
 }
 
 fn admit_role_with_staging_member(
     store: &mut Store, config_id: &str, objective: &str,
-    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
-    selected_worker_id: Option<&str>,
+    request_key: &str, busy: bool, options: ManualAdmissionOptions<'_>,
 ) -> Result<(Ticket, bool)> {
+    let ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id } = options;
     if selected_worker_id.is_some() && (coordinate || headless_staging) {
         return Err("Explicit Worker selection supports direct local read-only Demands only.".into());
     }
@@ -4404,7 +4413,8 @@ pub async fn superagent_submit_to_worker(
         // new Tickets; a repeated request key returns its existing Ticket
         // without ever delivering a second provider packet.
         let (ticket,launch)=admit_role_with_staging_member(
-            &mut store,&orchestration_id,&objective,&request_key,busy,false,false,Some(&worker.id),
+            &mut store,&orchestration_id,&objective,&request_key,busy,
+            ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker.id) },
         )?;
         (ticket,launch,worker.id)
     };
@@ -9931,7 +9941,7 @@ mod tests {
         assert!(preflight.allowed_tools.is_empty());
         assert!(!preflight.allowed_side_effects);
         let (ticket,launch)=admit_role_with_staging_member(
-            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("second"),
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
         ).unwrap();
         assert!(launch);
         assert_eq!(ticket_worker(&store,&ticket.id).unwrap(),"second");
@@ -9943,15 +9953,15 @@ mod tests {
         assert!(!manual_preflight_worker(&store,&team.id,"Second demand","worker",false).unwrap().eligible);
         assert!(admit(&mut store,&team.id,"Unselected","legacy-request",false).is_err());
         let (repeated,launched)=admit_role_with_staging_member(
-            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("second"),
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
         ).unwrap();
         assert_eq!(repeated.id,ticket.id);
         assert!(!launched);
         assert!(admit_role_with_staging_member(
-            &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("worker"),
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("worker") },
         ).unwrap_err().contains("another selected Worker"));
         assert!(admit_role_with_staging_member(
-            &mut store,&team.id,"Out of team","new-key",false,false,false,Some("router"),
+            &mut store,&team.id,"Out of team","new-key",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("router") },
         ).is_err());
         stop(&store,&ticket.id).unwrap();
         assert!(read_only_policy(&store,&session).is_err());
@@ -9988,7 +9998,7 @@ mod tests {
         assert!(change_enabled(&store,&team.id,reviewers.policy_revision,true).is_err());
         assert!(manual_preflight_worker(&store,&team.id,"Task","second",false).is_err());
         assert!(admit_role_with_staging_member(
-            &mut store,&team.id,"Task","guarded",false,false,false,Some("second"),
+            &mut store,&team.id,"Task","guarded",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
         ).is_err());
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }

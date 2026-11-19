@@ -77,6 +77,26 @@ pub(crate) fn set_preferences(
     Ok(json!({"visibility": visibility, "summary": summary}))
 }
 
+/// A concise explanation built only from consented or non-sensitive declared
+/// fields. Never derive summaries from private instructions or conversation text.
+fn capability_summary(role: &Value, skills: &[Value], published: &str) -> Value {
+    if !published.is_empty() {
+        return json!({"value":published,"source":"explicitly_published",
+            "status":"self_report"});
+    }
+    let declared_role=role.as_str().filter(|value|!value.trim().is_empty());
+    let assigned:Vec<&str>=skills.iter()
+        .filter_map(|skill|skill["id"].as_str()).take(8).collect();
+    let value=match (declared_role,assigned.is_empty()) {
+        (Some(role),false)=>format!("Declared role: {role}. Assigned Skill references: {}. Runtime execution capability is not verified.",assigned.join(", ")),
+        (Some(role),true)=>format!("Declared role: {role}. No assigned Skills. Runtime execution capability is not verified."),
+        (None,false)=>format!("No declared role. Assigned Skill references: {}. Runtime execution capability is not verified.",assigned.join(", ")),
+        (None,true)=>"No declared role or Skill references. Runtime execution capability is unknown.".to_owned(),
+    };
+    json!({"value":value,"source":"native_declared_configuration",
+        "status":"summarized"})
+}
+
 /// Native profile is freshly assembled every time. A local bot never receives
 /// unrelated private content; owner_only blocks peer and SuperAgent discovery.
 pub(crate) fn inspect(store: &Store, target_id: &str, requester: Option<&str>) -> Result<Value> {
@@ -109,6 +129,7 @@ pub(crate) fn inspect(store: &Store, target_id: &str, requester: Option<&str>) -
         else { safe_summary(&bot.role).ok()
             .map(|label| Value::String(label.chars().take(120).collect()))
             .unwrap_or(Value::Null) };
+    let concise = capability_summary(&role, &skills, &published);
     let summary = if published.is_empty() { Value::Null } else { Value::String(published) };
     let status = if paused { "unavailable" } else if !supported { "configuration_invalid" }
         else { "not_paused_runtime_unknown" };
@@ -118,6 +139,7 @@ pub(crate) fn inspect(store: &Store, target_id: &str, requester: Option<&str>) -
         "name":bot.name,
         "role":{"value":role,"source":"user_declared","status":if role.is_null() {"missing"} else {"self_report"}},
         "summary":{"value":summary,"source":"explicitly_published","status":if summary.is_null() {"missing"} else {"self_report"}},
+        "conciseSummary":concise,
         "instructions":{"configured":!bot.instructions.is_empty(),"status":"restricted",
             "source":"user_private_configuration"},
         "goals":{"configured":!bot.goals.is_empty(),"status":"restricted"},
@@ -149,6 +171,9 @@ fn topic(question: &str) -> Result<&'static str> {
     }
     let q = question.to_ascii_lowercase();
     if q.contains("skill") { Ok("skills") }
+    else if q.contains("capabilit") || q.contains("what can") || q.contains("able to")
+        || q.contains("specializ") || q.contains("expertise") || q.contains("role")
+        || q.contains("what do") { Ok("summary") }
     else if q.contains("mcp") || q.contains("tool") { Ok("tools") }
     else if q.contains("permission") || q.contains("access") || q.contains("write") { Ok("permissions") }
     else if q.contains("instruction") || q.contains("prompt") || q.contains("goal") { Ok("instructions") }
@@ -167,11 +192,16 @@ pub(crate) fn answer(store: &Store, target_id: &str, requester: Option<&str>,
     let profile = inspect(store, target_id, requester)?;
     let fields = match topic {
         "skills" => json!({"skills":profile["skills"]}),
+        "summary" => json!({"conciseSummary":profile["conciseSummary"],
+            "role":profile["role"],"skills":profile["skills"],
+            "availability":profile["availability"],
+            "executionLimits":profile["executionLimits"]}),
         "tools" => json!({"tools":profile["tools"],"mcp":profile["mcp"]}),
         "permissions" => json!({"permissionMode":profile["permissionMode"],
             "projectScope":profile["projectScope"]}),
         "instructions" => json!({"instructions":profile["instructions"],
-            "summary":profile["summary"],"goals":profile["goals"]}),
+            "summary":profile["summary"],"conciseSummary":profile["conciseSummary"],
+            "goals":profile["goals"]}),
         "scope" => json!({"projectScope":profile["projectScope"]}),
         "harness" => json!({"harness":profile["harness"],"provider":profile["provider"],
             "model":profile["model"]}),
@@ -494,6 +524,24 @@ mod tests {
         assert_eq!(inspect(&store, &target, None).unwrap()["visibility"], "owner_only");
         assert!(safe_summary("token=abc").is_err());
         assert!(safe_summary("Rust, tests and documentation").is_ok());
+    }
+
+    #[test]
+    fn plain_language_capability_questions_return_a_source_labelled_summary() {
+        let (store, actor, target)=fixture();
+        let profile=inspect(&store,&target,Some(&actor)).unwrap();
+        assert_eq!(profile["summary"]["status"],"missing");
+        assert_eq!(profile["conciseSummary"]["status"],"summarized");
+        assert_eq!(profile["conciseSummary"]["source"],"native_declared_configuration");
+        assert!(!profile["conciseSummary"].to_string().contains("hidden-secret"));
+        let response=answer(&store,&target,Some(&actor),"What can this bot do?").unwrap();
+        assert_eq!(response["topic"],"summary");
+        assert_eq!(response["executed"],false);
+        assert_eq!(response["fields"]["conciseSummary"]["status"],"summarized");
+        set_preferences(&store,&target,"local_bots","Rust tests only").unwrap();
+        let published=inspect(&store,&target,Some(&actor)).unwrap();
+        assert_eq!(published["conciseSummary"]["status"],"self_report");
+        assert_eq!(published["conciseSummary"]["value"],"Rust tests only");
     }
 
     #[test]

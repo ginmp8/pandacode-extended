@@ -10,6 +10,7 @@ interface Profile {
   name: string;
   role: Fact;
   summary: Fact;
+  conciseSummary: Fact;
   instructions: Fact;
   provider: Fact;
   model: Fact;
@@ -76,6 +77,7 @@ export function renderCapabilityPanel(detail: BotDetail, context: PanelContext):
     ' <small>Read at ' + escape(new Date(p.observedAt).toLocaleString()) + '</small></p>' +
     '<ul class="bots-items">' +
     item('Declared role', p.role.value || 'Not declared', p.role.status) +
+    item('Capability summary', p.conciseSummary?.value || 'Not available', p.conciseSummary?.status || 'unknown') +
     item('Published summary', published || 'Not published', p.summary.status) +
     item('Private instructions', p.instructions.configured ? 'Configured' : 'Not configured', 'restricted') +
     item('Provider and model', (p.provider.value || 'Unknown') + ' / ' + (p.model.value || 'Unknown'), 'current configuration') +

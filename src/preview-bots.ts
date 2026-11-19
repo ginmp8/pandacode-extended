@@ -268,6 +268,11 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       result = { schemaVersion: 1, botId: bot.id, name: bot.name,
         role: { value: bot.role || null, source: 'user_declared', status: bot.role ? 'self_report' : 'missing' },
         summary: { value: prefs.summary || null, source: 'explicitly_published', status: prefs.summary ? 'self_report' : 'missing' },
+        conciseSummary: { value: prefs.summary || ('Declared role: ' + (bot.role || 'not declared') +
+          '. Assigned Skill references: ' + (bot.skills.join(', ') || 'none') +
+          '. Runtime execution capability is not verified.'),
+          source: prefs.summary ? 'explicitly_published' : 'native_declared_configuration',
+          status: prefs.summary ? 'self_report' : 'summarized' },
         instructions: { configured: !!bot.instructions, status: 'restricted' },
         skills: bot.skills.map(id => ({ id, status: 'not_verified', source: 'assigned_bot_config' })),
         mcp: bot.mcp.map(name => ({ name, status: 'not_verified' })),
@@ -285,11 +290,12 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
     case 'bot_capability_question': {
       const bot = store(args.botId).bot;
       const q = String(args.question ?? '').toLowerCase();
-      const topic = q.includes('skill') ? 'skills' : q.includes('permission') ? 'permissions'
+      const topic = q.includes('skill') ? 'skills' : q.includes('what can') || q.includes('capabilit') || q.includes('role') ? 'summary' : q.includes('permission') ? 'permissions'
         : q.includes('model') ? 'harness' : q.includes('tool') ? 'tools'
         : q.includes('instruction') ? 'instructions' : 'unsupported';
       result = { botId: bot.id, topic, status: topic === 'unsupported' ? 'unsupported' : 'informational',
         fields: topic === 'skills' ? { skills: bot.skills.map(id => ({ id, status: 'not_verified' })) }
+          : topic === 'summary' ? { conciseSummary: { value: 'Declared role: ' + (bot.role || 'not declared') + '; Skill references: ' + (bot.skills.join(', ') || 'none'), source: 'native_declared_configuration', status: 'summarized' } }
           : topic === 'permissions' ? { permissionMode: { value: bot.mode, status: 'not_an_execution_grant' } }
           : topic === 'harness' ? { model: bot.model, provider: bot.provider }
           : topic === 'instructions' ? { instructions: { status: 'restricted', configured: !!bot.instructions } }

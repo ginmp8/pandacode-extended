@@ -4471,6 +4471,7 @@ pub fn run() {
                 superagent::superagent_tickets,
                 superagent::superagent_all_demands,
                 superagent::superagent_review_inbox,
+                superagent::superagent_team_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_activity_page,

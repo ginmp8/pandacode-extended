@@ -125,6 +125,7 @@ export function mountSuperagent(
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false, reviewQueueHasMore = false;
+  let reviewTeamFilter = '';
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
@@ -186,6 +187,39 @@ export function mountSuperagent(
           })) {
         throw new Error('Native Demand index returned invalid, duplicate or out-of-scope records; refresh the index.');
       }
+    }
+    return page;
+  };
+  // Team-scoped review rows come from native SQLite before LIMIT; the
+  // renderer validates response identity before exposing Open Demand controls.
+  const fetchReviewPage = async (teamId: string, cursor?: DemandIndex): Promise<DemandIndex[]> => {
+    const page = await call<DemandIndex[]>(
+      teamId ? 'superagent_team_review_inbox' : 'superagent_review_inbox',
+      {limit: 200, ...(teamId ? {orchestrationId: teamId} : {}),
+        ...(cursor ? {beforeUpdatedAt: cursor.updatedAt, beforeId: cursor.id} : {})},
+    );
+    const known = new Set((cursor ? reviewQueue : []).map(item => item.id));
+    const descends = (newer: DemandIndex, older: DemandIndex) =>
+      older.updatedAt < newer.updatedAt ||
+      (older.updatedAt === newer.updatedAt && older.id < newer.id);
+    if (!Array.isArray(page) || page.length > 200 ||
+        page.some((item, index) => {
+          if (!item || typeof item.id !== 'string' ||
+              !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+              typeof item.orchestrationId !== 'string' ||
+              !/^[A-Za-z0-9_-]{1,128}$/.test(item.orchestrationId) ||
+              (teamId && item.orchestrationId !== teamId) ||
+              !['waiting_approval','waiting_review'].includes(item.state) ||
+              typeof item.objective !== 'string' ||
+              !Number.isSafeInteger(item.revision) || item.revision < 0 ||
+              !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
+              known.has(item.id) ||
+              ((cursor || (teamId && index > 0)) &&
+                !descends(index === 0 ? cursor! : page[index - 1], item))) return true;
+          known.add(item.id);
+          return false;
+        })) {
+      throw new Error('Native review inbox returned invalid, overlapping or out-of-scope decisions; refresh before acting.');
     }
     return page;
   };
@@ -837,11 +871,18 @@ export function mountSuperagent(
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
-      '<h3>Review inbox · All Teams</h3><button type="button" data-sa-load-review-inbox>' +
+      '<h3>Review inbox · ' + safe(reviewTeamFilter
+         ? presets.find(team => team.id === reviewTeamFilter)?.name ?? 'Selected Team'
+         : 'All Teams') + '</h3><button type="button" data-sa-load-review-inbox>' +
       'Refresh review inbox</button></header>' +
       '<p>Up to 200 recently updated native Tickets requiring human acceptance or ' +
       'awaiting Council. A waiting Council verdict cannot be manually treated as passed. ' +
       'Open a Demand to inspect its native Team and revision before deciding.</p>' +
+      '<label>Filter decisions by Team<select data-sa-review-team-filter ' +
+      'aria-label="Filter review inbox by Team"><option value="">All Teams</option>' +
+      presets.map(team => '<option value="' + safe(team.id) + '"' +
+        (reviewTeamFilter === team.id ? ' selected' : '') + '>' + safe(team.name) +
+        '</option>').join('') + '</select></label>' +
       (!reviewQueueLoaded ? '<p role="status">Load native review queue to inspect all Teams.</p>' :
         '<ul class="sa-tickets">' + (reviewQueue.map(item =>
           '<li><div><strong>' + safe(item.objective) + '</strong><small>' +
@@ -1041,6 +1082,10 @@ export function mountSuperagent(
       if (demandTeamFilter && !presets.some(config => config.id === demandTeamFilter)) {
         demandTeamFilter = '';
       }
+      if (reviewTeamFilter && !presets.some(config => config.id === reviewTeamFilter)) {
+        reviewTeamFilter = '';
+        reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
+      }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
@@ -1154,6 +1199,22 @@ export function mountSuperagent(
       teamStatusFilter = target.value as typeof teamStatusFilter;
       render();
       host.querySelector<HTMLSelectElement>('[data-sa-team-status]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-review-team-filter')) {
+      if (busy) { target.value = reviewTeamFilter; return; }
+      const teamId = target.value;
+      if (teamId && !presets.some(item => item.id === teamId)) {
+        target.value = reviewTeamFilter; return;
+      }
+      reviewTeamFilter = teamId;
+      reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
+      render();
+      void work(async () => {
+        reviewQueue = await fetchReviewPage(teamId);
+        reviewQueueHasMore = reviewQueue.length === 200;
+        reviewQueueLoaded = true;
+      });
       return;
     }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-team-filter')) {
@@ -1528,7 +1589,7 @@ export function mountSuperagent(
     if (target.hasAttribute('data-sa-load-review-inbox')) {
       void work(async () => {
         reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
-        reviewQueue = await call<DemandIndex[]>('superagent_review_inbox',{limit:200});
+        reviewQueue = await fetchReviewPage(reviewTeamFilter);
         reviewQueueHasMore = reviewQueue.length === 200;
         reviewQueueLoaded = true;
       });
@@ -1544,21 +1605,7 @@ export function mountSuperagent(
         return;
       }
       void work(async () => {
-        const page = await call<DemandIndex[]>('superagent_review_inbox', {
-          limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
-        });
-        const descends = (newer:DemandIndex, older:DemandIndex) =>
-          older.updatedAt < newer.updatedAt ||
-          (older.updatedAt === newer.updatedAt && older.id < newer.id);
-        const known = new Set(reviewQueue.map(item => item.id));
-        if (!Array.isArray(page) || page.length > 200 ||
-            page.some((item, index) =>
-              !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
-              !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
-              !descends(index === 0 ? last : page[index - 1], item) ||
-              known.has(item.id))) {
-          throw new Error('Native review cursor or page ordering changed; refresh before acting.');
-        }
+        const page = await fetchReviewPage(reviewTeamFilter, last);
         reviewQueue = [...reviewQueue, ...page];
         reviewQueueHasMore = page.length === 200;
       });

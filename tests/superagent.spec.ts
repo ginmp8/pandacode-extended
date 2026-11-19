@@ -2230,6 +2230,80 @@ test('cross-Team review inbox pages native decisions without implicit approval',
   expect(calls.some(item=>/submit|dispatch|accept|reserve|grant/.test(item.command))).toBe(false);
 });
 
+
+test('Team review inbox uses native scoped keyset pages and rejects foreign Team receipts', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-team-review-test'; document.body.appendChild(host);
+    const rows = Array.from({length:201},(_,i)=>({
+      id:'review-'+String(201-i).padStart(3,'0'),orchestrationId:'team-a',
+      objective:'Team A pending decision '+i,state:i%2?'waiting_review':'waiting_approval',
+      revision:2,updatedAt:1794400200000-i,
+    }));
+    const calls: Array<{command:string;args?:Record<string,unknown>}> = [];
+    let invalid = true;
+    (window as unknown as {saReviewTeamTest:{
+      calls:typeof calls; setInvalid:(value:boolean)=>void
+    }}).saReviewTeamTest = {calls,setInvalid:value=>{invalid=value;}};
+    mountSuperagent(host,async <T>(command:string,args?:Record<string,unknown>):Promise<T> => {
+      calls.push({command,args});
+      if(command==='bots_list')return [
+        {id:'router',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as T;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Team A',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+        {id:'team-b',name:'Team B',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+      ] as T;
+      if(command==='superagent_tickets')return [] as T;
+      if(command==='superagent_team_review_inbox'){
+        if(args?.orchestrationId!=='team-a'||args?.limit!==200)
+          throw Error('Expected native Team review scope');
+        if(!args.beforeId)return rows.slice(0,200) as T;
+        if(args.beforeId!=='review-002'||args.beforeUpdatedAt!==1794400200000-199)
+          throw Error('Invalid review cursor');
+        return [{...rows[200],orchestrationId:invalid?'team-b':'team-a'}] as T;
+      }
+      if(command==='superagent_review_inbox')return [{
+        id:'review-b',orchestrationId:'team-b',objective:'Team B pending',
+        state:'waiting_review',revision:1,updatedAt:1794400200000,
+      }] as T;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-team-review-test');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await inbox.getByRole('combobox',{name:'Filter review inbox by Team'}).selectOption('team-a');
+  await expect(inbox).toContainText('200 native pending decisions loaded.');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(200);
+  await inbox.getByRole('button',{name:'Load older pending decisions'}).click();
+  await expect(host.getByRole('alert')).toContainText('out-of-scope');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(200);
+  await page.evaluate(()=>{
+    (window as unknown as {saReviewTeamTest:{setInvalid:(value:boolean)=>void}})
+      .saReviewTeamTest.setInvalid(false);
+  });
+  await inbox.getByRole('button',{name:'Load older pending decisions'}).click();
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(201);
+  await expect(inbox.getByRole('button',{name:'Load older pending decisions'})).toHaveCount(0);
+  await inbox.getByRole('combobox',{name:'Filter review inbox by Team'}).selectOption('');
+  await expect(inbox).toContainText('Team B pending');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(1);
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saReviewTeamTest:{
+      calls:Array<{command:string;args?:Record<string,unknown>}>
+    }}).saReviewTeamTest.calls);
+  expect(calls.filter(c=>c.command==='superagent_team_review_inbox')).toHaveLength(3);
+  expect(calls.filter(c=>c.command==='superagent_review_inbox')).toHaveLength(1);
+  expect(calls.some(c=>/accept|submit|dispatch|grant|effect/.test(c.command))).toBe(false);
+});
+
 test('native Run graph is lazy, revision-bound and read-only', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

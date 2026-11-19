@@ -4158,6 +4158,21 @@ pub async fn superagent_review_inbox(
     list_review_inbox_page(&store, limit.unwrap_or(200), before_updated_at, before_id.as_deref())
 }
 
+/// Native Team review projection; scope and cursor are checked inside SQLite.
+#[tauri::command]
+pub async fn superagent_team_review_inbox(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    orchestration_id: String, limit: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<String>,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_review_inbox_page_scoped(
+        &store, limit.unwrap_or(200), before_updated_at,
+        before_id.as_deref(), Some(&orchestration_id),
+    )
+}
+
 #[tauri::command]
 pub async fn superagent_assignments(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,

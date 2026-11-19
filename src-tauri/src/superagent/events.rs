@@ -1513,16 +1513,14 @@ pub(crate) fn headless_observe_source(
     serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn superagent_source_poll_authenticated(
-    window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
+async fn poll_source_authenticated(
+    state: &AppState, source_id: &str,
 ) -> Result<AuthenticatedPoll> {
-    require_main_window(&window)?;
     // Off: no request, no inferred work. Snapshot all policy authority BEFORE
     // making the bounded read-only GitHub request.
     let (snapshot, since) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let selected = source(&store, &source_id)?;
+        let selected = source(&store, source_id)?;
         if selected.mode != "observe" {
             return Err("Source is Off; authenticated polling is not permitted.".into());
         }
@@ -1531,7 +1529,7 @@ pub async fn superagent_source_poll_authenticated(
         }
         require_observe_preflight(&store, &selected)?;
         let since: i64 = store.db.query_row(
-            "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&source_id], |row| row.get(0),
+            "SELECT updated_at FROM sa_event_sources WHERE id=?1", [source_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         (selected, since)
     };
@@ -1547,6 +1545,61 @@ pub async fn superagent_source_poll_authenticated(
     poll_authenticated_events_with_repository_id(
         &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
     )
+}
+
+/// One source uses the same authenticated, revision-bound admission in
+/// desktop and headless. The bounded GitHub request holds no Store mutex.
+#[tauri::command]
+pub async fn superagent_source_poll_authenticated(
+    window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
+) -> Result<AuthenticatedPoll> {
+    require_main_window(&window)?;
+    poll_source_authenticated(&state, &source_id).await
+}
+
+/// Explicit, read-only Team polling shares the per-source authenticated
+/// adapter and durable receipt transactions. An unavailable source does not
+/// starve later enabled sources; no partial batch is reported as successful.
+#[tauri::command]
+pub async fn superagent_source_poll_team_authenticated(
+    window: tauri::WebviewWindow, state: State<'_,AppState>, orchestration_id: String,
+) -> Result<TeamObserveBatch> {
+    require_main_window(&window)?;
+    let sources = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        list_sources(&store, &orchestration_id)?
+    };
+    let mut observed = Vec::new();
+    let mut skipped_off = 0;
+    let mut skipped_check_runs = 0;
+    let mut failures = Vec::new();
+    for selected in sources {
+        if selected.mode != "observe" {
+            skipped_off += 1;
+            continue;
+        }
+        if selected.event_kind == "check_run.completed" {
+            skipped_check_runs += 1;
+            continue;
+        }
+        match poll_source_authenticated(&state, &selected.id).await {
+            Ok(result) => observed.push(result),
+            Err(reason) => failures.push(format!("{}: {}", selected.id, reason)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "GitHub Observe batch incomplete: {} source(s) succeeded, {} failed; retry after inspecting: {}",
+            observed.len(), failures.len(), failures.join("; "),
+        ));
+    }
+    if observed.is_empty() {
+        return Err("Team has no enabled GitHub Events Observe sources; no network request made.".into());
+    }
+    Ok(TeamObserveBatch {
+        orchestration_id, observed, skipped_off, skipped_check_runs,
+        observational_only: true,
+    })
 }
 
 /// A source-scoped, restart-durable decision timeline. Neither the read nor

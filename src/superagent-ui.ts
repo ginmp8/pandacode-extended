@@ -517,6 +517,9 @@ export function mountSuperagent(
             'pull_request_review_comment.created','check_run.completed']
             .map(kind => '<option value="' + kind + '">' + kind + '</option>').join('') +
           '</select></label><button type="submit">Add source (Off)</button></form>' +
+          (sources.some(src => src.mode === 'observe' && src.eventKind !== 'check_run.completed')
+            ? '<button type="button" data-sa-source-poll-team>Poll all enabled GitHub Events sources</button>'
+            : '') +
           '<ul class="sa-tickets sa-source-list">' +
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
           (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
@@ -1796,6 +1799,37 @@ export function mountSuperagent(
         feedback = 'Authenticated Checks API: ' + receipt.decision +
           (receipt.duplicate ? ' (duplicate)' : '') +
           '. Context receipt only; no task, approval or external effect started.';
+        await reload();
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-source-poll-team')) {
+      const teamId = selected;
+      if (!teamId || !sourcesLoaded ||
+          !sources.some(src => src.mode === 'observe' && src.eventKind !== 'check_run.completed')) return;
+      void work(async () => {
+        const summary = await call<{
+          orchestrationId:string; observationalOnly:boolean; skippedOff:number; skippedCheckRuns:number;
+          observed:Array<{scanned:number;recorded:number;duplicates:number;selfIgnored:number;pagesFetched:number}>;
+        }>('superagent_source_poll_team_authenticated', {orchestrationId:teamId});
+        if (summary.orchestrationId !== teamId || !summary.observationalOnly ||
+            !Array.isArray(summary.observed)) {
+          throw new Error('Native Team Observe response does not match the selected Team.');
+        }
+        const counts = summary.observed.reduce((tot, item) => {
+          tot.scanned += item.scanned;
+          tot.recorded += item.recorded;
+          tot.duplicates += item.duplicates;
+          tot.selfIgnored += item.selfIgnored;
+          tot.pagesFetched += item.pagesFetched;
+          return tot;
+        }, {scanned:0,recorded:0,duplicates:0,selfIgnored:0,pagesFetched:0});
+        feedback = 'Authenticated Team Observe: ' + summary.observed.length + ' source(s), ' +
+          counts.scanned + ' scanned across ' + counts.pagesFetched + ' page(s), ' +
+          counts.recorded + ' recorded, ' + counts.duplicates + ' duplicate, ' +
+          counts.selfIgnored + ' self-authored ignored. ' +
+          summary.skippedOff + ' Off and ' + summary.skippedCheckRuns +
+          ' Check Run source(s) skipped. No tasks or effects started.';
         await reload();
       });
       return;

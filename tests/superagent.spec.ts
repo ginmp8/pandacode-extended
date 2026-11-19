@@ -967,6 +967,66 @@ test('Off source never polls GitHub and Observe only records authenticated nativ
   expect(calls.filter(c=>c==='superagent_submit'||c==='superagent_dispatch_worker')).toHaveLength(0);
 });
 
+test('Team Observe batches only enabled authenticated GitHub Events sources without work', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-team-observe';
+    document.body.appendChild(host);
+    const sources = [
+      {id:'opened',orchestrationId:'team-1',repository:'owner/repo',actorFilter:'trusted-bot',
+        eventKind:'issues.opened',mode:'observe',policyRevision:2,lastSequence:0},
+      {id:'comment',orchestrationId:'team-1',repository:'owner/repo',actorFilter:'trusted-bot',
+        eventKind:'issue_comment.created',mode:'observe',policyRevision:2,lastSequence:0},
+      {id:'checks',orchestrationId:'team-1',repository:'owner/repo',actorFilter:'trusted-bot',
+        eventKind:'check_run.completed',mode:'observe',policyRevision:2,lastSequence:0},
+      {id:'off',orchestrationId:'team-1',repository:'owner/repo',actorFilter:'trusted-bot',
+        eventKind:'issues.closed',mode:'off',policyRevision:1,lastSequence:0},
+    ];
+    const called:string[] = [];
+    (window as unknown as {saTeamObserveCalls:string[]}).saTeamObserveCalls = called;
+    mountSuperagent(host, async (command,args) => {
+      if(command==='bots_list') return [
+        {id:'a',name:'A',paused:false},{id:'b',name:'B',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team-1',name:'Observe Team',coordinatorBotId:'a',workerBotId:'b',
+        enabled:false,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_source_list') return sources as never;
+      called.push(command);
+      if(command==='superagent_source_poll_team_authenticated') {
+        if(args?.orchestrationId!=='team-1') throw Error('Cross-Team Observe denied');
+        return {
+          orchestrationId:'team-1',observationalOnly:true,skippedOff:1,skippedCheckRuns:1,
+          observed:[
+            {scanned:3,recorded:1,duplicates:2,selfIgnored:0,pagesFetched:1},
+            {scanned:2,recorded:2,duplicates:0,selfIgnored:1,pagesFetched:1},
+          ],
+        } as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host = page.locator('#sa-team-observe');
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await host.getByRole('button',{name:'Poll all enabled GitHub Events sources'}).click();
+  await expect(host.getByRole('status').filter({
+    hasText:'2 source(s), 5 scanned across 2 page(s), 3 recorded, 2 duplicate, 1 self-authored ignored',
+  })).toBeVisible();
+  await expect(host.getByRole('status').filter({
+    hasText:'1 Off and 1 Check Run source(s) skipped. No tasks or effects started.',
+  })).toBeVisible();
+  const called = await page.evaluate(
+    () => (window as unknown as {saTeamObserveCalls:string[]}).saTeamObserveCalls,
+  );
+  expect(called).toEqual(['superagent_source_poll_team_authenticated']);
+});
+
 test('Check Run observation stays Off until enabled and never launches a Demand', async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

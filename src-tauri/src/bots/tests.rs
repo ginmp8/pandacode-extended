@@ -155,6 +155,10 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     let second_session = session_for(&second_id);
     let first_request = crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap();
     let second_request = crate::architect::council_requests::admit_channel(&f.store, &second_id).unwrap();
+    let pending_team = crate::architect::load(&f.store, &second_session).unwrap().unwrap();
+    assert_eq!(pending_team.council_status.as_ref().map(|status| status.state.as_str()), Some("waiting"),
+        "native save computes a waiting status for a valid unstarted Council");
+    assert!(crate::architect::council_requests::channel_request_is_current(&f.store, &second_id, &second_session));
     assert_ne!(first_request.request_id, second_request.request_id);
     assert_ne!(first_request.delivery_cycle_id, second_request.delivery_cycle_id);
     assert_eq!(first_request.session_id, first_session);
@@ -1474,6 +1478,29 @@ fn channel_council_inspector_requires_owning_delivery_and_frozen_cycle() {
     assert_eq!(shared_channels::detail(&f.store, &channel.id, 100).unwrap()
         .messages.iter().find(|m| m.id == delivery_id)
         .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+
+    // Altering the durable task cycle ID cannot manufacture a new inspection
+    // even if the artifact revision, root config and scores remain unchanged.
+    let original_cycle: String = f.store.db.query_row(
+        "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET cycle_id='forged-cycle' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    let forged_cycle = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let forged_view = forged_cycle.messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(forged_view.state, "Inconclusive");
+    assert!(forged_view.lowest.is_none() && forged_view.reviewers.is_empty());
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET cycle_id=?2 WHERE delivery_id=?1",
+        params![delivery_id,original_cycle],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).is_ok());
 
     let mut changed_council = council.clone();
     changed_council.target = 8.0;

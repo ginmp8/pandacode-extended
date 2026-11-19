@@ -403,7 +403,11 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             && original_revision == "0"
             && team.council_since == 0
             && team.workers.is_empty()
-            && status.is_none()
+            // Saving a new native team computes a "waiting" status even
+            // before the first Council cycle. Nested configurations can have
+            // an initial "blocked" projection until their child is admitted.
+            && status.is_none_or(|state| state.round == 0 && state.lowest.is_none()
+                && matches!(state.state.as_str(), "waiting" | "blocked"))
             && matches!(delivery_status, "queued" | "in_progress");
         let authorized_exception = original_matches && proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
             team.council_accepted == Some(*since) && team.council_since == *since
@@ -567,6 +571,14 @@ pub(crate) fn inspect_channel_delivery(
         || artifact_revision != format!("cycle:{}", team.council_since)
     {
         return Err("channel_council_inspection_stale: policy or cycle differs from the channel delivery.".into());
+    }
+    // A matching cycle and config alone cannot prove the original request:
+    // the admitted objective, executor, source message and root identity
+    // must still match their immutable native task-bound record.
+    if !crate::architect::council_requests::channel_request_is_current(
+        store, delivery_id, &session_id,
+    ) {
+        return Err("channel_council_inspection_stale: frozen native request no longer matches this delivery.".into());
     }
     let inspection = crate::architect::council_inspection_state(store, &session_id)?
         .ok_or("channel_council_inspection_denied: no native Council exists.")?;

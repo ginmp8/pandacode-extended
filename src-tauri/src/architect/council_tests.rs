@@ -2063,6 +2063,17 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
     stale.changed_at = team.council_since + 100;
     assert!(council::phase_one_challenge_handoff(&store, &stale, 2, None)
         .unwrap_err().contains("fresh"));
+    // A valid score at the tail of an oversized report must not hide findings
+    // omitted by a suffix-only SQL read. UTF-8 byte size matters as well.
+    for padding in ["x".repeat(8_500), "∑".repeat(3_000)] {
+        let long_report = format!(
+            "Council findings JSON: [{{\"severity\":\"medium\",\"category\":\"correctness\",\"title\":\"MUST-NOT-DROP\",\"explanation\":\"First-phase gap\"}}]\n{padding}\nCouncil score: 9.4/10"
+        );
+        store.message(&sessions[0], "assistant", &long_report).unwrap();
+        assert!(council::phase_one_challenge_handoff(&store, &team, 2, None)
+            .unwrap_err().contains("exceeds the bounded native report budget"),
+            "S3 must reject a truncated native report before admitting its challengers");
+    }
 }
 
 #[test]

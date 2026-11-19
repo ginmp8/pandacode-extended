@@ -2858,7 +2858,7 @@ fn admit_role_with_staging_member(
         if let Some(worker_id)=selected_worker_id {
             let config=configuration(store,config_id)?;
             direct_team_member(store,&config,worker_id)?;
-            if ticket.worker_bot_id!=worker_id {
+            if ticket_worker(store,&ticket.id)?!=worker_id {
                 return Err("Manual request key already belongs to another selected Worker.".into());
             }
         }
@@ -9934,7 +9934,7 @@ mod tests {
             &mut store,&team.id,"Read safely","worker-selection",false,false,false,Some("second"),
         ).unwrap();
         assert!(launch);
-        assert_eq!(ticket.worker_bot_id,"second");
+        assert_eq!(ticket_worker(&store,&ticket.id).unwrap(),"second");
         let assignment=assignments(&store,&ticket.id,10).unwrap();
         assert_eq!(assignment[0].bot_id,"second");
         let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
@@ -9958,7 +9958,7 @@ mod tests {
         assert!(!on_run_finished(&store,&session,true,"stale success").unwrap());
         let path=store.path.clone();drop(store);
         let persisted=Store::open(&path).unwrap();
-        assert_eq!(get_ticket(&persisted,&ticket.id).unwrap().worker_bot_id,"second");
+        assert_eq!(ticket_worker(&persisted,&ticket.id).unwrap(),"second");
     }
 
     #[test]

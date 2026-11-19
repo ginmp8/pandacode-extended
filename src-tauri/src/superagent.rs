@@ -1557,6 +1557,29 @@ pub(crate) fn list_headless_recovery_inbox_page(
     database_path: &std::path::Path, before_priority: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<String> {
+    list_headless_recovery_inbox_page_scoped(
+        database_path, None, before_priority, before_updated_at, before_id,
+    )
+}
+
+/// A Team-scoped operational recovery view. Apply the native Team boundary
+/// before priority ordering and pagination, including cursor-anchor validation.
+/// An operator cannot use a cursor from a different Team to inspect its Tickets.
+pub(crate) fn list_headless_team_recovery_inbox_page(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_priority: Option<i64>, before_updated_at: Option<i64>,
+    before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_recovery_inbox_page_scoped(
+        database_path, Some(orchestration_id), before_priority, before_updated_at, before_id,
+    )
+}
+
+fn list_headless_recovery_inbox_page_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_priority: Option<i64>, before_updated_at: Option<i64>,
+    before_id: Option<&str>,
+) -> Result<String> {
     match (before_priority,before_updated_at,before_id) {
         (None,None,None)=>{},
         (Some(priority),Some(updated_at),Some(id))
@@ -1566,19 +1589,24 @@ pub(crate) fn list_headless_recovery_inbox_page(
         _=>return Err("Invalid recovery cursor: supply priority 0..2, positive timestamp and bounded Ticket ID.".into()),
     }
     let store = Store::open_read_only(database_path)?;
+    if let Some(id) = orchestration_id {
+        configuration(&store, id)?;
+    }
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let observed_at = storage::now();
     let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
     let ids: Vec<(String, i64, i64)> = {
         let mut stmt = store.db.prepare(
-            "WITH candidates AS (
+            "WITH scoped_tickets AS (
+               SELECT * FROM sa_tickets WHERE (?7 IS NULL OR orchestration_id=?7)
+             ), candidates AS (
                SELECT t.id,t.updated_at,
                  CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
                                   WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
                       THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
                                          WHERE a.ticket_id=t.id AND a.state='running')
                       THEN 1 ELSE 2 END AS priority
-               FROM sa_tickets t
+               FROM scoped_tickets t
                WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
                                  'failed','interrupted','inconclusive')
                   OR EXISTS(SELECT 1 FROM sa_effect_receipts e
@@ -1669,7 +1697,7 @@ pub(crate) fn list_headless_recovery_inbox_page(
              ORDER BY page.priority ASC,page.updated_at DESC,page.id DESC",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
-            params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL],
+            params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL,orchestration_id],
             |row| Ok((
                 row.get::<_,Option<String>>(0)?,
                 row.get::<_,Option<i64>>(1)?,
@@ -1706,7 +1734,7 @@ pub(crate) fn list_headless_recovery_inbox_page(
         }))
     } else {None};
     snapshot.commit().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut response = serde_json::json!({
         "observedAt": observed_at,
         "pageLimit": 200,
         "mayHaveMore": ids.len() > 200,
@@ -1715,7 +1743,11 @@ pub(crate) fn list_headless_recovery_inbox_page(
         "observationalOnly": true,
         "automaticRecoveryPerformed": false,
         "requiresCurrentNativeRecheckBeforeAnyAction": true
-    })).map_err(|e| e.to_string())
+    });
+    if let Some(id) = orchestration_id {
+        response["orchestrationId"] = serde_json::json!(id);
+    }
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
 }
 
 /// Bounded local task index for a one-shot CLI. Keep this read-only so it can
@@ -6008,6 +6040,90 @@ mod tests {
         assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
         assert!(!serde_json::to_string(&after_restart).unwrap()
             .contains("Private native mandate recovery"));
+    }
+
+    #[test]
+    fn headless_team_recovery_inbox_filters_before_pagination_and_rejects_foreign_cursors() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Other recovery Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let second = configuration(&store, &second.id).unwrap();
+        let (private, launched) = admit(
+            &mut store, &first.id, "Private first-Team recovery objective",
+            "first-team-recovery", true,
+        ).unwrap();
+        assert!(!launched);
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=updated_at-30000 WHERE id=?1",
+            [&private.id],
+        ).unwrap();
+        for index in 0..201 {
+            let (ticket, launched) = admit(
+                &mut store, &second.id, "Private second-Team recovery objective",
+                &format!("second-team-recovery-{index}"), true,
+            ).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+        }
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        let first_page: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &first.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(first_page["orchestrationId"], first.id);
+        assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["items"][0]["ticketId"], private.id);
+        assert_eq!(first_page["mayHaveMore"], false);
+        let second_page: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &second.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second_page["items"].as_array().unwrap().len(), 200);
+        assert_eq!(second_page["mayHaveMore"], true);
+        let cursor = &second_page["nextCursor"];
+        let older: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &second.id, cursor["priority"].as_i64(),
+                cursor["updatedAt"].as_i64(), cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(older["items"].as_array().unwrap().len(), 1);
+        assert_eq!(older["mayHaveMore"], false);
+        assert!(list_headless_team_recovery_inbox_page(
+            &store.path, &first.id, cursor["priority"].as_i64(),
+            cursor["updatedAt"].as_i64(), cursor["ticketId"].as_str(),
+        ).is_err(), "A cursor from another Team must not authorize cross-Team pages");
+        assert!(list_headless_team_recovery_inbox_page(
+            &store.path, "unknown-team", None, None, None,
+        ).is_err());
+        let encoded = format!("{first_page}{second_page}{older}");
+        assert!(!encoded.contains("Private first-Team"));
+        assert!(!encoded.contains("Private second-Team"));
+        assert_eq!(first_page["observationalOnly"], true);
+        assert_eq!(second_page["automaticRecoveryPerformed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        let database = store.path.clone();
+        drop(store);
+        let after_restart: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &database, &first.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(after_restart["items"][0]["ticketId"], private.id);
     }
 
     #[test]

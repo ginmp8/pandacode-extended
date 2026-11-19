@@ -34,6 +34,7 @@ enum Command {
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
+    ListTeamRecoveryInbox { orchestration_id: String, before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListUnresolvedEffects { before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
     ListTeamUnresolvedEffects { orchestration_id: String, before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
     ListDemands {
@@ -424,6 +425,25 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListTeamRecoveryInbox {
+                orchestration_id, before_priority, before_updated_at, before_id,
+            } = &command {
+                // Scope native recovery candidates and cursor anchors in SQL before
+                // paging. This is read-only, including beside a healthy serve host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_team_recovery_inbox_page(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                        *before_priority, *before_updated_at, before_id.as_deref(),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team recovery inbox inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListUnresolvedEffects { before_updated_at, before_ticket_id, before_effect_key } = &command {
                 // Cross-Ticket native receipt inventory; no grant, replay, provider
                 // contact or startup recovery against another live serve host.
@@ -710,7 +730,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox { .. }
-        | Command::ListRecoveryInbox { .. } | Command::ListUnresolvedEffects { .. }
+        | Command::ListRecoveryInbox { .. } | Command::ListTeamRecoveryInbox { .. }
+        | Command::ListUnresolvedEffects { .. }
         | Command::ListTeamUnresolvedEffects { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
@@ -1197,6 +1218,33 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     } else {(None,None,None)};
                 command = Command::ListRecoveryInbox { before_priority,before_updated_at,before_id };
                 ops += 1;
+            }
+            "--list-team-recovery-inbox" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--list-team-recovery-inbox needs a Team ID.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let (before_priority, before_updated_at, before_id) =
+                    if args.get(index + 2).map(String::as_str) == Some("--before") {
+                        let priority = args.get(index + 3)
+                            .ok_or("--before needs recovery priority, timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|p| (0..=2).contains(p))
+                            .ok_or("Invalid Team recovery priority (0..2).")?;
+                        let updated_at = args.get(index + 4)
+                            .ok_or("--before needs recovery priority, timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|at| *at > 0)
+                            .ok_or("Invalid Team recovery timestamp.")?;
+                        let ticket_id = args.get(index + 5)
+                            .ok_or("--before needs recovery priority, timestamp and Ticket ID.")?;
+                        validate_ticket_id(ticket_id)?;
+                        index += 4;
+                        (Some(priority), Some(updated_at), Some(ticket_id.clone()))
+                    } else { (None, None, None) };
+                command = Command::ListTeamRecoveryInbox {
+                    orchestration_id: orchestration_id.clone(),
+                    before_priority, before_updated_at, before_id,
+                };
+                ops += 1;
+                index += 1;
             }
             "--list-unresolved-effects" => {
                 let (before_updated_at,before_ticket_id,before_effect_key) =
@@ -2016,6 +2064,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-recovery-inbox [--before <priority> <ms> <ticket-id>]
                          Page native recovery/decision Tickets across Teams by stable priority
                          then update time and ID; no provider or remote replay; exit.
+  --list-team-recovery-inbox <team-id> [--before <priority> <ms> <ticket-id>]
+                         Page the same native recovery/decision Tickets for one Team,
+                         scoped before cursor validation and pagination. No replay; exit.
   --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>]
                          Page unresolved native effect receipts across all Tickets,
                          including older ones; never retry or acknowledge remotely; exit.
@@ -2208,6 +2259,26 @@ mod tests {
             "--list-recovery-inbox --before 1 12345 ../private",
         ] { assert!(parsed(invalid).is_err(),"{invalid}"); }
         assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
+        assert_eq!(parsed("--list-team-recovery-inbox team_123"),
+            Ok(Command::ListTeamRecoveryInbox {
+                orchestration_id:"team_123".into(),
+                before_priority:None,before_updated_at:None,before_id:None,
+            }));
+        assert_eq!(parsed("--list-team-recovery-inbox team_123 --before 2 12345 ticket_1"),
+            Ok(Command::ListTeamRecoveryInbox {
+                orchestration_id:"team_123".into(),
+                before_priority:Some(2),before_updated_at:Some(12345),
+                before_id:Some("ticket_1".into()),
+            }));
+        for invalid in [
+            "--list-team-recovery-inbox",
+            "--list-team-recovery-inbox ../unsafe",
+            "--list-team-recovery-inbox team_123 --before",
+            "--list-team-recovery-inbox team_123 --before 3 12345 ticket_1",
+            "--list-team-recovery-inbox team_123 --before 1 0 ticket_1",
+            "--list-team-recovery-inbox team_123 --before 1 12345 ../private",
+            "--list-team-recovery-inbox team_123 --stop-ticket ticket_1",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--list-unresolved-effects"), Ok(Command::ListUnresolvedEffects {
             before_updated_at:None,before_ticket_id:None,before_effect_key:None,
         }));

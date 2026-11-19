@@ -95,6 +95,15 @@ retries or replays effects; current provider state must be reconciled separately
 Cursor timestamps are mutable when a receipt changes state, so re-list from the
 first page after concurrent reconciliation. An unrelated applied effect is omitted.
 
+For Team-specific recovery triage, use
+`pandacode serve --list-team-recovery-inbox <team-id>` and continue with
+`--before <priority> <updated-at-ms> <ticket-id>` from `nextCursor`.
+The Team filter applies within the native SQLite recovery candidates **before**
+the 200-item page limit and cursor validation. An unknown Team or cursor from
+another Team is rejected, not silently treated as an empty authorized result.
+This is read-only even beside a live server; no provider, mandate, approval,
+automatic retry or external action is performed.
+
 The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.

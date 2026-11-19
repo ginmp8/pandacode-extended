@@ -715,6 +715,17 @@ fn a_cached_pass_without_native_scores_cannot_approve_a_channel_delivery() {
     ).unwrap();
     shared_channels::bind_delivery_cycle(&f.store, &session_id, team.council_since).unwrap();
 
+    // An old scored snapshot must not advertise an accepted Council in the
+    // Channel list even when the actual callback correctly denies it.
+    let view = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let visible = view.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(visible.state, "Inconclusive");
+    assert_eq!(visible.lowest, None, "unverified scores must not look like a native pass");
+    assert!(visible.notice.as_deref().unwrap_or_default().contains("verified native reviewer evidence"));
+    let inspection = shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).unwrap();
+    assert_eq!(inspection["verifiedPass"], false);
+
     assert!(matches!(
         channel_council_outcome(&f.store, &session_id).unwrap(),
         ChannelCouncilOutcome::Denied(_),

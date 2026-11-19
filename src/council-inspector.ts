@@ -104,6 +104,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     reviewed_file_sha256_verified: 'Native file SHA-256 matched the required digest for the reviewed revision; this does not prove project tests or Council approval',
     reviewed_file_text_contains_verified: 'Native checkout file contained the exact configured UTF-8 fragment when the host checked it; this does not prove project tests, ongoing file immutability or Council approval',
     reviewed_file_json_verified: 'Native checkout JSON syntax was valid when the host checked the frozen file; this does not prove schema compliance, project tests or Council approval',
+    reviewed_file_toml_verified: 'Native checkout TOML syntax was valid when the host checked the task-scoped file; this does not prove Cargo checks, project tests, builds or Council approval',
     root_scores_observed: 'Root reviewer scores observed; not independently verified artifact evidence',
   };
   const nativeCriterionObservations = inspection.criterionObservations ?? [];

@@ -123,6 +123,30 @@ test('Council inspector exposes native mandatory evidence gaps without manufactu
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
 
+test('Council inspector presents native TOML syntax evidence without promoting a Council pass', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
+    cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [{ id: 'cargo-syntax', lens: 'File valid TOML: Cargo.toml',
+      required: true, target: 9, evidenceRequired: true,
+      nativeEvidence: { kind: 'reviewed_file_toml_valid', path: 'Cargo.toml' } }],
+    criterionObservations: [{ id: 'cargo-syntax', round: 1, rootScoredSeats: 2,
+      lowestRootScore: 9.9, state: 'reviewed_file_toml_verified' }],
+    attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const observations = panel(page).getByRole('region', { name: 'Native criterion observations' });
+  await expect(observations).toContainText('Native checkout TOML syntax was valid');
+  await expect(observations).toContainText('does not prove Cargo checks, project tests, builds or Council approval');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('Council inspector distinguishes an exact native pinned-input check from unverified evidence and approval', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'parallel', criteriaSource: 'hybrid',

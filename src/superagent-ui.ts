@@ -184,7 +184,6 @@ export function mountSuperagent(
                 !Number.isSafeInteger(item.revision) || item.revision < 0 ||
                 typeof item.objective !== 'string' ||
                 typeof item.state !== 'string' ||
-                typeof item.projectId !== 'string' ||
                 (query.searchQuery && !nativeCaseFold(item.objective).includes(searchNeedle)) ||
                 (index > 0 && !(item.updatedAt < page[index - 1].updatedAt ||
                   (item.updatedAt === page[index - 1].updatedAt && item.id < page[index - 1].id))) ||

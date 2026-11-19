@@ -1681,7 +1681,7 @@ test('native Team filter pages independently and resets pagination when changing
         if(query?.orchestrationId==='team-a' && !query?.beforeId)
           return [demand('a-0','team-a',1900)] as never;
         if(!query?.orchestrationId && !query?.beforeId)
-          return [demand('a-0','team-a',1900),demand('b-0','team-b',2000)] as never;
+          return [demand('b-0','team-b',2000),demand('a-0','team-a',1900)] as never;
         throw Error('Invalid native Team-scoped cursor');
       }
       throw Error('Unexpected native read: '+command);
@@ -1759,7 +1759,7 @@ test('native project filter preserves immutable Ticket scope across pages and ot
         if(query.projectId==='project-b' && !query.beforeId)
           return [item('b-0','team-b',2000)] as never;
         if(!query.projectId && !query.beforeId)
-          return [item('a-0','team-a',2000),item('b-0','team-b',2000)] as never;
+          return [item('b-0','team-b',2000),item('a-0','team-a',2000)] as never;
         throw Error('Unsupported native project cursor');
       }
       throw Error('Unexpected native command: '+command);
@@ -1872,8 +1872,8 @@ test('native objective search filters durable Demands before pagination without 
         if (!query) throw Error('Native Demand query envelope required');
         queries.push({...query});
         if(query?.searchQuery==='NEEDLE')return [
-          demand('match-a','team-a','Needle hidden past page 200'),
           demand('match-b','team-b','NEEDLE in another Team'),
+          demand('match-a','team-a','Needle hidden past page 200'),
         ] as never;
         if(query?.searchQuery)throw Error('Native objective filter mismatch');
         return [demand('recent','team-a','Recent unrelated work')] as never;

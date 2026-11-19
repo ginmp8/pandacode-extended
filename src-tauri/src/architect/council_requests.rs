@@ -333,6 +333,42 @@ pub struct NativeTaskCouncilReceipt {
     pub outcome: String,
     pub lowest_verified_score: f64,
     pub evidence_sha256: String,
+    /// Explicit native task correlation for new receipts. Legacy v1 receipts
+    /// deserialize without these fields and remain verifiable as historical proof.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assignment_key: String,
+    /// Caller-supplied artifact correlation, not a host-verified source digest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub artifact_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub policy_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task_scope_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_round: Option<usize>,
+}
+
+/// Compare one immutable receipt with the same live native proof. V1 lacks the
+/// explicit correlation fields but already hashes the exact request and proof;
+/// a replay may not use V1 to bypass a changed cycle, revision or policy.
+fn native_receipt_matches(stored: &NativeTaskCouncilReceipt, expected: &NativeTaskCouncilReceipt) -> bool {
+    if stored.schema_version == 2 {
+        return stored == expected;
+    }
+    if stored.schema_version != 1 {
+        return false;
+    }
+    let mut legacy = expected.clone();
+    legacy.schema_version = 1;
+    legacy.project_id.clear();
+    legacy.assignment_key.clear();
+    legacy.artifact_sha256.clear();
+    legacy.policy_sha256.clear();
+    legacy.task_scope_sha256.clear();
+    legacy.reviewed_round = None;
+    stored == &legacy
 }
 
 #[derive(Debug, Serialize)]
@@ -547,10 +583,16 @@ fn native_terminal_expected(
     let evidence = serde_json::to_vec(&(&inspected.request, proof))
         .map_err(|e| e.to_string())?;
     Ok(NativeTaskCouncilReceipt {
-        schema_version: 1, request_id: request_id.to_owned(),
+        schema_version: 2, request_id: request_id.to_owned(),
         session_id: session_id.to_owned(), cycle_id: proof.cycle_id.clone(),
         team_revision: proof.team_revision, outcome: "passed".into(),
         lowest_verified_score: proof.lowest, evidence_sha256: digest(&evidence),
+        project_id: inspected.request.project_id.clone(),
+        assignment_key: inspected.request.assignment_key.clone(),
+        artifact_sha256: inspected.request.artifact_sha256.clone(),
+        policy_sha256: inspected.request.policy_sha256.clone(),
+        task_scope_sha256: inspected.request.task_scope_sha256.clone(),
+        reviewed_round: Some(proof.round),
     })
 }
 
@@ -565,7 +607,7 @@ pub(crate) fn record_native_terminal(
     )?;
     let (raw, mut record) = native_task_record(store, session_id, assignment_key)?;
     if let Some(stored) = record.receipt {
-        return if stored == expected { Ok(stored) } else {
+        return if native_receipt_matches(&stored, &expected) { Ok(stored) } else {
             Err("council_task_stale: previous terminal receipt differs from current native proof.".into())
         };
     }
@@ -592,7 +634,7 @@ pub(crate) fn read_native_terminal(
     let expected = native_terminal_expected(
         store, session_id, project_id, assignment_key, artifact_sha256, request_id,
     )?;
-    if stored != expected {
+    if !native_receipt_matches(&stored, &expected) {
         return Err("council_task_stale: terminal receipt no longer matches native evidence.".into());
     }
     Ok(stored)

@@ -6851,6 +6851,13 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert_eq!(receipt.outcome, "passed");
     assert_eq!(receipt.lowest_verified_score, 9.2);
     assert_eq!(receipt.request_id, request.request_id);
+    assert_eq!(receipt.schema_version, 2);
+    assert_eq!(receipt.project_id, project);
+    assert_eq!(receipt.assignment_key, "native-approved-task");
+    assert_eq!(receipt.artifact_sha256, artifact);
+    assert_eq!(receipt.policy_sha256, request.policy_sha256);
+    assert_eq!(receipt.task_scope_sha256, request.task_scope_sha256);
+    assert_eq!(receipt.reviewed_round, Some(1));
     assert_eq!(receipt.evidence_sha256.len(), 64);
     assert_eq!(council_requests::record_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
@@ -6858,6 +6865,52 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap(), receipt);
+    // Old v1 records remain readable only when their existing native proof
+    // revalidates. A v2 receipt cannot silently change a task/policy pin.
+    let original_raw: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key='native-council-task:native-approved-task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&original_raw).unwrap();
+    let fields = legacy["receipt"].as_object_mut().unwrap();
+    fields.insert("schemaVersion".into(), json!(1));
+    for field in ["projectId", "assignmentKey", "artifactSha256", "policySha256",
+                  "taskScopeSha256", "reviewedRound"] {
+        fields.remove(field);
+    }
+    store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2
+         AND key='native-council-task:native-approved-task'",
+        rusqlite::params![legacy.to_string(), sid],
+    ).unwrap();
+    let historical = council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(historical.schema_version, 1);
+    assert_eq!(historical.evidence_sha256, receipt.evidence_sha256);
+    assert_eq!(council_requests::record_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap(), historical);
+    let mut forged: serde_json::Value = serde_json::from_str(&original_raw).unwrap();
+    forged["receipt"]["policySha256"] = json!("0".repeat(64));
+    store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2
+         AND key='native-council-task:native-approved-task'",
+        rusqlite::params![forged.to_string(), sid],
+    ).unwrap();
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap_err().contains("council_task_stale"));
+    store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2
+         AND key='native-council-task:native-approved-task'",
+        rusqlite::params![original_raw, sid],
+    ).unwrap();
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap(), receipt);
+
     // Even a persisted terminal receipt cannot authorize a changed objective.
     let mut tampered = load(&store, &sid).unwrap().unwrap();
     tampered.objective.push_str(" after approval");

@@ -2550,6 +2550,26 @@ fn m3_root_never_admits_forged_partial_sources_in_any_strategy() {
             assert!(denied.contains("Mixed Council reviewer sources"),
                 "{strategy:?}/{alias} must reject aliased native reviewer identities: {denied}");
         }
+        // Native source labels are not sufficient when a persisted seat's
+        // frozen cycle, identity or reviewer snapshot has been tampered with.
+        // Existing valid, partially admitted rosters still remain dispatchable.
+        for altered in ["cycle", "seat", "round", "lens", "revision", "model"] {
+            let mut corrupted = team.clone();
+            let binding = corrupted.workers[0].reviewer_binding.as_mut().unwrap();
+            match altered {
+                "cycle" => binding.council_cycle_id = "foreign:cycle".into(),
+                "seat" => binding.seat_id = "foreign-seat".into(),
+                "round" => binding.round = 2,
+                "lens" => binding.snapshot.lens = "Forged lens".into(),
+                "revision" => binding.artifact_revision = "forged-revision".into(),
+                "model" => binding.snapshot.model = "foreign-model".into(),
+                _ => unreachable!(),
+            }
+            assert!(council::round_for(
+                &corrupted, corrupted.config.council.as_ref().unwrap(), None,
+            ).unwrap_err().contains("Mixed Council reviewer sources"),
+                "{strategy:?}/{altered} must deny a new native reviewer after binding tampering");
+        }
         let mut duplicated = team.clone();
         duplicated.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
             Some("selected-reviewer".into());
@@ -2639,6 +2659,26 @@ fn m7_partial_root_roster_rejects_foreign_and_duplicate_sources_before_new_dispa
             ).unwrap_err();
             assert!(denied.contains("Mixed Council reviewer sources"),
                 "{strategy:?}/{alias} must reject aliased native reviewer identities: {denied}");
+        }
+        // Native source labels are not sufficient when a persisted seat's
+        // frozen cycle, identity or reviewer snapshot has been tampered with.
+        // Existing valid, partially admitted rosters still remain dispatchable.
+        for altered in ["cycle", "seat", "round", "lens", "revision", "model"] {
+            let mut corrupted = team.clone();
+            let binding = corrupted.workers[0].reviewer_binding.as_mut().unwrap();
+            match altered {
+                "cycle" => binding.council_cycle_id = "foreign:cycle".into(),
+                "seat" => binding.seat_id = "foreign-seat".into(),
+                "round" => binding.round = 2,
+                "lens" => binding.snapshot.lens = "Forged lens".into(),
+                "revision" => binding.artifact_revision = "forged-revision".into(),
+                "model" => binding.snapshot.model = "foreign-model".into(),
+                _ => unreachable!(),
+            }
+            assert!(council::round_for(
+                &corrupted, corrupted.config.council.as_ref().unwrap(), None,
+            ).unwrap_err().contains("Mixed Council reviewer sources"),
+                "{strategy:?}/{altered} must deny a new native reviewer after binding tampering");
         }
         let mut duplicate = team.clone();
         duplicate.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =

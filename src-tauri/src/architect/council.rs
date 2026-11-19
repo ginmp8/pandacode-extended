@@ -1689,6 +1689,12 @@ fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -
             return None;
         }
         let binding = worker.reviewer_binding.as_ref()?;
+        // Before admitting another source, revalidate every earlier seat against
+        // its immutable native cycle, artifact, worker and policy snapshot.
+        // A source label alone cannot repair a stale or tampered binding.
+        if binding.validate(team, worker).is_err() {
+            return None;
+        }
         match binding.reviewer_bot_id.as_deref() {
             Some(bot_id) if config.reviewer_bot_ids.iter().any(|id| id == bot_id)
                 && direct.insert(bot_id) => {}

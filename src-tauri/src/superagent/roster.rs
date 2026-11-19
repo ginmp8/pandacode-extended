@@ -5,6 +5,7 @@ use super::{configuration,create_configuration,require_main_window,NewOrchestrat
 use crate::{bots,storage::{self,Store},AppState,Result};
 use rusqlite::{params,OptionalExtension};
 use serde::{Deserialize,Serialize};
+use sha2::{Digest,Sha256};
 use std::collections::{HashMap,HashSet};
 use tauri::State;
 
@@ -144,6 +145,10 @@ pub struct AdmittedMemberProfile {
     pub mode:String,
     pub reasoning_effort:String,
     pub assigned_skill_ids:Vec<String>,
+    /// Length-framed digest of the original bot role and instructions. Raw prompt text stays private.
+    /// Legacy read-only Tickets may omit this field; absence never authorizes tools.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub prompt_identity_sha256:Option<String>,
 }
 #[derive(Debug,Clone,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -169,6 +174,17 @@ pub(super) fn member_execution_issue(bot:&bots::Bot)->Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Bind the actual task-facing role and instructions without copying private text into the Ticket.
+/// Length framing prevents ambiguous concatenations of role and instruction strings.
+pub(super) fn prompt_identity(bot:&bots::Bot)->String {
+    let mut digest=Sha256::new();
+    for field in [&bot.role,&bot.instructions] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    format!("{:x}",digest.finalize())
 }
 
 fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<AdmittedMemberProfile> {
@@ -199,6 +215,7 @@ fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<
         provider:bot.provider.clone(),model:bot.model.clone(),mode:bot.mode.clone(),
         reasoning_effort:bot.reasoning_effort.clone(),
         assigned_skill_ids:bot.skills.clone(),
+        prompt_identity_sha256:Some(prompt_identity(bot)),
     })
 }
 
@@ -284,6 +301,11 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
         let mut identities=HashSet::new();
         let (mut workers,mut reviewers)=(0_usize,0_usize);
         for (index,member) in members.iter().enumerate() {
+            if member.prompt_identity_sha256.as_deref().is_some_and(|digest| {
+                digest.len()!=64 || !digest.bytes().all(|b| matches!(b,b'0'..=b'9'|b'a'..=b'f'))
+            }) {
+                return Err("Invalid persisted task-effective bot prompt identity.".into());
+            }
             if member.bot_id.is_empty() || !identities.insert(member.bot_id.as_str()) {
                 return Err("Invalid persisted task-effective Team role identity.".into());
             }
@@ -349,6 +371,7 @@ pub(super) fn require_current_profile(
     let mut current=member_profile(store,&bots::get(store,bot_id)?,role,recorded.position)?;
     if recorded.project_path.is_none() {current.project_path=None;}
     if recorded.resolved_project_path.is_none() {current.resolved_project_path=None;}
+    if recorded.prompt_identity_sha256.is_none() {current.prompt_identity_sha256=None;}
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
     }

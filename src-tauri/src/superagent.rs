@@ -3027,7 +3027,14 @@ fn admitted_session_matches_profile(
     else {
         return Ok(false);
     };
-    Ok(session.project_id == member.project_id
+    // The provider session pins model/mode, while the bot brief is composed
+    // from the live bot. A changed role or instruction must not rewrite this
+    // admitted Demand's effective prompt during gateway/tool admission or callback.
+    let prompt_current=match &member.prompt_identity_sha256 {
+        Some(expected)=>roster::prompt_identity(&bots::get(store,bot_id)?)==*expected,
+        None=>true, // Historical read-only snapshots predate prompt fingerprinting.
+    };
+    Ok(prompt_current && session.project_id == member.project_id
         && session.provider == member.provider
         && session.model == member.model
         && session.mode == member.mode
@@ -6298,6 +6305,69 @@ mod tests {
             [&ticket.id], |row| row.get::<_, String>(0),
         ).unwrap(), "uncertain");
         assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn admitted_bot_prompt_identity_denies_untrusted_role_or_instruction_rewrites() {
+        for (field, changed) in [
+            ("role", "unapproved elevated role"),
+            ("instructions", "Unapproved replacement task instructions"),
+        ] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let key = format!("native-prompt-drift-{field}");
+            let (ticket, started) = admit(
+                &mut store, &cfg.id, "Keep the admitted task context", &key, false,
+            ).unwrap();
+            assert!(started);
+            let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let admitted = roster::ticket_profile(&store, &ticket.id).unwrap().unwrap();
+            assert!(admitted.members.iter().any(|member| {
+                member.bot_id == "worker"
+                    && member.prompt_identity_sha256.as_deref().is_some_and(|value| value.len()==64)
+            }));
+            assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+            let update = format!("UPDATE bots SET {field}=?1 WHERE id='worker'");
+            store.db.execute(&update, [changed]).unwrap();
+            assert!(read_only_policy(&store, &session_id).is_err(),
+                "{field} drift must deny native tool/provider admission");
+            assert!(on_run_finished(
+                &store, &session_id, true, "Stale model completion",
+            ).unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+                "{field} drift must never become approvable evidence");
+        }
+    }
+
+    #[test]
+    fn historic_read_only_profiles_without_prompt_digest_remain_compatible() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Legacy read-only inspection","legacy-prompt-field",false,
+        ).unwrap();
+        assert!(started);
+        let session_id=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_ticket_profiles
+             SET profiles_json=json_remove(profiles_json,
+               '$[0].promptIdentitySha256','$[1].promptIdentitySha256')
+             WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let snapshot=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert!(snapshot.members.iter().all(|m|m.prompt_identity_sha256.is_none()));
+        assert!(read_only_policy(&store,&session_id).unwrap().is_some());
+        let grant=mandate(&store,&ticket.id).unwrap();
+        assert!(grant.allowed_tools.is_empty() && !grant.allowed_side_effects);
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=
+             json_set(profiles_json,'$[1].promptIdentitySha256','invalid')
+             WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(roster::ticket_profile(&store,&ticket.id).is_err());
+        assert!(read_only_policy(&store,&session_id).is_err());
     }
 
     #[test]

@@ -2544,6 +2544,74 @@ fn m3_root_never_admits_forged_partial_sources_in_any_strategy() {
     }
 }
 
+
+#[test]
+fn m7_partial_root_roster_rejects_foreign_and_duplicate_sources_before_new_dispatch() {
+    // A composite child seat never authorizes a duplicate or substituted root reviewer.
+    for strategy in [
+        council::CouncilExecutionStrategy::Parallel,
+        council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase,
+    ] {
+        let mut config = on(9.0, 3, 0);
+        config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+        config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+            bot_id: "child-reviewer".into(), child_reviewers: 2,
+            child_target: 9.0, child_max_rounds: 3,
+        }];
+        config.automatic_reviewers = 1;
+        config.strategy = strategy;
+        assert_eq!(config.mode(), "m7");
+        config.validate().unwrap();
+        let mut team = team_with(config, vec![]);
+        let mut direct = seat("m7-direct", 1, None, SINCE + 1);
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
+            direct.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some("selected-reviewer".into());
+        binding.roster_bot_ids = vec!["selected-reviewer".into()];
+        binding.required_reviewers = Some(3);
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: "Selected reviewer".into(), role: "Security".into(),
+            instructions: String::new(), goals: String::new(), soul: String::new(),
+            reasoning_effort: String::new(), skill_ids: vec![],
+        });
+        direct.reviewer_binding = Some(binding);
+        team.workers.push(direct);
+        assert_eq!(council::round_for(&team, team.config.council.as_ref().unwrap(), None).unwrap(), 1,
+            "{strategy:?} must permit a valid, unfinished M7 root roster");
+
+        for invalid in ["unbound", "foreign"] {
+            let mut corrupt = team.clone();
+            if invalid == "unbound" {
+                corrupt.workers[0].reviewer_binding = None;
+            } else {
+                corrupt.workers[0].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
+                    Some("other-reviewer".into());
+            }
+            assert!(council::round_for(&corrupt, corrupt.config.council.as_ref().unwrap(), None)
+                .unwrap_err().contains("Mixed Council reviewer sources"),
+                "{strategy:?}/{invalid} cannot issue more root seats from an invalid M7 roster");
+        }
+
+        let mut automatic = seat("m7-automatic", 1, None, SINCE + 2);
+        automatic.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+            &team, &automatic.id, automatic.created_at, &automatic.provider,
+            &automatic.model, automatic.council.as_ref().unwrap(),
+        ));
+        team.workers.push(automatic);
+        assert_eq!(council::round_for(&team, team.config.council.as_ref().unwrap(), None).unwrap(), 1,
+            "{strategy:?} must keep a valid M7 parent roster dispatchable");
+        let mut duplicate = team.clone();
+        duplicate.workers[1].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
+            Some("selected-reviewer".into());
+        assert!(council::round_for(&duplicate, duplicate.config.council.as_ref().unwrap(), None)
+            .unwrap_err().contains("Mixed Council reviewer sources"),
+            "{strategy:?} cannot replace an automatic root seat with a duplicated direct bot");
+    }
+}
+
 #[test]
 fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
     let nested = |bot: &str| council::CouncilNestedReviewer {

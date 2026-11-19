@@ -3038,11 +3038,16 @@ fn admitted_session_matches_profile(
     // The provider session pins model/mode, while the bot brief is composed
     // from the live bot. A changed role or instruction must not rewrite this
     // admitted Demand's effective prompt during gateway/tool admission or callback.
+    let live_bot = bots::get(store, bot_id)?;
     let prompt_current=match &member.prompt_identity_sha256 {
-        Some(expected)=>roster::prompt_identity(&bots::get(store,bot_id)?)==*expected,
+        Some(expected)=>roster::prompt_identity(&live_bot)==*expected,
         None=>true, // Historical read-only snapshots predate prompt fingerprinting.
     };
-    Ok(prompt_current && session.project_id == member.project_id
+    // Gateway skills are composed from the current bot at each turn. A newly
+    // assigned Skill must not enter an already admitted Demand through an
+    // unchanged provider session, even when the role and instructions match.
+    let skills_current = live_bot.skills == member.assigned_skill_ids;
+    Ok(prompt_current && skills_current && session.project_id == member.project_id
         && session.provider == member.provider
         && session.model == member.model
         && session.mode == member.mode
@@ -8415,8 +8420,37 @@ mod tests {
     }
 
     #[test]
+    fn changed_worker_skills_deny_current_task_provider_and_callback_evidence() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Native Skill snapshot admission",
+            "task-skill-snapshot-drift", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+
+        // A bot remains reusable, but its editable Skill assignments cannot
+        // expand the immutable in-flight Ticket's task-facing environment.
+        assert_eq!(store.db.execute(
+            "UPDATE bots SET skills='[\\"late-added-skill\\"]' WHERE id=?1",
+            [&config.worker_bot_id],
+        ).unwrap(), 1);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(on_run_finished(&store, &session, true, "Untrusted late output").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(history(&store, &ticket.id, 20).unwrap().iter()
+            .any(|entry| entry.kind == "callback_rejected"));
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Repeated stale output").unwrap());
+    }
+
+    #[test]
     fn watchdog_settles_task_thread_profile_and_checkout_drift_without_replay() {
-        for fault in ["thread", "provider", "instructions", "checkout"] {
+        for fault in ["thread", "provider", "instructions", "skills", "checkout"] {
             let mut store = fixture();
             let config = enabled(&store);
             let (ticket, launched) = admit(
@@ -8445,6 +8479,12 @@ mod tests {
                     assert_eq!(store.db.execute(
                         "UPDATE bots SET instructions='Changed operator instructions'
                          WHERE id=?1",
+                        [&config.worker_bot_id],
+                    ).unwrap(), 1);
+                }
+                "skills" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bots SET skills='[\\"new-skill\\"]' WHERE id=?1",
                         [&config.worker_bot_id],
                     ).unwrap(), 1);
                 }

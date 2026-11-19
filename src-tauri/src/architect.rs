@@ -3995,33 +3995,40 @@ fn review_item(team: &TeamSnapshot, w: &Worker, summary: &str, budgeted: Option<
     mark_cut(&mut item, summary);
     item
 }
-pub(crate) fn activity(app: &tauri::AppHandle, sid: &str, admission: Option<&Admission>) {
-    let Some(admission) = admission else {
-        return;
+/// A progress event is an untrusted callback, not a new task admission.
+/// Apply the same native ownership and grant preflight as terminal callbacks
+/// before changing any persisted reviewer state.
+fn record_activity(store: &Store, sid: &str, admission: &Admission) -> Option<TeamSnapshot> {
+    let authority = if parent_of(store, &admission.parent).ok().flatten().is_some() {
+        child_council::authorize_leaf(store, sid, admission)
+    } else {
+        reject_task_owned_child_lead(store, &admission.parent)
     };
+    if authority.is_err() { return None; }
+    let mut team = load(store, &admission.parent).ok().flatten()?;
+    if team.generation != admission.generation || !active(&team.status) {
+        return None;
+    }
+    let worker = team.workers.iter_mut()
+        .find(|worker| worker.session_id == sid && active(&worker.status))?;
+    let session = store.session(sid).ok()?;
+    if !active(&session.status) || session.status == worker.status {
+        return None;
+    }
+    worker.status = session.status;
+    worker.updated_at = storage::now();
+    save(store, &mut team).ok()?;
+    Some(team)
+}
+
+pub(crate) fn activity(app: &tauri::AppHandle, sid: &str, admission: Option<&Admission>) {
+    let Some(admission) = admission else { return; };
     let state = app.state::<AppState>();
     if let Ok(store) = state.store.lock() {
-        if let Ok(Some(mut team)) = load(&store, &admission.parent) {
-            if team.generation != admission.generation || !active(&team.status) {
-                return;
-            }
-            if let Some(worker) = team
-                .workers
-                .iter_mut()
-                .find(|w| w.session_id == sid && active(&w.status))
-            {
-                if let Ok(task) = store.session(sid) {
-                    if active(&task.status) && task.status != worker.status {
-                        worker.status = task.status;
-                        worker.updated_at = storage::now();
-                        if save(&store, &mut team).is_ok() {
-                            emit(app, &team);
-                        }
-                    }
-                }
-            }
+        if let Some(team) = record_activity(&store, sid, admission) {
+            emit(app, &team);
         }
-    };
+    }
 }
 pub(crate) fn completed(
     app: &tauri::AppHandle,

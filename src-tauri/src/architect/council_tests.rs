@@ -6684,6 +6684,85 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
 
 
 #[test]
+fn native_child_progress_callbacks_require_live_grants_and_allow_waiting_completion() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["activity-security", "activity-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["activity-security", "activity-architecture"]
+            .iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review the immutable artifact", None, None).unwrap();
+    dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit real nested reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='waiting' WHERE id=?1", [&launch.sid],
+        ).unwrap();
+        let updated = record_activity(&store, &launch.sid, &launch.admission)
+            .expect("a legitimate native progress event may report waiting");
+        assert_eq!(updated.workers.iter().find(|worker|
+            worker.session_id == launch.sid).unwrap().status, "waiting");
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission)
+            .expect("waiting remains an active, previously issued native reviewer");
+        // Simulate a delayed callback after native root interruption while
+        // the persisted child snapshot still says running. A progress event
+        // must not update the child even though its generation still matches.
+        let original_root_status = store.session(&sid).unwrap().status;
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='running' WHERE id=?1", [&launch.sid],
+        ).unwrap();
+        let before = serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap(),
+        ).unwrap();
+        assert!(record_activity(&store, &launch.sid, &launch.admission).is_none(),
+            "a revoked native root must reject a delayed progress callback");
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap(),
+        ).unwrap(), before, "revoked progress must not mutate child state");
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sid, original_root_status],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='waiting' WHERE id=?1", [&launch.sid],
+        ).unwrap();
+        store.message(&launch.sid, "assistant", "Independent check.\nCouncil score: 9.5/10").unwrap();
+    }
+    completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    let store = state.store.lock().unwrap();
+    let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+    let leaf = child.workers.iter().find(|worker| worker.session_id == launch.sid).unwrap();
+    assert_eq!(leaf.status, "completed", "an active waiting reviewer can finish");
+    assert_eq!(leaf.council.as_ref().unwrap().score, Some(9.5));
+}
+
+#[test]
 fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barrier() {
     let (state, sid) = state_fixture();
     {

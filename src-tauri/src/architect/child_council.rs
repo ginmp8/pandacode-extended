@@ -837,7 +837,7 @@ fn validate_admitted(
             || leaf.provider != session.provider || leaf.model != session.model
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
-            || !matches!(leaf.status.as_str(), "queued" | "running" | "completed" | "failed" | "stopped")
+            || !matches!(leaf.status.as_str(), "queued" | "running" | "waiting" | "completed" | "failed" | "stopped")
             || leaf.council.as_ref().is_none_or(|seat| seat.round != expected_round)
             || super::parent_of(store, &record.child_session_id)?.as_deref()
                 != Some(root.session_id.as_str())
@@ -2368,7 +2368,7 @@ pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) ->
         .ok_or("child_council_stale: child team is missing.")?;
     if child.generation != admission.generation || child.status != "running"
         || !child.workers.iter().any(|leaf| leaf.session_id == sid
-            && leaf.status == "running" && leaf.read_only && leaf.council.is_some())
+            && super::active(&leaf.status) && leaf.read_only && leaf.council.is_some())
     {
         return Err("child_council_revoked: native leaf run is no longer scheduled.".into());
     }

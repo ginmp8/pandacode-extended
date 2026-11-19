@@ -319,6 +319,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
+  // Bounded, opt-in native observations; never a live-presence or completion claim.
+  let recentBotActivityTeamId='';
+  let recentBotActivityLoaded=false;
+  let recentBotActivity=new Map<string,{
+    ticketId:string; state:string; at:number; attempt:number;
+  }>();
+
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let delivery:DeliveryObservation|null=null, deliveryLoaded=false;
@@ -1497,7 +1504,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (bot?.paused ? 'Paused bot' : inspectedAssignment
           ? 'Inspected Demand · attempt ' + inspectedAssignment.attempt +
             ' · ' + safe(inspectedAssignment.state)
-          : 'No live assignment status loaded') +
+          : recentBotActivityTeamId===chosen?.id && recentBotActivityLoaded
+            ? (recentBotActivity.get(id)
+              ? 'Last recorded · attempt ' + recentBotActivity.get(id)!.attempt +
+                ' · ' + safe(nativeLabel(recentBotActivity.get(id)!.state))
+              : 'No recorded assignment in latest 8 native Tickets')
+            : 'Native Worker activity not inspected') +
         '</span></span><span class="sa-member-model">' +
         safe(bot?.provider ?? 'Unknown harness') + '<span>' +
         safe(bot?.model ?? 'Unavailable model') + '</span></span>' +
@@ -1505,9 +1517,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     };
     const teamActivity=chosen ? '<section class="sa-pane sa-team-activity" ' +
       'aria-label="Recent native Team activity"><header><div><h3>Recent Team activity</h3>' +
-      '<p>Native Demand updates for this Team only. Worker activity is shown in each ' +
-      'Demand and its bot chat.</p></div><button type="button" data-sa-team-tab="demands">' +
-      'Open team board</button></header>' +
+      '<p>Read-only native snapshots, not provider presence. Recent bot activity is ' +
+      'loaded only on request (up to 8 latest Team Tickets).</p></div>' +
+      '<div class="sa-actions"><button type="button" data-sa-load-team-activity>' +
+      'Inspect Worker activity</button><button type="button" data-sa-team-tab="demands">' +
+      'Open team board</button></div></header>' +
+      (recentBotActivityTeamId===chosen.id && recentBotActivityLoaded
+        ? '<div class="sa-team-activity-list"><h4>Last recorded bot assignments</h4>' +
+          [chosen.coordinatorBotId,...memberWorkers,...memberReviewers].map(id=>{
+            const entry=recentBotActivity.get(id);
+            return '<div class="sa-activity-row">' + botPortrait(id) +
+              '<div><strong>' + safe(botName(id)) + '</strong><small>' +
+              (entry ? 'Ticket ' + safe(entry.ticketId.slice(0,8)) +
+                ' · Attempt ' + entry.attempt + ' · ' + safe(activityTime(entry.at)) :
+                'No assignment found in the latest 8 native Tickets') +
+              '</small></div>' +
+              (entry ? nativeBadge(entry.state) : nativeBadge('off','No recent record')) +
+              '</div>';
+          }).join('') + '</div>'
+        : '<p>Inspect native activity to see the most recently recorded attempt for ' +
+          'each configured bot. No automatic polling or execution is started.</p>') +
+      '<h4>Recent Team Demands</h4>' +
       (!teamDemandsLoaded ? '<p role="status">Load native Team Demands to see activity.</p>' :
         (scopedTeamDemands.slice(0,5).map(item=>
           '<div class="sa-activity-row"><div><strong>' + safe(item.objective) +
@@ -1875,6 +1905,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
     teamDemands = []; teamDemandsLoaded = false; teamDemandsHasMore = false;
     teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;
+    recentBotActivityTeamId=''; recentBotActivityLoaded=false;
+    recentBotActivity.clear();
     reviewQueue = []; reviewQueueLoaded = false;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -2300,6 +2332,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!selected || (next!=='active' && next!=='archived')) return;
       teamArchived=next==='archived';
       void work(async()=>{await refreshTeamDemands(selected);});
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-team-activity')) {
+      const cfg=current();
+      if (!cfg || workspaceView!=='team' || busy || loading) return;
+      const teamId=cfg.id, policyRevision=cfg.policyRevision;
+      const candidates=tickets.filter(item=>item.orchestrationId===teamId).slice(0,8);
+      void work(async()=>{
+        const snapshots:TicketDetails[]=[];
+        // Sequential and bounded to avoid a burst of native SQLite reads.
+        for (const ticket of candidates) {
+          const snapshot=await call<TicketDetails>('superagent_snapshot',
+            {ticketId:ticket.id,limit:1});
+          if (snapshot.ticket.id!==ticket.id || snapshot.ticket.orchestrationId!==teamId)
+            throw new Error('Native Worker activity snapshot belongs to another Team or Ticket.');
+          snapshots.push(snapshot);
+        }
+        if (selected!==teamId || current()?.policyRevision!==policyRevision) return;
+        const observed=new Map<string,{
+          ticketId:string; state:string; at:number; attempt:number;
+        }>();
+        for (const snapshot of snapshots) {
+          for (const assignment of snapshot.assignments) {
+            const at=assignment.updatedAt ?? assignment.createdAt ?? 0;
+            const previous=observed.get(assignment.botId);
+            if (!previous || at>previous.at) {
+              observed.set(assignment.botId,{
+                ticketId:snapshot.ticket.id,state:assignment.state,
+                at,attempt:assignment.attempt,
+              });
+            }
+          }
+        }
+        recentBotActivity=observed;
+        recentBotActivityTeamId=teamId;
+        recentBotActivityLoaded=true;
+      });
       return;
     }
     if (target.hasAttribute('data-sa-refresh-team-demands')) {

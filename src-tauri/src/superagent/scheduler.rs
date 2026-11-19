@@ -562,8 +562,38 @@ fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],ini
     format!("{base}\n\nAuthorized Worker profiles (declarations, not executable grants):\n{capabilities}\n\n{path_guidance}")
 }
 
-/// Frozen native bot profiles provide bounded specialization hints. Do not
-/// pass credentials, memory bodies or writable authority to the Coordinator.
+/// Only a sanitized native discovery profile is allowed into Coordinator
+/// planning context. Never serialize the frozen raw instructions or goals:
+/// those are admission metadata, not consent for peer disclosure.
+fn coordinator_safe_capability(bot_id: &str, profile: &serde_json::Value)
+    -> serde_json::Value {
+    let skills: Vec<String> = profile["skills"].as_array().into_iter().flatten()
+        .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+        .take(32).collect();
+    serde_json::json!({
+        "workerBotId":bot_id,
+        "role":profile["role"],
+        "publishedSummary":profile["summary"],
+        "skills":skills,
+        "provider":profile["provider"]["value"],
+        "model":profile["model"]["value"],
+        "projectId":profile["projectScope"]["projectId"],
+        "projectScopeStatus":profile["projectScope"]["status"],
+        "nativePermissionMode":profile["permissionMode"]["value"],
+        "effectiveReadWrite":"runtime_authorization_required",
+        "instructions":{"configured":profile["instructions"]["configured"],
+            "status":"restricted"},
+        "goals":{"configured":profile["goals"]["configured"],
+            "status":"restricted"},
+        "availability":profile["availability"]["status"],
+        "capabilitySource":"current_native_configuration",
+        "executionEligibility":"not_verified",
+        "summaryOrigin":"explicitly_published_or_missing"
+    })
+}
+
+/// Frozen native role snapshots must still match before disclosure. Only native
+/// privacy-filtered profiles may cross into the Coordinator's planning prompt.
 fn coordinator_worker_capabilities(store:&Store,ticket_id:&str)->Result<String> {
     let snapshot=ticket_team_snapshot(store,ticket_id)?;
     let mut profiles=Vec::with_capacity(snapshot.worker_bot_ids.len());
@@ -574,22 +604,21 @@ fn coordinator_worker_capabilities(store:&Store,ticket_id:&str)->Result<String> 
         if !snapshot_role_profile_matches(&store.db,&snapshot,"worker",ordinal,bot_id)? {
             return Err("Worker capability profile changed after Demand admission.".into());
         }
-        let profile=role.effective_config.as_ref().ok_or("Worker capability profile missing.")?;
-        let bounded=|key:&str,max:usize|->String {
-            profile.get(key).and_then(serde_json::Value::as_str)
-                .unwrap_or("").chars().take(max).collect()
-        };
-        profiles.push(serde_json::json!({
-            "workerBotId":bot_id,
-            "projectId":bounded("projectId",128),
-            "provider":bounded("provider",80),
-            "model":bounded("model",120),
-            "role":bounded("role",120),
-            "instructions":bounded("instructions",1200),
-            "goals":bounded("goals",600),
-            "skills":profile.get("skills").cloned().unwrap_or(serde_json::json!([])),
-            "profileSha256":role.effective_config_sha256,
-        }));
+        if role.effective_config.is_none() {
+            return Err("Worker capability profile missing.".into());
+        }
+        let discoverable=bots::discovery::inspect(
+            store,bot_id,Some(&snapshot.coordinator_bot_id));
+        match discoverable {
+            Ok(profile)=>profiles.push(coordinator_safe_capability(bot_id,&profile)),
+            Err(error) if error.contains("discovery is disabled")=>
+                profiles.push(serde_json::json!({
+                    "workerBotId":bot_id,
+                    "status":"restricted_by_owner",
+                    "capabilitySource":"not_disclosed"
+                })),
+            Err(error)=>return Err(error),
+        }
     }
     serde_json::to_string(&profiles).map_err(|error|error.to_string())
 }
@@ -1206,6 +1235,31 @@ mod tests {
         assert!(check("Changed","key",Some((3,7,"project","/root",&scope))).is_err());
         db.execute("UPDATE sa_tickets SET actor='github' WHERE id='t'",[]).unwrap();
         assert!(check("Implement","key",Some((3,7,"project","/root",&scope))).is_err());
+    }
+
+    #[test]
+    fn coordinator_capability_context_never_forwards_private_bot_instructions() {
+        let discovered=serde_json::json!({
+            "role":{"value":"Rust test engineer","source":"user_declared","status":"self_report"},
+            "summary":{"value":"Tests Rust services","source":"explicitly_published","status":"self_report"},
+            "skills":[{"id":"rust-testing","status":"not_verified"}],
+            "provider":{"value":"codex"},"model":{"value":"default"},
+            "projectScope":{"projectId":"project-a","status":"project_reference_only"},
+            "permissionMode":{"value":"ask"},
+            "instructions":{"configured":true,"status":"restricted"},
+            "goals":{"configured":true,"status":"restricted"},
+            "availability":{"status":"not_paused_runtime_unknown"}
+        });
+        let entry=coordinator_safe_capability("worker-a",&discovered);
+        assert_eq!(entry["role"]["value"],"Rust test engineer");
+        assert_eq!(entry["skills"][0],"rust-testing");
+        assert_eq!(entry["instructions"]["status"],"restricted");
+        assert_eq!(entry["goals"]["status"],"restricted");
+        assert_eq!(entry["executionEligibility"],"not_verified");
+        assert_eq!(entry["publishedSummary"]["source"],"explicitly_published");
+        assert!(entry.get("rawInstructions").is_none());
+        assert!(entry.get("privateMemory").is_none());
+        assert!(!entry.to_string().contains("provider-secret"));
     }
 
     #[test]

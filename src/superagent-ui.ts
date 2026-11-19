@@ -596,17 +596,27 @@ export function mountSuperagent(
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
     // One native read of the bounded cross-Team Demand index powers both
     // accessible presentations. A board column is not a scheduler state.
-    const demandCard = (demand: DemandIndex) =>
-      '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
-      '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
-        'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
-      demand.revision + ' · Project ' + safe(demand.projectId ?? 'Unknown') +
-      ' · Updated ' + safe(activityTime(demand.updatedAt)) +
-      '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
-      '">Open demand</button>' +
-      (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
-        ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
-          '">Stop demand</button>' : '') + '</li>';
+    const demandCard = (demand: DemandIndex) => {
+      const team = presets.find(item => item.id === demand.orchestrationId);
+      return '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
+        '</strong><small>' + safe(team?.name ?? 'Unknown Team') +
+        ' · ' + safe(demand.state) + ' · Revision ' +
+        demand.revision + ' · Project ' + safe(demand.projectId ?? 'Unknown') +
+        ' · Updated ' + safe(activityTime(demand.updatedAt)) +
+        '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
+        '">Open demand</button>' +
+        (demand.state === 'blocked'
+          ? !team?.enabled
+            ? '<small>Manual retry unavailable: Team disabled or missing.</small>'
+            : (team.reviewerCount ?? 0) > 0
+              ? '<small>Manual retry unavailable: configured Council requires native review.</small>'
+              : '<button type="button" data-sa-retry-global-demand="' + safe(demand.id) +
+                '">Retry demand</button>'
+          : '') +
+        (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
+          ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
+            '">Stop demand</button>' : '') + '</li>';
+    };
     const demandGroups = [
       {label:'Working',states:['queued','running']},
       {label:'Awaiting decision',states:['waiting_approval','waiting_review']},
@@ -1722,6 +1732,59 @@ export function mountSuperagent(
         }
         allDemands = [...allDemands, ...loaded];
         allDemandsHasMore = loaded.length === 200;
+      });
+      return;
+    }
+    if (target.dataset.saRetryGlobalDemand) {
+      const demand = allDemands.find(item => item.id === target.dataset.saRetryGlobalDemand);
+      const team = presets.find(item => item.id === demand?.orchestrationId);
+      if (!demand || demand.state !== 'blocked' || !team?.enabled ||
+          (team.reviewerCount ?? 0) > 0 || busy) return;
+      void work(async () => {
+        // The cross-Team board is a read-only index, not a retry grant.
+        // Pin the original Ticket identity and revision before user consent.
+        const snapshot = await call<TicketDetails>('superagent_snapshot',
+          {ticketId:demand.id,limit:1});
+        const unchanged = (ticket:Ticket) =>
+          ticket.id === demand.id && ticket.orchestrationId === demand.orchestrationId &&
+          ticket.revision === demand.revision && ticket.state === 'blocked';
+        if (!unchanged(snapshot.ticket)) {
+          throw new Error('Demand changed since the native page was loaded; refresh before retrying.');
+        }
+        ask('Retry blocked Demand ' + demand.id + ' at revision ' + demand.revision +
+          '? Native admission rechecks the original worker, mandate, project and attempt budget. ' +
+          'This explicitly starts another read-only Worker attempt, not an approval.', async () => {
+          // Confirmation can remain open while another session changes the Ticket.
+          // Native retry itself also rechecks role, mandate, project and lease.
+          const fresh = await call<TicketDetails>('superagent_snapshot',
+            {ticketId:demand.id,limit:1});
+          if (!unchanged(fresh.ticket)) {
+            throw new Error('Demand changed before confirmation; refresh before retrying.');
+          }
+          let retried:Ticket;
+          try {
+            retried = await call<Ticket>('superagent_retry',{ticketId:demand.id});
+          } finally {
+            // Native retry may persist a blocked launch failure before returning
+            // an error. Never leave the prior board controls as if nothing changed.
+            await reload();
+            const page = await fetchDemandPage({
+              limit:200, orchestrationId:demandTeamFilter || undefined,
+              stateFilter:demandStateFilter || undefined,
+              searchQuery:demandSearch || undefined,
+              projectId:demandProjectFilter || undefined,
+            });
+            allDemands = page; allDemandsLoaded = true;
+            allDemandsHasMore = page.length === 200;
+          }
+          if (!retried || retried.id !== demand.id ||
+              retried.orchestrationId !== demand.orchestrationId ||
+              retried.revision <= demand.revision) {
+            throw new Error('Native retry returned an inconsistent Ticket; inspect its latest state.');
+          }
+          feedback = 'Native retry admitted for Demand ' + demand.id +
+            '. Inspect the Worker attempt and evidence; completion is not implied.';
+        });
       });
       return;
     }

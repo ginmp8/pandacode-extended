@@ -1444,6 +1444,101 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   await expect(global).toContainText('stopped');
 });
 
+test('cross-Team blocked Demand retry requires current native identity, confirmation and bounded admission', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div'); host.id = 'sa-global-retry-fixture';
+    document.body.appendChild(host);
+    type Mode = 'stale-first' | 'stale-confirm' | 'native-denied' | 'valid';
+    type Trace = {command:string;args?:Record<string,unknown>};
+    let mode:Mode = 'stale-first', reads = 0, enabled = true;
+    const trace:Trace[] = [];
+    (window as unknown as {saRetryTrace:Trace[]}).saRetryTrace = trace;
+    (window as unknown as {
+      saRetryMode:(next:Mode)=>void;saRetryEnabled:(next:boolean)=>void;
+    }).saRetryMode = next => {mode = next;reads = 0;};
+    (window as unknown as {saRetryEnabled:(next:boolean)=>void}).saRetryEnabled =
+      next => {enabled = next;};
+    let demand = {id:'retry-7',orchestrationId:'team-b',objective:'Recover scoped Worker',
+      state:'blocked',revision:7,updatedAt:1794470400000,projectId:'project-b',evidence:null};
+    mountSuperagent(host,async(command,args)=>{
+      trace.push({command,args});
+      if(command==='bots_list')return [
+        {id:'lead',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:false,policyRevision:2},
+        {id:'team-b',name:'Performance',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled,reviewerCount:0,policyRevision:3},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands')return [{...demand}] as never;
+      if(command==='superagent_snapshot'){
+        if(args?.ticketId!==demand.id)throw Error('Wrong native Ticket identity');
+        reads++;
+        const stale = mode==='stale-first' || (mode==='stale-confirm' && reads>1);
+        return {ticket:{...demand,revision:demand.revision+(stale?1:0)},
+          mandate:{actor:'local-user',authorizationId:'native',projectId:'project-b',
+            policyRevision:3,expiresAt:1800000000000,revoked:false,
+            allowedTools:[],allowedSideEffects:false},
+          assignments:[],activity:[],council:null} as never;
+      }
+      if(command==='superagent_retry'){
+        if(mode==='native-denied')throw Error('Original mandate expired; native retry denied.');
+        if(args?.ticketId!==demand.id)throw Error('Incorrect native retry Ticket');
+        demand={...demand,state:'running',revision:demand.revision+1};
+        return {...demand} as never;
+      }
+      throw Error('Unexpected native operation: '+command);
+    });
+  });
+  const host=page.locator('#sa-global-retry-fixture');
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  const retry=global.getByRole('button',{name:'Retry demand'});
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(host.getByRole('alert')).toContainText('Demand changed since the native page');
+  await expect(host.getByRole('alertdialog')).toHaveCount(0);
+  await page.evaluate(()=>(window as unknown as {saRetryMode:(v:string)=>void})
+    .saRetryMode('stale-confirm'));
+  await retry.click();
+  const confirm=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(confirm).toContainText('revision 7');
+  await expect(confirm).toContainText('read-only Worker attempt');
+  await confirm.getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('alert')).toContainText('Demand changed before confirmation');
+  let calls=await page.evaluate(()=>
+    (window as unknown as {saRetryTrace:Trace[]}).saRetryTrace);
+  expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(0);
+  await page.evaluate(()=>(window as unknown as {saRetryMode:(v:string)=>void})
+    .saRetryMode('native-denied'));
+  await retry.click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('alert')).toContainText('Original mandate expired');
+  await expect(retry).toBeVisible();
+  await page.evaluate(()=>(window as unknown as {saRetryMode:(v:string)=>void})
+    .saRetryMode('valid'));
+  await retry.click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(global).toContainText('running');
+  await expect(global.getByRole('button',{name:'Retry demand'})).toHaveCount(0);
+  await expect(host.getByRole('status').filter({hasText:'Native retry admitted'})).toBeVisible();
+  calls=await page.evaluate(()=>
+    (window as unknown as {saRetryTrace:{command:string;args?:Record<string,unknown>}[]})
+      .saRetryTrace);
+  expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(2);
+  expect(calls.find(call=>call.command==='superagent_retry')?.args)
+    .toMatchObject({ticketId:'retry-7'});
+  expect(calls.some(call=>/grant|accept|effect_reserve|council_pass/.test(call.command)))
+    .toBe(false);
+});
+
 test('cross-Team native Demand pages load older Tickets without inferring new work', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

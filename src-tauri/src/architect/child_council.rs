@@ -845,6 +845,12 @@ fn validate_admitted(
             || leaf.provider != session.provider || leaf.model != session.model
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
+            // A queued snapshot cannot authorize a second provider launch if
+            // its task-scoped native session is actually running or waiting.
+            // Check the entire issued roster before allowing any sibling
+            // launch, escalation, callback or composite evidence inspection.
+            || (leaf.status == "queued"
+                && matches!(session.status.as_str(), "running" | "waiting"))
             || !matches!(leaf.status.as_str(), "queued" | "running" | "waiting" | "completed" | "failed" | "stopped")
             || leaf.council.as_ref().is_none_or(|seat| seat.round != expected_round)
             || super::parent_of(store, &record.child_session_id)?.as_deref()

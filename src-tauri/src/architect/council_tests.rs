@@ -6282,6 +6282,75 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
 }
 
 #[test]
+fn queued_native_child_reviewer_cannot_be_dispatched_while_its_session_is_live() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["queued-live-security", "queued-live-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut council = on(9.0, 3, 0);
+        council.nested_bot_reviewers = ["queued-live-security", "queued-live-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(council);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review frozen task evidence", None, None,
+    ).unwrap();
+    dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit real read-only child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let child_id = child_council::inspect(&store, &root).unwrap()[0]
+        .child_session_id.clone();
+    let child_before = serde_json::to_value(
+        load(&store, &child_id).unwrap().unwrap(),
+    ).unwrap();
+    let leaf_sid = load(&store, &child_id).unwrap().unwrap().workers[0]
+        .session_id.clone();
+    let previous_status = store.session(&leaf_sid).unwrap().status;
+    assert!(!matches!(previous_status.as_str(), "running" | "waiting"));
+    for native_status in ["running", "waiting"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&leaf_sid, native_status],
+        ).unwrap();
+        let denied = child_council::next_leaf_launch(
+            &store, &std::collections::HashMap::new(), &root,
+        ).err().expect("a live native reviewer cannot launch twice");
+        assert!(denied.contains("child_council_stale"), "{denied}");
+        assert_eq!(
+            serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+            child_before, "denied duplicate native admission cannot consume a queued seat",
+        );
+    }
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![&leaf_sid, previous_status],
+    ).unwrap();
+    let launch = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).unwrap().unwrap();
+    assert_eq!(launch.sid, leaf_sid);
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+}
+
+#[test]
 fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admission() {
     let (state, sid) = state_fixture();
     {

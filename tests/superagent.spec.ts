@@ -944,6 +944,9 @@ test('Orchestrations reference Teams cards use native counters, avatars and stat
   await expect(host.getByRole('group',{name:'Native workspace metrics'}))
     .toContainText('Counts unavailable');
   await expect(host.getByRole('button',{name:'New Team',exact:true})).toBeVisible();
+  await host.getByRole('button',{name:'Team workspace',exact:true}).click();
+  await expect(host.getByRole('region',{name:'Team overview'})).toBeVisible();
+  await expect(host.locator('.sa-enable-toggle')).toHaveAttribute('aria-pressed','true');
 });
 
 test('reference Team board preserves native WorkItems and worker conversation evidence',async({page})=>{

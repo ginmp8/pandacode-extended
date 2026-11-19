@@ -4,11 +4,11 @@ Issue: [#159](https://github.com/ginmp8/pandacode-extended/issues/159). Base: st
 
 ## Scope and trust boundaries
 
-Profiles are read from current local bot configuration at query time. Results describe declared role and explicit published summary, assigned Skills and MCP references, native provider/model/permission mode, opaque Project ID, and paused status. Declared fields include provenance and a status; runtime eligibility and concurrency are not inferred. A Project ID is not a checkout or permission grant.
+Profiles are read from current local bot configuration at query time. Results describe declared role, an optional explicitly published summary, a separate concise source-labelled summary derived only from safe role/assigned Skill references when no summary was published, assigned Skills and MCP references, native provider/model/permission mode, opaque Project ID, and paused status. Declared fields include provenance and a status; runtime eligibility and concurrency are not inferred. A Project ID is not a checkout or permission grant.
 
 Discovery does not run a provider, send a work message, mutate settings, authorize a tool, or approve Council work. Native project permissions, Council and ToolHost gates remain authoritative. Assigned Skills and MCP references are not proof of successful installation, harness compatibility, execution or task completion.
 
-Raw instructions, hidden prompts, private memories, unrelated chats, environment values and credentials are not returned. Only an explicitly user-published bounded summary can be shared with other bots. Each bot can opt out of peer discovery; the local owner can still inspect it. Declared summaries and capability questions are untrusted data. Questions are answered by a native deterministic reader instead of an LLM.
+Raw instructions, hidden prompts, private memories, unrelated chats, environment values and credentials are not returned. Peer bots receive either an explicitly user-published bounded summary or a clearly marked `summarized` explanation of non-sensitive role and Skill references; no private prompt is summarized or exposed. Each bot can opt out of peer discovery; the local owner can still inspect it. Declared summaries and capability questions are untrusted data. Questions are answered by a native deterministic reader instead of an LLM.
 
 ## Interfaces
 

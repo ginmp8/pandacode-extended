@@ -65,6 +65,7 @@ test.describe('bots', () => {
     const profile = panel(page).getByRole('region', { name: 'Capability profile' });
     await expect(profile).toContainText('Not an execution grant');
     await expect(profile).toContainText('Private instructions');
+    await expect(profile).toContainText('Capability summary');
     await profile.getByRole('combobox', { name: 'Who can discover this bot' }).selectOption('owner_only');
     await profile.getByRole('textbox', { name: /Public capability summary/ }).fill('Automated testing');
     await profile.getByRole('button', { name: 'Save discovery preferences' }).click();
@@ -72,6 +73,9 @@ test.describe('bots', () => {
     await profile.getByRole('textbox', { name: 'Question' }).fill('What skills are assigned?');
     await profile.getByRole('button', { name: 'Ask without executing' }).click();
     await expect(profile.getByRole('region', { name: 'Capability answer' })).toContainText('no task executed');
+    await profile.getByRole('textbox', { name: 'Question' }).fill('What can this bot do?');
+    await profile.getByRole('button', { name: 'Ask without executing' }).click();
+    await expect(profile.getByRole('region', { name: 'Capability answer' })).toContainText('summary');
   });
   test('bot actions menu aligns icons and labels to the left', async ({ page }) => {
     await page.goto('/');

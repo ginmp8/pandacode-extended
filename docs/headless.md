@@ -274,6 +274,25 @@ external effects. The live native retry/dispatch path must separately recheck
 mandate expiry, revocation, policy revision, project and checkout lease. Stopped
 Tickets cannot be restarted through key replay.
 
+For a Team with several configured Workers and no Reviewers, a local
+operator can stage an exact selected Worker rather than implicitly choosing
+the first Worker:
+
+```sh
+pandacode serve --queue-worker-demand <team-id> <worker-bot-id> <stable-request-key> /private/objective.txt
+```
+
+The selected Worker must be an active member of the enabled Team and share
+the currently supported native project scope. The command captures the entire
+ordered Team roster and the exact Worker identity in the immutable Ticket,
+without creating a provider session, acquiring an execution lease or granting
+any tools. A stable key cannot be reused to select a different Worker. The
+existing Desktop native retry is a separate explicit action that rechecks the
+admitted roster, profile, Mandate expiry and physical checkout occupancy.
+Multi-project work, configured Council Reviewers and automatic delegation
+remain unsupported on this path; these constraints must not be bypassed by
+a detached CLI.
+
 ## First run
 
 ```sh

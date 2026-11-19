@@ -1853,17 +1853,20 @@ fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
     })).map_err(|e| e.to_string())
 }
 
-/// An operator-issued headless Demand is durable and idempotent but deliberately
-/// blocked: no provider session, inferred launch, additional tools or effects.
-/// The existing native manual retry must independently recheck all admission
-/// conditions before it can dispatch this Ticket.
-pub(crate) fn headless_queue_demand(
+/// A detached local operator can stage one explicitly chosen Team Worker,
+/// including a secondary member. Staging never reserves a provider session;
+/// the native desktop retry must revalidate the frozen roster, worker profile,
+/// mandate and current checkout lease before dispatch.
+fn headless_queue_demand_member(
     database_path: &std::path::Path, orchestration_id: &str,
-    objective: &str, request_key: &str,
+    objective: &str, request_key: &str, selected_worker_id: Option<&str>,
 ) -> Result<String> {
     let mut store = open_headless_transition_store(database_path)?;
-    let (ticket, launched) = admit_role_with_staging(
-        &mut store, orchestration_id, objective, request_key, true, false, true,
+    let (ticket, launched) = admit_role_with_staging_member(
+        &mut store, orchestration_id, objective, request_key, true,
+        ManualAdmissionOptions {
+            coordinate: false, headless_staging: true, selected_worker_id,
+        },
     )?;
     debug_assert!(!launched);
     serde_json::to_string_pretty(&serde_json::json!({
@@ -1875,6 +1878,25 @@ pub(crate) fn headless_queue_demand(
         "allowedTools": [],
         "allowedSideEffects": false,
     })).map_err(|e| e.to_string())
+}
+
+/// Preserve the original single-Worker CLI admission contract.
+pub(crate) fn headless_queue_demand(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    headless_queue_demand_member(database_path, orchestration_id, objective, request_key, None)
+}
+
+/// Stage a named configured Worker without assuming that the first Team member
+/// owns the Demand. The stable request key also binds the selected Worker.
+pub(crate) fn headless_queue_selected_worker_demand(
+    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    headless_queue_demand_member(
+        database_path, orchestration_id, objective, request_key, Some(worker_bot_id),
+    )
 }
 
 /// Explicit local headless Team rename uses the same desktop CAS and guard
@@ -2920,8 +2942,8 @@ fn admit_role_with_staging_member(
     request_key: &str, busy: bool, options: ManualAdmissionOptions<'_>,
 ) -> Result<(Ticket, bool)> {
     let ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id } = options;
-    if selected_worker_id.is_some() && (coordinate || headless_staging) {
-        return Err("Explicit Worker selection supports direct local read-only Demands only.".into());
+    if selected_worker_id.is_some() && coordinate {
+        return Err("Explicit Worker selection cannot impersonate a Coordinator.".into());
     }
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
@@ -2941,10 +2963,21 @@ fn admit_role_with_staging_member(
             return Err("The manual-request key is already bound to another objective.".into());
         }
         if let Some(worker_id)=selected_worker_id {
-            let config=configuration(store,config_id)?;
-            direct_team_member(store,&config,worker_id)?;
+            // A duplicate staging request must not depend on current bot
+            // availability; its immutable Ticket already pins the Worker.
             if ticket_worker(store,&ticket.id)?!=worker_id {
                 return Err("Manual request key already belongs to another selected Worker.".into());
+            }
+            if !headless_staging {
+                let config=configuration(store,config_id)?;
+                direct_team_member(store,&config,worker_id)?;
+            }
+        } else if headless_staging {
+            // Never replay a selected secondary-Worker key through the
+            // legacy primary-Worker CLI and misrepresent its original scope.
+            let config=configuration(store,config_id)?;
+            if ticket_worker(store,&ticket.id)?!=config.worker_bot_id {
+                return Err("Manual request key already belongs to a selected Worker.".into());
             }
         }
         // A key identifies the original native dispatch intent as well as its
@@ -3004,7 +3037,7 @@ fn admit_role_with_staging_member(
     if coordinate && (busy || occupied) {
         return Err("Coordinator is busy; retry this explicit manual request later.".into());
     }
-    if selected_worker_id.is_some() && (busy || occupied) {
+    if selected_worker_id.is_some() && !headless_staging && (busy || occupied) {
         return Err("Selected Worker or checkout is occupied; no Demand was admitted.".into());
     }
     let blocked = busy || occupied || headless_staging;
@@ -4565,14 +4598,30 @@ fn retry_blocked(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("SuperAgent remains disabled or globally paused.".into());
     }
-    if roster::has_additional_members(store, &config.id)? {
-        return Err("Multi-member Team requires native scoped role admission; manual retry denied.".into());
+    let members = roster::read(store, &config.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
+        return Err("Configured Council reviewers require a native task-bound review.".into());
+    }
+    let selected_worker_id = ticket_worker(store, ticket_id)?;
+    if members.worker_bot_ids.len() > 1 {
+        // A legacy blocked Ticket must not acquire a new multi-member roster
+        // merely because the Team changed while it was waiting. Compare the
+        // entire ordered admitted Worker set, not only the chosen bot.
+        let pinned = roster::ticket_profile(store, ticket_id)?
+            .ok_or("Multi-member Ticket has no admitted Team profile.")?;
+        let original_workers = pinned.members.iter()
+            .filter(|member| member.role == "worker")
+            .map(|member| member.bot_id.clone())
+            .collect::<Vec<_>>();
+        if pinned.policy_revision != config.policy_revision
+            || original_workers != members.worker_bot_ids
+        {
+            return Err("Multi-member Team roster changed since Demand admission; retry denied.".into());
+        }
     }
     let coordinator=bots::get(store,&config.coordinator_bot_id)?;
-    let worker=bots::get(store,&config.worker_bot_id)?;
-    if coordinator.paused || worker.paused || worker.id != ticket_worker(store,ticket_id)?
-        || worker.project_id != config.project_id
-    {
+    let worker=direct_team_member(store, &config, &selected_worker_id)?;
+    if coordinator.paused || worker.project_id != config.project_id {
         return Err("Original worker or coordinator is unavailable or out of scope.".into());
     }
     let mandate_ok: bool = store.db.query_row(
@@ -5259,6 +5308,122 @@ mod tests {
         assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
     }
 
+
+
+    #[test]
+    fn headless_secondary_worker_demand_is_staged_and_retried_only_with_native_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('secondary-headless','Secondary Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'secondary-headless')",
+            [&cfg.id],
+        ).unwrap();
+        let objective = "Private headless secondary work";
+        let raw = headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", objective, "staged-secondary-1",
+        ).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = status["ticketId"].as_str().unwrap().to_string();
+        assert_eq!(status["state"], "blocked");
+        assert_eq!(status["providerDispatchedByCommand"], false);
+        assert_eq!(status["allowedTools"], serde_json::json!([]));
+        assert_eq!(status["allowedSideEffects"], false);
+        assert!(!raw.contains(objective));
+        assert_eq!(ticket_worker(&store, &ticket_id).unwrap(), "secondary-headless");
+        assert!(assignment_session(&store, &ticket_id).unwrap().is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket_id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(raw, headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", objective, "staged-secondary-1",
+        ).unwrap());
+        assert!(headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "worker", objective, "staged-secondary-1",
+        ).is_err());
+        assert!(headless_queue_demand(
+            &store.path, &cfg.id, objective, "staged-secondary-1",
+        ).is_err());
+        let thread = format!("{ticket_id}:attempt:1");
+        assert!(guard_gateway_inbound(
+            &store, "secondary-headless", &thread, "local-user", true,
+        ).is_err(), "staging is not provider admission");
+        assert!(retry_blocked(&mut store, &ticket_id, true).is_err());
+        let (running, admitted_thread, worker) =
+            retry_blocked(&mut store, &ticket_id, false).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(worker, "secondary-headless");
+        assert_eq!(admitted_thread, thread);
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_ok());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "external-actor", true,
+        ).is_err());
+        let session = assignment_session(&store, &ticket_id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(on_run_finished(&store, &session, true, "Independent evidence").unwrap());
+        assert!(accept(&store, &ticket_id, running.revision).is_err());
+        let waiting = get_ticket(&store, &ticket_id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        assert_eq!(accept(&store, &ticket_id, waiting.revision).unwrap().state, "completed");
+        assert!(!on_run_finished(&store, &session, true, "Late callback").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(ticket_worker(&reopened, &ticket_id).unwrap(), "secondary-headless");
+        assert_eq!(get_ticket(&reopened, &ticket_id).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn headless_secondary_worker_retry_denies_roster_drift_without_new_session() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        for id in ["secondary-headless", "replacement-headless"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id, storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'secondary-headless')",
+            [&cfg.id],
+        ).unwrap();
+        let raw = headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", "Private scope", "roster-drift-1",
+        ).unwrap();
+        let ticket_id = serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+            ["ticketId"].as_str().unwrap().to_string();
+        let before_sessions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        // A corrupted or external roster writer changed membership without
+        // changing the Team revision. The immutable Ticket must still win.
+        store.db.execute(
+            "UPDATE sa_team_roles SET bot_id='replacement-headless'
+             WHERE orchestration_id=?1 AND role='worker' AND position=1",
+            [&cfg.id],
+        ).unwrap();
+        let denied = retry_blocked(&mut store, &ticket_id, false).unwrap_err();
+        assert!(denied.contains("Multi-member Team roster"));
+        assert_eq!(get_ticket(&store, &ticket_id).unwrap().state, "blocked");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_sessions);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket_id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert!(!mandate(&store, &ticket_id).unwrap().revoked);
+    }
 
     #[test]
     fn headless_staged_demand_can_run_only_after_explicit_native_retry() {

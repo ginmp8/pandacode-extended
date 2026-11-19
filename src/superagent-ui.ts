@@ -2299,7 +2299,7 @@ export function mountSuperagent(
         : isMulti ? 'superagent_submit_to_worker' : 'superagent_submit';
       const reviewed = demandPreflight;
       if (isMulti && (coordinated || roleRoster?.orchestrationId !== selectedConfig?.id ||
-          !roleRoster.workerBotIds.includes(workerId))) return;
+          !roleRoster?.workerBotIds.includes(workerId))) return;
       if (!selectedConfig?.enabled || !objective || !reviewed ||
           reviewed.orchestrationId !== selectedConfig.id ||
           reviewed.policyRevision !== selectedConfig.policyRevision ||

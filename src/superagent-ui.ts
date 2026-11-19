@@ -1401,19 +1401,41 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ? 'Coordinator' : memberWorkers.includes(inspectedMemberId)
         ? 'Worker' : 'Independent reviewer';
     const memberRow = (id: string, role: string, order = '') => {
-      const bot = bots.find(candidate => candidate.id === id);
-      const name = bot?.name ?? id;
+      const bot=bots.find(candidate=>candidate.id===id);
+      const name=bot?.name ?? id;
+      const inspectedAssignment=ticketDetails?.ticket.orchestrationId===chosen?.id
+        ? ticketDetails.assignments.find(item=>item.botId===id) : null;
       return '<button type="button" class="sa-member-row" data-sa-member-inspect="' +
         safe(id) + '" aria-pressed="' + (id === inspectedMemberId) + '">' +
-        '<span class="sa-member-avatar">' + safe(name.slice(0,1).toUpperCase()) +
-        '</span><span class="sa-member-name"><strong>' + safe(name) + '</strong>' +
+        botPortrait(id).replace('sa-ux-avatar','sa-member-avatar') +
+        '<span class="sa-member-name"><strong>' + safe(name) + '</strong>' +
         '<small>' + safe(role) + (order ? ' · #' + order : '') +
         (bot?.skills?.length ? ' · ' + safe(bot.skills.slice(0,2).join(', ')) : '') +
-        '</small></span><span class="sa-member-model">' +
+        '</small><span class="sa-member-activity">' +
+        (bot?.paused ? 'Paused bot' : inspectedAssignment
+          ? 'Inspected Demand · attempt ' + inspectedAssignment.attempt +
+            ' · ' + safe(inspectedAssignment.state)
+          : 'No live assignment status loaded') +
+        '</span></span><span class="sa-member-model">' +
         safe(bot?.provider ?? 'Unknown harness') + '<span>' +
         safe(bot?.model ?? 'Unavailable model') + '</span></span>' +
         icon('chevron') + '</button>';
     };
+    const teamActivity=chosen ? '<section class="sa-pane sa-team-activity" ' +
+      'aria-label="Recent native Team activity"><header><div><h3>Recent Team activity</h3>' +
+      '<p>Native Demand updates for this Team only. Worker activity is shown in each ' +
+      'Demand and its bot chat.</p></div><button type="button" data-sa-team-tab="demands">' +
+      'Open team board</button></header>' +
+      (!teamDemandsLoaded ? '<p role="status">Load native Team Demands to see activity.</p>' :
+        (scopedTeamDemands.slice(0,5).map(item=>
+          '<div class="sa-activity-row"><div><strong>' + safe(item.objective) +
+          '</strong><small>Ticket ' + safe(item.id.slice(0,8)) + ' · ' +
+          safe(activityTime(item.updatedAt)) + '</small></div>' +
+          nativeBadge(item.state) +
+          '<button type="button" data-sa-open-demand="' + safe(item.id) +
+          '">Inspect</button></div>').join('') ||
+          '<p>No Demands in the current Team scope.</p>')) +
+      '</section>' : '';
     const overview = chosen
       ? '<div class="sa-team-overview" role="region" aria-label="Team overview">' +
         '<div class="sa-overview-top">' +
@@ -1427,9 +1449,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           memberReviewers.map(id => memberRow(id,'Independent reviewer')).join('') : '') +
         '</div></section>' +
         '<aside class="sa-pane sa-member-inspector"><h3>Member inspector</h3>' +
-        '<div class="sa-member-identity"><span class="sa-member-avatar">' +
-        safe((inspectedMemberBot?.name ?? inspectedMemberId).slice(0,1).toUpperCase()) +
-        '</span><strong>' + safe(inspectedMemberBot?.name ?? inspectedMemberId) +
+        '<div class="sa-member-identity">' +
+        botPortrait(inspectedMemberId).replace('sa-ux-avatar','sa-member-avatar') +
+        '<strong>' + safe(inspectedMemberBot?.name ?? inspectedMemberId) +
         '</strong><small>' + safe(inspectedMemberRole) + '</small></div>' +
         '<dl><dt>Harness</dt><dd>' + safe(inspectedMemberBot?.provider ?? 'Unknown') + '</dd>' +
         '<dt>Model</dt><dd>' + safe(inspectedMemberBot?.model ?? 'Unavailable') + '</dd>' +
@@ -1474,7 +1496,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-team-tab="demands">' +
         'View this Team\'s Demands & Tasks</button></div>' +
-        '</section></div>'
+        '</section>' + teamActivity + '</div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +

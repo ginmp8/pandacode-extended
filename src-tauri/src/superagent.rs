@@ -8434,7 +8434,7 @@ mod tests {
         // A bot remains reusable, but its editable Skill assignments cannot
         // expand the immutable in-flight Ticket's task-facing environment.
         assert_eq!(store.db.execute(
-            "UPDATE bots SET skills='[\\"late-added-skill\\"]' WHERE id=?1",
+            "UPDATE bots SET skills='[\"late-added-skill\"]' WHERE id=?1",
             [&config.worker_bot_id],
         ).unwrap(), 1);
         assert!(read_only_policy(&store, &session).is_err());
@@ -8484,7 +8484,7 @@ mod tests {
                 }
                 "skills" => {
                     assert_eq!(store.db.execute(
-                        "UPDATE bots SET skills='[\\"new-skill\\"]' WHERE id=?1",
+                        "UPDATE bots SET skills='[\"new-skill\"]' WHERE id=?1",
                         [&config.worker_bot_id],
                     ).unwrap(), 1);
                 }

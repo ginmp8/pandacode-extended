@@ -77,6 +77,10 @@ Adding a channel is a guided flow (`src/bots-connect.ts`): numbered steps with b
 
 Unknown senders get a four-digit pairing code and wait until approved in **Bots → Connections**. Web chat holders are the owner and skip pairing. Commands in any connection: `/stop`, `/new`, `/help`; `yes`, `no` and `always` answer a pending approval.
 
+## Capability discovery
+
+Bot Settings → **Capabilities** reads a current, native, read-only capability profile. Users can explicitly publish a summary and opt out of bot-to-bot discovery without changing permissions. Peer bots use `pandacode_bot_inspect_capabilities(to)` and `pandacode_bot_ask_capability(to, question)` from authenticated local sessions; neither operation starts work. Headless hosts support `pandacode serve --inspect-bot-capabilities <bot-id>` and `--ask-bot-capability <bot-id> <question>`. Results label configuration and unknown runtime status but never grant execution rights. See [Capability discovery](bot-capability-discovery.md).
+
 ## Shared bot channels
 
 **Shared Channel Council (Extended, [PR #145](https://github.com/ginmp8/pandacode-extended/pull/145) candidate):** The scales icon in the message footer opens a floating per-message Council panel for score, rounds and reviewer selection without expanding the composer. These settings are separate from bot-wide and per-channel history preferences. See the [illustrated Council guide](shared-channel-council.md) and [implementation reference](shared-channel-council-engineering.md).

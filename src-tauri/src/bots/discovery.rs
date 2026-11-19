@@ -200,6 +200,140 @@ pub(crate) fn inspect_headless(database: &std::path::Path, bot_id: &str,
     }
 }
 
+/// Pure declared-term matching. Does not ask an LLM to infer private skills.
+fn relevant_words(text: &str) -> std::collections::BTreeSet<String> {
+    const STOP: &[&str] = &[
+        "and", "the", "for", "with", "from", "this", "that", "have", "need",
+        "build", "work", "team", "task", "bot", "agent", "worker", "what",
+    ];
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|word| word.len() >= 3 && word.len() <= 40
+            && !STOP.contains(&word.as_str()))
+        .collect()
+}
+
+fn declared_fit(profile: &Value, objective_words: &std::collections::BTreeSet<String>)
+    -> (i64, Vec<String>, Vec<String>) {
+    let mut terms = std::collections::BTreeSet::new();
+    let mut evidence = Vec::new();
+    let role = profile["role"]["value"].as_str().unwrap_or("");
+    let declared = profile["summary"]["value"].as_str().unwrap_or("");
+    let mut score = 0;
+    for (source, text, weight) in [("user_declared_role", role, 2),
+                                  ("explicitly_published_summary", declared, 1)] {
+        let matching: Vec<String> = relevant_words(text).intersection(objective_words)
+            .cloned().collect();
+        if !matching.is_empty() {
+            score += (matching.len() as i64) * weight;
+            terms.extend(matching);
+            evidence.push(source.to_owned());
+        }
+    }
+    if let Some(skills) = profile["skills"].as_array() {
+        for skill in skills {
+            let id = skill["id"].as_str().unwrap_or("");
+            let matching: Vec<String> = relevant_words(id).intersection(objective_words)
+                .cloned().collect();
+            if !matching.is_empty() {
+                score += (matching.len() as i64) * 3;
+                terms.extend(matching);
+                if !evidence.iter().any(|entry| entry == "assigned_skill_reference") {
+                    evidence.push("assigned_skill_reference".into());
+                }
+            }
+        }
+    }
+    (score.min(30), terms.into_iter().collect(), evidence)
+}
+
+fn declared_role(profile: &Value) -> &'static str {
+    let role = profile["role"]["value"].as_str().unwrap_or("").to_ascii_lowercase();
+    if ["reviewer", "auditor", "quality assurance", "security review"]
+        .iter().any(|word| role.contains(word)) {
+        "reviewer"
+    } else {
+        "worker"
+    }
+}
+
+/// Compare current, explicitly discoverable local profiles against a bounded
+/// objective without creating any Team role, mandate, task, run or grant.
+pub(crate) fn recommend_candidates(store: &Store, orchestration_id: &str,
+    objective: &str) -> Result<Value> {
+    if objective.trim().is_empty() || objective.len() > 2000
+        || objective.chars().any(char::is_control) {
+        return Err("Provide a one-line objective of at most 2000 characters.".into());
+    }
+    let team = crate::superagent::roster::read(store, orchestration_id)?;
+    super::get(store, &team.coordinator_bot_id)?;
+    let words = relevant_words(objective);
+    let roster_ids: std::collections::BTreeSet<&str> =
+        team.worker_bot_ids.iter().chain(team.reviewer_bot_ids.iter())
+            .map(String::as_str).collect();
+    let mut candidates = Vec::new();
+    let mut excluded_by_preference = 0;
+    for bot in super::list(store)?.into_iter().take(200) {
+        if bot.id == team.coordinator_bot_id { continue; }
+        let profile = match inspect(store, &bot.id, Some(&team.coordinator_bot_id)) {
+            Ok(profile) => profile,
+            Err(error) if error.contains("discovery is disabled") => {
+                excluded_by_preference += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let (score, matches, evidence) = declared_fit(&profile, &words);
+        let configured = profile["availability"]["status"] == "configured_not_running";
+        let role = declared_role(&profile);
+        candidates.push(json!({
+            "botId":bot.id,
+            "name":bot.name,
+            "suggestedRole":role,
+            "alreadyAssigned":roster_ids.contains(bot.id.as_str()),
+            "declaredMatchScore":score,
+            "matchedTerms":matches,
+            "evidenceSources":evidence,
+            "status":if !configured {"unavailable"} else if score==0 {"no_matching_declaration"} else {"declared_match"},
+            "projectScope":profile["projectScope"],
+            "permissionMode":profile["permissionMode"],
+            "availability":profile["availability"],
+            "executionEligibility":"not_verified",
+            "sourceConfidence":"declarations_only"
+        }));
+    }
+    candidates.sort_by(|left,right| {
+        right["declaredMatchScore"].as_i64().unwrap_or(0)
+            .cmp(&left["declaredMatchScore"].as_i64().unwrap_or(0))
+            .then_with(|| left["name"].as_str().unwrap_or("")
+                .cmp(right["name"].as_str().unwrap_or("")))
+            .then_with(|| left["botId"].as_str().unwrap_or("")
+                .cmp(right["botId"].as_str().unwrap_or("")))
+    });
+    let truncated = candidates.len() > 30;
+    candidates.truncate(30);
+    Ok(json!({
+        "orchestrationId":team.orchestration_id,
+        "policyRevision":team.policy_revision,
+        "observedAt":crate::storage::now(),
+        "candidates":candidates,
+        "truncated":truncated,
+        "excludedByPrivacyPreference":excluded_by_preference,
+        "selectionApplied":false,
+        "authorizationGranted":false,
+        "disclaimer":"Ranked matches use declared role, published summary and assigned Skill IDs only. All execution and reviewer eligibility require separate native admission."
+    }))
+}
+
+#[tauri::command]
+pub async fn superagent_capability_candidates(window: tauri::WebviewWindow,
+    state: State<'_, AppState>, orchestration_id: String, objective: String)
+    -> Result<Value> {
+    super::guard_main(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    recommend_candidates(&store, &orchestration_id, &objective)
+}
+
 #[tauri::command]
 pub async fn bot_capability_profile(window: tauri::WebviewWindow,
     state: State<'_, AppState>, bot_id: String) -> Result<Value> {
@@ -270,6 +404,23 @@ mod tests {
         assert_eq!(inspect(&store, &target, None).unwrap()["visibility"], "owner_only");
         assert!(safe_summary("token=abc").is_err());
         assert!(safe_summary("Rust, tests and documentation").is_ok());
+    }
+
+    #[test]
+    fn declared_match_uses_only_public_evidence_and_never_claims_execution() {
+        let profile = json!({
+            "role":{"value":"Rust quality reviewer"},
+            "summary":{"value":"Reviews automated tests"},
+            "skills":[{"id":"rust-testing"}],
+            "instructions":{"status":"restricted"}
+        });
+        let objective = relevant_words("Improve Rust tests");
+        let (score, terms, sources) = declared_fit(&profile, &objective);
+        assert!(score > 0);
+        assert!(terms.contains(&"rust".into()));
+        assert!(sources.contains(&"assigned_skill_reference".into()));
+        assert_eq!(declared_role(&profile), "reviewer");
+        assert_eq!(declared_role(&json!({"role":{"value":null}})), "worker");
     }
 
     #[test]

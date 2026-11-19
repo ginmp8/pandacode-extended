@@ -37,9 +37,18 @@ fn safe_summary(raw: &str) -> Result<String> {
     // The summary is intentionally user-published, but still reject common
     // credential/prompt fragments so accidentally pasted secrets stay local.
     let lower = text.to_ascii_lowercase();
-    if ["api_key", "apikey", "secret=", "password", "bearer ", "sk-", "ghp_", "token=",
-        "private key", "begin rsa", "system prompt", "developer instruction",
-        "authorization:"].iter().any(|fragment| lower.contains(fragment))
+    let obvious_secret = ["api_key", "apikey", "secret=", "password=", "password:",
+        "bearer ", "ghp_", "github_pat_", "token=", "private key", "begin rsa",
+        "system prompt", "developer instruction", "authorization:"].iter()
+        .any(|fragment| lower.contains(fragment));
+    let token_like = text.split_whitespace().any(|token| {
+        let lowercase = token.to_ascii_lowercase();
+        (lowercase.starts_with("sk-") && token.len() >= 20)
+            || lowercase.starts_with("xoxb-")
+            || lowercase.starts_with("xapp-")
+            || lowercase.starts_with("akia") && token.len() == 20
+    });
+    if obvious_secret || token_like
     {
         return Err("Capability summary may not contain credentials or private prompts.".into());
     }
@@ -437,6 +446,43 @@ mod tests {
         set_paused(&store, &target, true).unwrap();
         assert_eq!(inspect(&store, &target, Some(&actor)).unwrap()
             ["availability"]["status"], "unavailable");
+    }
+
+    #[test]
+    fn headless_and_desktop_profiles_agree_without_running_a_bot() {
+        let root = std::env::temp_dir().join(format!(
+            "pandacode-capabilities-parity-{}", crate::storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("bot-capabilities.sqlite3");
+        let store = Store::open(&database).unwrap();
+        let input = BotInput {
+            name: "Headless QA".into(),
+            role: "Rust testing".into(),
+            instructions: "API_KEY=never-disclose".into(),
+            provider: "codex".into(), model: "default".into(), mode: "ask".into(),
+            ..Default::default()
+        };
+        let bot = create(&store, &input, &root).unwrap();
+        set_capabilities(&store, &bot.id, &["rust".into()], &[]).unwrap();
+        set_preferences(&store, &bot.id, "owner_only", "Automated test reviews").unwrap();
+        let desktop = inspect(&store, &bot.id, None).unwrap();
+        let session_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0)).unwrap();
+        let headless = inspect_headless(&database, &bot.id, None).unwrap();
+        assert_eq!(desktop["skills"], headless["skills"]);
+        assert_eq!(desktop["visibility"], headless["visibility"]);
+        assert_eq!(desktop["permissionMode"], headless["permissionMode"]);
+        assert_eq!(desktop["summary"], headless["summary"]);
+        assert!(!headless.to_string().contains("never-disclose"));
+        let answer = inspect_headless(&database, &bot.id,
+            Some("What skills are assigned?")).unwrap();
+        assert_eq!(answer["executed"], false);
+        assert_eq!(answer["authorizationGranted"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get::<_, i64>(0)).unwrap(),
+            session_count);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

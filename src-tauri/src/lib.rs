@@ -4092,6 +4092,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Activated GitHub Observe sources are polled by the local desktop/serve
+    // host only. They cannot infer work or bypass native source admission.
+    superagent::events::start_observe_subscriptions(app.handle().clone());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());

@@ -1,12 +1,12 @@
 //! S4 native Off/Observe decisions and explicit local thread-to-task links.
-//! Authenticated operator-invoked GitHub Events polling and exact Checks API lookups are Observe-only.
-//! No webhook/subscription, inferred worker admission or Auto effects exist.
+//! Authenticated GitHub Events Observe polling is explicit or periodically run by the local host.
+//! Check Runs require exact operator-selected IDs; no inferred worker admission or Auto effects exist.
 //! Public IPC intake still refuses caller-supplied unverified envelopes.
 use super::require_main_window;
 use crate::{storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 /// Additive schema. No session, Ticket, bot profile or old authorization is changed.
 pub(crate) const SCHEMA: &str = r#"
@@ -88,6 +88,8 @@ const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
 const GITHUB_PAGE_SIZE: usize = 100;
 const GITHUB_MAX_PAGES: usize = 3;
+const AUTO_OBSERVE_BATCH: i64 = 12;
+const AUTO_OBSERVE_INTERVAL_SECS: u64 = 5 * 60;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issues.closed", "issues.reopened",
     "issues.assigned", "issues.unassigned", "issues.labeled", "issues.unlabeled",
@@ -492,6 +494,88 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([orchestration_id], source_row).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+
+/*
+ * Activated Observe sources are the ONLY candidates for local background
+ * GitHub reads. A stable keyset bounds each pass without starving later
+ * Teams, and excludes Check Runs, which require an exact operator-supplied ID.
+ * This is not an Auto grant or a gap-free GitHub event subscription.
+ */
+fn next_observe_subscription_sources(
+    store: &Store, after: Option<(i64, &str)>,
+) -> Result<Vec<(i64, String)>> {
+    let (after_at, after_id) = after.map_or(
+        (None, None), |(at, id)| (Some(at), Some(id)),
+    );
+    let mut stmt = store.db.prepare(
+        "SELECT s.created_at,s.id
+         FROM sa_event_sources s
+         JOIN sa_orchestrations o ON o.id=s.orchestration_id
+         WHERE s.mode='observe' AND s.event_kind<>'check_run.completed'
+           AND (?1 IS NULL OR s.created_at>?1
+                OR (s.created_at=?1 AND s.id>?2))
+         ORDER BY s.created_at,s.id LIMIT ?3",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        params![after_at, after_id, AUTO_OBSERVE_BATCH],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// One bounded, explicitly enabled Observe pass per interval, shared by
+/// desktop and live serve. The current native policy and authenticated GitHub
+/// identity are checked again at every source request and receipt transaction.
+/// Failed/Off/revoked sources cannot admit work, and the cursor advances in
+/// memory even on failure so a broken source does not starve another Team.
+pub(crate) fn start_observe_subscriptions(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut after: Option<(i64, String)> = None;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                AUTO_OBSERVE_INTERVAL_SECS,
+            )).await;
+            let state = app.state::<AppState>();
+            if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                break;
+            }
+            let read_batch = |after: Option<(i64, &str)>| -> Result<Vec<(i64, String)>> {
+                let store = state.store.lock().map_err(|e| e.to_string())?;
+                next_observe_subscription_sources(&store, after)
+            };
+            let mut batch = match read_batch(
+                after.as_ref().map(|(at, id)| (*at, id.as_str())),
+            ) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    eprintln!("SuperAgent Observe: source selection failed; retry on next interval.");
+                    continue;
+                }
+            };
+            if batch.is_empty() && after.is_some() {
+                after = None;
+                batch = match read_batch(None) {
+                    Ok(batch) => batch,
+                    Err(_) => {
+                        eprintln!("SuperAgent Observe: source selection failed; retry on next interval.");
+                        continue;
+                    }
+                };
+            }
+            for (created_at, source_id) in batch {
+                if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                    return;
+                }
+                after = Some((created_at, source_id.clone()));
+                if poll_source_authenticated(&state, &source_id).await.is_err() {
+                    // No GitHub response body, URL, token or provider text in logs.
+                    eprintln!("SuperAgent Observe: authenticated source poll failed; inspect source health and GitHub credentials.");
+                }
+            }
+        }
+    });
 }
 
 /// Native source health distinguishes a verified GitHub Events watermark from
@@ -2314,6 +2398,76 @@ pub async fn superagent_source_thread_links(
 mod tests {
     use super::*;
 
+
+
+    #[test]
+    fn periodic_observe_selection_is_bounded_rotating_and_restart_durable_without_work() {
+        let (store, path) = fixture();
+        let mut enabled_ids = Vec::new();
+        for (index, kind) in EVENT_KINDS.iter().take(15).enumerate() {
+            let source = create_source(
+                &store, "orch", "owner/repo", "trusted-bot", kind,
+            ).unwrap();
+            if index < 14 {
+                set_mode(&store, &source.id, source.policy_revision, "observe").unwrap();
+                enabled_ids.push(source.id);
+            }
+        }
+        let checks = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "check_run.completed",
+        ).unwrap();
+        set_mode(&store, &checks.id, checks.policy_revision, "observe").unwrap();
+        store.db.execute(
+            "INSERT INTO sa_orchestrations
+             (id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
+             VALUES('other-team','Another Team','router','worker','fixture',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let other = create_source(
+            &store, "other-team", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        set_mode(&store, &other.id, other.policy_revision, "observe").unwrap();
+        enabled_ids.push(other.id);
+
+        let first = next_observe_subscription_sources(&store, None).unwrap();
+        assert_eq!(first.len(), AUTO_OBSERVE_BATCH as usize);
+        let boundary = first.last().unwrap();
+        let second = next_observe_subscription_sources(
+            &store, Some((boundary.0, boundary.1.as_str())),
+        ).unwrap();
+        assert_eq!(second.len(), enabled_ids.len() - first.len());
+        let all: std::collections::BTreeSet<_> = first.iter().chain(&second)
+            .map(|(_, id)| id.as_str()).collect();
+        assert_eq!(all.len(), enabled_ids.len());
+        for id in &enabled_ids {
+            assert!(all.contains(id.as_str()));
+        }
+        assert!(!all.contains(checks.id.as_str()));
+        let end = second.last().unwrap();
+        assert!(next_observe_subscription_sources(
+            &store, Some((end.0, end.1.as_str())),
+        ).unwrap().is_empty());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(
+            next_observe_subscription_sources(&reopened, None).unwrap(),
+            first,
+        );
+        assert_eq!(
+            next_observe_subscription_sources(
+                &reopened, Some((boundary.0, boundary.1.as_str())),
+            ).unwrap(),
+            second,
+        );
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "Selecting background sources never invents an observation");
+    }
 
     #[test]
     fn headless_source_admin_preserves_off_policy_receipts_and_team_scope() {

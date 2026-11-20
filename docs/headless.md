@@ -594,6 +594,17 @@ Re-running is idempotent for unchanged provider delivery IDs, and there is no
 batch-wide promise of atomic rollback or a gap-free live subscription.
 This command does not register a background poller or enable Auto.
 
+Activated GitHub Events Observe sources are also checked by a running desktop
+or `pandacode serve` host every five minutes, up to twelve sources per pass.
+The host rotates across Teams in stable source order, and source revocation
+is checked both before the GitHub request and when storing each receipt.
+A process restart restarts the scan; durable delivery IDs deduplicate previously
+recorded events. An Off source makes no GitHub request, and Check Runs still
+require an exact explicit ID. This bounded polling is **not** a guarantee of
+gap-free GitHub event history or a grant for Auto, tools or external writes;
+a missing historical boundary fails closed and requires operator diagnosis.
+The one-shot CLI commands above retain their explicit, exit-after-poll behavior.
+
 ### Ticket review and stop commands
 
 ```sh

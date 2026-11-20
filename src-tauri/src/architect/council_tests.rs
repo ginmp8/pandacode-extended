@@ -5813,6 +5813,21 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
             "fresh review seats must not inherit the interrupted provider transcript");
     }
     assert_eq!(root.council_since, old_cycle);
+    // Two revoked leaves from the old child still consume task budget.
+    // Four current leaves plus two historical grants count as six attempts.
+    let active_leaf_count: usize = child_council::inspect(&store, &root).unwrap()
+        .iter().map(|view| load(&store, &view.child_session_id).unwrap().unwrap().workers.len())
+        .sum();
+    assert_eq!(active_leaf_count, 4);
+    let root_attempts = root.workers.iter()
+        .filter(|worker| worker.council.is_some() && worker.created_at >= root.council_since)
+        .count();
+    let remaining_with_history = 1024 - root_attempts - 6;
+    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining_with_history).is_ok(),
+        "recovery must retain the budget consumed by interrupted native child leaves");
+    let error = child_council::require_total_attempt_capacity(&store, &root, remaining_with_history + 1)
+        .unwrap_err();
+    assert!(error.contains("admitted root and child reviewer attempts"), "{error}");
 }
 
 

@@ -1895,22 +1895,68 @@ pub(super) fn verified_s2_receipts(
     Ok(Some(receipts))
 }
 
-/// Recount every task-owned child leaf from authenticated native reservations.
-/// The root transaction owns this check before dispatching any new review.
+/// Account for every issued leaf in the current root cycle, including
+/// revoked children replaced during explicit crash recovery. The root retains
+/// native ownership of retired child sessions, and their original read-only
+/// authority records remain durable even after leaf ownership is detached.
+/// Counting only active reservations would refund an entire wave on recovery.
+fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+    let mut statement = store.db.prepare(
+        "SELECT DISTINCT child.session_id FROM architect_workers AS child
+         JOIN sessions AS session ON session.id=child.session_id
+         WHERE child.parent_session_id=?1 AND session.task_description=?2",
+    ).map_err(|error| error.to_string())?;
+    let children = statement.query_map(
+        params![&root.session_id, RESERVATION_DESCRIPTION],
+        |row| row.get::<_, String>(0),
+    ).map_err(|error| error.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let mut attempts = 0usize;
+    for child_id in children {
+        let child = super::load(store, &child_id)?
+            .ok_or("child_council_stale: historical child admission state is missing.")?;
+        if child.council_since != root.council_since {
+            continue;
+        }
+        if child.session_id != child_id || child.config.council.is_none() {
+            return Err("child_council_stale: historical child Council identity changed.".into());
+        }
+        let grants: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='reviewer_authority'",
+            [&child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        let recorded = usize::try_from(grants)
+            .map_err(|_| "child_council_stale: invalid historical leaf grant count.")?;
+        // Neither a removed snapshot entry nor a deleted authority row may
+        // refund a previously admitted reviewer attempt.
+        attempts = attempts.saturating_add(child.workers.len().max(recorded));
+    }
+    Ok(attempts)
+}
+
+/// Recount active and revoked task-owned child leaves before new admission.
+/// The root transaction owns this gate; recovery never refunds prior attempts.
 pub(super) fn require_total_attempt_capacity(
     store: &Store, root: &TeamSnapshot, additional_attempts: usize,
 ) -> Result<()> {
     let Some(config) = root.config.council.as_ref() else { return Ok(()) };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
-    let mut child_attempts = 0usize;
+    let mut current_attempts = 0usize;
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?
             .ok_or("child_council_stale: missing reservation during attempt accounting.")?;
         let child = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: missing child during attempt accounting.")?;
-        child_attempts = child_attempts.saturating_add(child.workers.len());
+        current_attempts = current_attempts.saturating_add(child.workers.len());
     }
-    super::council::require_composed_attempt_budget(root, child_attempts, additional_attempts)
+    let all_attempts = admitted_child_attempts_in_cycle(store, root)?;
+    if all_attempts < current_attempts {
+        return Err("child_council_stale: native child attempt history is incomplete.".into());
+    }
+    super::council::require_composed_attempt_budget(root, all_attempts, additional_attempts)
 }
 
 /// Issue one fresh, independently authorized native child reviewer wave.

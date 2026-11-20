@@ -6950,7 +6950,7 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     assert!(council_requests::resolve_native_admission_collision(
         &store, &sid, &project, "assignment-1", &"b".repeat(64),
     ).unwrap_err().contains("council_task_conflict"));
-    assert_eq!(first.schema_version, 1);
+    assert_eq!(first.schema_version, 2);
     // Different assignment keys or artifact digests must never share one
     // task-bound Council verdict, even if both are admitted before dispatch.
     for (assignment, digest) in [
@@ -7156,6 +7156,30 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap(), receipt);
+    // A native verdict cannot be replayed across a change in execution
+    // permission mode or checkout branch, even when the original reviewers
+    // and their independently recorded scores are still intact.
+    let original_session = store.session(&sid).unwrap();
+    for (sql, reason) in [
+        ("UPDATE sessions SET mode=CASE WHEN mode='full' THEN 'plan' ELSE 'full' END WHERE id=?1", "permission mode"),
+        ("UPDATE sessions SET worktree_branch='foreign-review-branch' WHERE id=?1", "checkout branch"),
+    ] {
+        store.db.execute(sql, [&sid]).unwrap();
+        let denied = council_requests::read_native_terminal(
+            &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+        ).unwrap_err();
+        assert!(denied.contains("council_task_stale"), "{reason}: {denied}");
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+        ).is_err(), "{reason} must not mint another terminal receipt");
+        store.db.execute(
+            "UPDATE sessions SET mode=?2,worktree_branch=?3 WHERE id=?1",
+            rusqlite::params![&sid, &original_session.mode, &original_session.worktree_branch],
+        ).unwrap();
+        assert_eq!(council_requests::read_native_terminal(
+            &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+        ).unwrap(), receipt, "restoring the frozen scope recovers the same receipt");
+    }
     // Simulate the losing native consumer after its stale CAS: only a
     // genuinely identical winning terminal proof is idempotently reusable.
     assert_eq!(council_requests::resolve_native_terminal_collision(

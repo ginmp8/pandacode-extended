@@ -426,12 +426,16 @@ fn native_task_candidate(
     }
     let config = team.config.council
         .ok_or("council_task_denied: native Council is disabled.")?;
+    // V2 binds the task's effective native permission mode and checkout branch
+    // as well as its harness and project. A V1 request is deliberately stale
+    // rather than silently inheriting a different execution authority.
     let scope = serde_json::to_vec(&(
-        &session.project_id, &session.worktree_path, &session.provider,
-        &session.model, &session.reasoning_effort,
+        &session.project_id, &session.worktree_path, &session.worktree_branch,
+        &session.provider, &session.model, &session.reasoning_effort,
+        &session.mode,
     )).map_err(|e| e.to_string())?;
     Ok(NativeTaskCouncilRequest {
-        schema_version: 1, request_id, session_id: session_id.to_owned(),
+        schema_version: 2, request_id, session_id: session_id.to_owned(),
         project_id: project_id.to_owned(), assignment_key: assignment_key.to_owned(),
         cycle_id: format!("{}:{}", session_id, team.council_since),
         artifact_sha256: artifact_sha256.to_owned(),

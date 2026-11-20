@@ -1020,8 +1020,8 @@ test('reference UX keeps Team tile rows and native Demand actions aligned',async
   await page.evaluate(async()=>{
     const paths=['/src/superagent.css','/src/superagent-reference-ux.css'];
     const css=await Promise.all(paths.map(async path=>{
-      const response=await fetch(path);
-      if(!response.ok)throw Error('Cannot load orchestration stylesheet: '+path);
+      const response=await fetch(path+'?direct');
+      if(!response.ok)throw Error('Cannot load direct orchestration CSS: '+path);
       return (await response.text()).replaceAll('#superagent-workspace','#sa-v2-fixture');
     }));
     const style=document.createElement('style');

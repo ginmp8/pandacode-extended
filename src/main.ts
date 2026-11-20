@@ -2849,7 +2849,11 @@ function renderComposer(): void {
           const focus = [...nextPanel.querySelectorAll<HTMLElement>(councilControls)][councilFocusedIndex];
           if (focus?.getClientRects().length && !focus.matches(':disabled')) {
             focus.focus({ preventScroll: true });
-            if (councilCaret && (focus instanceof HTMLInputElement || focus instanceof HTMLTextAreaElement))
+            // A roster change may shift the numeric Tab position to a different
+            // control. Never apply a text selection to a number input or checkbox.
+            if (councilCaret && councilFocusedText && focus.getAttribute('name') === councilFocusedText.name
+              && (focus instanceof HTMLTextAreaElement
+                || (focus instanceof HTMLInputElement && ['text', 'search', 'tel', 'url'].includes(focus.type))))
               focus.setSelectionRange(councilCaret.start, councilCaret.end, councilCaret.direction);
           }
         } else if (promptWasFocused) {

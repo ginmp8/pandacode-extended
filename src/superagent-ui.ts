@@ -2041,7 +2041,7 @@ export function mountSuperagent(
     }
     if (target.dataset.saSelect || target.dataset.saAssignTeam) {
       if (busy || loading) return;
-      const next = target.dataset.saSelect ?? target.dataset.saAssignTeam;
+      const next = target.dataset.saSelect ?? target.dataset.saAssignTeam ?? '';
       if (!presets.some(item => item.id === next)) return;
       const assigning = target.hasAttribute('data-sa-assign-team');
       workspaceView = 'runs';

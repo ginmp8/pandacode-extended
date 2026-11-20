@@ -238,18 +238,26 @@ export async function invokeSuperagent<T>(
     case 'superagent_manifest_import':{
       const doc=args.document;if(doc?.schemaVersion!==1||!Array.isArray(doc.orchestrations))throw Error('Invalid manifest.');
       const pending:string[]=[],unchanged:string[]=[];
+      const localRoles:Array<{coordinatorId:string;workerId:string;existingId:string|null}>=[];
       for(const preset of doc.orchestrations){
         const found=configName(preset.name);
         if(preset.autonomy!=='off'||preset.council?.enabled||preset.maxConcurrentTasks!==1)throw Error('Unsupported policy.');
         const a=bots.filter(b=>b.name.toLowerCase()===String(preset.coordinatorBot).toLowerCase());
         const b=bots.filter(b=>b.name.toLowerCase()===String(preset.workerBot).toLowerCase());
         if(a.length!==1||b.length!==1||a[0].id===b[0].id)throw Error('Invalid portable bot reference.');
+        localRoles.push({coordinatorId:a[0].id,workerId:b[0].id,existingId:found?.id??null});
         if(found){if(found.coordinatorBotId!==a[0].id||found.workerBotId!==b[0].id)throw Error('Conflicting preset.');
           unchanged.push(preset.name);
         }else pending.push(preset.name);
       }
+      // Preview-only counterpart to the native review identity contract.
+      // It is intentionally not a real native receipt or authorization.
+      const input=new TextEncoder().encode(JSON.stringify({document:doc,localRoles,pending,unchanged}));
+      const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',input));
+      const reviewDigest=Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');
       if(command==='superagent_manifest_import'){
         if(args.confirmed!==true)throw Error('Confirmation required.');
+        if(args.reviewDigest!==reviewDigest)throw Error('Portable Team preview is stale; review it again.');
         for(const name of pending){
           const preset=doc.orchestrations.find((item:any)=>item.name===name);
           const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
@@ -257,7 +265,7 @@ export async function invokeSuperagent<T>(
             projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
         }
         value={created:pending,unchanged};
-      }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};
+      }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true,reviewDigest};
       break;
     }
     default: throw Error('Unknown preview SuperAgent command: '+command);

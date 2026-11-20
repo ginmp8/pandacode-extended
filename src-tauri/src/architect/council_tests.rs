@@ -6482,6 +6482,23 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
     let before = serde_json::to_value(&interrupted).unwrap();
     {
         let store = state.store.lock().unwrap();
+        // A policy edit that removes every nested reviewer (or turns Council
+        // off) must not make persisted current-cycle child reservations vanish
+        // from the native Resume preflight, for either interruption state.
+        for status in ["interrupted", "paused"] {
+            let mut tampered = interrupted.clone();
+            tampered.status = status.into();
+            tampered.config.council.as_mut().unwrap().nested_bot_reviewers.clear();
+            for policy in [tampered.config.council.clone(), None] {
+                tampered.config.council = policy;
+                let error = if status == "interrupted" {
+                    child_council::require_resumable_child_cycles(&store, &tampered)
+                } else {
+                    child_council::require_unrevoked_child_sessions_on_resume(&store, &tampered)
+                }.unwrap_err();
+                assert!(error.contains("child reservation roster changed"), "{error}");
+            }
+        }
         child_council::require_resumable_child_cycles(&store, &interrupted).unwrap();
         let genuine_key = format!(
             "native-council-child:{}:roster-security", interrupted.council_since

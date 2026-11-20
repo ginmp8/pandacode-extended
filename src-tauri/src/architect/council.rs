@@ -859,21 +859,31 @@ fn current_finding_origin_is_authorized(
     // reviewer projection. Every composed/selected-bot mode requires a real
     // task-issued reviewer binding before accessing any session's report text.
     // A forged unbound M3-M7 worker must never read another bot or channel.
-    let Some(binding) = worker.reviewer_binding.as_ref() else {
-        return team.config.council.as_ref()
-            .is_some_and(|config| config.mode() == "m1");
-    };
-    if !worker.read_only
-        || binding.validate(team, worker).is_err()
-        || super::reviewer_security::validate_issued_authority(
-            store, &team.session_id, binding,
-        ).is_err()
+    if !worker.read_only {
+        return false;
+    }
+    if let Some(binding) = worker.reviewer_binding.as_ref() {
+        if binding.validate(team, worker).is_err()
+            || super::reviewer_security::validate_issued_authority(
+                store, &team.session_id, binding,
+            ).is_err()
+        {
+            return false;
+        }
+    } else if !team.config.council.as_ref()
+        .is_some_and(|config| config.mode() == "m1")
     {
         return false;
     }
+    // Legacy M1 snapshots lack modern seat bindings but still require a
+    // durable native parent/worker/session link before reading report text.
+    // A changed worker.session_id cannot expose an unrelated private session.
     store.db.query_row(
-        "SELECT 1 FROM architect_workers
-         WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3 LIMIT 1",
+        "SELECT 1 FROM architect_workers AS w
+         JOIN sessions AS reviewer ON reviewer.id=w.session_id
+         JOIN sessions AS root ON root.id=w.parent_session_id
+         WHERE w.parent_session_id=?1 AND w.worker_id=?2 AND w.session_id=?3
+           AND reviewer.project_id=root.project_id LIMIT 1",
         params![team.session_id, worker.id, worker.session_id],
         |row| row.get::<_, i64>(0),
     ).optional().ok().flatten() == Some(1)

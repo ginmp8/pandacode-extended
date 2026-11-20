@@ -26,6 +26,11 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     let mut team = load(&store, &sid).unwrap().unwrap();
     let mut reviewer = seat("finding-reviewer", 1, Some(6.0), team.council_since + 1);
     reviewer.session_id = review_session.id.clone();
+    store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+         VALUES(?1,?2,?3)",
+        rusqlite::params![sid, "finding-reviewer", review_session.id],
+    ).unwrap();
     team.workers.push(reviewer);
     save(&store, &mut team).unwrap();
     let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
@@ -66,6 +71,46 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert!(!forged.verified_pass);
 }
 
+
+#[test]
+fn legacy_automatic_findings_require_a_real_native_reviewer_session_link() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let legitimate = store.create_session(&project, "codex", "", "full").unwrap();
+    let foreign = store.create_session(&project, "codex", "", "full").unwrap();
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"privacy\",\"title\":\"Private report\",\"explanation\":\"Must stay in its owner session\"}]\\nCouncil score: 9.5/10";
+    store.message(&legitimate.id, "assistant", report).unwrap();
+    store.message(&foreign.id, "assistant", report).unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let mut reviewer = seat("legacy-auto", 1, Some(9.5), team.council_since + 1);
+    reviewer.session_id = legitimate.id.clone();
+    team.workers.push(reviewer);
+    // An M1 score and a valid same-project session are insufficient without
+    // the native owner link. A snapshot alone cannot authorize private reads.
+    assert!(council::reported_findings(&store, &team).is_empty());
+    store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+         VALUES(?1,?2,?3)",
+        rusqlite::params![sid, "legacy-auto", legitimate.id],
+    ).unwrap();
+    assert_eq!(council::reported_findings(&store, &team).len(), 1,
+        "historical unbound M1 retains native-linked read-only reporting");
+    team.workers[0].session_id = foreign.id.clone();
+    assert!(council::reported_findings(&store, &team).is_empty(),
+        "another session in the same project is not the Council reviewer");
+    team.workers[0].session_id = legitimate.id.clone();
+    team.workers[0].read_only = false;
+    assert!(council::reported_findings(&store, &team).is_empty(),
+        "a writable worker cannot expose legacy reviewer findings");
+    team.workers[0].read_only = true;
+    store.message(&legitimate.id, "coordination", "New turn").unwrap();
+    assert_eq!(council::historical_reported_findings(&store, &team).len(), 1,
+        "linked legacy findings remain in historical inspection after a new turn");
+    team.workers[0].session_id = foreign.id;
+    assert!(council::historical_reported_findings(&store, &team).is_empty(),
+        "historical inspection must enforce the same exact native link");
+}
 
 #[test]
 fn unbound_selected_and_composed_reviewers_cannot_expose_foreign_session_findings() {

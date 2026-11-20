@@ -765,9 +765,23 @@ impl Store {
             if version < 52 {
                 // Preserve the incident and record only subsequent bounded
                 // verification; never infer or recreate missing GitHub events.
-                migration.execute_batch(
-                    crate::superagent::events::HISTORY_GAP_RECONCILIATION_SCHEMA,
-                ).map_err(|e| e.to_string())?;
+                // Legacy databases and selectively rebuilt fixtures may already
+                // contain one or both columns despite an older user_version.
+                // Check each independently so partial upgrades remain recoverable.
+                for (name, definition) in
+                    crate::superagent::events::HISTORY_GAP_RECONCILIATION_COLUMNS
+                {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1)",
+                        [name],
+                        |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!(
+                            "ALTER TABLE sa_source_history_gaps ADD COLUMN {name} {definition};"
+                        )).map_err(|e| e.to_string())?;
+                    }
+                }
                 migration.execute_batch("PRAGMA user_version=52;")
                     .map_err(|e| e.to_string())?;
             }
@@ -3753,6 +3767,43 @@ mod tests {
         assert_eq!(reopened.session(&session_id).unwrap().id, session_id);
         drop(reopened);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn history_gap_v52_reopen_skips_columns_already_present_at_v51() {
+        let directory = std::env::temp_dir().join(format!(
+            "pandacode-sa-gap-columns-{}", uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        {
+            let store = Store::open(&path).unwrap();
+            for name in ["verified_at", "verified_sequence"] {
+                let present: bool = store.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1)",
+                    [name], |row| row.get(0),
+                ).unwrap();
+                assert!(present);
+            }
+            // Reproduce older import/fixture versions whose additive columns
+            // already exist. Migration must not fail with duplicate columns.
+            store.db.pragma_update(None, "user_version", 51).unwrap();
+        }
+        for _ in 0..2 {
+            let reopened = Store::open(&path).unwrap();
+            let version: i64 = reopened.db.pragma_query_value(
+                None, "user_version", |row| row.get(0),
+            ).unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+            for name in ["verified_at", "verified_sequence"] {
+                let count: i64 = reopened.db.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1",
+                    [name], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(count, 1, "{name} must never be added twice");
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

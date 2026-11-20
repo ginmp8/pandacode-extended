@@ -101,10 +101,10 @@ CREATE TABLE IF NOT EXISTS sa_source_history_gaps (
 
 /// v52 preserves the original incident even after a later bounded feed
 /// verifies continuity through the durable cursor. NULL means unresolved.
-pub(crate) const HISTORY_GAP_RECONCILIATION_SCHEMA: &str = r#"
-ALTER TABLE sa_source_history_gaps ADD COLUMN verified_at INTEGER CHECK(verified_at>0);
-ALTER TABLE sa_source_history_gaps ADD COLUMN verified_sequence INTEGER CHECK(verified_sequence>0);
-"#;
+pub(crate) const HISTORY_GAP_RECONCILIATION_COLUMNS: [(&str, &str); 2] = [
+    ("verified_at", "INTEGER CHECK(verified_at>0)"),
+    ("verified_sequence", "INTEGER CHECK(verified_sequence>0)"),
+];
 
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
@@ -642,7 +642,7 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
          FROM sa_event_decisions WHERE source_id=?1",
         [source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|e| e.to_string())?;
-    let gap: Option<(i64,i64,String,i64,Option<i64>,Option<i64>)> = store.db.query_row(
+    let gap = store.db.query_row(
         "SELECT cursor_sequence,last_detected_at,reason,occurrences,
                 verified_at,verified_sequence
          FROM sa_source_history_gaps WHERE source_id=?1",

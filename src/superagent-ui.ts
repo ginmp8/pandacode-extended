@@ -1094,17 +1094,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       safe(chosen.name) + '</h3><p>Only work owned by this Team. Expand a Demand to see its ' +
       'real WorkItems and assigned Workers.</p></div>' +
       '<button type="button" data-sa-refresh-team-demands>Refresh Team Tasks</button></header>' +
-      '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand history">' +
+      '<div class="sa-demand-toolbar"><div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand history">' +
       '<button type="button" data-sa-team-archived="active" aria-pressed="' +
         !teamArchived + '">Active Demands</button>' +
       '<button type="button" data-sa-team-archived="archived" aria-pressed="' +
         teamArchived + '">Archived (restore)</button></div>' +
-      (!teamDemandsLoaded ? '<p role="status">Loading this Team\'s native Demands…</p>' :
+      (!teamDemandsLoaded ? '</div><p role="status">Loading this Team\'s native Demands…</p>' :
         '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand presentation">' +
         (['board','list'] as const).map(layout=>
           '<button type="button" data-sa-team-demand-layout="' + layout +
           '" aria-pressed="' + (teamDemandLayout===layout) + '">' +
-          (layout==='board' ? 'Board' : 'List') + '</button>').join('') + '</div>' +
+          (layout==='board' ? 'Board' : 'List') + '</button>').join('') + '</div></div>' +
         (teamDemandLayout==='board'
           ? renderDemandBoard(scopedTeamDemands,'team','Team Demand status board')
           : '<ul class="sa-tickets sa-global-demand-list">' +

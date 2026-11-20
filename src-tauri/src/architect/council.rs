@@ -1056,11 +1056,27 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
     let config = team.config.council.as_ref()?;
     // A stored nested status alone is not evidence. The caller must have
     // revalidated every child receipt and its root artifact before display.
-    let status = if verified_pass && !config.nested_bot_reviewers.is_empty() {
+    let mut status = if verified_pass && !config.nested_bot_reviewers.is_empty() {
         team.council_status.clone().or_else(|| status(team))?
     } else {
         status(team)?
     };
+    // A score-only projection is historical, not verified native approval.
+    // Preserve the freshly refreshed blocked reason instead of reintroducing
+    // the legacy scorer's "passed" label in the read-only inspector.
+    if !verified_pass && status.state == "passed" {
+        if let Some(revoked) = team.council_status.as_ref()
+            .filter(|projected| projected.state != "passed")
+        {
+            status = revoked.clone();
+        } else {
+            status.state = "blocked".into();
+            status.stale = true;
+            status.notice = Some(
+                "Native Council evidence is not verified for this task; scores cannot approve it.".into(),
+            );
+        }
+    }
     let verified_pass = verified_pass && status.state == "passed" && !status.stale;
     let verified_completion = if verified_pass && team.status == "completed" {
         status.lowest.map(|lowest| CouncilVerifiedCompletion {

@@ -118,6 +118,9 @@ export function createCouncil(host: CouncilHost) {
       authorizationId: persisted?.reviewPermissions?.authorizationId,
     };
   };
+  /** A composed root quorum can include one selected bot and one automatic reviewer. */
+  const selectedRosterReady = (draft: ReviewerSelection): boolean => draft.selected
+    && draft.ids.length >= ((draft.automaticReviewers ?? 0) > 0 ? 1 : 2);
   const scopedFile = (path: string): boolean => path.length > 0 && path.length <= 240
     && !path.startsWith('/') && !path.startsWith('\\') && !path.includes(':')
     && path.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
@@ -273,6 +276,9 @@ export function createCouncil(host: CouncilHost) {
       const activeField = document.activeElement as HTMLElement | null;
       const focusedChild = activeField?.dataset.councilBotId;
       const focusedChildKind = ['data-council-bot-role', 'data-council-child-reviewers', 'data-council-child-target', 'data-council-child-rounds'].find(attribute => activeField?.hasAttribute(attribute));
+      const focusedPolicyKind = ['data-council-optional-skill', 'data-council-required-check', 'data-council-scoped', 'data-council-path'].find(attribute => activeField?.hasAttribute(attribute));
+      const focusedPolicySkill = focusedPolicyKind === 'data-council-optional-skill' ? activeField?.dataset.councilOptionalSkill
+        : focusedPolicyKind === 'data-council-required-check' ? activeField?.dataset.councilRequiredCheck : undefined;
       if (list.innerHTML !== markup) {
         // A checked input's property is not always reconciled by a DOM attribute morph.
         // Recreate only the bot rows; preserve keyboard focus and scroll position.
@@ -286,6 +292,11 @@ export function createCouncil(host: CouncilHost) {
       }
       if (focusedChild && focusedChildKind && !list.contains(document.activeElement)) {
         list.querySelector<HTMLElement>(`[${focusedChildKind}][data-council-bot-id="${CSS.escape(focusedChild)}"]`)?.focus({ preventScroll: true });
+      }
+      if (focusedPolicyKind && !list.contains(document.activeElement)) {
+        const selector = focusedPolicySkill === undefined ? `[${focusedPolicyKind}]`
+          : `[${focusedPolicyKind}="${CSS.escape(focusedPolicySkill)}"]`;
+        list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
       }
       list.hidden = !draft.selected;
     }
@@ -675,7 +686,7 @@ export function createCouncil(host: CouncilHost) {
           authorizationId: input.hasAttribute('data-council-scoped') && input.checked
             ? (draft.authorizationId || crypto.randomUUID()) : draft.authorizationId,
         });
-        if (shownConfig(sessionId) && draft.ids.length >= 2) {
+        if (shownConfig(sessionId) && selectedRosterReady(draft)) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); }
           catch (cause) { selectedError(sessionId, String(cause)); }
         } else paint(sessionId);
@@ -685,7 +696,7 @@ export function createCouncil(host: CouncilHost) {
         const id = input.dataset.councilOptionalSkill!, draft = selection(sessionId);
         const optionalSkills = input.checked ? [...new Set([...(draft.optionalSkills ?? []), id])] : (draft.optionalSkills ?? []).filter(value => value !== id);
         reviewerDraft.set(sessionId, { ...draft, optionalSkills, checkSkills: input.checked ? (draft.checkSkills ?? []).filter(value => value !== id) : draft.checkSkills });
-        if (shownConfig(sessionId) && draft.ids.length >= 2) {
+        if (shownConfig(sessionId) && selectedRosterReady(draft)) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); }
           catch (cause) { selectedError(sessionId, String(cause)); }
         } else paint(sessionId);
@@ -695,7 +706,7 @@ export function createCouncil(host: CouncilHost) {
         const id = input.dataset.councilRequiredCheck!, draft = selection(sessionId);
         const checkSkills = input.checked ? [...new Set([...(draft.checkSkills ?? []), id])] : (draft.checkSkills ?? []).filter(value => value !== id);
         reviewerDraft.set(sessionId, { ...draft, checkSkills, optionalSkills: input.checked ? (draft.optionalSkills ?? []).filter(value => value !== id) : draft.optionalSkills });
-        if (shownConfig(sessionId) && draft.ids.length >= 2) {
+        if (shownConfig(sessionId) && selectedRosterReady(draft)) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); }
           catch (cause) { selectedError(sessionId, String(cause)); }
         } else paint(sessionId);

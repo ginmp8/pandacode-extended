@@ -1292,6 +1292,51 @@ test('M3 mixed Council preserves a direct bot plus one explicitly added automati
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
+test('M3 one selected bot and one automatic seat persist native reviewer grants and skill checks', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(1);
+  await eligibleReviewers(page).first().check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+
+  const grant = panel(page).getByRole('checkbox', { name: /Allow one exact native host action/ });
+  await grant.focus();
+  await page.keyboard.press('Space');
+  await expect(grant).toBeChecked();
+  await expect(grant).toBeFocused();
+  await expect(panel(page).getByRole('alert')).toContainText('Choose a relative file path');
+  expect(await calls(page)).toHaveLength(1);
+  const path = panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' });
+  await path.fill('src/example.ts');
+  await path.press('Tab');
+  await expect.poll(async () => (await calls(page)).at(-1)?.reviewPermissions?.grants?.[0]?.resource).toBe('src/example.ts');
+  expect((await calls(page)).at(-1)?.reviewPermissions?.authorizationId).toMatch(/^[a-f0-9-]{36}$/);
+
+  const optional = panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' });
+  await optional.focus();
+  await page.keyboard.press('Space');
+  await expect(optional).toBeFocused();
+  await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
+
+  const required = panel(page).getByRole('group', { name: 'Required native skill checks' }).getByRole('checkbox', { name: 'risk-scan' });
+  await required.focus();
+  await page.keyboard.press('Space');
+  await expect(required).toBeFocused();
+  await expect.poll(async () => (await calls(page)).at(-1)?.requiredCheckSkillIds).toEqual(['risk-scan']);
+  const final = (await calls(page)).at(-1);
+  expect(final).toMatchObject({ automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'] });
+  expect(final.optionalSkillIds).toBeUndefined();
+  expect(final.reviewPermissions.grants).toEqual([
+    { tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: 'src/example.ts' },
+  ]);
+});
+
 test('M4 and M7 task child roles preserve native configuration and require authenticated leaf callbacks', async ({ page }) => {
   const bots = [
     { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },

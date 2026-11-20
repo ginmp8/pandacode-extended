@@ -8767,6 +8767,18 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
         &state, &sid, "Review independently through all enabled Council sources",
         None, None,
     ).unwrap();
+    // Pin a real native task request before the M6/M7 reviewer callbacks.
+    // Inspecting a passing score without an authenticated terminal is insufficient.
+    let (project, artifact, task) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "a".repeat(64);
+        let assignment = if include_automatic { "m7-parallel-native" } else { "m6-parallel-native" };
+        let task = council_requests::admit_native_task(
+            &store, &sid, &project, assignment, &artifact,
+        ).unwrap();
+        (project, artifact, task)
+    };
     let mut direct = reviewer_assignment("direct-root", "Quality");
     direct["councilReviewerSource"] = json!("direct_bot");
     let mut assignments = vec![direct];
@@ -8805,6 +8817,10 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
         let pending = load(&store, &sid).unwrap().unwrap();
         assert!(!verified_council_pass(&store, &pending),
             "child leaf callbacks are not yet authenticated composite receipts");
+        let assignment = if include_automatic { "m7-parallel-native" } else { "m6-parallel-native" };
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, assignment, &artifact, &task.request_id,
+        ).is_err(), "M6/M7 cannot record a terminal receipt before its child composite settles");
     }
     let (finished, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
@@ -8817,6 +8833,18 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved));
+    let assignment = if include_automatic { "m7-parallel-native" } else { "m6-parallel-native" };
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, assignment, &artifact, &task.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(1));
+    assert_eq!(council_requests::record_native_terminal(
+        &store, &sid, &project, assignment, &artifact, &task.request_id,
+    ).unwrap(), terminal, "a reentrant M6/M7 settlement must be idempotent");
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, assignment, &artifact, &task.request_id,
+    ).unwrap(), terminal);
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(inspected.usage.unique_attempts, if include_automatic { 2 } else { 1 });
     assert_eq!(inspected.composed_usage.unwrap().unique_attempts,
@@ -8847,6 +8875,9 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
     ).unwrap();
     assert!(!verified_council_pass(&store, &saved),
         "a revoked real direct-bot grant invalidates the composed terminal verdict");
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, assignment, &artifact, &task.request_id,
+    ).is_err(), "revoking the direct reviewer must revoke a previously issued M6/M7 task receipt");
 }
 
 #[test]
@@ -9656,6 +9687,18 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
     let (started, _) = start_state(
         &state, &sid, "Authenticate an M5 child-triggered S2 review", None, None,
     ).unwrap();
+    // The native task-bound boundary must refuse the low-score first wave,
+    // settle only after fresh child callbacks, and revoke the terminal on lost evidence.
+    let (project, artifact, task) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "e".repeat(64);
+        let assignment = format!("{mode}-triggered-s2-native");
+        let task = council_requests::admit_native_task(
+            &store, &sid, &project, &assignment, &artifact,
+        ).unwrap();
+        (project, artifact, task)
+    };
     let mut assignments = Vec::new();
     if matches!(mode, "m6" | "m7") {
         let mut direct = reviewer_assignment("direct-root", "Quality");
@@ -9700,6 +9743,10 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
         assert!(!verified_council_pass(&store, &root),
             "a passing root and an admitted child wave are not approval");
         assert!(authenticated_hierarchical_status(&store, &root).is_none());
+        let assignment = format!("{mode}-triggered-s2-native");
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, &assignment, &artifact, &task.request_id,
+        ).is_err(), "a below-target M5/M6/M7 child wave cannot authorize a task result");
     }
     let mut second_wave_sessions = std::collections::HashSet::new();
     for _ in 0..2 {
@@ -9731,6 +9778,15 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.7));
     assert!(verified_council_pass(&store, &saved));
+    let assignment = format!("{mode}-triggered-s2-native");
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(2));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).unwrap(), terminal);
     let root_seats = saved.workers.iter().filter(|worker| worker.council.is_some())
         .collect::<Vec<_>>();
     assert_eq!(root_seats.len(), if mode == "m7" { 2 } else { 1 },
@@ -9768,6 +9824,9 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
     ).unwrap();
     assert!(!verified_council_pass(&store, &saved),
         "revoking the child S2 receipt must revoke the mixed root verdict");
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).is_err(), "revoking a fresh child S2 receipt must revoke its native task terminal");
 }
 
 #[test]

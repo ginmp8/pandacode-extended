@@ -5813,21 +5813,36 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
             "fresh review seats must not inherit the interrupted provider transcript");
     }
     assert_eq!(root.council_since, old_cycle);
-    // Two revoked leaves from the old child still consume task budget.
-    // Four current leaves plus two historical grants count as six attempts.
+    // Both child Councils originally issued two leaves. Recovery revokes all
+    // four old grants, then issues four more: none of the eight may be refunded.
     let active_leaf_count: usize = child_council::inspect(&store, &root).unwrap()
         .iter().map(|view| load(&store, &view.child_session_id).unwrap().unwrap().workers.len())
         .sum();
     assert_eq!(active_leaf_count, 4);
+    let issued_grants: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE kind='reviewer_authority'
+         AND parent_session_id IN (
+             SELECT session_id FROM architect_workers WHERE parent_session_id=?1
+         )",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(issued_grants, 8, "recovered leaf grants must retain both retired waves");
     let root_attempts = root.workers.iter()
         .filter(|worker| worker.council.is_some() && worker.created_at >= root.council_since)
         .count();
-    let remaining_with_history = 1024 - root_attempts - 6;
-    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining_with_history).is_ok(),
-        "recovery must retain the budget consumed by interrupted native child leaves");
-    let error = child_council::require_total_attempt_capacity(&store, &root, remaining_with_history + 1)
+    let child_attempts = usize::try_from(issued_grants).unwrap();
+    let remaining_child = council::MAX_CHILD_LEAF_ATTEMPTS - child_attempts;
+    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining_child).is_ok(),
+        "recovery must retain the budget consumed by both interrupted native child Councils");
+    let error = child_council::require_total_attempt_capacity(&store, &root, remaining_child + 1)
         .unwrap_err();
-    assert!(error.contains("admitted root and child reviewer attempts"), "{error}");
+    assert!(error.contains("admitted child reviewer attempts"), "{error}");
+    // The separate composed-task ceiling still includes root reviewer attempts.
+    let remaining_total = 1024 - root_attempts - child_attempts;
+    assert!(council::require_composed_attempt_budget(&root, child_attempts, remaining_total).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, child_attempts, remaining_total + 1)
+        .unwrap_err().contains("admitted root and child reviewer attempts"));
 }
 
 

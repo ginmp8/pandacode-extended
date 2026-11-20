@@ -1956,6 +1956,16 @@ pub(super) fn require_total_attempt_capacity(
     if all_attempts < current_attempts {
         return Err("child_council_stale: native child attempt history is incomplete.".into());
     }
+    // The per-task child cap includes all retired waves, even if their
+    // leaf ownership was detached during explicit crash recovery.
+    if all_attempts.saturating_add(additional_attempts)
+        > super::council::MAX_CHILD_LEAF_ATTEMPTS
+    {
+        return Err(format!(
+            "Nested Council reached {} admitted child reviewer attempts; no additional child reviewer may be dispatched.",
+            super::council::MAX_CHILD_LEAF_ATTEMPTS,
+        ));
+    }
     super::council::require_composed_attempt_budget(root, all_attempts, additional_attempts)
 }
 

@@ -12,7 +12,7 @@ const MAX_ROUNDS: usize = 100;
 const MAX_REVIEWERS: usize = 8;
 const MIN_REVIEWERS: usize = 2;
 // Upper bound on reserved child-review attempts per root task, including retries.
-const MAX_CHILD_LEAF_ATTEMPTS: usize = 256;
+pub(super) const MAX_CHILD_LEAF_ATTEMPTS: usize = 256;
 // Worst-case task-level cap for new composed modes, across all root rounds
 // and all potential child reviewer rounds. Legacy M1/M2 budgets are unchanged.
 const MAX_COMPOSED_REVIEW_ATTEMPTS: usize = 1024;

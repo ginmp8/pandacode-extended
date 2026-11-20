@@ -569,6 +569,14 @@ fn save(store: &Store, team: &mut TeamSnapshot) -> Result<()> {
     store.db.execute("INSERT INTO architect_teams(session_id,content) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET content=excluded.content",params![team.session_id,content]).map_err(|e|e.to_string())?;
     Ok(())
 }
+/// A persisted Council score is not live approval after the owning native
+/// session is interrupted, has failed, or is archived. This applies to root-only
+/// M1/M2/M3 as well as hierarchical Councils.
+fn root_session_allows_council_proof(store: &Store, team: &TeamSnapshot) -> bool {
+    store.session(&team.session_id).is_ok_and(|session|
+        !session.archived && !matches!(session.status.as_str(), "interrupted" | "error"))
+}
+
 /// Recompute the existing Council verdict from all current native receipts.
 /// Neither a first-wave composite nor a second-wave child receipt is approval
 /// without the independent root and child admission gates.
@@ -674,6 +682,20 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
             status.state = "blocked".into();
             status.stale = true;
             status.notice = Some("Native reviewer authority is missing or revoked; scored claims cannot approve this Council.".into());
+        }
+    }
+    // The legacy root-only scorer can still project its previous scores
+    // after the native session was revoked. Keep that history inspectable,
+    // but do not display it as a live Council approval.
+    if projected.as_ref().is_some_and(|status| status.state == "passed")
+        && !root_session_allows_council_proof(store, team)
+    {
+        if let Some(status) = &mut projected {
+            status.state = "blocked".into();
+            status.stale = true;
+            status.notice = Some(
+                "Native root Council session is unavailable or revoked; previous scores are not current approval.".into(),
+            );
         }
     }
     team.council_status = projected;
@@ -810,7 +832,11 @@ fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) 
 /// the native Council gate from frozen workers, scores, required skill receipts
 /// and current stored change evidence before publishing a successful result.
 pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool {
-    if !council_evidence_is_current(store, team) { return false; }
+    if !root_session_allows_council_proof(store, team)
+        || !council_evidence_is_current(store, team)
+    {
+        return false;
+    }
     let Some(stored) = team.council_status.as_ref() else { return false };
     if stored.state != "passed" || stored.stale { return false; }
     let verified = if team.config.council.as_ref()

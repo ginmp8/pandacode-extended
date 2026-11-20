@@ -10470,6 +10470,46 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                             &store, &sid, &project, "root-matrix-task",
                             &artifact, &request.request_id,
                         ).unwrap(), receipt, "{mode}/{strategy:?}: receipt must be idempotent");
+
+                        // All nine root-only mode/strategy paths must revoke
+                        // previously issued approval when the native root is
+                        // interrupted, fails, or is archived. Historical scores
+                        // and stored receipts cannot authorize a new callback.
+                        let previous_status = store.session(&sid).unwrap().status;
+                        for revoked_status in ["interrupted", "error"] {
+                            store.db.execute(
+                                "UPDATE sessions SET status=?2 WHERE id=?1",
+                                rusqlite::params![sid, revoked_status],
+                            ).unwrap();
+                            let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+                            assert!(!inspected.verified_pass,
+                                "{mode}/{strategy:?}: revoked native root cannot verify a pass");
+                            assert_ne!(inspected.status.state, "passed",
+                                "{mode}/{strategy:?}: a revoked root cannot display live approval");
+                            assert!(council_requests::read_native_terminal(
+                                &store, &sid, &project, "root-matrix-task",
+                                &artifact, &request.request_id,
+                            ).is_err(), "{mode}/{strategy:?}: revoked root cannot replay a terminal receipt");
+                        }
+                        store.db.execute(
+                            "UPDATE sessions SET status=?2 WHERE id=?1",
+                            rusqlite::params![sid, previous_status],
+                        ).unwrap();
+                        store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&sid]).unwrap();
+                        let archived = council_inspection_state(&store, &sid).unwrap().unwrap();
+                        assert!(!archived.verified_pass, "{mode}/{strategy:?}: archived root cannot pass");
+                        assert_ne!(archived.status.state, "passed",
+                            "{mode}/{strategy:?}: archived root cannot display approval");
+                        assert!(council_requests::read_native_terminal(
+                            &store, &sid, &project, "root-matrix-task",
+                            &artifact, &request.request_id,
+                        ).is_err(), "{mode}/{strategy:?}: archived root cannot replay a terminal receipt");
+                        store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", [&sid]).unwrap();
+                        assert_eq!(council_requests::read_native_terminal(
+                            &store, &sid, &project, "root-matrix-task",
+                            &artifact, &request.request_id,
+                        ).unwrap(), receipt,
+                            "{mode}/{strategy:?}: original native proof remains idempotent after restoring scope");
                     }
                 }
             });

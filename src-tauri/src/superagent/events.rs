@@ -522,8 +522,9 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
 
 /*
  * Activated Observe sources are the ONLY candidates for local background
- * GitHub reads. A stable keyset bounds each pass without starving later
- * Teams, and excludes Check Runs, which require an exact operator-supplied ID.
+ * GitHub reads for enabled Teams only. A stable keyset bounds each pass
+ * without starving later Teams, and excludes Check Runs, which require
+ * an exact operator-supplied ID.
  * This is not an Auto grant or a gap-free GitHub event subscription.
  */
 fn next_observe_subscription_sources(
@@ -536,7 +537,8 @@ fn next_observe_subscription_sources(
         "SELECT s.created_at,s.id
          FROM sa_event_sources s
          JOIN sa_orchestrations o ON o.id=s.orchestration_id
-         WHERE s.mode='observe' AND s.event_kind<>'check_run.completed'
+         WHERE o.enabled=1 AND s.mode='observe'
+           AND s.event_kind<>'check_run.completed'
            AND (?1 IS NULL OR s.created_at>?1
                 OR (s.created_at=?1 AND s.id>?2))
          ORDER BY s.created_at,s.id LIMIT ?3",
@@ -2544,8 +2546,41 @@ mod tests {
 
 
     #[test]
+    fn disabled_team_does_not_trigger_background_observe_after_restart() {
+        let (store, path) = fixture();
+        let selected = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let active = set_mode(&store, &selected.id, selected.policy_revision, "observe").unwrap();
+
+        // A source's Observe policy never implicitly enables a disabled Team.
+        assert!(next_observe_subscription_sources(&store, None).unwrap().is_empty());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1 WHERE id='orch'", [],
+        ).unwrap();
+        let enabled = next_observe_subscription_sources(&store, None).unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].1, active.id);
+
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0 WHERE id='orch'", [],
+        ).unwrap();
+        assert!(next_observe_subscription_sources(&store, None).unwrap().is_empty());
+        assert_eq!(source(&store, &active.id).unwrap().mode, "observe");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        drop(store);
+
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert!(next_observe_subscription_sources(&reopened, None).unwrap().is_empty());
+        assert_eq!(source(&reopened, &active.id).unwrap().policy_revision, active.policy_revision);
+    }
+
+    #[test]
     fn periodic_observe_selection_is_bounded_rotating_and_restart_durable_without_work() {
         let (store, path) = fixture();
+        store.db.execute("UPDATE sa_orchestrations SET enabled=1 WHERE id='orch'", []).unwrap();
         let mut enabled_ids = Vec::new();
         for (index, kind) in EVENT_KINDS.iter().take(15).enumerate() {
             let source = create_source(
@@ -2566,6 +2601,7 @@ mod tests {
              VALUES('other-team','Another Team','router','worker','fixture',?1,?1)",
             [storage::now()],
         ).unwrap();
+        store.db.execute("UPDATE sa_orchestrations SET enabled=1 WHERE id='other-team'", []).unwrap();
         let other = create_source(
             &store, "other-team", "owner/repo", "trusted-bot", "issues.opened",
         ).unwrap();

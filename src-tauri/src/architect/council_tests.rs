@@ -8371,6 +8371,15 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     }
     let (started, _) = start_state(&state, &sid,
         "Review the unchanged artifact using both S3 phases", None, None).unwrap();
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "d".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "nested-m5-s3-native", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
     call(&state, &sid, "pandacode_dispatch_workers", json!({
         "assignments": [reviewer_assignment("s3-first-automatic", "correctness")]
     })).unwrap();
@@ -8396,6 +8405,13 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(pending["completed"], false,
         "S3 cannot pass using only first-phase native root and child callbacks");
+    {
+        let store = state.store.lock().unwrap();
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "nested-m5-s3-native", &artifact,
+            &request.request_id,
+        ).is_err(), "M5/S3 cannot mint a task receipt from phase-one root/child results");
+    }
     {
         let store = state.store.lock().unwrap();
         let saved = load(&store, &sid).unwrap().unwrap();
@@ -8534,6 +8550,16 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     assert_eq!(root.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(root.council_status.as_ref().unwrap().round, 2);
     assert!(verified_council_pass(&store, &root));
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m5-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(2));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m5-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal);
     let root_reviewers = root.workers.iter().filter(|worker| worker.council.is_some())
         .collect::<Vec<_>>();
     assert_eq!(root_reviewers.len(), 2);
@@ -8553,6 +8579,10 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     ).unwrap();
     assert!(authenticated_hierarchical_status(&store, &root).is_none());
     assert!(!verified_council_pass(&store, &root));
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m5-s3-native", &artifact,
+        &request.request_id,
+    ).is_err(), "revoking a root S3 reviewer grant must revoke the task receipt");
 }
 
 #[test]
@@ -9006,6 +9036,15 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     let (started, _) = start_state(&state, &sid,
         "Run two independent task-owned phases for child Council review",
         None, None).unwrap();
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "c".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
     let (pending, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"Admit first S3 child phase"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
@@ -9023,6 +9062,13 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         "pandacode_finish_team", json!({"summary":"Admit independent S3 challengers"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "nested-m4-s3-native", &artifact,
+            &request.request_id,
+        ).is_err(), "S3 first-phase child results cannot authorize a task terminal receipt");
+    }
     {
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
@@ -9077,6 +9123,16 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     let root = load(&store, &sid).unwrap().unwrap();
     assert!(verified_council_pass(&store, &root),
         "only fresh native challenge receipts can settle the root Council");
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(2));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal, "M4/S3 task proof must be idempotent");
     let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
     assert_eq!(challenges.len(), 2, "both native S3 child phases must have authenticated receipts");
     assert!(challenges.iter().all(|receipt|
@@ -9108,6 +9164,10 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         "a forged phase-two receipt must fail native challenge verification");
     assert!(!verified_council_pass(&store, &root),
         "a modified receipt must revoke an otherwise completed root approval");
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        &request.request_id,
+    ).is_err(), "a stale child receipt must revoke the previously issued task result");
     store.db.execute(
         "UPDATE architect_requests SET content=?3
          WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
@@ -9117,6 +9177,10 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         "restoring the exact native receipt must restore read-only verification");
     assert!(verified_council_pass(&store, &root),
         "only the restored exact native receipt may revalidate the stored pass");
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal, "restoring exact S3 evidence must revalidate the same task receipt");
 }
 
 #[test]

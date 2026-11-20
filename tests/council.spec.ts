@@ -29,7 +29,7 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
         return team;
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
-      if (command === 'architect_council_inspect' && ${inspection !== undefined}) return ${JSON.stringify(inspection ?? null)};
+      if (command === 'architect_council_inspect' && ${inspection !== undefined}) return (window.__councilInspectorOverride ?? ${JSON.stringify(inspection ?? null)});
       if (command === 'architect_get' && ${Boolean(criteriaPreset)}) {
         const team = architect.get(args.sessionId);
         if (team?.config.council) return { ...team, config: { ...team.config, council: { ...team.config.council, ...${JSON.stringify(criteriaPreset ?? {})} } } };
@@ -97,6 +97,34 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
+});
+
+test('Council inspector refreshes an approved native snapshot without promoting stale approval', async ({ page }) => {
+  const current = {
+    sessionId: 'native-review-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'native-review-1', cycleId: 'native-review-1:1000',
+      teamRevision: 7, round: 1, lowest: 9.5,
+    },
+    attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, current);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toBeVisible();
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+  }, { ...current, status: { ...current.status, stale: true } });
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Stale revision', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+  await expect(refresh).toBeEnabled();
 });
 
 test('Council inspector exposes native mandatory evidence gaps without manufacturing a passed criterion', async ({ page }) => {

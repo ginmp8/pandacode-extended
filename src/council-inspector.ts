@@ -390,7 +390,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
       escape(String(inspection.verifiedCompletion.round)) + '</p>' : '';
   return '<div class="council-inspection-detail"><p><strong>' + escape(verdict) +
-    '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
+    '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Status at last native inspection') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
@@ -404,12 +404,18 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   details.setAttribute('aria-label', 'Council results');
   details.innerHTML = '<summary>Review evidence and usage</summary><div class="council-inspection-body" aria-live="polite"></div>';
   const body = details.querySelector<HTMLElement>('.council-inspection-body')!;
+  const refresh = document.createElement('button');
+  refresh.type = 'button';
+  refresh.className = 'ds-btn council-inspection-refresh';
+  refresh.textContent = 'Refresh native evidence';
+  body.before(refresh);
   let serial = 0;
-  details.addEventListener('toggle', () => {
-    if (!details.open) { serial++; return; }
+  const load = () => {
     const current = ++serial;
+    refresh.disabled = true;
     body.textContent = 'Loading native Council result…';
-    void read().then(result => {
+    // A synchronous read failure must also fail closed and release the button.
+    void Promise.resolve().then(read).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
       body.innerHTML = councilInspectionHtml(result);
     }).catch(reason => {
@@ -419,7 +425,16 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       error.setAttribute('role', 'alert');
       error.textContent = 'Could not inspect this Council: ' + (reason instanceof Error ? reason.message : String(reason));
       body.append(error);
+    }).finally(() => {
+      if (serial === current) refresh.disabled = false;
     });
+  };
+  details.addEventListener('toggle', () => {
+    if (!details.open) { serial++; refresh.disabled = false; return; }
+    load();
+  });
+  refresh.addEventListener('click', () => {
+    if (details.open) load();
   });
   return details;
 }

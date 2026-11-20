@@ -140,6 +140,10 @@ pub struct AdmittedMemberProfile {
     /// Legacy read-only snapshots without it remain compatible.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub resolved_project_path:Option<String>,
+    /// Some(true/false) pins admission-time checkout existence.
+    /// None preserves legacy read-only snapshots predating this witness.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub checkout_existed_at_admission:Option<bool>,
     pub provider:String,
     pub model:String,
     pub mode:String,
@@ -211,6 +215,7 @@ fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<
     Ok(AdmittedMemberProfile {
         role:role.into(),position,bot_id:bot.id.clone(),
         project_id:bot.project_id.clone(),project_path:Some(project_path),
+        checkout_existed_at_admission:Some(resolved_project_path.is_some()),
         resolved_project_path,
         provider:bot.provider.clone(),model:bot.model.clone(),mode:bot.mode.clone(),
         reasoning_effort:bot.reasoning_effort.clone(),
@@ -306,6 +311,11 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
             }) {
                 return Err("Invalid persisted task-effective bot prompt identity.".into());
             }
+            if member.checkout_existed_at_admission.is_some_and(|existed|
+                existed != member.resolved_project_path.is_some()
+            ) {
+                return Err("Inconsistent admitted checkout existence evidence.".into());
+            }
             if member.bot_id.is_empty() || !identities.insert(member.bot_id.as_str()) {
                 return Err("Invalid persisted task-effective Team role identity.".into());
             }
@@ -354,6 +364,14 @@ pub(super) fn checkout_paths_current(store:&Store,ticket_id:&str)->Result<bool> 
             let Some(current_path)=actual else {return Ok(false);};
             let Ok(resolved)=std::fs::canonicalize(current_path) else {return Ok(false);};
             if resolved.to_string_lossy().into_owned()!=original {return Ok(false);}
+        } else if member.checkout_existed_at_admission==Some(false) {
+            // The local checkout did not exist at admission. A subsequently
+            // created directory or symlink must not silently acquire authority.
+            // Existing legacy read-only snapshots retain their old semantics.
+            match std::fs::symlink_metadata(&expected) {
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound => {},
+                _ => return Ok(false),
+            }
         }
     }
     Ok(true)
@@ -372,6 +390,9 @@ pub(super) fn require_current_profile(
     let mut current=member_profile(store,&bots::get(store,bot_id)?,role,recorded.position)?;
     if recorded.project_path.is_none() {current.project_path=None;}
     if recorded.resolved_project_path.is_none() {current.resolved_project_path=None;}
+    if recorded.checkout_existed_at_admission.is_none() {
+        current.checkout_existed_at_admission=None;
+    }
     if recorded.prompt_identity_sha256.is_none() {current.prompt_identity_sha256=None;}
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
@@ -1027,6 +1048,76 @@ mod tests {
 
         std::fs::remove_file(&alias).unwrap();
         symlink(&first,&alias).unwrap();
+        assert!(checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
+        assert!(!super::super::mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+
+    #[test]
+    fn missing_checkout_appearance_blocks_native_admission_and_preserves_legacy_snapshots() {
+        let root=std::env::temp_dir().join(format!("sa-missing-checkout-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let checkout=root.join("checkout");
+        assert!(!checkout.exists());
+        let path=root.join("state.sqlite3");
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Pending checkout',?1)",
+            [checkout.to_string_lossy().into_owned()],
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config=super::super::create_configuration(&store,NewOrchestration {
+            name:"Missing checkout".into(),
+            coordinator_bot_id:"lead".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        super::super::change_enabled(&store,&config.id,config.policy_revision,true).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&config.id,"Observe the original checkout","missing-checkout",false,
+        ).unwrap();
+        assert!(started);
+        let session=super::super::assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let profile=ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert!(profile.members.iter().all(|member|
+            member.checkout_existed_at_admission==Some(false)
+                && member.resolved_project_path.is_none()));
+        assert!(checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
+
+        std::fs::create_dir(&checkout).unwrap();
+        assert!(!checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        assert!(super::super::read_only_policy(&store,&session).is_err());
+        assert!(super::super::guard_run_admission(&store,&session,&[]).is_err());
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert!(!checkout_paths_current(&reopened,&ticket.id).unwrap());
+        assert!(super::super::read_only_policy(&reopened,&session).is_err());
+        drop(reopened);
+
+        // A snapshot from before this optional field existed remains readable
+        // and read-only rather than gaining any new tool authorization.
+        let raw:String=store.db.query_row(
+            "SELECT profiles_json FROM sa_ticket_profiles WHERE ticket_id=?1",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        let mut legacy:Vec<serde_json::Value>=serde_json::from_str(&raw).unwrap();
+        for member in &mut legacy {
+            member.as_object_mut().unwrap().remove("checkoutExistedAtAdmission");
+        }
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![&ticket.id,serde_json::to_string(&legacy).unwrap()],
+        ).unwrap();
+        assert!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members
+            .iter().all(|member|member.checkout_existed_at_admission.is_none()));
         assert!(checkout_paths_current(&store,&ticket.id).unwrap());
         assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
         assert!(!super::super::mandate(&store,&ticket.id).unwrap().allowed_side_effects);

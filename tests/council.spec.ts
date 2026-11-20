@@ -65,6 +65,38 @@ const settle = async (page: Page) => { await expect(button(page)).toBeVisible();
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
+test('a late reviewer-options failure cannot replace a fresh lookup after reopening Council', async ({ page }) => {
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots: [
+    { id: 'qa-reviewer', name: 'QA Reviewer', role: 'QA', provider: 'codex', model: 'gpt', paused: false },
+    { id: 'security-reviewer', name: 'Security Reviewer', role: 'Security', provider: 'codex', model: 'gpt', paused: false },
+  ] });
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold = state.__hold ?? {};
+    state.__hold.architect_council_reviewer_options = new Promise<void>((_resolve, reject) => {
+      state.__rejectStaleReviewerLookup = reject;
+    });
+  });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(panel(page).getByText('Loading available bots…')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await page.evaluate(() => { delete (window as any).__hold.architect_council_reviewer_options; });
+
+  await button(page).click();
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await page.evaluate(async () => {
+    (window as any).__rejectStaleReviewerLookup(new Error('outdated lookup failed'));
+    // Allow the earlier native rejection and its UI continuation to settle.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  await expect(panel(page).getByText('Cannot load bots:', { exact: false })).toHaveCount(0);
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await eligibleReviewers(page).first().check();
+  await expect(eligibleReviewers(page).first()).toBeChecked();
+});
+
 test('native Council inspector displays unknown usage and never trusts a display-only pass', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 5,

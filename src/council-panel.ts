@@ -86,6 +86,8 @@ export function createCouncil(host: CouncilHost) {
   const pending = new Map<string, { tail: Promise<void>; count: number; asked: CouncilConfig | null }>(), failures = new Map<string, string>();
   const reviewerBots = new Map<string, ReviewerBot[]>();
   const reviewerLoads = new Map<string, string>();
+  // A reopened panel may start a newer lookup before the older one settles.
+  const reviewerLoadVersions = new Map<string, number>();
   const reviewerDraft = new Map<string, ReviewerSelection>();
   // Strategy is task-scoped; a pre-enable selection must not become a global default.
   const strategyDraft = new Map<string, 'parallel' | 'escalated' | 'two_phase'>();
@@ -180,12 +182,16 @@ export function createCouncil(host: CouncilHost) {
     paint(sessionId);
   }
   function loadReviewerBots(sessionId: string): void {
+    const version = (reviewerLoadVersions.get(sessionId) ?? 0) + 1;
+    reviewerLoadVersions.set(sessionId, version);
     reviewerLoads.set(sessionId, 'Loading available bots…');
     void host.call<ReviewerBot[]>('architect_council_reviewer_options', { sessionId }).then(bots => {
+      if (reviewerLoadVersions.get(sessionId) !== version) return;
       reviewerBots.set(sessionId, bots);
       reviewerLoads.delete(sessionId);
       if (panelSession === sessionId) paint(sessionId);
     }).catch(cause => {
+      if (reviewerLoadVersions.get(sessionId) !== version) return;
       reviewerLoads.set(sessionId, `Cannot load bots: ${cause instanceof Error ? cause.message : String(cause)}`);
       if (panelSession === sessionId) paint(sessionId);
     });

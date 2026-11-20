@@ -1971,8 +1971,10 @@ fn independent_review_attempts(team: &TeamSnapshot, through_round: usize) -> boo
     let mut reviewer_ids = std::collections::HashSet::new();
     let mut session_ids = std::collections::HashSet::new();
     (1..=through_round).flat_map(|round| in_round(team, round)).all(|(worker, _)| {
+        // A retired or unscored attempt still needs a real native session
+        // identity. An empty ID must not bypass cross-wave replay checks.
         !worker.id.is_empty() && reviewer_ids.insert(worker.id.as_str())
-            && (worker.session_id.is_empty() || session_ids.insert(worker.session_id.as_str()))
+            && !worker.session_id.is_empty() && session_ids.insert(worker.session_id.as_str())
     })
 }
 

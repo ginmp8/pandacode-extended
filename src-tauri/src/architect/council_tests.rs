@@ -9118,6 +9118,103 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
 
 
 
+/// M4/S1 must settle two independent child Councils, not one composite vote
+/// copied into the missing seat. A task receipt is issued only after the native
+/// root callback has authenticated all four distinct child leaf executions.
+#[test]
+fn nested_m4_parallel_task_receipt_requires_both_child_council_callbacks() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Parallel;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        assert_eq!(config.mode(), "m4");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Run both isolated native child Councils", None, None).unwrap();
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "f".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "nested-m4-parallel-task", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await both child Councils"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    let mut child_parents = std::collections::HashSet::new();
+    let mut leaf_sessions = std::collections::HashSet::new();
+    for index in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        assert!(child_parents.insert(launch.admission.parent.clone()) || index > 0);
+        assert!(leaf_sessions.insert(launch.sid.clone()),
+            "all child callbacks require distinct native leaf sessions");
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent child Council evidence.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+        if index == 2 {
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            assert!(!verified_council_pass(&store, &root),
+                "three of four leaf callbacks cannot satisfy the root quorum");
+            assert!(council_requests::record_native_terminal(
+                &store, &sid, &project, "nested-m4-parallel-task",
+                &artifact, &request.request_id,
+            ).is_err(), "one unfinished child cannot mint a native terminal receipt");
+        }
+    }
+    assert_eq!(child_parents.len(), 2, "each selected bot must own a child Architect");
+    assert_eq!(leaf_sessions.len(), 4);
+    let (settled, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Both independent child Councils passed"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(settled["completed"], true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(verified_council_pass(&store, &root));
+    let children = child_council::inspect(&store, &root).unwrap();
+    assert_eq!(children.len(), 2);
+    assert!(children.iter().all(|child|
+        child.verified_child_receipt.is_some()
+            && child.leaf_attempts.len() == 2
+            && child.leaf_attempts.iter().all(|leaf| leaf.round == 1)));
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel-task",
+        &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(1));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel-task",
+        &artifact, &request.request_id,
+    ).unwrap(), terminal, "one task must retain one idempotent terminal receipt");
+}
+
 #[test]
 fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phase_two() {
     let (state, sid) = state_fixture();

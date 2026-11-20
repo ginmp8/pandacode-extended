@@ -3513,6 +3513,7 @@ test('portable confirmation rejects a manifest changed after native preview',asy
       if(command==='superagent_list')return [] as never;
       if(command==='superagent_manifest_preview')return {
         wouldCreate:['Reviewed Team'],unchanged:[],importedPresetsDisabled:true,
+        reviewDigest:'a'.repeat(64),
       } as never;
       if(command==='superagent_manifest_import')throw Error('Unreviewed import reached native mutation.');
       throw Error('Unexpected native command '+command);
@@ -3556,7 +3557,8 @@ test('portable preview invalidates a late response after editing the manifest', 
       if(command==='superagent_list')return [] as never;
       if(command==='superagent_manifest_preview'){
         await release;
-        return {wouldCreate:['Original Team'],unchanged:[],importedPresetsDisabled:true} as never;
+        return {wouldCreate:['Original Team'],unchanged:[],importedPresetsDisabled:true,
+          reviewDigest:'a'.repeat(64)} as never;
       }
       if(command==='superagent_manifest_import')throw Error('Unreviewed manifest reached native import.');
       throw Error('Unexpected native command '+command);
@@ -3576,3 +3578,49 @@ test('portable preview invalidates a late response after editing the manifest', 
   expect(commands.filter(command=>command==='superagent_manifest_preview')).toHaveLength(1);
   expect(commands).not.toContain('superagent_manifest_import');
 });
+
+test('confirmed portable Team import forwards the current native-reviewed plan digest',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-reviewed-import';document.body.appendChild(host);
+    const imports:Array<{document:unknown;confirmed:unknown;reviewDigest:unknown}>=[];
+    (window as unknown as {saReviewedImports:typeof imports}).saReviewedImports=imports;
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [] as never;
+      if(command==='superagent_manifest_preview')return {
+        wouldCreate:['Reviewed Team'],unchanged:[],importedPresetsDisabled:true,
+        reviewDigest:'f'.repeat(64),
+      } as never;
+      if(command==='superagent_manifest_import'){
+        imports.push({document:args?.document,confirmed:args?.confirmed,
+          reviewDigest:args?.reviewDigest});
+        if(args?.reviewDigest!=='f'.repeat(64))throw Error('Native review identity missing.');
+        return {created:['Reviewed Team'],unchanged:[]} as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-reviewed-import');
+  await host.getByRole('button',{name:'Portable configuration'}).click();
+  const manifest=host.getByRole('textbox',{name:'Companion manifest JSON'});
+  await manifest.fill('{"schemaVersion":1,"orchestrations":[]}');
+  await host.getByRole('button',{name:'Preview import'}).click();
+  await expect(host.getByRole('button',{name:'Confirm import'})).toBeVisible();
+  await host.getByRole('button',{name:'Confirm import'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('status').filter({hasText:'1 presets imported; 0 unchanged.'}))
+    .toBeVisible();
+  const received=await page.evaluate(()=>
+    (window as unknown as {saReviewedImports:unknown[]}).saReviewedImports);
+  expect(received).toEqual([{
+    document:{schemaVersion:1,orchestrations:[]},
+    confirmed:true,reviewDigest:'f'.repeat(64),
+  }]);
+});
+

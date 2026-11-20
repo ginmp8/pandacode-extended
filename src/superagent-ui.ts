@@ -36,7 +36,7 @@ interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number; projectId?: string }
 interface DemandQuery { limit?: number; beforeUpdatedAt?: number; beforeId?: string;
   orchestrationId?: string; stateFilter?: string; searchQuery?: string; projectId?: string }
-interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
+interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean; reviewDigest: string }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
@@ -2341,6 +2341,9 @@ export function mountSuperagent(
           inspected = null; preview = null;
           throw new Error('Manifest changed during preview; preview again before importing.');
         }
+        if (!verified.importedPresetsDisabled || !/^[a-f0-9]{64}$/.test(verified.reviewDigest)) {
+          throw new Error('Native preview did not verify a disabled-only configuration and review digest.');
+        }
         inspected = document; preview = verified;
       }); return;
     }
@@ -2351,7 +2354,10 @@ export function mountSuperagent(
         // confirmation. Never submit a document the user did not review.
         if (inspected !== document || !preview || importText !== reviewedText)
           throw new Error('Manifest changed since preview; preview again before importing.');
-        const result = await call<ImportResult>('superagent_manifest_import',{ document, confirmed:true });
+        const reviewDigest = preview.reviewDigest;
+        const result = await call<ImportResult>('superagent_manifest_import',{
+          document, confirmed:true, reviewDigest,
+        });
         preview = null; inspected = null; await reload();
         feedback = result.created.length + ' presets imported; ' + result.unchanged.length +
           ' unchanged.' + (result.backupPath ? ' Recovery snapshot: ' + result.backupPath : '');

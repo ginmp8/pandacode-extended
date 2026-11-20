@@ -7,6 +7,7 @@ use super::Orchestration;
 use crate::{bots, storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, path::Path};
 use tauri::{Manager, State};
 
@@ -73,6 +74,9 @@ pub struct ImportPreview {
     pub unchanged: Vec<String>,
     /// Explicitly warn even when the exported source configuration was enabled.
     pub imported_presets_disabled: bool,
+    /// Content and resolved local-role identity of the operator-reviewed plan.
+    /// This is a freshness guard, never a permission or execution grant.
+    pub review_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,7 +88,7 @@ pub struct ImportResult {
     pub backup_path: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct Resolved {
     name: String,
     coordinator_id: String,
@@ -96,6 +100,18 @@ struct Resolved {
     purpose: String,
     strategy: String,
     existing: bool,
+}
+
+fn reviewed_plan_digest(document: &serde_json::Value, resolved: &[Resolved]) -> Result<String> {
+    // Bind both the exact portable configuration and its locally resolved bot
+    // identities. Import must recheck this under the same Store lock before
+    // writing a private backup or inserting any disabled Team.
+    let mut hash = Sha256::new();
+    hash.update(b"pandacode-superagent-preview-v1\0");
+    hash.update(serde_json::to_vec(document).map_err(|e| e.to_string())?);
+    hash.update(b"\0");
+    hash.update(serde_json::to_vec(resolved).map_err(|e| e.to_string())?);
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -289,6 +305,7 @@ fn preview(store: &Store, document: &serde_json::Value) -> Result<ImportPreview>
         would_create: resolved.iter().filter(|r| !r.existing).map(|r| r.name.clone()).collect(),
         unchanged: resolved.iter().filter(|r| r.existing).map(|r| r.name.clone()).collect(),
         imported_presets_disabled: true,
+        review_digest: reviewed_plan_digest(document, &resolved)?,
     })
 }
 
@@ -371,6 +388,22 @@ fn apply_with_backup(
     let mut result = apply(store, document, true)?;
     result.backup_path = Some(path.display().to_string());
     Ok(result)
+}
+
+fn apply_reviewed_with_backup(
+    store: &Store, data_dir: &Path, document: &serde_json::Value,
+    confirmed: bool, review_digest: &str,
+) -> Result<ImportResult> {
+    if !confirmed {
+        return Err("Confirm the preview before importing SuperAgent presets.".into());
+    }
+    let resolved = resolve(store, document)?;
+    if reviewed_plan_digest(document, &resolved)? != review_digest {
+        return Err("Portable Team preview is stale; review the current manifest and native bot identities again.".into());
+    }
+    // The outer Tauri entrypoint holds the native Store lock across this
+    // freshness check, private backup and transactional disabled-only import.
+    apply_with_backup(store, data_dir, document, true)
 }
 
 fn export(store: &Store) -> Result<serde_json::Value> {
@@ -537,12 +570,12 @@ pub async fn superagent_manifest_preview(
 #[tauri::command]
 pub async fn superagent_manifest_import(
     app: tauri::AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>,
-    document: serde_json::Value, confirmed: bool,
+    document: serde_json::Value, confirmed: bool, review_digest: String,
 ) -> Result<ImportResult> {
     main_window(&window)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    apply_with_backup(&store, &dir, &document, confirmed)
+    apply_reviewed_with_backup(&store, &dir, &document, confirmed, &review_digest)
 }
 
 #[cfg(test)]
@@ -615,6 +648,61 @@ mod tests {
         ).unwrap();
         assert_eq!(count, 0);
         std::fs::remove_file(blocked).unwrap();
+    }
+
+    #[test]
+    fn portable_import_requires_the_same_reviewed_manifest_and_native_role_identity() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-reviewed-import-{}", storage::id(),
+        ));
+        let original = document("Reviewed Team");
+        let inspected = preview(&store, &original).unwrap();
+        assert_eq!(inspected.review_digest.len(), 64);
+        assert!(inspected.review_digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let modified = document("Unreviewed Team");
+        assert!(apply_reviewed_with_backup(
+            &store, &root, &modified, true, &inspected.review_digest,
+        ).unwrap_err().contains("stale"));
+        assert!(apply_reviewed_with_backup(
+            &store, &root, &original, false, &inspected.review_digest,
+        ).is_err());
+        assert!(!root.join("bot-backups").exists());
+
+        // Even unchanged JSON must be reviewed again if its portable name
+        // resolves to a different local bot identity before import.
+        store.db.execute("UPDATE bots SET id='other-worker' WHERE id='worker'", []).unwrap();
+        let remapped = preview(&store, &original).unwrap();
+        assert_ne!(inspected.review_digest, remapped.review_digest);
+        assert!(apply_reviewed_with_backup(
+            &store, &root, &original, true, &inspected.review_digest,
+        ).unwrap_err().contains("stale"));
+        assert!(!root.join("bot-backups").exists());
+
+        let imported = apply_reviewed_with_backup(
+            &store, &root, &original, true, &remapped.review_digest,
+        ).unwrap();
+        assert_eq!(imported.created, vec!["Reviewed Team"]);
+        let (worker_id, enabled): (String, i64) = store.db.query_row(
+            "SELECT worker_bot_id,enabled FROM sa_orchestrations WHERE name='Reviewed Team'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(worker_id, "other-worker");
+        assert_eq!(enabled, 0);
+        // The first creation changes the native plan from create to no-op.
+        // An old confirmation cannot authorize a subsequent import.
+        assert!(apply_reviewed_with_backup(
+            &store, &root, &original, true, &remapped.review_digest,
+        ).unwrap_err().contains("stale"));
+        let fresh = preview(&store, &original).unwrap();
+        let second = apply_reviewed_with_backup(
+            &store, &root, &original, true, &fresh.review_digest,
+        ).unwrap();
+        assert_eq!(second.unchanged, vec!["Reviewed Team"]);
+        assert!(second.backup_path.is_none());
+        assert_eq!(std::fs::read_dir(root.join("bot-backups")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

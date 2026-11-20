@@ -1521,13 +1521,21 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     Ok(Some((event,at)))
 }
 
+/// Authenticated feed identity and the optional in-flight Team revision are
+/// one receipt context, never an execution grant.
+struct ObserveFeedContext {
+    repository_id: u64,
+    background_team_revision: Option<i64>,
+}
+
 fn poll_authenticated_events_with_repository_id(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
     repository_id: u64,
 ) -> Result<AuthenticatedPoll> {
     poll_authenticated_events_with_repository_id_scoped(
-        store, expected, since, raw, signed_in, pages_fetched, repository_id, None,
+        store, expected, since, raw, signed_in, pages_fetched,
+        ObserveFeedContext { repository_id, background_team_revision: None },
     )
 }
 
@@ -1537,9 +1545,10 @@ fn poll_authenticated_events_with_repository_id(
 fn poll_authenticated_events_with_repository_id_scoped(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
-    repository_id: u64, background_team_revision: Option<i64>,
+    feed: ObserveFeedContext,
 ) -> Result<AuthenticatedPoll>
 {
+    let ObserveFeedContext { repository_id, background_team_revision } = feed;
     if !token_ok(signed_in, 80) || !(1..=GITHUB_MAX_PAGES).contains(&pages_fetched) {
         return Err("Authenticated source polling requires a verified operator and bounded pages.".into());
     }
@@ -1910,8 +1919,8 @@ async fn poll_source_authenticated(
     }
     let (signed_in, response, pages_fetched, repository_id) = fetched?;
     poll_authenticated_events_with_repository_id_scoped(
-        &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
-        team_revision,
+        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+        ObserveFeedContext { repository_id, background_team_revision: team_revision },
     )
 }
 
@@ -2662,8 +2671,8 @@ mod tests {
             "payload": {"action": "opened", "issue": {"number": 42}}
         }]);
         let denied = poll_authenticated_events_with_repository_id_scoped(
-            &store, &selected, 0, &response, "operator", 1, 101,
-            Some(first_revision),
+            &store, &selected, 0, &response, "operator", 1,
+            ObserveFeedContext { repository_id: 101, background_team_revision: Some(first_revision) },
         ).unwrap_err();
         assert!(denied.contains("activation changed"), "{denied}");
         assert!(list_decisions(&store, &selected.id, 10).unwrap().is_empty());
@@ -2682,8 +2691,8 @@ mod tests {
             &store, "orch", Some(first_revision),
         ).is_err());
         assert!(poll_authenticated_events_with_repository_id_scoped(
-            &store, &selected, 0, &response, "operator", 1, 101,
-            Some(first_revision),
+            &store, &selected, 0, &response, "operator", 1,
+            ObserveFeedContext { repository_id: 101, background_team_revision: Some(first_revision) },
         ).is_err());
         store.db.execute(
             "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1

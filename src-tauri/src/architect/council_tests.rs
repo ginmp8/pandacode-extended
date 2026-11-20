@@ -8030,6 +8030,18 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
         save(&store, &mut root).unwrap();
     }
     let (root, _) = start_state(&state, &sid, "Review frozen project", None, None).unwrap();
+    // A reusable non-Channel Council task must remain bound to the genuine
+    // child callbacks, not merely an allocated pair of composite seats.
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "a".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "nested-m4-parallel", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
+
     let (pending, _) = dispatch_state(
         &state, &sid, root.generation, "pandacode_finish_team",
         json!({"summary":"Await real child reviews"}),
@@ -8049,6 +8061,11 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
         let before = load(&store, &sid).unwrap().unwrap();
         assert!(!verified_council_pass(&store, &before),
             "leaf callbacks alone cannot approve a root without persisted composite receipts");
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "nested-m4-parallel", &artifact,
+            &request.request_id,
+        ).is_err(), "native task admission cannot approve pending child receipts");
+
     }
     let (finished, _) = dispatch_state(
         &state, &sid, root.generation, "pandacode_finish_team",
@@ -8063,6 +8080,22 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved));
     let inspect = council_inspection_state(&store, &sid).unwrap().unwrap();
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel", &artifact,
+        &request.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.lowest_verified_score, 9.5);
+    assert_eq!(terminal.reviewed_round, Some(1));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal);
+    assert_eq!(council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal, "repeated settlement may not issue a second receipt");
+
     assert!(inspect.verified_pass);
     assert_eq!(inspect.usage.unique_attempts, 0, "M4 has no direct root reviewer");
     let composed = inspect.composed_usage.as_ref().expect("task-scoped child usage");
@@ -9461,6 +9494,17 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
         }
         let (started, _) = start_state(&state, &sid,
             "Verify two independent native phases for mixed Council", None, None).unwrap();
+        let (project, artifact, request) = {
+            let store = state.store.lock().unwrap();
+            let project = store.session(&sid).unwrap().project_id;
+            let artifact = "b".repeat(64);
+            let assignment = if include_automatic { "m7-s3-native" } else { "m6-s3-native" };
+            let request = council_requests::admit_native_task(
+                &store, &sid, &project, assignment, &artifact,
+            ).unwrap();
+            (project, artifact, request)
+        };
+
         let assignments = |round: usize| {
             let mut direct = reviewer_assignment(
                 &format!("quality-root-phase-{round}"), "Quality");
@@ -9534,6 +9578,17 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
         assert_eq!(root.council_status.as_ref().unwrap().round, 2);
         assert!(verified_council_pass(&store, &root));
         let parents = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
+        let assignment = if include_automatic { "m7-s3-native" } else { "m6-s3-native" };
+        let terminal = council_requests::record_native_terminal(
+            &store, &sid, &project, assignment, &artifact, &request.request_id,
+        ).unwrap();
+        assert_eq!(terminal.outcome, "passed");
+        assert_eq!(terminal.reviewed_round, Some(2),
+            "a first-phase result must never qualify for an S3 terminal receipt");
+        assert_eq!(council_requests::read_native_terminal(
+            &store, &sid, &project, assignment, &artifact, &request.request_id,
+        ).unwrap(), terminal);
+
         let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
         assert!(council::status_for_authenticated_children_s3(
             &root, &parents, &challenges).is_some());
@@ -9545,6 +9600,10 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
         ).unwrap();
         assert!(!verified_council_pass(&store, &root),
             "a revoked child S3 challenge must invalidate the root result");
+        assert!(council_requests::read_native_terminal(
+            &store, &sid, &project, assignment, &artifact, &request.request_id,
+        ).is_err(), "revoking a child challenge must also revoke reusable terminal proof");
+
     });
 }
 

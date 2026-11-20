@@ -71,7 +71,7 @@ test('native Council inspector displays unknown usage and never trusts a display
     status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
     verifiedPass: false,
     usage: { uniqueAttempts: 1, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
-      cumulativeQueueWaitMs: 1000, cumulativeObservedSpanMs: 8000,
+      cumulativeQueueWaitMs: 1000, cumulativeObservedSpanMs: 8000, settledReviewWindowMs: 6400,
       tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
     criteria: [{ id: 'security', lens: 'Security', target: 9, required: true }],
     attempts: [{ workerId: 'a', name: '<img src=x onerror=alert(1)>', lens: 'Security',
@@ -90,6 +90,8 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).getByText('Native attempts: 1', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative queue 1.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Cumulative observed span 8.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Settled review window 6.4 s');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('overlap counted once; not provider time');
   await expect(panel(page).getByText('Provider tokens unknown', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-inspection section[aria-label="Review round 1"] small').getByText('Queue 1.0 s', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();

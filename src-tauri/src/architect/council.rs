@@ -661,6 +661,9 @@ pub struct CouncilUsageTotals {
     pub span_measured_attempts: usize,
     pub cumulative_queue_wait_ms: Option<i64>,
     pub cumulative_observed_span_ms: Option<i64>,
+    /// First settled reviewer start to last settled update; concurrent overlap counts once.
+    /// Native lifecycle observation only, not provider duration or billing.
+    pub settled_review_window_ms: Option<i64>,
     pub token_count: Option<u64>,
     pub cost_amount: Option<f64>,
     pub cost_currency: Option<String>,
@@ -695,12 +698,21 @@ fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
     let add = |values: &[i64]| (!values.is_empty())
         .then(|| values.iter().try_fold(0_i64, |sum, value| sum.checked_add(*value)))
         .flatten();
+    // A sum of reviewer spans is not elapsed task time when independent reviewers
+    // overlap. Exclude queued/live attempts and never invent a completed window.
+    let settled: Vec<_> = unique.iter().filter(|attempt|
+        attempt.observed_span_ms.is_some() && attempt.started_at > 0
+            && attempt.last_updated_at >= attempt.started_at).collect();
+    let settled_review_window_ms = settled.iter().map(|attempt| attempt.started_at).min()
+        .zip(settled.iter().map(|attempt| attempt.last_updated_at).max())
+        .and_then(|(first, last)| last.checked_sub(first));
     CouncilUsageTotals {
         unique_attempts: unique.len(),
         queue_measured_attempts: queue.len(),
         span_measured_attempts: spans.len(),
         cumulative_queue_wait_ms: add(&queue),
         cumulative_observed_span_ms: add(&spans),
+        settled_review_window_ms,
         // No native provider receipt is available: unknown even for completed reviews.
         token_count: None,
         cost_amount: None,

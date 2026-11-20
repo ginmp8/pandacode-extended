@@ -83,6 +83,8 @@ export interface CouncilReportedFinding {
 export interface CouncilUsageTotals {
   uniqueAttempts: number; queueMeasuredAttempts: number; spanMeasuredAttempts: number;
   cumulativeQueueWaitMs: number | null; cumulativeObservedSpanMs: number | null;
+  /** Settled reviewer wall-clock window, with overlapping reviewers counted once; not billing time. */
+  settledReviewWindowMs?: number | null;
   tokenCount: number | null; costAmount: number | null; costCurrency: string | null;
   usageProvenance: 'unknown';
 }

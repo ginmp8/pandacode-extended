@@ -268,6 +268,8 @@ fn council_inspector_reports_native_queue_wait_and_settled_span_without_provider
     assert_eq!(result.usage.span_measured_attempts, 2);
     assert_eq!(result.usage.cumulative_queue_wait_ms, Some(4));
     assert_eq!(result.usage.cumulative_observed_span_ms, Some(31));
+    assert_eq!(result.usage.settled_review_window_ms, Some(26),
+        "elapsed settled reviewer window must not double-count overlap or queued attempts");
     assert!(result.usage.token_count.is_none());
     assert!(result.usage.cost_amount.is_none());
     assert_eq!(result.usage.usage_provenance, "unknown");
@@ -288,6 +290,8 @@ fn native_usage_totals_dedupe_attempt_ids_and_never_treat_absent_receipts_as_zer
     assert_eq!(inspected.usage.queue_measured_attempts, 1);
     assert_eq!(inspected.usage.cumulative_queue_wait_ms, Some(2));
     assert_eq!(inspected.usage.cumulative_observed_span_ms, Some(6));
+    assert_eq!(inspected.usage.settled_review_window_ms, Some(6),
+        "duplicate reviewer IDs must not extend the elapsed window");
     assert!(inspected.usage.token_count.is_none());
     assert!(inspected.usage.cost_amount.is_none());
 }
@@ -319,6 +323,10 @@ fn native_root_usage_breakdown_counts_each_attempt_once_across_rounds() {
         .map(|group| group.usage.unique_attempts).sum::<usize>(), inspected.usage.unique_attempts);
     assert_eq!(inspected.usage.cumulative_queue_wait_ms, Some(4));
     assert_eq!(inspected.usage.cumulative_observed_span_ms, Some(13));
+    assert_eq!(inspected.usage.settled_review_window_ms, Some(16),
+        "the observed window includes gaps between settled review rounds");
+    assert_eq!(inspected.usage_by_round_source[0].usage.settled_review_window_ms, Some(6));
+    assert_eq!(inspected.usage_by_round_source[1].usage.settled_review_window_ms, Some(7));
     assert_eq!(inspected.usage_by_round_source[1].usage.span_measured_attempts, 1);
     for group in &inspected.usage_by_round_source {
         assert_eq!(group.reviewer_source, "automatic");

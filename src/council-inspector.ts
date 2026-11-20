@@ -227,6 +227,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
             ' (' + escape(String(measured.queueMeasuredAttempts)) + ' measured)' +
             ' · Observed span ' + escape(observedDuration('', measured.cumulativeObservedSpanMs).trim()) +
             ' (' + escape(String(measured.spanMeasuredAttempts)) + ' measured)' +
+            ' · Settled review window ' + escape(observedDuration('', measured.settledReviewWindowMs).trim()) +
             ' · Provider tokens ' + (measured.tokenCount == null ? 'unknown' : escape(String(measured.tokenCount))) +
             ' · Cost ' + (measured.costAmount == null || !measured.costCurrency
               ? 'unknown' : escape(String(measured.costAmount) + ' ' + measured.costCurrency)) +
@@ -336,6 +337,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' (' + escape(String(usage.queueMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
       ' · Cumulative observed span ' + escape(observedDuration('', usage.cumulativeObservedSpanMs).trim()) +
       ' (' + escape(String(usage.spanMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
+      ' · Settled review window ' + escape(observedDuration('', usage.settledReviewWindowMs).trim()) +
+      ' (overlap counted once; not provider time)' +
       ' · Provider tokens ' + (usage.tokenCount === null ? 'unknown' : escape(String(usage.tokenCount))) +
       ' · Cost ' + (usage.costAmount === null || !usage.costCurrency ? 'unknown' : escape(String(usage.costAmount) + ' ' + usage.costCurrency)) +
       '</p>'
@@ -347,6 +350,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' (' + escape(String(composed.queueMeasuredAttempts)) + ' measured)' +
       ' · Cumulative observed span ' + escape(observedDuration('', composed.cumulativeObservedSpanMs).trim()) +
       ' (' + escape(String(composed.spanMeasuredAttempts)) + ' measured)' +
+      ' · Settled review window ' + escape(observedDuration('', composed.settledReviewWindowMs).trim()) +
+      ' (overlap counted once; not provider time)' +
       ' · Provider tokens ' + (composed.tokenCount == null ? 'unknown' : escape(String(composed.tokenCount))) +
       ' · Cost ' + (composed.costAmount == null || !composed.costCurrency
         ? 'unknown' : escape(String(composed.costAmount) + ' ' + composed.costCurrency)) +
@@ -363,7 +368,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         ' · Queue ' + escape(observedDuration('', group.usage.cumulativeQueueWaitMs).trim()) +
         ' (' + escape(String(group.usage.queueMeasuredAttempts)) + ' measured)' +
         ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) +
-        ' (' + escape(String(group.usage.spanMeasuredAttempts)) + ' measured)</li>').join('') +
+        ' (' + escape(String(group.usage.spanMeasuredAttempts)) + ' measured)' +
+        ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +
       '</ul></section>'
     : '';
   const allGroups = inspection.composedUsageByRoundSource ?? [];
@@ -375,7 +381,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         escape(group.reviewerSource.replace('_', ' ')) +
         ' · Native attempts ' + escape(String(group.usage.uniqueAttempts)) +
         ' · Queue ' + escape(observedDuration('', group.usage.cumulativeQueueWaitMs).trim()) +
-        ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) + '</li>').join('') +
+        ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) +
+        ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +
       '</ul></section>'
     : '';
   const completion = verified && inspection.verifiedCompletion

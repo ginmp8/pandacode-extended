@@ -30,6 +30,7 @@ enum Command {
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
+    CreateOrchestration { config_file: PathBuf },
     ListTickets,
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
@@ -116,6 +117,26 @@ fn read_bounded_roster(path: &std::path::Path)
         .map_err(|_| "Cannot read bounded UTF-8 Team roster file.".to_owned())?;
     serde_json::from_str(&text)
         .map_err(|_| "Team roster file must contain workerBotIds and reviewerBotIds arrays.".into())
+}
+
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HeadlessTeamCreateDocument {
+    config: crate::superagent::NewOrchestration,
+    roster: crate::superagent::roster::RosterInput,
+    max_worker_attempts: Option<i64>,
+    purpose: Option<String>,
+    strategy: Option<String>,
+}
+
+/// Configuration-only local JSON. Unknown authority fields, oversized files
+/// and malformed role documents fail before any native Team transaction.
+fn read_bounded_team_creation(path: &std::path::Path) -> Result<HeadlessTeamCreateDocument, String> {
+    let content = read_bounded_objective(path)
+        .map_err(|_| "Cannot read bounded UTF-8 Team creation file.".to_owned())?;
+    serde_json::from_str(&content)
+        .map_err(|_| "Invalid Team configuration/roster JSON or unsupported authority field.".into())
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -741,6 +762,29 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+
+            if let Command::CreateOrchestration { config_file } = &command {
+                // Create a disabled Team through the same atomic native policy
+                // transaction as desktop. The local document is not an
+                // execution, provider or GitHub authorization.
+                let result = (|| -> Result<String, String> {
+                    let config = read_bounded_team_creation(config_file)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_create_orchestration(
+                        &dir.join("kingcode.sqlite3"), config.config, config.roster,
+                        config.max_worker_attempts.unwrap_or(2),
+                        config.purpose.as_deref().unwrap_or(""),
+                        config.strategy.as_deref().unwrap_or("balanced"),
+                    )
+                })();
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team creation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let native_action = matches!(&command,
                 Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
@@ -1296,6 +1340,16 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             "--inspect-orchestrations" => {
                 command = Command::InspectOrchestrations;
                 ops += 1;
+            }
+            "--create-orchestration" => {
+                let file = args.get(index + 1)
+                    .ok_or("--create-orchestration needs a local Team JSON file.")?;
+                if file.is_empty() || file.starts_with("--") {
+                    return Err("Provide a local Team creation file path, not another command.".into());
+                }
+                command = Command::CreateOrchestration { config_file: PathBuf::from(file) };
+                ops += 1;
+                index += 1;
             }
             "--list-tickets" => {
                 command = Command::ListTickets;
@@ -2275,7 +2329,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2298,6 +2352,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          and a verified config-only backup; exit without starting tasks.
   --export-orchestrations <file>
                          Export portable SuperAgent presets without tickets or secrets; exit.
+  --create-orchestration <json-file>
+                          Create one disabled Team with ordered Workers, optional
+                          Reviewers and future-task policy from bounded local JSON.
+                          No provider, task grant, GitHub Auto or effect is started.
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
@@ -2481,6 +2539,33 @@ mod tests {
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--create-orchestration team.json"),
+            Ok(Command::CreateOrchestration { config_file: PathBuf::from("team.json") }));
+        for invalid in [
+            "--create-orchestration",
+            "--create-orchestration --stop-ticket",
+            "--create-orchestration team.json --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        let valid = r#"{
+            "config":{"name":"Safe Team","coordinatorBotId":"lead","workerBotId":"worker"},
+            "roster":{"workerBotIds":["worker","worker-two"],"reviewerBotIds":[]},
+            "maxWorkerAttempts":3,"purpose":"Headless delivery","strategy":"balanced"
+        }"#;
+        let config: HeadlessTeamCreateDocument = serde_json::from_str(valid).unwrap();
+        assert_eq!(config.roster.worker_bot_ids.len(), 2);
+        assert_eq!(config.max_worker_attempts, Some(3));
+        for unsafe_json in [
+            r#"{"config":{"name":"Team","coordinatorBotId":"lead","workerBotId":"worker"},
+                "roster":{"workerBotIds":["worker"],"reviewerBotIds":[]},"enabled":true}"#,
+            r#"{"config":{"name":"Team","coordinatorBotId":"lead","workerBotId":"worker",
+                "allowedSideEffects":true},"roster":{"workerBotIds":["worker"],"reviewerBotIds":[]}}"#,
+            r#"{"config":{"name":"Team","coordinatorBotId":"lead","workerBotId":"worker"},
+                "roster":{"workerBotIds":["worker"],"reviewerBotIds":[],"grantIssued":true}}"#,
+        ] {
+            assert!(serde_json::from_str::<HeadlessTeamCreateDocument>(unsafe_json).is_err());
+        }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-ticket-activity ticket_123"), Ok(Command::ListTicketActivity {
             ticket_id:"ticket_123".into(), before_id:None,

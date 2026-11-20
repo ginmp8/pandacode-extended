@@ -1907,6 +1907,33 @@ pub(crate) fn headless_queue_selected_worker_demand(
     )
 }
 
+/// Create a reusable, disabled Team through the same atomic role and future-task
+/// policy boundary as desktop. A detached operator cannot turn a creation
+/// document into a live grant, Assignment, Council verdict or provider launch.
+/// Existing bot identities are checked natively before the transaction commits.
+pub(crate) fn headless_create_orchestration(
+    database_path: &std::path::Path, input: NewOrchestration,
+    members: roster::RosterInput, max_worker_attempts: i64,
+    purpose: &str, strategy: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let created = roster::create_with_attempt_policy_and_strategy(
+        &store, input, Some(members), max_worker_attempts, purpose, strategy,
+    )?;
+    let saved = roster::read(&store, &created.id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": created.id,
+        "enabled": created.enabled,
+        "policyRevision": created.policy_revision,
+        "workerCount": saved.worker_bot_ids.len(),
+        "reviewerCount": saved.reviewer_bot_ids.len(),
+        "maxWorkerAttempts": saved.max_worker_attempts,
+        "strategy": saved.strategy,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local headless Team rename uses the same desktop CAS and guard
 /// without startup recovery. This never changes bot identities, roles, grants
 /// or the historical Ticket snapshot; an active Team is always rejected.
@@ -5344,6 +5371,87 @@ mod tests {
         assert_eq!(list_review_inbox(&reopened, 200).unwrap()
             .into_iter().find(|item| item.id == "historical-review").unwrap().project_id,
             "archived-project");
+    }
+
+
+    #[test]
+    fn headless_team_creation_is_atomic_disabled_role_scoped_and_restart_durable() {
+        let store = fixture();
+        for id in ["worker-two", "reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id, storage::now()],
+            ).unwrap();
+        }
+        let members = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker-two".into()],
+            reviewer_bot_ids: vec!["reviewer".into()],
+        };
+        let output = headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Headless Team".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, members.clone(), 3, "Native delivery", "performance",
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["enabled"], false);
+        assert_eq!(result["workerCount"], 2);
+        assert_eq!(result["reviewerCount"], 1);
+        assert_eq!(result["maxWorkerAttempts"], 3);
+        assert_eq!(result["strategy"], "performance");
+        assert_eq!(result["grantIssued"], false);
+        assert_eq!(result["providerDispatched"], false);
+        assert!(!output.contains("Native delivery"));
+        let team_id = result["orchestrationId"].as_str().unwrap();
+        let saved = roster::read(&store, team_id).unwrap();
+        assert_eq!(saved.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(saved.reviewer_bot_ids, members.reviewer_bot_ids);
+        assert_eq!(saved.purpose, "Native delivery");
+        assert!(!configuration(&store, team_id).unwrap().enabled);
+        for table in ["sa_tickets", "sa_mandates", "sa_assignments", "sa_effect_receipts"] {
+            let count: i64 = store.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "{table} must not receive runtime authority");
+        }
+        let team_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        let invalid = headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Rejected Team".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, roster::RosterInput {
+                worker_bot_ids: vec!["worker".into(), "worker".into()],
+                reviewer_bot_ids: vec![],
+            }, 3, "", "balanced",
+        );
+        assert!(invalid.is_err(), "duplicate Worker must roll back Team creation");
+        assert!(headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Invalid Budget".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, members.clone(), 0, "", "balanced",
+        ).is_err());
+        assert!(headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Missing Bot".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "unknown".into(),
+            }, members.clone(), 3, "", "balanced",
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), team_count, "failed creation must never leave an orphan Team");
+        let path = store.path.clone();
+        let id = team_id.to_owned();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let durable = roster::read(&reopened, &id).unwrap();
+        assert_eq!(durable.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(durable.reviewer_bot_ids, members.reviewer_bot_ids);
+        assert_eq!(durable.max_worker_attempts, 3);
+        assert!(!configuration(&reopened, &id).unwrap().enabled);
     }
 
     #[test]

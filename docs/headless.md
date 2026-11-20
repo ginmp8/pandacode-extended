@@ -907,6 +907,48 @@ pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New
 
 The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
 
+### Headless Team creation (native, disabled)
+
+A trusted local operator can create a reusable Team from **existing local bots**
+without opening a Desktop Webview. Save a private UTF-8 JSON file (maximum 16 KiB):
+
+```json
+{
+  "config": {
+    "name": "Release Engineering",
+    "coordinatorBotId": "existing-coordinator-id",
+    "workerBotId": "existing-first-worker-id"
+  },
+  "roster": {
+    "workerBotIds": ["existing-first-worker-id", "existing-second-worker-id"],
+    "reviewerBotIds": []
+  },
+  "maxWorkerAttempts": 2,
+  "purpose": "Deliver authorized repository changes",
+  "strategy": "balanced"
+}
+```
+
+```sh
+pandacode serve --create-orchestration /private/team.json
+```
+
+The first Worker must match `config.workerBotId` for compatibility with older
+native Team records. `maxWorkerAttempts` defaults to 2; `purpose` defaults
+to empty and `strategy` to `balanced`. An empty reviewer set is permitted.
+Unknown fields (including `enabled`, `allowedTools` and permissions) are
+rejected, not silently applied. The command checks that all selected bots are
+eligible and that the full roster and policy are valid **in one native SQLite
+transaction**. Invalid bots, duplicate roles or unsupported budgets leave no
+partial Team. Existing bots are neither created nor modified.
+
+New Teams always start **disabled** with no Ticket, Mandate, Assignment,
+source subscription, Council verdict, tool permission or provider launch.
+The output contains only Team identity, policy revision, role counts, strategy
+and explicit false authority flags; it does not echo the private purpose or bot
+instructions. Enable the Team separately after inspecting its policy. This
+command does not run startup recovery against an active serve process.
+
 ### Headless Team strategy (future Demands only)
 
 A trusted local operator can update a disabled Team's scenario purpose and

@@ -88,6 +88,20 @@ pub struct ImportResult {
     pub backup_path: Option<String>,
 }
 
+/// Effective local member identity bound to an operator-reviewed import.
+/// Legacy manifests do not pin profiles, so preview confirmation must.
+#[derive(Clone, Serialize)]
+struct ReviewedMember {
+    id: String,
+    name: String,
+    project_id: String,
+    provider: String,
+    model: String,
+    mode: String,
+    reasoning_effort: String,
+    skills: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 struct Resolved {
     name: String,
@@ -100,6 +114,7 @@ struct Resolved {
     purpose: String,
     strategy: String,
     existing: bool,
+    reviewed_members: Vec<ReviewedMember>,
 }
 
 fn reviewed_plan_digest(document: &serde_json::Value, resolved: &[Resolved]) -> Result<String> {
@@ -107,7 +122,7 @@ fn reviewed_plan_digest(document: &serde_json::Value, resolved: &[Resolved]) -> 
     // identities. Import must recheck this under the same Store lock before
     // writing a private backup or inserting any disabled Team.
     let mut hash = Sha256::new();
-    hash.update(b"pandacode-superagent-preview-v1\0");
+    hash.update(b"pandacode-superagent-preview-v2\0");
     hash.update(serde_json::to_vec(document).map_err(|e| e.to_string())?);
     hash.update(b"\0");
     hash.update(serde_json::to_vec(resolved).map_err(|e| e.to_string())?);
@@ -284,6 +299,27 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 return Err(format!("Existing orchestration conflicts with imported preset: {}",preset.name));
             }
         }
+        // Even v1/v2 manifests must bind the *current* local bot
+        // capabilities to the reviewed plan. Resolving the same names/IDs
+        // after a model, harness, Skills or project edit is a new plan.
+        let reviewed_members = std::iter::once(preset.coordinator_bot.as_str())
+            .chain(std::iter::once(preset.worker_bot.as_str()))
+            .chain(preset.extra_worker_bots.iter().map(String::as_str))
+            .chain(preset.reviewer_bots.iter().map(String::as_str))
+            .map(|name| {
+                let bot = lookup(name)?;
+                Ok(ReviewedMember {
+                    id: bot.id.clone(),
+                    name: bot.name.clone(),
+                    project_id: bot.project_id.clone(),
+                    provider: bot.provider.clone(),
+                    model: bot.model.clone(),
+                    mode: bot.mode.clone(),
+                    reasoning_effort: bot.reasoning_effort.clone(),
+                    skills: bot.skills.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         resolved.push(Resolved {
             name: preset.name.clone(),
             coordinator_id: coordinator.id.clone(),
@@ -294,6 +330,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             max_worker_attempts,
             purpose,strategy,
             existing: existing.is_some(),
+            reviewed_members,
         });
     }
     Ok(resolved)
@@ -703,6 +740,113 @@ mod tests {
         assert!(second.backup_path.is_none());
         assert_eq!(std::fs::read_dir(root.join("bot-backups")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reviewed_legacy_import_rejects_profile_changes_before_private_backup() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-review-profile-drift-{}", storage::id(),
+        ));
+        // Legacy v1/v2 had no serialized botProfiles; confirmation still
+        // needs to pin the effective local model/harness/Skills identity.
+        let document = document("Legacy Profile Drift");
+        let before = preview(&store, &document).unwrap();
+        store.db.execute(
+            "UPDATE bots SET model='changed-after-preview' WHERE id='worker'", [],
+        ).unwrap();
+        let current = preview(&store, &document).unwrap();
+        assert_ne!(before.review_digest, current.review_digest);
+        let error = apply_reviewed_with_backup(
+            &store, &root, &document, true, &before.review_digest,
+        ).unwrap_err();
+        assert!(error.contains("stale"), "{error}");
+        assert!(!root.join("bot-backups").exists());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+
+        // Freshly reviewed local metadata is still a configuration-only
+        // import. No task, grant or activation is issued.
+        let imported = apply_reviewed_with_backup(
+            &store, &root, &document, true, &current.review_digest,
+        ).unwrap();
+        assert_eq!(imported.created, vec!["Legacy Profile Drift"]);
+        let (enabled, worker_id): (i64, String) = store.db.query_row(
+            "SELECT enabled,worker_bot_id FROM sa_orchestrations
+             WHERE name='Legacy Profile Drift'", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((enabled, worker_id), (0, "worker".into()));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exported_multi_role_team_imports_on_a_different_local_bot_catalog() {
+        let source = fixture();
+        for (id, name) in [("extra-source", "Worker B"), ("reviewer-source", "Reviewer A")] {
+            source.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?2,'worker-project','codex','default','plan',?3,?3)",
+                params![id, name, storage::now()],
+            ).unwrap();
+        }
+        let mut config = document("Portable Multi Role");
+        config["schemaVersion"] = json!(2);
+        config["orchestrations"][0]["extraWorkerBots"] = json!(["Worker B"]);
+        config["orchestrations"][0]["reviewerBots"] = json!(["Reviewer A"]);
+        assert_eq!(apply(&source, &config, true).unwrap().created,
+            vec!["Portable Multi Role"]);
+        let exported = export(&source).unwrap();
+        assert_eq!(exported["schemaVersion"], 6);
+
+        let destination_path = std::env::temp_dir().join(format!(
+            "sa-portable-other-catalog-{}.sqlite3", storage::id(),
+        ));
+        let destination = Store::open(&destination_path).unwrap();
+        for (id, name, project) in [
+            ("local-coordinator", "Router", "different-lead-project"),
+            ("local-worker", "Builder", "different-worker-project"),
+            ("local-extra", "Worker B", "different-worker-project"),
+            ("local-reviewer", "Reviewer A", "different-worker-project"),
+        ] {
+            destination.db.execute(
+                "INSERT OR IGNORE INTO projects(id,name,path) VALUES(?1,?1,?2)",
+                params![project, format!("/tmp/sa-portable-destination-{project}")],
+            ).unwrap();
+            destination.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?2,?3,'codex','default','plan',?4,?4)",
+                params![id, name, project, storage::now()],
+            ).unwrap();
+        }
+        let checked = preview(&destination, &exported).unwrap();
+        assert_eq!(checked.would_create, vec!["Portable Multi Role"]);
+        let backup = std::env::temp_dir().join(format!(
+            "sa-portable-other-catalog-backup-{}", storage::id(),
+        ));
+        let imported = apply_reviewed_with_backup(
+            &destination, &backup, &exported, true, &checked.review_digest,
+        ).unwrap();
+        assert_eq!(imported.created, vec!["Portable Multi Role"]);
+        let team_id: String = destination.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Portable Multi Role'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let team = super::super::configuration(&destination, &team_id).unwrap();
+        let roles = super::super::roster::read(&destination, &team_id).unwrap();
+        assert_eq!(team.coordinator_bot_id, "local-coordinator");
+        assert_eq!(roles.worker_bot_ids, vec!["local-worker", "local-extra"]);
+        assert_eq!(roles.reviewer_bot_ids, vec!["local-reviewer"]);
+        assert!(!team.enabled);
+        assert!(!roles.execution_ready);
+        assert_eq!(destination.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(backup);
     }
 
     #[test]

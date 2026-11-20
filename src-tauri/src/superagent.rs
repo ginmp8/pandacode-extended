@@ -10731,6 +10731,7 @@ mod tests {
         members.push(roster::AdmittedMemberProfile {
             role: "reviewer".into(), position: 0, bot_id: bot.id,
             project_id: bot.project_id, project_path: None, resolved_project_path: None,
+            checkout_existed_at_admission: None, // Historical read-only snapshot.
             provider: bot.provider, model: bot.model, mode: bot.mode,
             reasoning_effort: bot.reasoning_effort, assigned_skill_ids: bot.skills,
             prompt_identity_sha256: None, // Historical snapshot without a prompt digest.

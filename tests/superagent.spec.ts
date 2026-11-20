@@ -195,6 +195,61 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   });
 });
 
+
+test('Team directory Assign demand opens native scoped Runs without inherited drafts or dispatch', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-assign-demand-route';document.body.appendChild(host);
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    (window as unknown as {saAssignRouteCalls:typeof calls}).saAssignRouteCalls=calls;
+    const teams=[
+      {id:'team-a',name:'Design Team',coordinatorBotId:'coordinator',
+        workerBotId:'worker',enabled:false,policyRevision:1,workerCount:1,reviewerCount:0},
+      {id:'team-b',name:'Build Team',coordinatorBotId:'coordinator',
+        workerBotId:'worker',enabled:false,policyRevision:1,workerCount:1,reviewerCount:0},
+    ];
+    mountSuperagent(host,async(command,args)=>{
+      calls.push({command,args});
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return teams as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        if((args?.query as {orchestrationId?:string} | undefined)?.orchestrationId!=='team-b')
+          throw Error('Native Demand query was not Team scoped');
+        return [{id:'demand-b',orchestrationId:'team-b',objective:'Persisted build activity',
+          state:'blocked',revision:2,updatedAt:1000,projectId:'project-b'}] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-assign-demand-route');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Draft for Design Team only');
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.getByRole('button',{name:'Assign demand to Build Team'}).click();
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toHaveAttribute('aria-current','page');
+  await expect(host.getByRole('region',{name:'Selected orchestration'})).toContainText('Build Team');
+  await expect(host.getByRole('combobox',{name:'Filter Demands by Team'})).toHaveValue('team-b');
+  await expect(host.getByRole('textbox',{name:'Task objective'})).toHaveValue('');
+  await expect(host.getByRole('textbox',{name:'Task objective'})).toBeFocused();
+  await expect(host.getByRole('region',{name:'All Demands across Teams'}))
+    .toContainText('Persisted build activity');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saAssignRouteCalls:Array<{command:string;args?:Record<string,unknown>}>})
+      .saAssignRouteCalls);
+  expect(calls.filter(item=>item.command==='superagent_all_demands')).toEqual([
+    {command:'superagent_all_demands',args:{query:{limit:200,orchestrationId:'team-b'}}},
+  ]);
+  expect(calls.some(item=>/superagent_(submit|preflight|set_enabled|dispatch)/.test(item.command)))
+    .toBe(false);
+});
+
 test('Team strategy changes through native CAS and persists after refresh',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{
@@ -3235,10 +3290,10 @@ test('Team directory uses durable native human and Council pending counts indepe
       if(command==='superagent_list')return [
         {id:'team-1',name:'Needs review',coordinatorBotId:'a',workerBotId:'b',enabled:false,
           policyRevision:1,ticketCount:260,runningCount:2,blockedCount:3,
-          waitingApprovalCount:4,waitingReviewCount:2},
+          queuedCount:8,completedCount:40,waitingApprovalCount:4,waitingReviewCount:2},
         {id:'team-2',name:'No reviews',coordinatorBotId:'a',workerBotId:'b',enabled:false,
           policyRevision:1,ticketCount:1,runningCount:0,blockedCount:0,
-          waitingApprovalCount:0,waitingReviewCount:0},
+          queuedCount:0,completedCount:1,waitingApprovalCount:0,waitingReviewCount:0},
       ] as never;
       if(command==='superagent_tickets')return [] as never;
       throw Error('Unexpected native command: '+command);
@@ -3250,6 +3305,9 @@ test('Team directory uses durable native human and Council pending counts indepe
     '0 awaiting human approval · 0 awaiting Council (not approved)',
   ]);
   await expect(host.locator('.sa-list .sa-counts').first()).toContainText('260 tasks');
+  await expect(host.locator('.sa-list .sa-lifecycle-counts')).toHaveText([
+    '8 queued · 40 completed','0 queued · 1 completed',
+  ]);
   await host.getByRole('button',{name:'Review inbox',exact:true}).click();
   await expect(host.locator('.sa-list .sa-review-counts').first())
     .toContainText('2 awaiting Council (not approved)');

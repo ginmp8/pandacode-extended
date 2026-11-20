@@ -10,6 +10,7 @@ interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   projectId?: string; enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number;
+  queuedCount?: number; completedCount?: number;
   waitingApprovalCount?: number; waitingReviewCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
   manualEnableBlocker?: string | null;
@@ -254,6 +255,8 @@ export function mountSuperagent(
       : ' · Check outcome unavailable (legacy receipt)';
   function render(): void {
     if (!host.isConnected) return;
+    const nativeCount = (n: number | undefined, label: string): string =>
+      typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n + ' ' + label : label + ' unavailable';
     const roleSummary = (item:Config): string =>
       typeof item.workerCount === 'number' && typeof item.reviewerCount === 'number' &&
       Number.isInteger(item.workerCount) && Number.isInteger(item.reviewerCount) &&
@@ -275,8 +278,12 @@ export function mountSuperagent(
       safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
       '</small><small class="sa-role-counts" aria-label="Configured member counts">' +
       safe(roleSummary(item)) + '</small><small class="sa-counts" aria-label="Task counts">' +
-      (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
-      ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
+      safe(nativeCount(item.ticketCount,'tasks')) + ' · ' +
+      safe(nativeCount(item.runningCount,'running')) + ' · ' +
+      safe(nativeCount(item.blockedCount,'blocked')) + '</small>' +
+      '<small class="sa-lifecycle-counts" aria-label="Native queued and completed Demand counts">' +
+      safe(nativeCount(item.queuedCount,'queued')) + ' · ' +
+      safe(nativeCount(item.completedCount,'completed')) + '</small>' +
       '<small class="sa-review-counts" aria-label="Native pending review counts">' +
       (Number.isSafeInteger(item.waitingApprovalCount) && Number.isSafeInteger(item.waitingReviewCount) &&
        (item.waitingApprovalCount ?? -1) >= 0 && (item.waitingReviewCount ?? -1) >= 0
@@ -287,7 +294,10 @@ export function mountSuperagent(
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
-      (item.id === selected) + '">Details</button></li>').join('');
+      (item.id === selected) + '">Details</button>' +
+      '<button type="button" data-sa-select="' + safe(item.id) +
+      '" data-sa-assign-demand="true" aria-label="Assign demand to ' +
+      safe(item.name) + '">Assign demand</button></li>').join('');
     const optionsFor = (selected: string | string[]) => {
       const selectedIds = Array.isArray(selected) ? selected : [selected];
       return bots.map(bot => '<option value="' + safe(bot.id) + '"' +
@@ -2031,11 +2041,40 @@ export function mountSuperagent(
     }
     if (target.dataset.saSelect) {
       if (busy || loading) return;
-      workspaceView = 'runs';
-      if (selected === target.dataset.saSelect) { render(); return; }
       const next = target.dataset.saSelect;
+      if (!presets.some(item => item.id === next)) return;
+      const assigning = target.hasAttribute('data-sa-assign-demand');
+      workspaceView = 'runs';
+      if (assigning) {
+        // Choose this Team's durable Demand scope; never infer admission.
+        demandTeamFilter = next; demandProjectFilter = ''; demandStateFilter = '';
+        demandSearch = ''; demandSearchDraft = '';
+        allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      }
+      const focusObjective = () => {
+        if (assigning && !error && selected === next && workspaceView === 'runs') {
+          host.querySelector<HTMLTextAreaElement>(
+            'form[data-sa-form="run"] textarea[name="objective"]')?.focus();
+        }
+      };
+      const loadTeamDemands = async () => {
+        const loaded = await fetchDemandPage({limit:200,orchestrationId:next});
+        if (selected !== next || demandTeamFilter !== next) return;
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      };
+      if (selected === next) {
+        if (assigning) void work(loadTeamDemands).then(focusObjective);
+        else render();
+        return;
+      }
       selected = next;
       selectedDemandWorkerId = ''; demandPreflight = null;
+      if (assigning) {
+        // No cross-Team reuse of another user's unsent objective or task key.
+        demandObjective = ''; demandMode = 'coordinated';
+        taskKey = crypto.randomUUID();
+      }
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
@@ -2043,7 +2082,8 @@ export function mountSuperagent(
       sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
-      });
+        if (assigning) await loadTeamDemands();
+      }).then(focusObjective);
       return;
     }
     if (target.dataset.saEnable) {

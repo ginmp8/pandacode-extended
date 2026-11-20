@@ -274,6 +274,9 @@ pub struct OrchestrationOverview {
     pub config: Orchestration,
     pub ticket_count: i64,
     pub running_count: i64,
+    /// Durable lifecycle totals, independent of paginated UI queries.
+    pub queued_count: i64,
+    pub completed_count: i64,
     pub blocked_count: i64,
     /// Pending human acceptance, not a successful native review.
     pub waiting_approval_count: i64,
@@ -304,7 +307,9 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
                 1 + (SELECT COUNT(*) FROM sa_team_roles r
                      WHERE r.orchestration_id=o.id AND r.role='worker'),
                 (SELECT COUNT(*) FROM sa_team_roles r
-                 WHERE r.orchestration_id=o.id AND r.role='reviewer')
+                 WHERE r.orchestration_id=o.id AND r.role='reviewer'),
+                COALESCE(SUM(CASE WHEN t.state='queued' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='completed' THEN 1 ELSE 0 END),0)
          FROM sa_orchestrations o
          LEFT JOIN sa_tickets t ON t.orchestration_id=o.id
          GROUP BY o.id ORDER BY o.created_at,o.id",
@@ -320,6 +325,8 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             last_activity_at: row.get(12)?,
             worker_count: row.get(13)?,
             reviewer_count: row.get(14)?,
+            queued_count: row.get(15)?,
+            completed_count: row.get(16)?,
             manual_enable_blocker: None,
             policy_edit_blocker: None,
         })
@@ -9119,6 +9126,7 @@ mod tests {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
             assert_eq!(item.blocked_count, 0);
+            assert_eq!((item.queued_count, item.completed_count), (0, 0));
             assert_eq!((item.waiting_approval_count, item.waiting_review_count), (0, 0));
             assert!(item.last_activity_at > 0);
         }
@@ -9165,6 +9173,25 @@ mod tests {
         let serialized = serde_json::to_value(selected).unwrap();
         assert_eq!(serialized["waitingApprovalCount"], 1);
         assert_eq!(serialized["waitingReviewCount"], 1);
+        // Count the durable lifecycle, not only the latest native Ticket page.
+        store.db.execute("UPDATE sa_tickets SET state='queued' WHERE id=?1",
+            [&blocked.id]).unwrap();
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id=?1",
+            [&active.id]).unwrap();
+        let projected=orchestration_overview(&store).unwrap();
+        let owned=projected.iter().find(|item|item.config.id==config.id).unwrap();
+        let unrelated=projected.iter().find(|item|item.config.id==other.id).unwrap();
+        assert_eq!((owned.queued_count,owned.completed_count),(1,1));
+        assert_eq!((unrelated.queued_count,unrelated.completed_count),(0,0));
+        let encoded=serde_json::to_value(owned).unwrap();
+        assert_eq!(encoded["queuedCount"],1);
+        assert_eq!(encoded["completedCount"],1);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persistent=orchestration_overview(&reopened).unwrap();
+        let restored=persistent.iter().find(|item|item.config.id==config.id).unwrap();
+        assert_eq!((restored.queued_count,restored.completed_count),(1,1));
     }
 
     #[test]

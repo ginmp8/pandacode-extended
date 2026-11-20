@@ -2822,6 +2822,18 @@ function renderComposer(): void {
       ? [...oldCouncilPanel.querySelectorAll<HTMLElement>(councilControls)].indexOf(document.activeElement as HTMLElement)
       : -1;
     const councilScrollTop = councilWasOpen ? oldCouncilPanel?.scrollTop ?? 0 : 0;
+    // A channel event can replace a text field while the user edits the middle
+    // of a criterion or file scope. Retain the caret as well as the focus.
+    const councilFocusedText = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      && (document.activeElement instanceof HTMLTextAreaElement
+        || (document.activeElement instanceof HTMLInputElement
+          && ['text', 'search', 'tel', 'url'].includes(document.activeElement.type)))
+      ? document.activeElement : null;
+    const councilCaret = councilFocusedText ? {
+      start: councilFocusedText.selectionStart ?? 0,
+      end: councilFocusedText.selectionEnd ?? 0,
+      direction: councilFocusedText.selectionDirection ?? 'none',
+    } : null;
     const promptWasFocused = document.activeElement === oldChannelComposer?.querySelector('#shared-channel-prompt');
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
@@ -2835,7 +2847,11 @@ function renderComposer(): void {
         toggleSharedChannelCouncil(nextTrigger);
         if (councilFocusedIndex >= 0) {
           const focus = [...nextPanel.querySelectorAll<HTMLElement>(councilControls)][councilFocusedIndex];
-          if (focus?.getClientRects().length && !focus.matches(':disabled')) focus.focus({ preventScroll: true });
+          if (focus?.getClientRects().length && !focus.matches(':disabled')) {
+            focus.focus({ preventScroll: true });
+            if (councilCaret && (focus instanceof HTMLInputElement || focus instanceof HTMLTextAreaElement))
+              focus.setSelectionRange(councilCaret.start, councilCaret.end, councilCaret.direction);
+          }
         } else if (promptWasFocused) {
           channelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.focus({ preventScroll: true });
         }

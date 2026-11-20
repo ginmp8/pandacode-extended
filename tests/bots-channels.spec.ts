@@ -103,6 +103,7 @@ test.describe('shared bot channels', () => {
     const lens = panel.locator('input[name="councilCriterionLens"]').first();
     await lens.fill('Project privacy boundary');
     await lens.focus();
+    await lens.evaluate(element => (element as HTMLInputElement).setSelectionRange(2, 9));
     const scrollTop = await panel.evaluate(element => {
       element.scrollTop = Math.min(80, element.scrollHeight - element.clientHeight);
       return element.scrollTop;
@@ -120,6 +121,11 @@ test.describe('shared bot channels', () => {
     await expect(restored.getByRole('button', { name: 'Council: on' })).toHaveAttribute('aria-expanded', 'true');
     await expect(restoredPanel.locator('input[name="councilCriterionLens"]').first()).toHaveValue('Project privacy boundary');
     await expect(restoredPanel.locator('input[name="councilCriterionLens"]').first()).toBeFocused();
+    // An unrelated channel refresh must not move the caret or overwrite a
+    // partially edited required review criterion.
+    await expect.poll(() => restoredPanel.locator('input[name="councilCriterionLens"]').first()
+      .evaluate(element => [(element as HTMLInputElement).selectionStart, (element as HTMLInputElement).selectionEnd]))
+      .toEqual([2, 9]);
     await expect.poll(() => restoredPanel.evaluate(element => element.scrollTop)).toBe(scrollTop);
     await page.keyboard.press('Escape');
     await expect(restoredPanel).toBeHidden();

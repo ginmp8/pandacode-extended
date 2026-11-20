@@ -7732,11 +7732,18 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert!(council::status_for_authenticated_children(&root, &complete_roster[..1]).is_none());
     let already_admitted = root.workers.iter().filter(|worker|
         worker.council.is_some() && worker.created_at >= root.council_since).count();
-    let remaining = 1024usize - already_admitted - 4;
-    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining).is_ok());
-    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining + 1)
+    let remaining_child = council::MAX_CHILD_LEAF_ATTEMPTS - 4;
+    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining_child).is_ok());
+    let error = child_council::require_total_attempt_capacity(&store, &root, remaining_child + 1)
+        .unwrap_err();
+    assert!(error.contains("admitted child reviewer attempts"), "{error}");
+    // Independently verify the larger composed budget. Child admission itself
+    // must stop at the stricter 256-leaf task limit before reaching 1024.
+    let remaining_total = 1024usize - already_admitted - 4;
+    assert!(council::require_composed_attempt_budget(&root, 4, remaining_total).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, 4, remaining_total + 1)
         .unwrap_err().contains("1024 admitted root and child reviewer attempts"),
-        "four real issued child leaves must reduce the native root dispatch budget");
+        "four real child leaves must also reduce the composed root dispatch budget");
     assert_ne!(complete_roster[0].parent_worker_id, complete_roster[1].parent_worker_id);
     assert_ne!(complete_roster[0].child_session_id, complete_roster[1].child_session_id);
     assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|

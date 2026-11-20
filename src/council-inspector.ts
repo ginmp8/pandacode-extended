@@ -408,6 +408,8 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   refresh.type = 'button';
   refresh.className = 'ds-btn council-inspection-refresh';
   refresh.textContent = 'Refresh native evidence';
+  // A collapsed disclosure must never offer an un-focusable refresh as a Tab stop.
+  refresh.disabled = true;
   body.before(refresh);
   let serial = 0;
   const load = () => {
@@ -430,7 +432,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     });
   };
   details.addEventListener('toggle', () => {
-    if (!details.open) { serial++; refresh.disabled = false; return; }
+    if (!details.open) { serial++; refresh.disabled = true; return; }
     load();
   });
   refresh.addEventListener('click', () => {

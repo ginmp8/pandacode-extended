@@ -2077,6 +2077,22 @@ test('Auto is explained, the off note is plain, and the button is busy while a s
   await expect(button(page)).toHaveAttribute('aria-busy', 'false', { timeout: 5000 });
 });
 
+test('a collapsed Council inspector cannot trap keyboard focus on its refresh action', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const inspection = panel(page).locator('.council-inspection');
+  await expect(inspection).toHaveCount(1);
+  const refresh = inspection.locator('.council-inspection-refresh');
+  await expect(refresh).toBeDisabled();
+  await inspection.locator('summary').focus();
+  await page.keyboard.press('Tab');
+  await expect(panel(page).locator('.council-new-threads')).toBeFocused();
+  await inspection.locator('summary').click();
+  await expect(refresh).toBeEnabled();
+  await inspection.locator('summary').click();
+  await expect(refresh).toBeDisabled();
+});
+
 test('Tab and Shift+Tab stay inside the panel through every control, from any of them (WebKit too)', async ({ page }) => {
   await open(page, '/?council');
   await button(page).click();

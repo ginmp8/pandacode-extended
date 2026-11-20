@@ -5303,6 +5303,26 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
     let parent_checkout = store.session(&sid).unwrap().worktree_path;
     store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1", rusqlite::params![child_id, parent_checkout]).unwrap();
+    let original_child_branch = store.session(&child_id).unwrap().worktree_branch;
+    store.db.execute(
+        "UPDATE sessions SET worktree_branch='foreign-child-branch' WHERE id=?1", [&child_id],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"),
+        "a child on a different branch cannot inherit the original Council grant");
+    store.db.execute(
+        "UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
+        rusqlite::params![&child_id, &original_child_branch],
+    ).unwrap();
+    let original_root_branch = store.session(&sid).unwrap().worktree_branch;
+    store.db.execute(
+        "UPDATE sessions SET worktree_branch='foreign-root-branch' WHERE id=?1", [&sid],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"),
+        "changing the root checkout branch must revoke child evidence");
+    store.db.execute(
+        "UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
+        rusqlite::params![&sid, &original_root_branch],
+    ).unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     // A duplicate request can claim the other child's session despite the
     // UNIQUE session ownership row; it must never gain a second composite seat.
@@ -6044,6 +6064,26 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
             rusqlite::params![child_id, previous_worktree],
         ).unwrap();
     }
+    // Paused Resume must not silently rebind a task-owned child to another
+    // checkout branch, even when the directory path has not changed.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='foreign-child-branch' WHERE id=?1",
+            [&child_id],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        let parent_branch = store.session(&sid).unwrap().worktree_branch;
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
+            rusqlite::params![&child_id, &parent_branch],
+        ).unwrap();
+    }
     // An extra reservation in the *current* cycle must not create a
     // phantom child or silently extend the resumed review roster.
     let unexpected_key = format!("native-council-child:{}:unselected", started.council_since);
@@ -6238,6 +6278,21 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
         store.db.execute(
             "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
             rusqlite::params![&launch.sid, original_worktree],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='foreign-leaf-branch' WHERE id=?1",
+            [&launch.sid],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    {
+        let store = state.store.lock().unwrap();
+        let coordinator_branch = store.session(&launch.admission.parent).unwrap().worktree_branch;
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
+            rusqlite::params![&launch.sid, &coordinator_branch],
         ).unwrap();
         let child = load(&store, &launch.admission.parent).unwrap().unwrap();
         let reviewer = child.workers.iter()

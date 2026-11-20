@@ -381,7 +381,12 @@ child reviewer remains active or queued, explicitly submitting a **new
 objective** creates a strictly newer Council cycle with fresh task-owned
 child sessions and frozen review authority. Earlier child sessions and
 callbacks remain revoked; this does not resume or approve the previous
-artifact. A still-running child reviewer blocks the new task until it stops.
+artifact. A still-running child reviewer blocks the new task until it stops. New child
+coordinator and leaf sessions inherit the root's exact checkout path and
+branch; native admission, callback and paused Resume validate both. Frozen
+child reservation schema v5 pins the checkout branch. Earlier v4 reservations
+without that pin fail closed and require a fresh task cycle rather than
+silently receiving authority over a different branch.
 
 Setup offers one limit, workers at once. PandaCode enforces no rounds, assignments,
 batch size, file scopes, sub-worker counts or follow-up attempts; the kept brakes

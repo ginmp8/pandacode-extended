@@ -124,7 +124,7 @@ fn frozen_with_recovery_status(
         return Err("child_council_revoked: reserved child task is archived, completed, interrupted or failed.".into());
     }
     if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
-        || session.mode != "plan"
+        || session.worktree_branch != parent.worktree_branch || session.mode != "plan"
     {
         return Err("child_council_stale: child project, checkout or permission mode changed.".into());
     }
@@ -144,7 +144,8 @@ fn frozen_with_recovery_status(
         return Err("child_council_revoked: selected bot review harness changed.".into());
     }
     let scope = serde_json::to_vec(&(
-        &session.project_id, &session.worktree_path, &session.provider,
+        &session.project_id, &session.worktree_path, &session.worktree_branch,
+        &session.provider,
         &session.model, &session.reasoning_effort,
     )).map_err(|e| e.to_string())?;
     // A pending child must never be admitted under an edited coordinator persona,
@@ -155,7 +156,7 @@ fn frozen_with_recovery_status(
         &bot.mode, &bot.skills, &bot.mcp, &bot.backup_models, &bot.fallback_mode,
     )).map_err(|e| e.to_string())?;
     Ok(FrozenChildReservation {
-        schema_version: 4,
+        schema_version: 5,
         root_session_id: root.session_id.clone(),
         root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
         bot_id: child.bot_id.clone(),
@@ -412,6 +413,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         let session = store.session(&child_id)?;
         if session.project_id != root_session.project_id
             || session.worktree_path != root_session.worktree_path
+            || session.worktree_branch != root_session.worktree_branch
             || session.mode != "plan"
         {
             return Err("child_council_revoked: child project, checkout or permission mode changed; start a fresh Council task.".into());
@@ -457,6 +459,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         let coordinator = store.session(&child_id)?;
         if session.project_id != coordinator.project_id
             || session.worktree_path != coordinator.worktree_path
+            || session.worktree_branch != coordinator.worktree_branch
             || session.mode != "plan"
         {
             return Err("child_council_revoked: native reviewer project, checkout or permission mode changed; start a fresh Council task.".into());
@@ -692,9 +695,10 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         // Fresh task-owned session: no chat, worker, grant or earlier score.
         let fresh = store.create_session(&parent.project_id, &old.provider, &old.model, "plan")?;
         store.db.execute(
-            "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+            "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5,worktree_branch=?6 WHERE id=?1",
             params![&fresh.id, format!("Council child: {}", choice.bot_id),
-                RESERVATION_DESCRIPTION, &parent.worktree_path, &old.reasoning_effort],
+                RESERVATION_DESCRIPTION, &parent.worktree_path, &old.reasoning_effort,
+                &parent.worktree_branch],
         ).map_err(|e| e.to_string())?;
         store.db.execute(
             "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
@@ -868,6 +872,7 @@ fn validate_admitted(
                 != Some(record.child_session_id.as_str())
             || session.project_id != coordinator.project_id
             || session.worktree_path != coordinator.worktree_path
+            || session.worktree_branch != coordinator.worktree_branch
             || session.mode != "plan" || session.archived || session.task_stage == "completed"
             || leaf.provider != session.provider || leaf.model != session.model
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
@@ -1983,9 +1988,10 @@ fn issue_leaf_wave(
         let leaf = store.create_session(&session.project_id, &session.provider, &session.model, "plan")?;
             let now = storage::now();
             store.db.execute(
-                "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+                "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5,worktree_branch=?6 WHERE id=?1",
                 params![leaf.id, format!("Child Council reviewer {}", index + 1),
-                    assignment, session.worktree_path, session.reasoning_effort],
+                    assignment, session.worktree_path, session.reasoning_effort,
+                    session.worktree_branch],
             ).map_err(|e| e.to_string())?;
             let id = storage::id();
             store.db.execute(
@@ -2532,10 +2538,10 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         // permission mode, credential or skill materialization.
         let session = store.create_session(&parent.project_id, &bot.provider, &bot.model, "plan")?;
         store.db.execute(
-            "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+            "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5,worktree_branch=?6 WHERE id=?1",
             params![session.id, format!("Council child: {}", bot.name),
                 RESERVATION_DESCRIPTION,
-                parent.worktree_path, bot.reasoning_effort],
+                parent.worktree_path, bot.reasoning_effort, parent.worktree_branch],
         ).map_err(|e| e.to_string())?;
         store.db.execute(
             "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",

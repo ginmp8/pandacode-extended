@@ -594,7 +594,7 @@ pub(crate) fn start_observe_subscriptions(app: tauri::AppHandle) {
                     return;
                 }
                 after = Some((created_at, source_id.clone()));
-                if poll_source_authenticated(&state, &source_id).await.is_err() {
+                if poll_source_authenticated(&state, &source_id, true).await.is_err() {
                     // No GitHub response body, URL, token or provider text in logs.
                     eprintln!("SuperAgent Observe: authenticated source poll failed; inspect source health and GitHub credentials.");
                 }
@@ -1525,6 +1525,19 @@ fn poll_authenticated_events_with_repository_id(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
     repository_id: u64,
+) -> Result<AuthenticatedPoll> {
+    poll_authenticated_events_with_repository_id_scoped(
+        store, expected, since, raw, signed_in, pages_fetched, repository_id, None,
+    )
+}
+
+/// Background selection captures the Team's policy revision. A change of
+/// enabled state, even Off followed quickly by On, revokes the in-flight poll.
+/// Explicit local-operator Observe remains independent of Team activation.
+fn poll_authenticated_events_with_repository_id_scoped(
+    store: &Store, expected: &EventSource, since: i64,
+    raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
+    repository_id: u64, background_team_revision: Option<i64>,
 ) -> Result<AuthenticatedPoll>
 {
     if !token_ok(signed_in, 80) || !(1..=GITHUB_MAX_PAGES).contains(&pages_fetched) {
@@ -1570,6 +1583,18 @@ fn poll_authenticated_events_with_repository_id(
     let current_policy = source(store, &expected.id)?;
     if current_policy.mode != "observe" || current_policy.policy_revision != expected.policy_revision {
         return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
+    }
+    if let Some(expected_team_revision) = background_team_revision {
+        // The authoritative check occurs in the SAME SQLite transaction as
+        // decision/cursor writes, not only at scheduler selection or after HTTP.
+        let (enabled, revision): (i64, i64) = tx.query_row(
+            "SELECT enabled,policy_revision FROM sa_orchestrations WHERE id=?1",
+            [&current_policy.orchestration_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        if enabled != 1 || revision != expected_team_revision {
+            return Err("Team activation changed during background GitHub Observe; no event recorded.".into());
+        }
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
     pin_authenticated_repository_identity(&tx, &current_policy.id, repository_id)?;
@@ -1824,12 +1849,25 @@ pub(crate) fn headless_observe_source(
     serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
 }
 
+fn require_background_team_revision(
+    store: &Store, team_id: &str, expected_revision: Option<i64>,
+) -> Result<i64> {
+    let (enabled, revision): (i64, i64) = store.db.query_row(
+        "SELECT enabled,policy_revision FROM sa_orchestrations WHERE id=?1",
+        [team_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    if enabled != 1 || expected_revision.is_some_and(|expected| expected != revision) {
+        return Err("Team activation changed; background GitHub Observe is not permitted.".into());
+    }
+    Ok(revision)
+}
+
 async fn poll_source_authenticated(
-    state: &AppState, source_id: &str,
+    state: &AppState, source_id: &str, background: bool,
 ) -> Result<AuthenticatedPoll> {
     // Off: no request, no inferred work. Snapshot all policy authority BEFORE
     // making the bounded read-only GitHub request.
-    let (snapshot, since) = {
+    let (snapshot, since, team_revision) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let selected = source(&store, source_id)?;
         if selected.mode != "observe" {
@@ -1839,10 +1877,17 @@ async fn poll_source_authenticated(
             return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
         }
         require_observe_preflight(&store, &selected)?;
+        let team_revision = if background {
+            Some(require_background_team_revision(
+                &store, &selected.orchestration_id, None,
+            )?)
+        } else {
+            None
+        };
         let since: i64 = store.db.query_row(
             "SELECT updated_at FROM sa_event_sources WHERE id=?1", [source_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        (selected, since)
+        (selected, since, team_revision)
     };
     let repo = snapshot.repository.clone();
     let prior_cursor = snapshot.last_sequence;
@@ -1853,12 +1898,20 @@ async fn poll_source_authenticated(
         fetch_authenticated_github_window(&repo, since, prior_cursor)
     }).await.map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    // A revoked background subscription cannot create a failure receipt or
+    // apply a response even if the Team was re-enabled during its HTTP read.
+    if let Some(expected_revision) = team_revision {
+        require_background_team_revision(
+            &store, &snapshot.orchestration_id, Some(expected_revision),
+        )?;
+    }
     if let Err(failure) = &fetched {
         record_observe_fetch_failure(&store, &snapshot, failure)?;
     }
     let (signed_in, response, pages_fetched, repository_id) = fetched?;
-    poll_authenticated_events_with_repository_id(
+    poll_authenticated_events_with_repository_id_scoped(
         &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
+        team_revision,
     )
 }
 
@@ -1869,7 +1922,7 @@ pub async fn superagent_source_poll_authenticated(
     window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
 ) -> Result<AuthenticatedPoll> {
     require_main_window(&window)?;
-    poll_source_authenticated(&state, &source_id).await
+    poll_source_authenticated(&state, &source_id, false).await
 }
 
 /// Explicit, read-only Team polling shares the per-source authenticated
@@ -1897,7 +1950,7 @@ pub async fn superagent_source_poll_team_authenticated(
             skipped_check_runs += 1;
             continue;
         }
-        match poll_source_authenticated(&state, &selected.id).await {
+        match poll_source_authenticated(&state, &selected.id, false).await {
             Ok(result) => observed.push(result),
             Err(reason) => failures.push(format!("{}: {}", selected.id, reason)),
         }
@@ -2575,6 +2628,82 @@ mod tests {
         let reopened = Store::open_read_only(&path).unwrap();
         assert!(next_observe_subscription_sources(&reopened, None).unwrap().is_empty());
         assert_eq!(source(&reopened, &active.id).unwrap().policy_revision, active.policy_revision);
+    }
+
+    #[test]
+    fn background_observe_rechecks_team_revision_after_off_and_on_without_manual_regression() {
+        let (store, path) = fixture();
+        let source_off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let selected = set_mode(
+            &store, &source_off.id, source_off.policy_revision, "observe",
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        let first_revision = require_background_team_revision(&store, "orch", None).unwrap();
+
+        // A scheduler already selected the Team, then the operator revoked it
+        // while the authenticated GitHub request was in flight.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        assert!(require_background_team_revision(
+            &store, "orch", Some(first_revision),
+        ).is_err());
+        let response = serde_json::json!([{
+            "id": "5000001100", "type": "IssuesEvent",
+            "created_at": "2026-11-12T08:59:00Z",
+            "actor": {"login": "trusted-bot"},
+            "repo": {"name": "owner/repo", "id": 101},
+            "payload": {"action": "opened", "issue": {"number": 42}}
+        }]);
+        let denied = poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &response, "operator", 1, 101,
+            Some(first_revision),
+        ).unwrap_err();
+        assert!(denied.contains("activation changed"), "{denied}");
+        assert!(list_decisions(&store, &selected.id, 10).unwrap().is_empty());
+        assert_eq!(source(&store, &selected.id).unwrap().last_sequence, 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&selected.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        // Turning the Team back On does not resurrect an old in-flight poll.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        assert!(require_background_team_revision(
+            &store, "orch", Some(first_revision),
+        ).is_err());
+        assert!(poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &response, "operator", 1, 101,
+            Some(first_revision),
+        ).is_err());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+
+        // Explicit authenticated manual Observe works on a disabled Team;
+        // its receipt is not authorization for a Ticket, Worker or grant.
+        let manual = poll_authenticated_events_with_repository_id(
+            &store, &selected, 0, &response, "operator", 1, 101,
+        ).unwrap();
+        assert_eq!(manual.recorded, 1);
+        assert_eq!(list_decisions(&store, &selected.id, 10).unwrap().len(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        drop(store);
+        let restarted = Store::open_read_only(&path).unwrap();
+        assert!(next_observe_subscription_sources(&restarted, None).unwrap().is_empty());
+        assert_eq!(list_decisions(&restarted, &selected.id, 10).unwrap().len(), 1);
     }
 
     #[test]

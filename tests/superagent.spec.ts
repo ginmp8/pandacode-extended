@@ -927,3 +927,172 @@ test('native bot Conversations identifies SuperAgent threads and never calls the
   await expect(ordinary.locator('[data-open-task="latest-scheduled-chat"]'))
     .toHaveText('Open chat');
 });
+
+
+test('Orchestrations reference Teams cards use native counters, avatars and status states',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true,withOtherTeam:true});
+  const teams=host.getByRole('region',{name:'Saved Teams'});
+  await expect(host.getByRole('group',{name:'Native workspace metrics'})).toBeVisible();
+  const first=teams.locator('.sa-team-card').filter({hasText:'Native Team'});
+  await expect(first).toContainText('1 Demands');
+  await expect(first.locator('.sa-ux-avatar-stack .bot-avatar').first()).toBeVisible();
+  await expect(first.locator('[data-native-tone="success"]')).toContainText('Enabled');
+  await expect(teams.locator('.sa-team-card')).toHaveCount(2);
+  // Native Team metadata does not provide a blocked count in this fixture.
+  // Never silently convert an unknown aggregate into zero.
+  await expect(host.getByRole('group',{name:'Native workspace metrics'}))
+    .toContainText('Counts unavailable');
+  await expect(host.getByRole('button',{name:'New Team',exact:true})).toBeVisible();
+  await host.getByRole('button',{name:'Team workspace',exact:true}).click();
+  await expect(host.getByRole('region',{name:'Team overview'})).toBeVisible();
+  await expect(host.locator('.sa-enable-toggle')).toHaveAttribute('aria-pressed','true');
+});
+
+test('reference Team board preserves native WorkItems and worker conversation evidence',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true});
+  await host.locator('[data-sa-team-tasks="team-1"]').click();
+  const board=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await expect(host.getByRole('group',{name:'Native workspace metrics'})).toBeVisible();
+  await expect(board.locator('.sa-demand-column[data-native-tone="info"]')).toContainText('Working');
+  const card=board.locator('.sa-demand-card');
+  await expect(card.locator('[data-native-tone="info"]')).toContainText('Working');
+  await expect(card).toContainText('WorkItems: Inspect native tasks');
+  await card.locator('[data-sa-team-demand-tasks="demand-1"]').click();
+  const task=board.getByRole('region',{name:'Demand task timeline'});
+  await expect(task).toContainText('Implement isolated native WorkItem');
+  await expect(task.locator('.bot-avatar').first()).toBeVisible();
+  await expect(card).toContainText('0 / 1 tasks recorded');
+  await task.getByRole('button',{name:'Open full Demand timeline'}).click();
+  const run=host.getByRole('region',{name:'Selected native Demand'});
+  await expect(run).toContainText('Native execution timeline');
+  await expect(run.locator('.sa-run-milestones li')).toHaveCount(5);
+  await run.locator('details.sa-ux-accordion summary').click();
+  await expect(run.locator('details.sa-ux-accordion')).toContainText('Worker');
+  const mutations=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations);
+  expect(mutations).toEqual([]);
+});
+
+test('reference Review inbox separates human decisions from unverified Council pending',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,ticketState:'waiting_review'});
+  await host.getByRole('button',{name:'Review inbox'}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(1);
+  await expect(inbox).toContainText('Awaiting native Council (not approved)');
+  await expect(inbox.locator('[data-native-tone="warning"]')).toContainText('Council pending');
+  await inbox.locator('[data-sa-review-tab="human"]').click();
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(0);
+  await inbox.locator('[data-sa-review-tab="council"]').click();
+  await expect(inbox.locator('.sa-review-card')).toHaveCount(1);
+  await expect(inbox.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
+});
+
+
+test('Team member activity is native, bounded, read-only and scoped to its Team',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,withOtherTeam:true});
+  await host.getByRole('button',{name:'Details'}).first().click();
+  const activity=host.getByRole('region',{name:'Recent native Team activity'});
+  await expect(activity).toContainText('No automatic polling or execution');
+  await activity.getByRole('button',{name:'Inspect Worker activity'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(activity).toContainText('Last recorded bot assignments');
+  await expect(activity).toContainText('Worker');
+  await expect(activity).toContainText('Attempt 1');
+  const mutations=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations);
+  expect(mutations).toEqual([]);
+});
+
+
+test('reference UX keeps Team tile rows and native Demand actions aligned',async({page})=>{
+  await page.setViewportSize({width:1600,height:900});
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true,withOtherTeam:true});
+  // The fixture is intentionally outside #superagent-workspace, so duplicate
+  // its actual shipped CSS with that scope remapped to the fixture. This tests
+  // the real cascade against the legacy .sa-item > div column rule.
+  await page.evaluate(async()=>{
+    const paths=['/src/superagent.css','/src/superagent-reference-ux.css'];
+    const css=await Promise.all(paths.map(async path=>{
+      const response=await fetch(path+'?direct');
+      if(!response.ok)throw Error('Cannot load direct orchestration CSS: '+path);
+      return (await response.text()).replaceAll('#superagent-workspace','#sa-v2-fixture');
+    }));
+    const style=document.createElement('style');
+    style.setAttribute('data-sa-reference-layout-test','');
+    style.textContent=css.join('\n');
+    document.head.appendChild(style);
+  });
+  const tile=host.locator('.sa-team-card').filter({hasText:'Native Team'});
+  await expect(tile).toBeVisible();
+  const tileLayout=await tile.evaluate(element=>{
+    const top=element.querySelector<HTMLElement>('.sa-team-card-top')!;
+    const foot=element.querySelector<HTMLElement>('.sa-team-card-foot')!;
+    const actions=element.querySelector<HTMLElement>('.sa-team-card-actions')!;
+    const avatar=element.querySelector<HTMLElement>('.sa-ux-avatar-stack')!;
+    const badge=top.querySelector<HTMLElement>('.sa-native-state')!;
+    const buttons=[...actions.querySelectorAll<HTMLElement>('button')];
+    const baseline=(el:HTMLElement)=>el.getBoundingClientRect().top;
+    return {
+      topDirection:getComputedStyle(top).flexDirection,
+      footDirection:getComputedStyle(foot).flexDirection,
+      actionsDirection:getComputedStyle(actions).flexDirection,
+      topDelta:Math.abs(baseline(avatar)-baseline(badge)),
+      footDelta:Math.abs(baseline(foot.firstElementChild as HTMLElement)-
+        baseline(foot.lastElementChild as HTMLElement)),
+      buttonDelta:Math.abs(baseline(buttons[0])-baseline(buttons[1])),
+      cardHeight:element.getBoundingClientRect().height,
+    };
+  });
+  expect(tileLayout.topDirection).toBe('row');
+  expect(tileLayout.footDirection).toBe('row');
+  expect(tileLayout.actionsDirection).toBe('row');
+  expect(tileLayout.topDelta).toBeLessThan(15);
+  expect(tileLayout.footDelta).toBeLessThan(15);
+  expect(tileLayout.buttonDelta).toBeLessThan(15);
+  expect(tileLayout.cardHeight).toBeLessThan(310);
+
+  await tile.locator('[data-sa-team-tasks="team-1"]').click();
+  const teamBoard=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await expect(teamBoard).toBeVisible();
+  const toolbar=teamBoard.locator('.sa-demand-toolbar');
+  const history=toolbar.getByRole('group',{name:'Team Demand history'});
+  const presentation=toolbar.getByRole('group',{name:'Team Demand presentation'});
+  await expect(history).toBeVisible();
+  await expect(presentation).toBeVisible();
+  const [historyBounds,presentationBounds]=await Promise.all([
+    history.boundingBox(),presentation.boundingBox(),
+  ]);
+  expect(historyBounds).not.toBeNull();
+  expect(presentationBounds).not.toBeNull();
+  expect(Math.abs(historyBounds!.y-presentationBounds!.y)).toBeLessThan(15);
+  const demand=teamBoard.locator('.sa-demand-board .sa-demand-card').first();
+  await expect(demand).toBeVisible();
+  const demandLayout=await demand.evaluate(element=>{
+    const actions=element.querySelector<HTMLElement>('.sa-demand-actions')!;
+    const buttons=[...actions.querySelectorAll<HTMLElement>('button')];
+    const bounds=element.getBoundingClientRect();
+    return {
+      direction:getComputedStyle(actions).flexDirection,
+      buttonDelta:Math.abs(buttons[0].getBoundingClientRect().top-
+        buttons[1].getBoundingClientRect().top),
+      overflow:element.scrollWidth-element.clientWidth,
+      cardWidth:bounds.width,
+    };
+  });
+  expect(demandLayout.direction).toBe('row');
+  expect(demandLayout.buttonDelta).toBeLessThan(15);
+  expect(demandLayout.overflow).toBeLessThanOrEqual(2);
+  const empty=teamBoard.locator('.sa-demand-board .sa-demand-column .sa-empty').first();
+  await expect(empty).toHaveCSS('text-align','center');
+  const writes=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations);
+  expect(writes).toEqual([]);
+});

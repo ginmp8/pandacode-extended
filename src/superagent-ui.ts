@@ -1,4 +1,5 @@
 import './superagent.css';
+import './superagent-reference-ux.css';
 import './superagent-multiselect.css';
 import { escape, icon } from './dom';
 import { botAvatarHtml } from './bot-avatars';
@@ -237,6 +238,42 @@ function roleUnavailableForChange(
   return reviewerDraft.includes(bot.id);
 }
 
+/** Native status colors are presentation only, never runtime verification. */
+function nativeTone(state:string):'info'|'warning'|'danger'|'success'|'neutral' {
+  if (['queued','running','working'].includes(state)) return 'info';
+  if (['waiting_approval','waiting_review'].includes(state)) return 'warning';
+  if (['blocked','failed','interrupted','inconclusive'].includes(state)) return 'danger';
+  if (['completed','enabled'].includes(state)) return 'success';
+  return 'neutral';
+}
+function nativeLabel(state:string):string {
+  const labels:Record<string,string>={
+    queued:'Queued',running:'Working',waiting_approval:'Awaiting approval',
+    waiting_review:'Council pending',blocked:'Needs attention',failed:'Failed',
+    interrupted:'Interrupted',inconclusive:'Inconclusive',completed:'Completed',
+    stopped:'Stopped',enabled:'Enabled',off:'Off',
+  };
+  return labels[state] ?? state.split('_').join(' ');
+}
+function nativeBadge(state:string, label=nativeLabel(state)):string {
+  return '<span class="sa-native-state" data-native-tone="' + nativeTone(state) +
+    '"><span class="sa-native-state-dot" aria-hidden="true"></span>' +
+    escape(label) + '</span>';
+}
+interface NativeMetric {
+  label:string; value:string|number;
+  tone?:'neutral'|'warning'|'danger'|'success';
+  note?:string;
+}
+function nativeMetricStrip(metrics:NativeMetric[]):string {
+  return '<div class="sa-ux-metrics" role="group" aria-label="Native workspace metrics">' +
+    metrics.map(metric=>'<section class="sa-ux-metric" data-metric-tone="' +
+      (metric.tone ?? 'neutral') + '"><span class="sa-ux-metric-label">' +
+      escape(metric.label) + '</span><strong class="sa-ux-metric-value">' +
+      escape(String(metric.value)) + '</strong>' +
+      (metric.note ? '<small class="sa-ux-metric-note">' + escape(metric.note) + '</small>' : '') +
+      '</section>').join('') + '</div>';
+}
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
@@ -249,6 +286,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let demandProjectFilter = '', demandProjectDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
+  let reviewTab:'all'|'human'|'council'='all';
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' = 'teams';
@@ -281,6 +319,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
   let ticketDetails: TicketDetails | null = null;
+  // Bounded, opt-in native observations; never a live-presence or completion claim.
+  let recentBotActivityTeamId='';
+  let recentBotActivityLoaded=false;
+  let recentBotActivity=new Map<string,{
+    ticketId:string; state:string; at:number; attempt:number;
+  }>();
+
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let delivery:DeliveryObservation|null=null, deliveryLoaded=false;
@@ -442,20 +487,56 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const visibleTeams = presets.filter(item =>
       item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
       (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
-    const list = visibleTeams.map(item =>
-      '<li class="sa-item"><span class="sa-team-tile">' + icon('team') +
-      '</span><div><strong>' + safe(item.name) + '</strong><small>' +
-      safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
-      '</small><small class="sa-role-counts" aria-label="Configured member counts">' +
-      safe(roleSummary(item)) + '</small></div>' +
-      '<div class="sa-team-row-meta"><span class="sa-team-state">' +
-      (item.enabled ? 'Enabled' : 'Off') + '</span>' +
-      '<small class="sa-counts">' + (item.ticketCount ?? 0) + ' runs</small>' +
-      '<small class="sa-last-activity">' + safe(activityTime(item.lastActivityAt)) +
-      '</small></div><button type="button" data-sa-select="' + safe(item.id) +
-      '" aria-current="' + (item.id === selected) + '">Details ' + icon('chevron') +
-      '</button><button type="button" data-sa-team-tasks="' + safe(item.id) +
-      '">Team tasks</button></li>').join('');
+    const botPortrait = (id:string) => {
+      const bot=bots.find(candidate=>candidate.id===id);
+      return botAvatarHtml(bot?.avatar ?? '',bot?.name ?? 'Missing bot',
+        'sa-ux-avatar',bot?.color ?? '');
+    };
+    const allCountsAvailable=presets.every(item=>typeof item.runningCount==='number' &&
+      typeof item.blockedCount==='number');
+    const reviewHuman=reviewQueue.filter(item=>item.state==='waiting_approval');
+    const reviewCouncil=reviewQueue.filter(item=>item.state==='waiting_review');
+    const teamsMetrics=nativeMetricStrip([
+      {label:'Configured Teams',value:presets.length},
+      {label:'Running Demands',value:allCountsAvailable
+        ? presets.reduce((sum,item)=>sum+(item.runningCount ?? 0),0) : '—',
+        note:allCountsAvailable?'Native Team counters':'Counts unavailable'},
+      {label:'Human decisions',value:reviewQueueLoaded?reviewHuman.length:'—',
+        tone:'warning',note:reviewQueueLoaded?'Loaded native queue':'Open Review inbox to load'},
+      {label:'Needs attention',value:allCountsAvailable
+        ? presets.reduce((sum,item)=>sum+(item.blockedCount ?? 0),0) : '—',
+        tone:'danger',note:allCountsAvailable?'Native Team counters':'Counts unavailable'},
+    ]);
+    const list = visibleTeams.map(item => {
+      const members=[item.coordinatorBotId,...(item.workerBotIds?.length
+        ? item.workerBotIds : [item.workerBotId])];
+      const count=typeof item.ticketCount==='number' && Number.isInteger(item.ticketCount)
+        ? item.ticketCount.toLocaleString() : '—';
+      const workers=typeof item.workerCount==='number'
+        ? item.workerCount : Math.max(0,members.length-1);
+      return '<li class="sa-item sa-team-card">' +
+        '<div class="sa-team-card-top"><span class="sa-ux-avatar-stack" ' +
+          'aria-label="Configured team members">' +
+          members.slice(0,4).map(botPortrait).join('') + '</span>' +
+          nativeBadge(item.enabled?'enabled':'off') + '</div>' +
+        '<div class="sa-team-card-body"><strong>' + safe(item.name) + '</strong>' +
+          '<small>Coordinator · ' + safe(botName(item.coordinatorBotId)) + '</small>' +
+          '<small class="sa-role-counts" aria-label="Configured member counts">' +
+          safe(roleSummary(item)) + '</small></div>' +
+        '<div class="sa-team-card-foot"><span class="sa-team-card-count">' +
+          '<strong>' + count + '</strong> Demands</span>' +
+          '<span>' + workers + ' Workers' +
+          (typeof item.runningCount==='number' ? ' · ' + item.runningCount + ' running' : '') +
+          '</span></div>' +
+        '<div class="sa-team-card-actions">' +
+          '<button type="button" data-sa-select="' + safe(item.id) +
+          '" aria-current="' + (item.id === selected) + '">Details ' +
+          icon('chevron') + '</button>' +
+          '<button type="button" data-sa-team-tasks="' + safe(item.id) +
+          '">Team tasks</button>' +
+          '<small class="sa-last-activity">Updated ' +
+          safe(activityTime(item.lastActivityAt)) + '</small></div></li>';
+    }).join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
@@ -916,30 +997,41 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const terminal=['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state);
       const archived=Boolean(demand.archived);
       const showingTasks=scope==='team' && teamPlanTicketId===demand.id;
+      const scopedPlan=showingTasks && teamPlanLoaded && teamPlan?.ticketId===demand.id
+        ? teamPlan : null;
       const taskList=showingTasks
         ? '<div class="sa-team-task-detail" role="region" aria-label="Demand task timeline">' +
           (!teamPlanLoaded
             ? '<p role="status">Loading native WorkItems…</p>'
-            : teamPlan && teamPlan.ticketId===demand.id
+            : scopedPlan
               ? '<ol class="sa-team-task-timeline">' +
-                teamPlan.items.map(item => '<li><strong>' + safe(item.key) + ' · ' +
-                  safe(item.objective) + '</strong><small>Worker: ' +
-                  safe(botName(item.workerBotId)) + ' · State: ' + safe(item.state) +
+                scopedPlan.items.map(item => '<li data-native-tone="' + nativeTone(item.state) +
+                  '"><div class="sa-demand-meta">' + botPortrait(item.workerBotId) +
+                  nativeBadge(item.state) + '</div><strong>' + safe(item.key) +
+                  ' · ' + safe(item.objective) + '</strong><small>Worker: ' +
+                  safe(botName(item.workerBotId)) +
                   (item.childTicketState ? ' · Native Ticket: ' + safe(item.childTicketState) : '') +
                   (item.dependsOn.length ? ' · After: ' + safe(item.dependsOn.join(', ')) : '') +
-                  '</small><small>' + safe(workItemProgressHint(item,teamPlan?.items ?? [])) +
-                  '</small></li>').join('') + '</ol>'
+                  '</small><small>' +
+                  safe(workItemProgressHint(item,scopedPlan.items)) + '</small></li>').join('') +
+                '</ol>'
               : '<p>No native WorkItem plan has been issued for this Demand yet.</p>') +
           '<button type="button" data-sa-open-demand="' + safe(demand.id) +
           '">Open full Demand timeline</button></div>'
         : '';
       return '<li class="sa-demand-card" data-sa-demand-team="' +
-        safe(demand.orchestrationId) + '"><div><strong>' + safe(demand.objective) +
-        '</strong><small>' + safe(presets.find(item => item.id===demand.orchestrationId)?.name ??
-          'Unknown Team') + ' · ' + safe(demand.state) +
-        (archived ? ' · Archived' : '') + ' · Revision ' + demand.revision +
-        ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
-        ' · Updated ' + safe(activityTime(demand.updatedAt)) + '</small></div>' +
+        safe(demand.orchestrationId) + '"><div class="sa-demand-main">' +
+        '<div class="sa-demand-meta"><span>Ticket ' + safe(demand.id.slice(0,8)) +
+        '</span>' + (archived?nativeBadge('off','Archived'):'') + '</div>' +
+        '<strong>' + safe(demand.objective) + '</strong>' +
+        nativeBadge(demand.state) +
+        '<small>' + safe(presets.find(item => item.id===demand.orchestrationId)?.name ??
+          'Unknown Team') + ' · Revision ' + demand.revision +
+        ' · Updated ' + safe(activityTime(demand.updatedAt)) + '</small>' +
+        '<small>WorkItems: ' +
+        (scopedPlan ? scopedPlan.items.filter(item=>item.state==='completed').length +
+          ' / ' + scopedPlan.items.length + ' tasks recorded' : 'Inspect native tasks') +
+        '</small></div>' +
         '<div class="sa-demand-actions">' +
         '<button type="button" data-sa-open-demand="' + safe(demand.id) +
         '">Open demand</button>' +
@@ -969,7 +1061,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandGroups.concat(unmatched.length ? [{label:'Other states',states:[]}] : [])
           .map(group=>{
             const entries=group.states.length ? items.filter(item=>group.states.includes(item.state)) : unmatched;
-            return '<section class="sa-demand-column" aria-label="' + safe(group.label) + ' Demands">' +
+            return '<section class="sa-demand-column" data-native-tone="' +
+               (group.label==='Awaiting decision'?'warning':group.label==='Needs attention'?'danger':
+                 group.label==='Finished or stopped'?'success':'info') +
+               '" aria-label="' + safe(group.label) + ' Demands">' +
               '<h4>' + safe(group.label) + ' <span class="sa-demand-count">' +
               entries.length + '</span></h4><ul class="sa-tickets">' +
               (entries.map(item=>demandCard(item,scope)).join('') ||
@@ -981,22 +1076,35 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const scopedTeamDemands=chosen
       ? teamDemands.filter(item=>item.orchestrationId===chosen.id && Boolean(item.archived)===teamArchived)
       : [];
+    const currentTeamCounts=teamDemandsLoaded && !teamArchived ? scopedTeamDemands : null;
+    const teamMetrics=nativeMetricStrip([
+      {label:'Loaded Demands',value:currentTeamCounts?.length ?? '—',
+        note:'Current native Team page'},
+      {label:'Working',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['queued','running'].includes(item.state)).length : '—'},
+      {label:'Awaiting decision',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['waiting_approval','waiting_review'].includes(item.state)).length : '—',
+        tone:'warning'},
+      {label:'Needs attention',value:currentTeamCounts
+        ? currentTeamCounts.filter(item=>['blocked','failed','interrupted','inconclusive'].includes(item.state)).length : '—',
+        tone:'danger'},
+    ]);
     const teamDemandsPanel=chosen ? '<section class="sa-pane sa-team-demands" ' +
       'aria-label="Team Demands and Tasks"><header><div><h3>Demands & Tasks · ' +
       safe(chosen.name) + '</h3><p>Only work owned by this Team. Expand a Demand to see its ' +
       'real WorkItems and assigned Workers.</p></div>' +
       '<button type="button" data-sa-refresh-team-demands>Refresh Team Tasks</button></header>' +
-      '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand history">' +
+      '<div class="sa-demand-toolbar"><div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand history">' +
       '<button type="button" data-sa-team-archived="active" aria-pressed="' +
         !teamArchived + '">Active Demands</button>' +
       '<button type="button" data-sa-team-archived="archived" aria-pressed="' +
         teamArchived + '">Archived (restore)</button></div>' +
-      (!teamDemandsLoaded ? '<p role="status">Loading this Team\'s native Demands…</p>' :
+      (!teamDemandsLoaded ? '</div><p role="status">Loading this Team\'s native Demands…</p>' :
         '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand presentation">' +
         (['board','list'] as const).map(layout=>
           '<button type="button" data-sa-team-demand-layout="' + layout +
           '" aria-pressed="' + (teamDemandLayout===layout) + '">' +
-          (layout==='board' ? 'Board' : 'List') + '</button>').join('') + '</div>' +
+          (layout==='board' ? 'Board' : 'List') + '</button>').join('') + '</div></div>' +
         (teamDemandLayout==='board'
           ? renderDemandBoard(scopedTeamDemands,'team','Team Demand status board')
           : '<ul class="sa-tickets sa-global-demand-list">' +
@@ -1007,6 +1115,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (teamDemandsHasMore
           ? '<button type="button" data-sa-load-older-team-demands>Load older Team Demands</button>'
           : '')) + '</section>' : '';
+    const loadedGlobal=allDemandsLoaded?allDemands:null;
+    const demandsMetrics=nativeMetricStrip([
+      {label:'Loaded Demands',value:loadedGlobal?.length ?? '—',
+        note:'Filtered native index; not lifetime total'},
+      {label:'Working',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['queued','running'].includes(item.state)).length : '—'},
+      {label:'Awaiting decision',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['waiting_approval','waiting_review'].includes(item.state)).length : '—',
+        tone:'warning'},
+      {label:'Needs attention',value:loadedGlobal
+        ? loadedGlobal.filter(item=>['blocked','failed','interrupted','inconclusive'].includes(item.state)).length : '—',
+        tone:'danger'},
+    ]);
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
       (demandTeamFilter ? 'Refresh selected Team' : 'Refresh all Teams') + '</button></header>' +
@@ -1153,19 +1274,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ' · Ticket ' + safe(inspectedTicket) +
         (ticketDetails?.archived ? ' · Archived' : '') + '</p></div>' +
       attentionPanel +
+      '<h3>Native execution timeline</h3>' +
       '<ol class="sa-run-milestones" aria-label="Native Run lifecycle">' +
-        '<li><span>01 · Admission</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket?'success':'neutral') +
+        '"><span>01 · Admission</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket ? 'Native Ticket recorded' : 'Loading native record') +
           '</strong></li>' +
-        '<li><span>02 · Assignment</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket &&
+          ticketDetails.assignments.length>0?'info':'neutral') +
+        '"><span>02 · Assignment</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket
             ? ticketDetails.assignments.length + ' recorded attempts' : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>03 · WorkItems</span><strong>' +
+        '<li data-native-tone="' + (workPlanLoaded && workPlan?.ticketId===inspectedTicket
+          ? (workPlan.items.some(item=>item.state==='blocked')?'danger' :
+             workPlan.items.length>0 && workPlan.items.every(item=>item.state==='completed' &&
+               Boolean(item.evidenceSha256))?'success' :
+             workPlan.items.some(item=>item.state==='running')?'info' :
+             workPlan.items.some(item=>item.state==='waiting_review')?'warning' : 'neutral')
+          : 'neutral') + '"><span>03 · WorkItems</span><strong>' +
           (workPlanLoaded && workPlan?.ticketId === inspectedTicket
             ? workPlan.items.length + ' native WorkItems' : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>04 · Review</span><strong>' +
+        '<li data-native-tone="' + (ticketDetails?.ticket.id===inspectedTicket
+          ? nativeTone(ticketDetails.ticket.state) : 'neutral') +
+        '"><span>04 · Review</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket
             ? ticketDetails.finalizationGate === 'council_required' ? 'Council required' :
               ticketDetails.ticket.state === 'waiting_approval' ? 'Human approval pending' :
@@ -1173,10 +1306,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               'No verified verdict shown'
             : 'Not inspected') +
           '</strong></li>' +
-        '<li><span>05 · Delivery</span><strong>' +
+        '<li data-native-tone="' + (deliveryLoaded && delivery?.ticketId===inspectedTicket &&
+          delivery.externalDeliveryVerified?'success':'neutral') +
+        '"><span>05 · Delivery</span><strong>' +
           (deliveryLoaded && delivery?.ticketId === inspectedTicket
             ? safe(delivery.deliveryState) : 'Not inspected') +
           '</strong></li></ol>' +
+      '<details class="sa-ux-accordion"><summary>Worker activity · ' +
+        (ticketDetails?.ticket.id===inspectedTicket?ticketDetails.assignments.length:'—') +
+        ' native attempts' + icon('chevron') + '</summary>' +
+        '<div class="sa-ux-accordion-body">' +
+        (ticketDetails?.ticket.id===inspectedTicket && ticketDetails.assignments.length
+          ? ticketDetails.assignments.map(item=>
+            '<div class="sa-activity-row"><div><strong>' +
+            safe(botName(item.botId)) + '</strong><small>Attempt ' + item.attempt +
+            ' · Updated ' + safe(activityTime(item.updatedAt)) + '</small></div>' +
+            nativeBadge(item.state) + '</div>').join('')
+          : '<p>No native Worker attempts loaded for this Demand.</p>') +
+        '</div></details>' +
       '<div class="sa-title"><h4>Native Ticket</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.filter(ticket => ticket.id === inspectedTicket).map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -1343,19 +1490,64 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ? 'Coordinator' : memberWorkers.includes(inspectedMemberId)
         ? 'Worker' : 'Independent reviewer';
     const memberRow = (id: string, role: string, order = '') => {
-      const bot = bots.find(candidate => candidate.id === id);
-      const name = bot?.name ?? id;
+      const bot=bots.find(candidate=>candidate.id===id);
+      const name=bot?.name ?? id;
+      const inspectedAssignment=ticketDetails && ticketDetails.ticket.orchestrationId===chosen?.id
+        ? ticketDetails.assignments.find(item=>item.botId===id) : null;
       return '<button type="button" class="sa-member-row" data-sa-member-inspect="' +
         safe(id) + '" aria-pressed="' + (id === inspectedMemberId) + '">' +
-        '<span class="sa-member-avatar">' + safe(name.slice(0,1).toUpperCase()) +
-        '</span><span class="sa-member-name"><strong>' + safe(name) + '</strong>' +
+        botPortrait(id).replace('sa-ux-avatar','sa-member-avatar') +
+        '<span class="sa-member-name"><strong>' + safe(name) + '</strong>' +
         '<small>' + safe(role) + (order ? ' · #' + order : '') +
         (bot?.skills?.length ? ' · ' + safe(bot.skills.slice(0,2).join(', ')) : '') +
-        '</small></span><span class="sa-member-model">' +
+        '</small><span class="sa-member-activity">' +
+        (bot?.paused ? 'Paused bot' : inspectedAssignment
+          ? 'Inspected Demand · attempt ' + inspectedAssignment.attempt +
+            ' · ' + safe(inspectedAssignment.state)
+          : recentBotActivityTeamId===chosen?.id && recentBotActivityLoaded
+            ? (recentBotActivity.get(id)
+              ? 'Last recorded · attempt ' + recentBotActivity.get(id)!.attempt +
+                ' · ' + safe(nativeLabel(recentBotActivity.get(id)!.state))
+              : 'No recorded assignment in latest 8 native Tickets')
+            : 'Native Worker activity not inspected') +
+        '</span></span><span class="sa-member-model">' +
         safe(bot?.provider ?? 'Unknown harness') + '<span>' +
         safe(bot?.model ?? 'Unavailable model') + '</span></span>' +
         icon('chevron') + '</button>';
     };
+    const teamActivity=chosen ? '<section class="sa-pane sa-team-activity" ' +
+      'aria-label="Recent native Team activity"><header><div><h3>Recent Team activity</h3>' +
+      '<p>Read-only native snapshots, not provider presence. Recent bot activity is ' +
+      'loaded only on request (up to 8 latest Team Tickets).</p></div>' +
+      '<div class="sa-actions"><button type="button" data-sa-load-team-activity>' +
+      'Inspect Worker activity</button><button type="button" data-sa-team-tab="demands">' +
+      'Open team board</button></div></header>' +
+      (recentBotActivityTeamId===chosen.id && recentBotActivityLoaded
+        ? '<div class="sa-team-activity-list"><h4>Last recorded bot assignments</h4>' +
+          [chosen.coordinatorBotId,...memberWorkers,...memberReviewers].map(id=>{
+            const entry=recentBotActivity.get(id);
+            return '<div class="sa-activity-row">' + botPortrait(id) +
+              '<div><strong>' + safe(botName(id)) + '</strong><small>' +
+              (entry ? 'Ticket ' + safe(entry.ticketId.slice(0,8)) +
+                ' · Attempt ' + entry.attempt + ' · ' + safe(activityTime(entry.at)) :
+                'No assignment found in the latest 8 native Tickets') +
+              '</small></div>' +
+              (entry ? nativeBadge(entry.state) : nativeBadge('off','No recent record')) +
+              '</div>';
+          }).join('') + '</div>'
+        : '<p>Inspect native activity to see the most recently recorded attempt for ' +
+          'each configured bot. No automatic polling or execution is started.</p>') +
+      '<h4>Recent Team Demands</h4>' +
+      (!teamDemandsLoaded ? '<p role="status">Load native Team Demands to see activity.</p>' :
+        (scopedTeamDemands.slice(0,5).map(item=>
+          '<div class="sa-activity-row"><div><strong>' + safe(item.objective) +
+          '</strong><small>Ticket ' + safe(item.id.slice(0,8)) + ' · ' +
+          safe(activityTime(item.updatedAt)) + '</small></div>' +
+          nativeBadge(item.state) +
+          '<button type="button" data-sa-open-demand="' + safe(item.id) +
+          '">Inspect</button></div>').join('') ||
+          '<p>No Demands in the current Team scope.</p>')) +
+      '</section>' : '';
     const overview = chosen
       ? '<div class="sa-team-overview" role="region" aria-label="Team overview">' +
         '<div class="sa-overview-top">' +
@@ -1369,9 +1561,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           memberReviewers.map(id => memberRow(id,'Independent reviewer')).join('') : '') +
         '</div></section>' +
         '<aside class="sa-pane sa-member-inspector"><h3>Member inspector</h3>' +
-        '<div class="sa-member-identity"><span class="sa-member-avatar">' +
-        safe((inspectedMemberBot?.name ?? inspectedMemberId).slice(0,1).toUpperCase()) +
-        '</span><strong>' + safe(inspectedMemberBot?.name ?? inspectedMemberId) +
+        '<div class="sa-member-identity">' +
+        botPortrait(inspectedMemberId).replace('sa-ux-avatar','sa-member-avatar') +
+        '<strong>' + safe(inspectedMemberBot?.name ?? inspectedMemberId) +
         '</strong><small>' + safe(inspectedMemberRole) + '</small></div>' +
         '<dl><dt>Harness</dt><dd>' + safe(inspectedMemberBot?.provider ?? 'Unknown') + '</dd>' +
         '<dt>Model</dt><dd>' + safe(inspectedMemberBot?.model ?? 'Unavailable') + '</dd>' +
@@ -1416,25 +1608,47 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-team-tab="demands">' +
         'View this Team\'s Demands & Tasks</button></div>' +
-        '</section></div>'
+        '</section>' + teamActivity + '</div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
+    const visibleReviews=reviewQueue.filter(item=>reviewTab==='all' ||
+      (reviewTab==='human' && item.state==='waiting_approval') ||
+      (reviewTab==='council' && item.state==='waiting_review'));
+    const reviewTabOptions=[
+      ['all','All requests',reviewQueue.length],
+      ['human','Needs my decision',reviewHuman.length],
+      ['council','Council pending',reviewCouncil.length],
+    ] as const;
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
-      '<h3>Review inbox · All Teams</h3><button type="button" data-sa-load-review-inbox>' +
-      'Refresh review inbox</button></header>' +
-      '<p>Up to 200 recently updated native Tickets requiring human acceptance or ' +
-      'awaiting Council. A waiting Council verdict cannot be manually treated as passed. ' +
-      'Open a Demand to inspect its native Team and revision before deciding.</p>' +
+      '<div><h3>Review inbox · All Teams</h3><p>Human decisions and native Council ' +
+      'reviews are separate; a pending or advisory Council verdict is never a pass.</p></div>' +
+      '<button type="button" data-sa-load-review-inbox>Refresh review inbox</button></header>' +
+      '<p>Up to 200 recently updated native Tickets. Open a Demand to inspect ' +
+      'its Team, exact revision, authorization and evidence before acting.</p>' +
+      '<div class="sa-review-tabs" role="group" aria-label="Review inbox filters">' +
+      reviewTabOptions.map(([key,label,count])=>
+        '<button type="button" data-sa-review-tab="' + key +
+        '" aria-pressed="' + (reviewTab===key) + '">' + safe(label) +
+        ' (' + (reviewQueueLoaded?count:'—') + ')</button>').join('') + '</div>' +
       (!reviewQueueLoaded ? '<p role="status">Load native review queue to inspect all Teams.</p>' :
-        '<ul class="sa-tickets">' + (reviewQueue.map(item =>
-          '<li><div><strong>' + safe(item.objective) + '</strong><small>' +
-          safe(presets.find(team => team.id === item.orchestrationId)?.name ?? 'Unknown Team') +
-          ' · ' + safe(item.state === 'waiting_approval' ? 'Human decision' :
-            'Awaiting native Council (not approved)') + ' · Revision ' +
-          item.revision + '</small></div><button type="button" data-sa-open-demand="' +
-          safe(item.id) + '">Open demand</button></li>').join('') ||
-          '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>') +
-      '</section>';
+        '<div class="sa-review-items">' +
+        (visibleReviews.map(item=>
+          '<article class="sa-review-card"><div class="sa-review-main">' +
+          '<div class="sa-demand-meta">' + nativeBadge(item.state) +
+          '<span>Ticket ' + safe(item.id.slice(0,8)) + '</span></div>' +
+          '<h4>' + safe(item.objective) + '</h4>' +
+          '<p>' + (item.state==='waiting_approval'
+            ? 'Human decision required · review native evidence before accepting or rejecting.'
+            : 'Awaiting native Council (not approved) · no manual Council pass.') + '</p>' +
+          '<small>' +
+          safe(presets.find(team=>team.id===item.orchestrationId)?.name ?? 'Unknown Team') +
+          ' · Revision ' + item.revision + ' · Updated ' +
+          safe(activityTime(item.updatedAt)) + '</small></div>' +
+          '<button type="button" data-sa-open-demand="' + safe(item.id) + '">' +
+          (item.state==='waiting_approval'?'Review evidence':'Inspect Demand') +
+          ' ' + icon('chevron') + '</button></article>').join('') ||
+          '<p class="sa-empty">No native review requests match this filter.</p>') +
+        '</div>') + '</section>';
     const selectedTeamReview = chosen
       ? '<section class="sa-pane" aria-label="Review inbox"><h3>Review inbox · ' + safe(chosen.name) +
         '</h3><p>Only native Tickets awaiting explicit human evidence acceptance; advisory Council is not a verified pass.</p>' +
@@ -1461,10 +1675,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
       '<p class="sa-nav-label">Workspace</p>' +
       ([
-        ['teams','Teams','team'],['runs','Demands / Runs','kanban'],['review','Review inbox','archive'],
+        ['teams','Teams','team'],['team','Team workspace','kanban'],
+        ['runs','Demands / Runs','kanban'],['review','Review inbox','archive'],
       ] as const).map(([id,label,glyph]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        ((workspaceView === id || (workspaceView === 'team' && id === 'teams') ||
+        ((workspaceView === id ||
           (id === 'runs' && (workspaceView === 'new-demand' || workspaceView === 'run'))) ? 'page' : 'false') +
         '">' + icon(glyph) + '<span>' + label + '</span></button>').join('') +
       '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
@@ -1484,7 +1699,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (!presets.length ? ' disabled' : '') + '>' + icon(glyph) +
         '<span>' + label + '</span></button>').join('') +
       '</nav>';
-    const directory = '<div class="sa-section-head"><div><h2>Teams</h2>' +
+    const directory = '<div class="sa-section-head"><div><h2>Your Teams</h2>' +
       '<p>Each Team is a reusable SuperAgent made from existing PandaCode bots.</p></div>' +
       (presets.length ? '<button class="primary-button" type="button" data-sa-builder-open>' +
         icon('plus') + ' New Team</button>' : '') + '</div>' +
@@ -1511,7 +1726,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</select></label></div>' +
       '<p class="sa-list-caption" role="status">' + visibleTeams.length + ' of ' +
         presets.length + ' Teams</p>' +
-      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
+      '<ul class="sa-list sa-ux-team-grid">' + (list || '<li class="sa-empty">' +
       (presets.length ? 'No Teams match these filters.' : 'No Teams created yet.') +
       '</li>') + '</ul></section>' : '');
     const portablePanel = '<section class="sa-pane sa-portable-panel"><h3>Import / export</h3>' +
@@ -1542,7 +1757,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             : 'Loading native policy') + '</p></div>' +
         '<div class="sa-detail-actions">' +
         '<button type="button" class="sa-enable-toggle" data-sa-enable="' + safe(chosen.id) +
-        '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '">' +
+        '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') +
+         '" aria-pressed="' + chosen.enabled + '">' +
         (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-team-tab="demands">' + icon('kanban') +
         ' Team tasks</button>' +
@@ -1582,13 +1798,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       '<div class="sa-layout">' + navigation + '<div class="sa-stage">' +
       (workspaceView === 'teams' ?
-        (guidedBuilder.isOpen ? guidedBuilder.render(bots) : directory) : '') +
-      (workspaceView === 'team' ? teamView : '') +
+        (guidedBuilder.isOpen ? guidedBuilder.render(bots) : teamsMetrics + directory) : '') +
+      (workspaceView === 'team' ? teamMetrics + teamView : '') +
       (workspaceView === 'runs'
         ? '<div class="sa-section-head"><div><h2>Demands / Runs</h2>' +
           '<p>Track native WorkItems, approvals and evidence across Teams.</p></div>' +
           '<button type="button" class="primary-button" data-sa-create-demand>New Demand</button></div>' +
-          globalDemands : '') +
+          demandsMetrics + globalDemands : '') +
       (workspaceView === 'new-demand'
         ? '<div class="sa-section-head"><div><h2>Assign a Demand</h2>' +
           '<p>Describe the expected result, then review the native execution policy.</p></div></div>' +
@@ -1611,7 +1827,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</dd></dl></aside></div>' : '') +
       (workspaceView === 'run'
         ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +
-      (workspaceView === 'review' ? reviewPanel : '') +
+      (workspaceView === 'review' ? nativeMetricStrip([
+        {label:'Human decisions',value:reviewQueueLoaded?reviewHuman.length:'—',
+          tone:'warning'},
+        {label:'Council pending',value:reviewQueueLoaded?reviewCouncil.length:'—'},
+        {label:'Teams with requests',value:reviewQueueLoaded
+          ? new Set(reviewQueue.map(item=>item.orchestrationId)).size:'—'},
+        {label:'Loaded requests',value:reviewQueueLoaded?reviewQueue.length:'—',
+          note:'Up to 200 native Tickets'},
+      ]) + reviewPanel : '') +
       '</div></div></div>';
     // During native hydration, local-only draft fields remain editable.
     // Stateful commands and controls must stay inert until the snapshot loads.
@@ -1682,6 +1906,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
     teamDemands = []; teamDemandsLoaded = false; teamDemandsHasMore = false;
     teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;
+    recentBotActivityTeamId=''; recentBotActivityLoaded=false;
+    recentBotActivity.clear();
     reviewQueue = []; reviewQueueLoaded = false;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -2109,6 +2335,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async()=>{await refreshTeamDemands(selected);});
       return;
     }
+    if (target.hasAttribute('data-sa-load-team-activity')) {
+      const cfg=current();
+      if (!cfg || workspaceView!=='team' || busy || loading) return;
+      const teamId=cfg.id, policyRevision=cfg.policyRevision;
+      const candidates=tickets.filter(item=>item.orchestrationId===teamId).slice(0,8);
+      void work(async()=>{
+        const snapshots:TicketDetails[]=[];
+        // Sequential and bounded to avoid a burst of native SQLite reads.
+        for (const ticket of candidates) {
+          const snapshot=await call<TicketDetails>('superagent_snapshot',
+            {ticketId:ticket.id,limit:1});
+          if (snapshot.ticket.id!==ticket.id || snapshot.ticket.orchestrationId!==teamId)
+            throw new Error('Native Worker activity snapshot belongs to another Team or Ticket.');
+          snapshots.push(snapshot);
+        }
+        if (selected!==teamId || current()?.policyRevision!==policyRevision) return;
+        const observed=new Map<string,{
+          ticketId:string; state:string; at:number; attempt:number;
+        }>();
+        for (const snapshot of snapshots) {
+          for (const assignment of snapshot.assignments) {
+            const at=assignment.updatedAt ?? assignment.createdAt ?? 0;
+            const previous=observed.get(assignment.botId);
+            if (!previous || at>previous.at) {
+              observed.set(assignment.botId,{
+                ticketId:snapshot.ticket.id,state:assignment.state,
+                at,attempt:assignment.attempt,
+              });
+            }
+          }
+        }
+        recentBotActivity=observed;
+        recentBotActivityTeamId=teamId;
+        recentBotActivityLoaded=true;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-refresh-team-demands')) {
       if (selected) void work(async()=>{await refreshTeamDemands(selected);});
       return;
@@ -2209,12 +2472,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       )?.focus({preventScroll:true});
       return;
     }
+    if (target.dataset.saReviewTab) {
+      const tab=target.dataset.saReviewTab;
+      if (!['all','human','council'].includes(tab)) return;
+      reviewTab=tab as typeof reviewTab;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-review-tab="' + tab + '"]')
+        ?.focus({preventScroll:true});
+      return;
+    }
     if (target.dataset.saView) {
       const next = target.dataset.saView;
-      if (!['teams','runs','review'].includes(next)) return;
+      if (!['teams','team','runs','review'].includes(next)) return;
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      if (next === 'team' && selected && !teamDemandsLoaded)
+        void work(async()=>{await refreshTeamDemands(selected);});
       if (next === 'runs' && !allDemandsLoaded)
         host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
       if (next === 'review' && !reviewQueueLoaded)

@@ -1202,7 +1202,18 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         params![&ticket.id, now, now.saturating_sub(MAX_ASSIGNMENT_RUN_MS)],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let mandate = mandate(store, &ticket.id)?;
+    // A damaged or partially migrated Ticket can lose its Mandate. Recovery
+    // inspection must still expose the Ticket instead of hiding the entire
+    // inbox; absence never counts as an active authorization.
+    let mandate_present: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
+        [&ticket.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let mandate = if mandate_present {
+        Some(mandate(store, &ticket.id)?)
+    } else {
+        None
+    };
     let consistent = if ticket.state == "running" {
         // One active native assignment is the current Ticket contract. A
         // duplicate attempt with a valid active link must still be triaged.
@@ -1234,6 +1245,10 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "investigate_native_assignment_state"
     } else if ticket.state == "running" && expired_running > 0 {
         "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && mandate.is_none() {
+        // The operator can quarantine the orphaned authority, but must not
+        // infer that a detached serve host has stopped the live provider.
+        "quarantine_missing_native_mandate"
     } else if ticket.state == "running" && !active_read_only_authorized {
         // Contain the live provider before reconciling an uncertain effect;
         // neither action may imply that the remote operation succeeded.
@@ -1251,6 +1266,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "await_fresh_task_bound_native_council"
     } else if ticket.state == "waiting_approval" {
         "decide_with_current_ticket_revision"
+    } else if mandate.is_none() {
+        "investigate_missing_native_mandate"
     } else if terminal {
         "do_not_replay_terminal_ticket"
     } else {
@@ -1268,8 +1285,9 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "uncertainExternalEffects": uncertain,
         "requiresIndependentRemoteReconciliation": pending + uncertain > 0,
         "requiresLiveHostVerification": running > 0 || pending > 0,
-        "mandateRevoked": mandate.revoked,
-        "mandateExpired": mandate.expires_at <= now,
+        "mandateMissing": mandate.is_none(),
+        "mandateRevoked": mandate.as_ref().map(|m| m.revoked),
+        "mandateExpired": mandate.as_ref().map(|m| m.expires_at <= now),
         "terminal": terminal,
         "nextOperatorAction": next_action,
         "automaticReplayAllowed": false,
@@ -2184,12 +2202,14 @@ pub(crate) fn headless_quarantine_orphan_running_ticket(
     }
     let store = open_headless_transition_store(database_path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    // Match the owning watchdog's structural fault predicate. Healthy
-    // assignments are not operator-recoverable through this command.
+    // Match the owning watchdog's structural/authority fault predicate.
+    // A running Assignment without its native Mandate is not healthy and
+    // must be revocable without fabricating a replacement authorization.
     let fault_revision: Option<i64> = tx.query_row(
         "SELECT t.revision FROM sa_tickets t
          WHERE t.id=?1 AND t.state='running' AND (
            t.active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_mandates m WHERE m.ticket_id=t.id)
            OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o WHERE o.id=t.orchestration_id)
            OR (SELECT COUNT(*) FROM sa_assignments a
                WHERE a.ticket_id=t.id AND a.state='running')<>1
@@ -2209,6 +2229,8 @@ pub(crate) fn headless_quarantine_orphan_running_ticket(
                 revision=revision+1,updated_at=?3
          WHERE id=?1 AND revision=?2 AND state='running' AND (
            active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_mandates m
+                         WHERE m.ticket_id=sa_tickets.id)
            OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
                          WHERE o.id=sa_tickets.orchestration_id)
            OR (SELECT COUNT(*) FROM sa_assignments a
@@ -2237,7 +2259,7 @@ pub(crate) fn headless_quarantine_orphan_running_ticket(
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'headless_orphan_running_quarantined',
-           'Running Ticket lost its Team or unique active Assignment; revoked without provider or effect replay',?2)",
+           'Running Ticket lost its Team, Mandate or unique active Assignment; revoked without provider or effect replay',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -6307,6 +6329,84 @@ mod tests {
             assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
             assert_eq!(effects::unresolved_count(&reopened,&ticket.id).unwrap(),1);
         }
+    }
+
+    #[test]
+    fn headless_missing_mandate_remains_discoverable_and_quarantines_without_replay() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id,
+            "Private missing mandate work", "headless-missing-mandate", false).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let path = store.path.clone();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision,
+        ).is_err(), "Healthy native execution is not an orphan");
+
+        // Simulate legacy/partial database damage, without manufacturing a
+        // replacement grant or modifying the linked native provider session.
+        store.db.execute("DELETE FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket.id]).unwrap();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'missing-mandate-effect',?2,'pending',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let audits_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        let item = inbox["items"].as_array().unwrap().iter()
+            .find(|entry| entry["ticketId"] == ticket.id).unwrap();
+        assert_eq!(item["recovery"]["mandateMissing"], true);
+        assert!(item["recovery"]["mandateRevoked"].is_null());
+        assert!(item["recovery"]["mandateExpired"].is_null());
+        assert_eq!(item["recovery"]["nextOperatorAction"],
+            "quarantine_missing_native_mandate");
+        assert_eq!(item["recovery"]["pendingExternalEffects"], 1);
+        assert_eq!(inbox["observationalOnly"], true);
+        assert!(!inbox.to_string().contains("Private missing mandate work"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audits_before);
+
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision + 1,
+        ).is_err(), "A stale operator revision cannot settle this Ticket");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let settled: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_orphan_running_ticket(
+                &path, &ticket.id, revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(settled["state"], "interrupted");
+        assert_eq!(settled["revision"], revision + 1);
+        assert_eq!(settled["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(settled["providerStoppedByCommand"], false);
+        assert_eq!(settled["externalEffectReplayAllowed"], false);
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision,
+        ).is_err(), "Duplicate quarantine must not repeat audit or effects");
+        assert!(!on_run_finished(&store, &session, true, "Late output").unwrap());
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|entry| entry.kind == "headless_orphan_running_quarantined").count(), 1);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state,
+            "uncertain");
+        drop(store);
+
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state,
+            "interrupted");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
     }
 
     #[test]

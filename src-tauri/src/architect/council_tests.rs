@@ -831,7 +831,7 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     let before_scope_revocation = serde_json::to_value(
         load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
     ).unwrap();
-    for tamper in ["owner", "mode", "checkout"] {
+    for tamper in ["owner", "mode", "checkout", "branch"] {
         {
             let store = state.store.lock().unwrap();
             match tamper {
@@ -851,6 +851,12 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
                 "checkout" => {
                     store.db.execute(
                         "UPDATE sessions SET worktree_path='foreign-checkout' WHERE id=?1",
+                        [&native_reviewer_session.id],
+                    ).unwrap();
+                }
+                "branch" => {
+                    store.db.execute(
+                        "UPDATE sessions SET worktree_branch='foreign-reviewer-branch' WHERE id=?1",
                         [&native_reviewer_session.id],
                     ).unwrap();
                 }
@@ -875,9 +881,10 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
                 rusqlite::params![&native_reviewer_session.id, &sid],
             ).unwrap();
             store.db.execute(
-                "UPDATE sessions SET mode=?2,worktree_path=?3 WHERE id=?1",
+                "UPDATE sessions SET mode=?2,worktree_path=?3,worktree_branch=?4 WHERE id=?1",
                 rusqlite::params![&native_reviewer_session.id,
-                    &native_reviewer_session.mode, &native_reviewer_session.worktree_path],
+                    &native_reviewer_session.mode, &native_reviewer_session.worktree_path,
+                    &native_reviewer_session.worktree_branch],
             ).unwrap();
         }
     }
@@ -1160,6 +1167,36 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
     assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &writable),
         "a write-capable seat must never receive the native read-only file check");
     let generation = team.generation;
+    // Native host evidence must not be minted after a file reviewer switches
+    // branches within the same checkout, even when the seat remains active.
+    let first_file_session = team.workers.iter().find(|worker|
+        worker.id == reviewer_ids[0]).unwrap().session_id.clone();
+    let before_branch_drift = serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='foreign-file-branch' WHERE id=?1",
+            [&first_file_session],
+        ).unwrap();
+    }
+    let first_actor = coordination::Actor::Worker { id: reviewer_ids[0].clone(), attempt: 1 };
+    let denied = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &first_actor, "pandacode_reviewer_file_verify",
+        json!({"criterionId":"file-proof"})).unwrap_err();
+    assert!(denied.contains("native reviewer scope or read-only authority changed"),
+        "branch drift must deny host-verified file evidence: {denied}");
+    assert_eq!(serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap(), before_branch_drift,
+        "a revoked reviewer branch must not persist a native evidence receipt");
+    {
+        let store = state.store.lock().unwrap();
+        let original_branch = store.session(&sid).unwrap().worktree_branch;
+        store.db.execute("UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
+            rusqlite::params![&first_file_session, original_branch]).unwrap();
+    }
     for id in &reviewer_ids {
         let actor = coordination::Actor::Worker { id: id.clone(), attempt: 1 };
         assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,

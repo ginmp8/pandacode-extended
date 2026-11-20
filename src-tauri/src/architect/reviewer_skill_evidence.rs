@@ -254,6 +254,7 @@ pub(super) fn dispatch_state(
     if super::parent_of(&store, &reviewer_session.id)?.as_deref() != Some(parent)
         || reviewer_session.project_id != root_session.project_id
         || reviewer_session.worktree_path != root_session.worktree_path
+        || reviewer_session.worktree_branch != root_session.worktree_branch
         || reviewer_session.mode != root_session.mode
         || reviewer_session.archived || reviewer_session.task_stage == "completed"
         || matches!(reviewer_session.status.as_str(), "interrupted" | "error" | "completed")
@@ -366,6 +367,7 @@ fn dispatch_file_state(
         .map_err(|_| "reviewer_session_mismatch: native reviewer unavailable.".to_string())?;
     if super::parent_of(&store, &native.id)?.as_deref() != Some(parent)
         || native.project_id != root.project_id || native.worktree_path != root.worktree_path
+        || native.worktree_branch != root.worktree_branch
         || native.mode != root.mode || native.archived || native.task_stage == "completed"
         || matches!(native.status.as_str(), "interrupted" | "error" | "completed")
         || !worker.read_only || worker.wrote_at != 0 || !worker.files.is_empty()

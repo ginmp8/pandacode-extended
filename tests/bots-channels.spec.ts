@@ -366,7 +366,7 @@ test.describe('shared bot channels', () => {
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
   });
 
-  test('narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {
+  test('bot collaboration: narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 320, height: 640 });
     await showBots(page);

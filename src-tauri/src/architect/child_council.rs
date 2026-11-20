@@ -2698,6 +2698,14 @@ fn authenticated_first_wave_s2_triggers(
 }
 
 pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildReservationView>> {
+    // A removed reviewer source must not hide child reservations already issued
+    // for this immutable cycle. Validate the complete roster before the
+    // disabled/empty-policy early return in this read-only inspector.
+    if root.council_since > 0 {
+        require_current_child_reservation_roster(
+            store, root, root.config.council.as_ref().map_or(0, |config| config.nested_bot_reviewers.len()),
+        )?;
+    }
     let Some(council) = root.config.council.as_ref() else { return Ok(Vec::new()) };
     if council.nested_bot_reviewers.is_empty() || root.objective.is_empty() {
         return Ok(Vec::new());

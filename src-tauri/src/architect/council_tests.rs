@@ -271,8 +271,11 @@ fn council_inspection_is_cycle_scoped_and_never_invents_usage_or_pass() {
     let other = seat("fresh-b", 1, Some(9.5), SINCE + 2);
     let team = team_with(on(9.0, 3, 2), vec![old, fresh, other]);
     let inspected = council::inspection(&team, false).unwrap();
-    assert_eq!(inspected.status.state, "passed");
+    assert_eq!(inspected.status.state, "blocked",
+        "score-only native inspection cannot present an unverified Council pass");
+    assert!(inspected.status.stale);
     assert!(!inspected.verified_pass);
+    assert!(inspected.verified_completion.is_none());
     assert_eq!(inspected.attempts.len(), 2);
     let first = &inspected.attempts[0];
     assert_eq!(first.worker_id, "fresh-a");
@@ -5251,6 +5254,15 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
         assert_ne!(first[0].child_session_id, first[1].child_session_id);
         child_council::reserve(&store, &started).unwrap();
         assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+        // A changed/disabled policy cannot make an already admitted child
+        // disappear from the read-only inspection while keeping its grants.
+        let mut hidden = started.clone();
+        hidden.config.council.as_mut().unwrap().nested_bot_reviewers.clear();
+        let denied = child_council::inspect(&store, &hidden).unwrap_err();
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+        hidden.config.council = None;
+        let denied = child_council::inspect(&store, &hidden).unwrap_err();
+        assert!(denied.contains("child_council_revoked"), "{denied}");
         for child in &first {
             let session = store.session(&child.child_session_id).unwrap();
             assert_eq!(session.mode, "plan", "parent Full permission never carries into children");

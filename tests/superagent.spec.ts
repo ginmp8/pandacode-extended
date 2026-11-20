@@ -3256,3 +3256,99 @@ test('Team directory uses durable native human and Council pending counts indepe
   const calls=await page.evaluate(()=> (window as unknown as {saPendingCalls:string[]}).saPendingCalls);
   expect(calls).toEqual(['bots_list','superagent_list','superagent_tickets']);
 });
+
+
+test('overlapping native Team refreshes cannot replace the newest directory with an older response',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-refresh-order';document.body.appendChild(host);
+    const first={id:'first',name:'First Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker',enabled:false,policyRevision:1};
+    const second={...first,id:'second',name:'Second Team'};
+    let listReads=0,releaseSlow:(()=>void)|undefined,completed=false;
+    const mounted=mountSuperagent(host,async command=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list'){
+        listReads++;
+        if(listReads===2){
+          await new Promise<void>(resolve=>{releaseSlow=resolve;});
+          return [first] as never;
+        }
+        return (listReads>=3?[first,second]:[first]) as never;
+      }
+      if(command==='superagent_tickets')return [] as never;
+      throw Error('Unexpected native command '+command);
+    });
+    (window as unknown as {saRefreshControl:{
+      queue:()=>void;hasSlow:()=>boolean;release:()=>void;completed:()=>boolean;
+    }}).saRefreshControl={
+      queue:()=>{void Promise.all([mounted.refresh(),mounted.refresh()])
+        .then(()=>{completed=true;});},
+      hasSlow:()=>Boolean(releaseSlow),
+      release:()=>{if(!releaseSlow)throw Error('Slow native read not started');releaseSlow();},
+      completed:()=>completed,
+    };
+  });
+  const host=page.locator('#sa-refresh-order');
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('First Team');
+  await page.evaluate(()=>(window as unknown as {saRefreshControl:{queue:()=>void}})
+    .saRefreshControl.queue());
+  await expect.poll(()=>page.evaluate(()=>
+    (window as unknown as {saRefreshControl:{hasSlow:()=>boolean}})
+      .saRefreshControl.hasSlow())).toBe(true);
+  await page.evaluate(()=>(window as unknown as {saRefreshControl:{release:()=>void}})
+    .saRefreshControl.release());
+  await expect.poll(()=>page.evaluate(()=>
+    (window as unknown as {saRefreshControl:{completed:()=>boolean}})
+      .saRefreshControl.completed())).toBe(true);
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText(['First Team','Second Team']);
+});
+
+test('native Team creation clears stale directory filters after creation is acknowledged',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-create-filter';document.body.appendChild(host);
+    const teams:Array<Record<string,unknown>>=[];
+    const commands:string[]=[];
+    (window as unknown as {saFilterCommands:string[]}).saFilterCommands=commands;
+    mountSuperagent(host,async(command,args)=>{
+      commands.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [...teams] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        const input=(args as {input:{name:string;coordinatorBotId:string;workerBotId:string}}).input;
+        const created={...input,id:'new-team',enabled:false,policyRevision:1};
+        teams.push(created);
+        return created as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-create-filter');
+  await expect(host.getByText('No orchestrations created.')).toBeVisible();
+  await host.getByRole('searchbox',{name:'Search Teams'}).fill('not-this-team');
+  await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('New Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('New Team');
+  await expect(host.getByRole('searchbox',{name:'Search Teams'})).toHaveValue('');
+  await expect(host.getByRole('combobox',{name:'Team status'})).toHaveValue('all');
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saFilterCommands:string[]}).saFilterCommands);
+  expect(calls.filter(command=>command==='superagent_create')).toHaveLength(1);
+  expect(calls).not.toContain('superagent_submit');
+});

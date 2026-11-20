@@ -1160,7 +1160,16 @@ export function mountSuperagent(
       if (index >= 0) tickets[index] = snapshot.ticket;
     }
   }
-  async function reload(): Promise<void> {
+  // Native reloads may overlap a mutation or a view refresh. Serialize reads
+  // so an older, slower list cannot overwrite a newer confirmed Team state.
+  // A post-mutation reload also waits for any earlier in-flight observation.
+  let reloadTail: Promise<void> = Promise.resolve();
+  function reload(): Promise<void> {
+    const next = reloadTail.then(() => loadNativeSnapshot());
+    reloadTail = next.catch(() => {});
+    return next;
+  }
+  async function loadNativeSnapshot(): Promise<void> {
     loading = true;
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
@@ -2571,6 +2580,9 @@ export function mountSuperagent(
         draftCoordinatorBotId = ''; draftWorkerBotId = '';
         draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
         selected = created.id; selectedDemandWorkerId = ''; demandPreflight = null;
+        // A newly confirmed Team must be visible even if a search or status
+        // filter previously excluded disabled Teams.
+        teamSearch = ''; teamStatusFilter = 'all';
         workspaceView = 'runs'; await reload();
       });
     }

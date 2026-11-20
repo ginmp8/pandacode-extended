@@ -263,16 +263,21 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
                 : 'Fresh child evidence is recorded separately; root approval remains pending.')
               : 'First-wave receipts do not verify second-wave completion or authorize root approval.') + '</p>'
           : '';
+        const rootChallengeVerified = Boolean(verified && challengeCorrelated);
         const challengeHtml = hasFreshWave && s3
           ? '<p role="status">Independent S3 child challenge: phase 2 admitted ' +
             escape(String(freshLeafCount)) + ' of ' + escape(String(child.requiredLeafReviewers)) +
             ' reviewers. ' + (challengeCorrelated
-              ? 'The challenge receipt is authenticated; root approval remains pending.'
+              ? (rootChallengeVerified
+                ? 'Independent S3 challenge receipt and root native pass are verified.'
+                : 'The challenge receipt is authenticated; root approval remains pending.')
               : 'A first-phase score is not independent challenge evidence or terminal approval.') + '</p>'
           : '';
         const challengeReceiptHtml = s3 && challengeReceipt
           ? (challengeCorrelated
-            ? '<p>Native S3 challenge child receipt recorded (root approval pending): minimum score ' +
+            ? '<p>Native S3 challenge child receipt recorded (' +
+              (rootChallengeVerified ? 'root native pass verified' : 'root approval pending') +
+              '): minimum score ' +
               escape((challenge?.lowestScore ?? 0).toFixed(1)) + '/10 · ' +
               escape(String(challengeIds.length)) + ' fresh independent reviewer identifiers.</p>' +
               '<ul aria-label="S3 child challenge reviewer evidence identifiers">' +

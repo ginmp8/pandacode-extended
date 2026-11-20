@@ -754,6 +754,41 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
   await expect(panel(page)).toContainText('Native pass not verified');
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 
+  // This browser fixture is display-only: it must reflect a correlated
+  // native root completion, then fail closed if its revision no longer matches.
+  const approvedInspection = {
+    ...inspection,
+    sessionId: 'root-task',
+    status: { state: 'passed', round: 2, lowest: 9.7, target: 9.0, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'root-task', cycleId: 'root-task:1000',
+      teamRevision: 20, round: 2, lowest: 9.7,
+    },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, approvedInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const passedChild = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await passedChild.locator('summary').click();
+  await expect(panel(page)).toContainText('Verified native pass');
+  await expect(passedChild).toContainText('Independent S3 challenge receipt and root native pass are verified');
+  await expect(passedChild).toContainText('Native S3 challenge child receipt recorded (root native pass verified)');
+
+  const staleInspection = {
+    ...approvedInspection,
+    verifiedCompletion: { ...approvedInspection.verifiedCompletion, teamRevision: 19 },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, staleInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const staleChild = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await staleChild.locator('summary').click();
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(staleChild).toContainText('The challenge receipt is authenticated; root approval remains pending');
+  await expect(staleChild).not.toContainText('root native pass verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
   inspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds[0] = 'first-a';
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
   await button(page).click();

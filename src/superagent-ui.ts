@@ -109,7 +109,10 @@ interface SourceIntegrity {
   policyRevision: number; cursorKind: string; lastSequence: number;
   receiptCount: number; permittedReceiptCount: number;
   maxReceiptSequence: number; cursorConsistent: boolean;
-  receiptCapacityReached: boolean; nextAction: string;
+  receiptCapacityReached: boolean;
+  historyGapCursor?: number | null; historyGapDetectedAt?: number | null;
+  historyGapReason?: 'cursor_missing' | 'window_unverified' | null;
+  historyGapOccurrences?: number; nextAction: string;
   observationalOnly: boolean;
 }
 
@@ -594,6 +597,14 @@ export function mountSuperagent(
               ? 'Cursor is consistent with stored receipts.'
               : 'Cursor behind durable receipts — new observations denied until reconciled.') +
             ' Native next action: ' + safe(sourceIntegrity.nextAction) + '</p>' +
+            (sourceIntegrity.historyGapCursor
+              ? '<p role="alert">GitHub history continuity not verified since cursor ' +
+                safe(sourceIntegrity.historyGapCursor) + ' (' +
+                safe(sourceIntegrity.historyGapReason === 'cursor_missing'
+                  ? 'stored cursor absent from bounded feed' : 'bounded feed exhausted') +
+                '). Observed ' + safe(sourceIntegrity.historyGapOccurrences ?? 1) +
+                ' time(s). Operator reconciliation required; no lost events have been inferred or replayed.</p>'
+              : '') +
             '<p>Observation only. No GitHub subscription completeness, worker admission, Council pass, or Auto authorization is implied.</p>' +
             '</section>' : '') +
           (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +

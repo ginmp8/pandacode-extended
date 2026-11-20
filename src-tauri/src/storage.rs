@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 50;
+pub const SCHEMA_VERSION: i64 = 51;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -752,6 +752,15 @@ impl Store {
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=50;")
                     .map_err(|e|e.to_string())?;
+            }
+            if version < 51 {
+                // An Observe window can lose its durable event boundary without
+                // moving the source cursor. Preserve this independent diagnostic
+                // across restarts; older source receipts remain unchanged.
+                migration.execute_batch(crate::superagent::events::HISTORY_GAP_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=51;")
+                    .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

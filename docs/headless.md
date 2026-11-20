@@ -1078,3 +1078,7 @@ running in-memory sessions; `eligibleAtSnapshot` is **not** permission or a
 reservation. Explicit native admission must independently check live provider
 occupancy, permissions, revision and leases. The existing `--queue-demand`
 continues to create a blocked manual Ticket without automatically executing it.
+
+### GitHub Observe history diagnostics
+
+Inspect an enabled source using `--inspect-source-health <source-id>` after a bounded GitHub Events poll fails. Source health now includes a durable `historyGapCursor`, `historyGapReason` (`cursor_missing` or `window_unverified`), `historyGapDetectedAt` and `historyGapOccurrences` when a previously stored event cursor could not be verified within the authenticated, bounded feed. These observations are diagnostic, not proof of which events were missed; the warning remains after restart and source mode changes until a separately verified reconciliation is available. No cursor is rewound, no missing events are invented, and no Auto work or effects are admitted. Transient authentication, network and provider-order failures are not classified as a history gap.

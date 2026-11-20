@@ -83,6 +83,22 @@ CREATE TABLE IF NOT EXISTS sa_source_repository_identity (
 );
 "#;
 
+/// Durable evidence of a bounded GitHub Events window that did not verify
+/// continuity. An incident is diagnostic only: it never grants Auto, infers a
+/// Ticket, rewinds a source cursor or claims that missing events were recovered.
+/// The source can still be observed later, but the warning survives restarts.
+pub(crate) const HISTORY_GAP_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_source_history_gaps (
+  source_id TEXT PRIMARY KEY REFERENCES sa_event_sources(id) ON DELETE RESTRICT,
+  cursor_sequence INTEGER NOT NULL CHECK(cursor_sequence>0),
+  policy_revision INTEGER NOT NULL CHECK(policy_revision>0),
+  reason TEXT NOT NULL CHECK(reason IN ('cursor_missing','window_unverified')),
+  first_detected_at INTEGER NOT NULL CHECK(first_detected_at>0),
+  last_detected_at INTEGER NOT NULL CHECK(last_detected_at>0),
+  occurrences INTEGER NOT NULL DEFAULT 1 CHECK(occurrences>0)
+);
+"#;
+
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
@@ -595,6 +611,10 @@ pub struct SourceIntegrity {
     pub max_receipt_sequence: i64,
     pub cursor_consistent: bool,
     pub receipt_capacity_reached: bool,
+    pub history_gap_cursor: Option<i64>,
+    pub history_gap_detected_at: Option<i64>,
+    pub history_gap_reason: Option<String>,
+    pub history_gap_occurrences: i64,
     pub next_action: &'static str,
     pub observational_only: bool,
 }
@@ -613,12 +633,24 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
          FROM sa_event_decisions WHERE source_id=?1",
         [source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|e| e.to_string())?;
+    let gap: Option<(i64,i64,String,i64)> = store.db.query_row(
+        "SELECT cursor_sequence,last_detected_at,reason,occurrences
+         FROM sa_source_history_gaps WHERE source_id=?1",
+        [source_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (history_gap_cursor,history_gap_detected_at,history_gap_reason,history_gap_occurrences) =
+        match gap {
+            Some((cursor,at,reason,count)) => (Some(cursor),Some(at),Some(reason),count),
+            None => (None,None,None,0),
+        };
     let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
     let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
     let next_action = if !cursor_consistent {
         "investigate_cursor_receipt_mismatch"
     } else if receipt_capacity_reached {
         "receipt_limit_requires_operator_intervention"
+    } else if history_gap_cursor.is_some() {
+        "investigate_unverified_github_history"
     } else if selected.mode == "off" {
         "source_off_no_poll"
     } else { "explicit_observe_available" };
@@ -630,7 +662,8 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         } else { "github_event_identity_high_watermark" },
         last_sequence:selected.last_sequence, receipt_count, permitted_receipt_count,
         max_receipt_sequence, cursor_consistent, receipt_capacity_reached,
-        next_action, observational_only:true,
+        history_gap_cursor, history_gap_detected_at, history_gap_reason,
+        history_gap_occurrences, next_action, observational_only:true,
     })
 }
 
@@ -647,6 +680,57 @@ fn require_source_cursor_integrity(
         return Err("Source cursor is behind durable receipts; observation denied pending reconciliation.".into());
     }
     Ok(())
+}
+
+/// Record only three bounded-continuity failures, not authentication errors,
+/// transient network faults or arbitrary provider text. Do not use an
+/// unverified feed response to advance the source's actual event watermark.
+/// A stale or disabled source must not acquire a new incident after revocation.
+fn record_observe_fetch_failure(
+    store: &Store, expected: &EventSource, failure: &str,
+) -> Result<()> {
+    let reason = if failure.starts_with(
+        "GitHub Events passed the durable source cursor without its exact identity;"
+    ) || failure.starts_with(
+        "GitHub Events ended before the durable source cursor was observed;"
+    ) {
+        "cursor_missing"
+    } else if failure.starts_with("GitHub Events window exceeds three pages;") {
+        "window_unverified"
+    } else {
+        return Ok(());
+    };
+    if expected.last_sequence <= 0 || expected.event_kind == "check_run.completed" {
+        return Ok(());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let at = storage::now();
+    tx.execute(
+        "INSERT INTO sa_source_history_gaps
+         (source_id,cursor_sequence,policy_revision,reason,
+          first_detected_at,last_detected_at,occurrences)
+         SELECT id,?2,?3,?4,?5,?5,1 FROM sa_event_sources
+         WHERE id=?1 AND mode='observe' AND policy_revision=?3
+           AND last_sequence=?2 AND event_kind<>'check_run.completed'
+         ON CONFLICT(source_id) DO UPDATE SET
+           first_detected_at=CASE
+             WHEN sa_source_history_gaps.cursor_sequence=excluded.cursor_sequence
+              AND sa_source_history_gaps.policy_revision=excluded.policy_revision
+              AND sa_source_history_gaps.reason=excluded.reason
+             THEN sa_source_history_gaps.first_detected_at
+             ELSE excluded.first_detected_at END,
+           occurrences=CASE
+             WHEN sa_source_history_gaps.cursor_sequence=excluded.cursor_sequence
+              AND sa_source_history_gaps.policy_revision=excluded.policy_revision
+              AND sa_source_history_gaps.reason=excluded.reason
+             THEN sa_source_history_gaps.occurrences+1 ELSE 1 END,
+           cursor_sequence=excluded.cursor_sequence,
+           policy_revision=excluded.policy_revision,
+           reason=excluded.reason,
+           last_detected_at=excluded.last_detected_at",
+        params![&expected.id,expected.last_sequence,expected.policy_revision,reason,at],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Reject unusable Observe sources before the authenticated network call.
@@ -1614,7 +1698,11 @@ where
             // Deny corrupted/filled receipt sources before any authenticated
             // request. Receipt admission repeats the authoritative checks.
             require_observe_preflight(store, &selected)?;
-            let (signed_in, response, pages, repository_id) = fetch(&selected, since)?;
+            let fetched = fetch(&selected, since);
+            if let Err(failure) = &fetched {
+                record_observe_fetch_failure(store, &selected, failure)?;
+            }
+            let (signed_in, response, pages, repository_id) = fetched?;
             poll_authenticated_events_with_repository_id(
                 store, &selected, since, &response, &signed_in, pages, repository_id,
             )
@@ -1674,9 +1762,13 @@ pub(crate) fn headless_observe_source(
         "SELECT updated_at FROM sa_event_sources WHERE id=?1",
         [source_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let (signed_in, response, pages_fetched, repository_id) = fetch_authenticated_github_window(
+    let fetched = fetch_authenticated_github_window(
         &snapshot.repository, since, snapshot.last_sequence,
-    )?;
+    );
+    if let Err(failure) = &fetched {
+        record_observe_fetch_failure(&store, &snapshot, failure)?;
+    }
+    let (signed_in, response, pages_fetched, repository_id) = fetched?;
     let receipt = poll_authenticated_events_with_repository_id(
         &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
     )?;
@@ -1708,10 +1800,14 @@ async fn poll_source_authenticated(
     // Authenticate the operator independently of untrusted Event payloads.
     // Fetch the complete bounded window before storing even one decision.
     // Any failed page, authentication change or unstable order denies the poll.
-    let (signed_in, response, pages_fetched, repository_id) = tokio::task::spawn_blocking(move || {
+    let fetched = tokio::task::spawn_blocking(move || {
         fetch_authenticated_github_window(&repo, since, prior_cursor)
-    }).await.map_err(|e| e.to_string())??;
+    }).await.map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    if let Err(failure) = &fetched {
+        record_observe_fetch_failure(&store, &snapshot, failure)?;
+    }
+    let (signed_in, response, pages_fetched, repository_id) = fetched?;
     poll_authenticated_events_with_repository_id(
         &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
     )
@@ -3413,6 +3509,88 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(list_decisions(&reopened,&src.id,10).unwrap()[0].decision,"ignored_filter");
         assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,5_000_001_001);
+    }
+
+    #[test]
+    fn github_history_gap_diagnostic_is_restart_durable_and_source_scoped() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let initial = serde_json::json!([{
+            "id":"5000000600","created_at":"2026-11-12T08:59:00Z",
+            "type":"IssuesEvent","repo":{"name":"owner/repo"},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        poll_authenticated_events(&store, &observed, 0, &initial).unwrap();
+        let pinned = source(&store, &observed.id).unwrap();
+        assert_eq!(pinned.last_sequence, 5_000_000_600);
+        let missing = combine_github_pages(
+            &[github_page(5_000_000_602, 2)], 0, pinned.last_sequence,
+        ).unwrap_err();
+        assert!(missing.contains("durable source cursor"));
+        record_observe_fetch_failure(&store, &pinned, &missing).unwrap();
+        record_observe_fetch_failure(&store, &pinned, &missing).unwrap();
+        let health = inspect_source_integrity(&store, &pinned.id).unwrap();
+        assert_eq!(health.history_gap_cursor, Some(pinned.last_sequence));
+        assert_eq!(health.history_gap_reason.as_deref(), Some("cursor_missing"));
+        assert_eq!(health.history_gap_occurrences, 2);
+        assert_eq!(health.next_action, "investigate_unverified_github_history");
+        assert!(health.cursor_consistent);
+        assert_eq!(source(&store, &pinned.id).unwrap().last_sequence, pinned.last_sequence);
+        assert_eq!(list_decisions(&store, &pinned.id, 10).unwrap().len(), 1);
+        let another = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.closed",
+        ).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &another.id).unwrap().history_gap_cursor, None);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let durable = inspect_source_integrity(&reopened, &pinned.id).unwrap();
+        assert_eq!(durable.history_gap_cursor, Some(5_000_000_600));
+        assert_eq!(durable.history_gap_occurrences, 2);
+        let disabled = set_mode(&reopened, &pinned.id, pinned.policy_revision, "off").unwrap();
+        record_observe_fetch_failure(&reopened, &pinned, &missing).unwrap();
+        assert_eq!(inspect_source_integrity(&reopened, &disabled.id).unwrap().history_gap_occurrences, 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn github_history_gap_diagnostic_excludes_transient_failures_and_unanchored_sources() {
+        let (store, _) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        record_observe_fetch_failure(
+            &store, &observed, "GitHub Events window exceeds three pages; no source cursor advanced.",
+        ).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().history_gap_cursor, None);
+        store.db.execute(
+            "UPDATE sa_event_sources SET last_sequence=5000001000 WHERE id=?1",
+            [&observed.id],
+        ).unwrap();
+        let pinned = source(&store, &observed.id).unwrap();
+        for error in [
+            "GitHub authentication failed",
+            "GitHub Events ordering changed during pagination; retry without advancing cursor.",
+            "GitHub Events repository ID differs from authenticated repository metadata; cursor unchanged.",
+        ] {
+            record_observe_fetch_failure(&store, &pinned, error).unwrap();
+        }
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_cursor, None);
+        record_observe_fetch_failure(
+            &store, &pinned, "GitHub Events window exceeds three pages; no source cursor advanced.",
+        ).unwrap();
+        let health = inspect_source_integrity(&store, &pinned.id).unwrap();
+        assert_eq!(health.history_gap_cursor, Some(5_000_001_000));
+        assert_eq!(health.history_gap_reason.as_deref(), Some("window_unverified"));
+        assert_eq!(health.history_gap_occurrences, 1);
+        assert_eq!(health.max_receipt_sequence, 0);
+        assert_eq!(health.receipt_count, 0);
     }
 
     fn github_page(start: i64, size: usize) -> serde_json::Value {

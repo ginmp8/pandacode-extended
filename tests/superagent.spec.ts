@@ -1654,7 +1654,7 @@ test('cross-Team Demand pagination rejects overlapping, reordered and foreign Te
     const host=document.createElement('div');
     host.id='sa-invalid-demand-pages';
     document.body.appendChild(host);
-    type Mode = 'duplicate' | 'out-of-order' | 'foreign' | 'valid';
+    type Mode = 'duplicate' | 'out-of-order' | 'foreign' | 'invalid-revision' | 'invalid-objective' | 'valid';
     (window as unknown as {saDemandPageMode:Mode}).saDemandPageMode='duplicate';
     const calls:string[]=[];
     (window as unknown as {saDemandPageCalls:string[]}).saDemandPageCalls=calls;
@@ -1683,6 +1683,8 @@ test('cross-Team Demand pagination rejects overlapping, reordered and foreign Te
         if(mode==='duplicate')return [demand(198)] as never;
         if(mode==='out-of-order')return [{...demand(200),updatedAt:1802}] as never;
         if(mode==='foreign')return [{...demand(200),orchestrationId:'other'}] as never;
+        if(mode==='invalid-revision')return [{...demand(200),revision:-1}] as never;
+        if(mode==='invalid-objective')return [{...demand(200),objective:null}] as never;
         return [demand(200)] as never;
       }
       throw Error('Unexpected native call: '+command);
@@ -1693,12 +1695,13 @@ test('cross-Team Demand pagination rejects overlapping, reordered and foreign Te
   const global=host.getByRole('region',{name:'All Demands across Teams'});
   await global.getByRole('combobox',{name:'Filter Demands by Team'}).selectOption('team');
   await expect(global).toContainText('200 native Demands loaded.');
-  for(const mode of ['duplicate','out-of-order','foreign'] as const){
+  for(const mode of ['duplicate','out-of-order','foreign','invalid-revision','invalid-objective'] as const){
     await page.evaluate(value=>{
       (window as unknown as {saDemandPageMode:string}).saDemandPageMode=value;
     },mode);
     await global.getByRole('button',{name:'Load older Demands'}).click();
-    await expect(host.getByRole('alert')).toContainText('Native Demand page overlaps');
+    await expect(host.getByRole('alert')).toContainText(mode.startsWith('invalid-')
+      ? 'Native Demand continuation has malformed Ticket' : 'Native Demand page overlaps');
     await expect(global).toContainText('200 native Demands loaded.');
   }
   await page.evaluate(()=>{
@@ -1709,7 +1712,7 @@ test('cross-Team Demand pagination rejects overlapping, reordered and foreign Te
   await expect(global.getByRole('button',{name:'Load older Demands'})).toHaveCount(0);
   const calls=await page.evaluate(()=>
     (window as unknown as {saDemandPageCalls:string[]}).saDemandPageCalls);
-  expect(calls.filter(command=>command==='superagent_all_demands')).toHaveLength(5);
+  expect(calls.filter(command=>command==='superagent_all_demands')).toHaveLength(7);
   expect(calls.filter(command=>command==='superagent_stop'||command==='superagent_submit')).toHaveLength(0);
 });
 
@@ -3531,4 +3534,45 @@ test('portable confirmation rejects a manifest changed after native preview',asy
     (window as unknown as {saPreviewCommands:string[]}).saPreviewCommands);
   expect(calls.filter(command=>command==='superagent_manifest_preview')).toHaveLength(1);
   expect(calls).not.toContain('superagent_manifest_import');
+});
+
+test('portable preview invalidates a late response after editing the manifest', async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-preview-race';
+    document.body.appendChild(host);
+    const commands:string[]=[];
+    let completePreview:()=>void=()=>{};
+    const release=new Promise<void>(resolve=>{completePreview=resolve;});
+    (window as unknown as {saFinishPreview:()=>void}).saFinishPreview=completePreview;
+    (window as unknown as {saPreviewRaceCommands:string[]}).saPreviewRaceCommands=commands;
+    mountSuperagent(host,async command=>{
+      commands.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [] as never;
+      if(command==='superagent_manifest_preview'){
+        await release;
+        return {wouldCreate:['Original Team'],unchanged:[],importedPresetsDisabled:true} as never;
+      }
+      if(command==='superagent_manifest_import')throw Error('Unreviewed manifest reached native import.');
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-preview-race');
+  await host.getByRole('button',{name:'Portable configuration'}).click();
+  const manifest=host.getByRole('textbox',{name:'Companion manifest JSON'});
+  await manifest.fill('{"schemaVersion":1,"orchestrations":[]}');
+  await host.getByRole('button',{name:'Preview import'}).click();
+  await manifest.fill('{"schemaVersion":1,"orchestrations":[{"name":"Different"}]}');
+  await page.evaluate(()=>(window as unknown as {saFinishPreview:()=>void}).saFinishPreview());
+  await expect(host.getByRole('alert')).toContainText('Manifest changed during preview');
+  await expect(host.getByRole('button',{name:'Confirm import'})).toHaveCount(0);
+  const commands=await page.evaluate(()=>
+    (window as unknown as {saPreviewRaceCommands:string[]}).saPreviewRaceCommands);
+  expect(commands.filter(command=>command==='superagent_manifest_preview')).toHaveLength(1);
+  expect(commands).not.toContain('superagent_manifest_import');
 });

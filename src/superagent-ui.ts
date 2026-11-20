@@ -207,6 +207,19 @@ export function mountSuperagent(
           })) {
         throw new Error('Native Demand index returned invalid, duplicate or out-of-scope records; refresh the index.');
       }
+    } else if (!Array.isArray(page) || page.length > (query.limit ?? 200) ||
+        page.some(item => !item || typeof item.id !== 'string' ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+          typeof item.orchestrationId !== 'string' ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(item.orchestrationId) ||
+          typeof item.objective !== 'string' ||
+          typeof item.state !== 'string' || !item.state ||
+          !Number.isSafeInteger(item.revision) || item.revision < 0 ||
+          !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
+          (item.projectId !== undefined && typeof item.projectId !== 'string'))) {
+      // Continuations get ordering, overlap and filter checks at the caller,
+      // but still require valid native Ticket metadata before exposing actions.
+      throw new Error('Native Demand continuation has malformed Ticket identity or revision; refresh the index.');
     }
     return page;
   };
@@ -2319,8 +2332,16 @@ export function mountSuperagent(
     }
     if (target.hasAttribute('data-sa-preview')) {
       void work(async () => {
-        inspected = JSON.parse(importText);
-        preview = await call<Preview>('superagent_manifest_preview',{ document:inspected });
+        const reviewedText = importText;
+        const document = JSON.parse(reviewedText);
+        const verified = await call<Preview>('superagent_manifest_preview',{ document });
+        // The textarea stays editable during native preflight. A late result
+        // must not resurrect confirmation for a superseded document.
+        if (importText !== reviewedText) {
+          inspected = null; preview = null;
+          throw new Error('Manifest changed during preview; preview again before importing.');
+        }
+        inspected = document; preview = verified;
       }); return;
     }
     if (target.hasAttribute('data-sa-import') && inspected) {

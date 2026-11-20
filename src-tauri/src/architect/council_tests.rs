@@ -10110,11 +10110,11 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                         finish(&state, &run,
                             "Independent native root reviewer report.\nCouncil score: 9.7/10", true);
                     }
-                    let (settled, _) = dispatch_state(
+                    let settlement = dispatch_state(
                         &state, &sid, started.generation, "pandacode_finish_team",
                         json!({"summary":"Native independent reviewer callbacks finished"}),
                         &std::sync::atomic::AtomicBool::new(false),
-                    ).unwrap();
+                    );
                     let terminal = {
                         let store = state.store.lock().unwrap();
                         council_requests::record_native_terminal(
@@ -10123,11 +10123,29 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                         )
                     };
                     if round < waves {
-                        assert_eq!(settled["completed"], false,
-                            "{mode}/{strategy:?}: preliminary phase must not settle");
+                        // Root-only S2/S3 intentionally refuse finish_team until a
+                        // fresh native round settles, unlike nested Councils which
+                        // return a child_council_reviewing pending response.
+                        let refused = settlement.expect_err(
+                            "a preliminary root-only Council round must refuse completion");
+                        let reason = if strategy == council::CouncilExecutionStrategy::Escalated {
+                            "S2 forced escalation requires a fresh second native Council round"
+                        } else {
+                            "S3 phase one passed"
+                        };
+                        assert!(refused.contains(reason),
+                            "{mode}/{strategy:?}: unexpected preliminary refusal: {refused}");
+                        let store = state.store.lock().unwrap();
+                        let pending = load(&store, &sid).unwrap().unwrap();
+                        assert_ne!(pending.status, "completed",
+                            "{mode}/{strategy:?}: refused phase must not settle the native task");
+                        assert!(!verified_council_pass(&store, &pending),
+                            "{mode}/{strategy:?}: first-wave callbacks must not pass the native gate");
                         assert!(terminal.is_err(),
                             "{mode}/{strategy:?}: preliminary callbacks are not terminal proof");
                     } else {
+                        let (settled, _) = settlement.expect(
+                            "complete independently authenticated native rounds must settle");
                         assert_eq!(settled["completed"], true,
                             "{mode}/{strategy:?}: independently completed root reviewers must settle");
                         let receipt = terminal.expect("native terminal result must revalidate callbacks");

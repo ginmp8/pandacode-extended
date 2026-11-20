@@ -1461,6 +1461,12 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
             require_matching_github_thread_url(raw, "/payload/comment/issue_url",
                 &source.repository, "issues", number)?;
             if raw.pointer("/payload/issue/pull_request").is_some() {
+                // A present PR marker is not enough to prove a comment belongs
+                // to a pull request. Require its canonical typed API URL before
+                // linking the receipt to a pull:N Ticket instead of issue:N.
+                if raw.pointer("/payload/issue/pull_request/url").is_none() {
+                    return Err("Authenticated GitHub PR comment has no typed pull request URL.".into());
+                }
                 require_matching_github_thread_url(raw, "/payload/issue/pull_request/url",
                     &source.repository, "pulls", number)?;
             }
@@ -4234,6 +4240,28 @@ mod tests {
                 [&issue_source.id], |row| row.get(0),
             ).unwrap();
             assert_eq!(pins, 0, "Rejected observation must not pin repository identity");
+        }
+        // Empty, null and wrong-type PR markers must not be accepted as
+        // authenticated pull:N context or advance/pin this Observe source.
+        for marker in [
+            serde_json::json!({}),
+            serde_json::Value::Null,
+            serde_json::json!({"url": null}),
+            serde_json::json!({"url": "https://api.github.com/repos/owner/repo/issues/42"}),
+        ] {
+            let mut malformed = issue_comment.clone();
+            malformed["payload"]["issue"]["pull_request"] = marker;
+            assert!(poll_authenticated_events_with_repository_id(
+                &store, &issue_source, 0, &serde_json::json!([malformed]),
+                "operator", 1, 101,
+            ).is_err(), "Unverified PR marker must not attach task context");
+            assert_eq!(source(&store, &issue_source.id).unwrap().last_sequence, 0);
+            assert!(list_decisions(&store, &issue_source.id, 10).unwrap().is_empty());
+            let pins: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+                [&issue_source.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(pins, 0, "Rejected PR marker must not pin repository identity");
         }
         let accepted = poll_authenticated_events_with_repository_id(
             &store, &issue_source, 0, &serde_json::json!([issue_comment.clone()]),

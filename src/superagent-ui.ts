@@ -295,8 +295,8 @@ export function mountSuperagent(
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button>' +
-      '<button type="button" data-sa-select="' + safe(item.id) +
-      '" data-sa-assign-demand="true" aria-label="Assign demand to ' +
+      '<button type="button" data-sa-assign-team="' + safe(item.id) +
+      '" aria-label="Assign demand to ' +
       safe(item.name) + '">Assign demand</button></li>').join('');
     const optionsFor = (selected: string | string[]) => {
       const selectedIds = Array.isArray(selected) ? selected : [selected];
@@ -2039,11 +2039,11 @@ export function mountSuperagent(
       host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
       return;
     }
-    if (target.dataset.saSelect) {
+    if (target.dataset.saSelect || target.dataset.saAssignTeam) {
       if (busy || loading) return;
-      const next = target.dataset.saSelect;
+      const next = target.dataset.saSelect ?? target.dataset.saAssignTeam;
       if (!presets.some(item => item.id === next)) return;
-      const assigning = target.hasAttribute('data-sa-assign-demand');
+      const assigning = target.hasAttribute('data-sa-assign-team');
       workspaceView = 'runs';
       if (assigning) {
         // Choose this Team's durable Demand scope; never infer admission.

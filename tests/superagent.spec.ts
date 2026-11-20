@@ -773,6 +773,10 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('observed_permitted');
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('issue:42');
   await expect(host.locator('[data-sa-next-mode="auto"]')).toHaveCount(0);
+  // Details and Assign demand are different actions; a Team selector must
+  // resolve to exactly one control even when both are available.
+  await expect(host.locator('[data-sa-select="two"]')).toHaveCount(1);
+  await expect(host.getByRole('button',{name:'Assign demand to two'})).toHaveCount(1);
   await host.locator('[data-sa-select="two"]').click();
   await host.getByRole('button',{name:'Sources',exact:true}).click();
   await expect(host.locator('.sa-source-list')).toHaveCount(0);

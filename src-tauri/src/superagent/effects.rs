@@ -141,6 +141,16 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
                  VALUES(?1,?2,?3,'pending',?4,?4)",
                 params![ticket_id,key,digest,now]
             ).map_err(|e|e.to_string())?;
+            // The reservation is not usable without a durable, task-owned
+            // audit record. If audit persistence fails, roll back the receipt
+            // in this same transaction rather than permit an untraceable call.
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'effect_reserved',?2,?3)",
+                params![ticket_id,
+                    format!("Effect {key} reserved; provider outcome not confirmed"),
+                    now],
+            ).map_err(|e|e.to_string())?;
             Reservation::Reserved
         }
     };
@@ -150,19 +160,34 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
 
 #[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
-    let n=store.db.execute(
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let now=storage::now();
+    let n=tx.execute(
         "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
          WHERE ticket_id=?1 AND effect_key=?2 AND state='pending'",
-        params![ticket_id,key,storage::now()]
+        params![ticket_id,key,now],
     ).map_err(|e|e.to_string())?;
-    if n==1 { return Ok(()); }
-    // A duplicated timeout/recovery notification must not rewrite the
-    // original uncertainty timestamp or turn an applied effect uncertain.
-    let state:Option<String>=store.db.query_row(
+    if n==1 {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'effect_uncertain',?2,?3)",
+            params![ticket_id,
+                format!("Effect {key} outcome uncertain; independent remote reconciliation required"),
+                now],
+        ).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
+        return Ok(());
+    }
+    // A duplicate timeout must not rewrite the original uncertainty time
+    // or add another audit event. Applied receipts never go backwards.
+    let state:Option<String>=tx.query_row(
         "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
         params![ticket_id,key],|r|r.get(0),
     ).optional().map_err(|e|e.to_string())?;
-    if state.as_deref()==Some("uncertain") { return Ok(()); }
+    if state.as_deref()==Some("uncertain") {
+        tx.commit().map_err(|e|e.to_string())?;
+        return Ok(());
+    }
     Err("No unresolved effect receipt.".into())
 }
 
@@ -171,21 +196,39 @@ pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
 #[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
 pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->Result<()>{
     let digest=format!("{:x}",Sha256::digest(payload));
-    let n=store.db.execute(
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let now=storage::now();
+    let n=tx.execute(
         "UPDATE sa_effect_receipts SET state='applied',updated_at=?4
          WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
            AND state IN ('pending','uncertain')",
-        params![ticket_id,key,digest,storage::now()]
+        params![ticket_id,key,digest,now],
     ).map_err(|e|e.to_string())?;
-    if n==1 { return Ok(()); }
-    // Duplicate provider reconciliation is a no-op only for the same
-    // payload. Never mutate a terminal receipt or bless an unknown key.
-    let state:Option<String>=store.db.query_row(
+    if n==1 {
+        // The caller, not this storage primitive, must independently verify
+        // the provider result. This audit records the transition, not proof
+        // that a provider check actually took place.
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'effect_applied',?2,?3)",
+            params![ticket_id,
+                format!("Effect {key} marked applied by reconciliation caller; provider verification is caller responsibility"),
+                now],
+        ).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
+        return Ok(());
+    }
+    // Repeated reconciliation is a no-op for the same payload only. Failed
+    // attempts never produce a fabricated applied audit event.
+    let state:Option<String>=tx.query_row(
         "SELECT state FROM sa_effect_receipts
          WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
         params![ticket_id,key,digest],|r|r.get(0),
     ).optional().map_err(|e|e.to_string())?;
-    if state.as_deref()==Some("applied") { return Ok(()); }
+    if state.as_deref()==Some("applied") {
+        tx.commit().map_err(|e|e.to_string())?;
+        return Ok(());
+    }
     Err("Missing receipt or mismatched payload.".into())
 }
 
@@ -1061,6 +1104,79 @@ mod tests{
             params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
         ).unwrap();
         assert_eq!(persisted, applied);
+    }
+
+    #[test]
+    fn effect_receipt_transitions_require_atomic_audit_and_remain_idempotent() {
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        let key="github:comment:audited";
+        let payload=b"private provider payload must not appear in audit";
+
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_effect_reservation_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='effect_reserved'
+             BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;",
+        ).unwrap();
+        assert!(reserve(&store,&id,key,payload).is_err());
+        assert_eq!(receipt_history(&store,&id,10).unwrap().len(),0,
+            "a failed audit must roll back the reservation");
+        store.db.execute_batch("DROP TRIGGER reject_effect_reservation_audit;").unwrap();
+
+        assert_eq!(reserve(&store,&id,key,payload).unwrap(),Reservation::Reserved);
+        assert_eq!(reserve(&store,&id,key,payload).unwrap(),Reservation::AlreadyPending);
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_effect_uncertain_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;",
+        ).unwrap();
+        assert!(mark_uncertain(&store,&id,key).is_err());
+        assert_eq!(receipt_history(&store,&id,10).unwrap()[0].state,"pending",
+            "a failed audit must roll back uncertainty");
+        store.db.execute_batch("DROP TRIGGER reject_effect_uncertain_audit;").unwrap();
+
+        mark_uncertain(&store,&id,key).unwrap();
+        mark_uncertain(&store,&id,key).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_effect_applied_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='effect_applied'
+             BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;",
+        ).unwrap();
+        assert!(acknowledge_applied(&store,&id,key,payload).is_err());
+        assert_eq!(receipt_history(&store,&id,10).unwrap()[0].state,"uncertain",
+            "a failed audit must roll back an applied state");
+        store.db.execute_batch("DROP TRIGGER reject_effect_applied_audit;").unwrap();
+
+        // The fixture simulates a verified provider outcome. The native
+        // primitive itself does not make a provider call or prove success.
+        acknowledge_applied(&store,&id,key,payload).unwrap();
+        acknowledge_applied(&store,&id,key,payload).unwrap();
+        assert!(acknowledge_applied(&store,&id,key,b"different bytes").is_err());
+        let audit=store.db.prepare(
+            "SELECT kind,detail FROM sa_audit WHERE ticket_id=?1
+             AND kind IN ('effect_reserved','effect_uncertain','effect_applied')
+             ORDER BY id",
+        ).unwrap().query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(audit.len(),3,"each transition is audited exactly once");
+        assert_eq!(audit.iter().map(|row|row.0.as_str()).collect::<Vec<_>>(),
+            vec!["effect_reserved","effect_uncertain","effect_applied"]);
+        assert!(audit.iter().all(|row|row.1.contains(key)));
+        assert!(audit.iter().all(|row|!row.1.contains("private provider payload")));
+
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(receipt_history(&reopened,&id,10).unwrap()[0].state,"applied");
+        let count:i64=reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind IN ('effect_reserved','effect_uncertain','effect_applied')",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,3,"restart cannot generate duplicate transition records");
     }
 
     #[test]

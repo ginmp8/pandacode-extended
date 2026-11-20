@@ -2263,6 +2263,15 @@ fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass(
         assert_eq!(council::status(&team).unwrap().state, "passed",
             "{strategy:?} must not reject legitimate fresh scores merely because a discarded attempt exists");
 
+        let mut absent_retired_session = team.clone();
+        absent_retired_session.workers.last_mut().unwrap().session_id.clear();
+        assert_ne!(council::status(&absent_retired_session).unwrap().state, "passed",
+            "{strategy:?} cannot treat a retired attempt without a native session as independent");
+        let mut absent_first_session = team.clone();
+        absent_first_session.workers[0].session_id.clear();
+        assert_ne!(council::status(&absent_first_session).unwrap().state, "passed",
+            "{strategy:?} cannot approve a missing first-wave native reviewer session");
+
         let mut session_replay = team.clone();
         session_replay.workers[2].session_id = "revoked-native-session".into();
         assert_ne!(council::status(&session_replay).unwrap().state, "passed",

@@ -10023,3 +10023,124 @@ fn nested_m4_triggered_s2_requires_authenticated_evidence_before_terminal_pass()
     assert!(verified_council_pass(&store, &root),
         "the original callback-bound receipt revalidates the terminal gate");
 }
+
+/// Positive native task-bound callback proof for every root-only mode and
+/// strategy. Reservations, provisional scores and preliminary phases may not
+/// create C-2 terminal receipts; independent native completions can.
+#[test]
+fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_strategy() {
+    for (mode, direct_count, automatic_count) in [
+        ("m1", 0_usize, 0_usize),
+        ("m2", 2_usize, 0_usize),
+        ("m3", 1_usize, 1_usize),
+    ] {
+        for strategy in [
+            council::CouncilExecutionStrategy::Parallel,
+            council::CouncilExecutionStrategy::Escalated,
+            council::CouncilExecutionStrategy::TwoPhase,
+        ] {
+            crate::providers::with_test_executable_override("codex", || {
+                let (state, sid) = state_fixture();
+                {
+                    let store = state.store.lock().unwrap();
+                    let project = store.session(&sid).unwrap().project_id;
+                    for index in 0..direct_count {
+                        let bot_id = format!("direct-{index}");
+                        store.db.execute(
+                            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                             VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                            rusqlite::params![bot_id, project, storage::now()],
+                        ).unwrap();
+                    }
+                    let mut config = on(9.0, 3, 0);
+                    config.reviewer_bot_ids =
+                        (0..direct_count).map(|index| format!("direct-{index}")).collect();
+                    config.automatic_reviewers = automatic_count;
+                    config.strategy = strategy;
+                    config.force_escalation = strategy == council::CouncilExecutionStrategy::Escalated;
+                    assert_eq!(config.mode(), mode);
+                    config.validate().unwrap();
+                    let mut root = load(&store, &sid).unwrap().unwrap();
+                    root.config.council = Some(config);
+                    root.status = "ready".into();
+                    root.round = 0;
+                    save(&store, &mut root).unwrap();
+                }
+                let (started, _) = start_state(
+                    &state, &sid, "Verify root-only native Council task callbacks", None, None,
+                ).unwrap();
+                let (project, artifact, request) = {
+                    let store = state.store.lock().unwrap();
+                    let project = store.session(&sid).unwrap().project_id;
+                    let artifact = "e".repeat(64);
+                    let request = council_requests::admit_native_task(
+                        &store, &sid, &project, "root-matrix-task", &artifact,
+                    ).unwrap();
+                    (project, artifact, request)
+                };
+                let waves = if strategy == council::CouncilExecutionStrategy::Parallel { 1 } else { 2 };
+                for round in 1..=waves {
+                    let mut assignments = Vec::new();
+                    for index in 0..direct_count {
+                        let mut reviewer = reviewer_assignment(
+                            &format!("{mode}-round-{round}-direct-{index}"),
+                            &format!("Direct criterion {index}"),
+                        );
+                        reviewer["councilReviewerSource"] = json!("direct_bot");
+                        assignments.push(reviewer);
+                    }
+                    let automatic = if mode == "m1" { 2 } else { automatic_count };
+                    for index in 0..automatic {
+                        let mut reviewer = reviewer_assignment(
+                            &format!("{mode}-round-{round}-automatic-{index}"),
+                            &format!("Automatic criterion {index}"),
+                        );
+                        if mode != "m1" {
+                            reviewer["councilReviewerSource"] = json!("automatic");
+                        }
+                        assignments.push(reviewer);
+                    }
+                    call(&state, &sid, "pandacode_dispatch_workers",
+                        json!({"assignments": assignments})).unwrap();
+                    for _ in 0..(direct_count + automatic) {
+                        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+                        let (run, _) = claim(&state, action);
+                        assert!(run.config.reviewer_boundary,
+                            "{mode}/{strategy:?}: reviewer not read-only");
+                        finish(&state, &run,
+                            "Independent native root reviewer report.\nCouncil score: 9.7/10", true);
+                    }
+                    let (settled, _) = dispatch_state(
+                        &state, &sid, started.generation, "pandacode_finish_team",
+                        json!({"summary":"Native independent reviewer callbacks finished"}),
+                        &std::sync::atomic::AtomicBool::new(false),
+                    ).unwrap();
+                    let terminal = {
+                        let store = state.store.lock().unwrap();
+                        council_requests::record_native_terminal(
+                            &store, &sid, &project, "root-matrix-task",
+                            &artifact, &request.request_id,
+                        )
+                    };
+                    if round < waves {
+                        assert_eq!(settled["completed"], false,
+                            "{mode}/{strategy:?}: preliminary phase must not settle");
+                        assert!(terminal.is_err(),
+                            "{mode}/{strategy:?}: preliminary callbacks are not terminal proof");
+                    } else {
+                        assert_eq!(settled["completed"], true,
+                            "{mode}/{strategy:?}: independently completed root reviewers must settle");
+                        let receipt = terminal.expect("native terminal result must revalidate callbacks");
+                        assert_eq!(receipt.outcome, "passed", "{mode}/{strategy:?}");
+                        assert_eq!(receipt.reviewed_round, Some(round), "{mode}/{strategy:?}");
+                        let store = state.store.lock().unwrap();
+                        assert_eq!(council_requests::read_native_terminal(
+                            &store, &sid, &project, "root-matrix-task",
+                            &artifact, &request.request_id,
+                        ).unwrap(), receipt, "{mode}/{strategy:?}: receipt must be idempotent");
+                    }
+                }
+            });
+        }
+    }
+}

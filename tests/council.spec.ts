@@ -227,6 +227,11 @@ test('Council inspector shows disjoint root usage per round/source without claim
   await expect(groups).toContainText('Child reservations are excluded');
   await expect(groups).toContainText('provider tokens and cost remain unknown without receipts');
   await expect(panel(page).locator('.council-usage-totals')).toContainText('Native attempts: 2');
+  const sources = panel(page).locator('.council-native-mode');
+  await expect(sources).toContainText('Native mode: Mixed bots + Architect');
+  await expect(sources).toContainText('1 direct bot, 1 automatic');
+  await expect(sources).toContainText('Task-owned child Council reservations: 1');
+  await expect(sources).toContainText('reservations are not approvals');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
 
@@ -547,6 +552,11 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(grouped).toContainText('composite parent seats and unadmitted reservations are excluded');
   await expect(combined).toContainText('parent composite seats excluded');
   await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  const sources = panel(page).locator('.council-native-mode');
+  await expect(sources).toContainText('Native mode: Bots with own Architect');
+  await expect(sources).toContainText('0 direct bot, 0 automatic');
+  await expect(sources).toContainText('Task-owned child Council reservations: 1');
+  await expect(sources).toContainText('reservations are not approvals');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });

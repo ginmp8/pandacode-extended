@@ -43,11 +43,17 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       (inspection.criteriaSource && criteriaLabels[inspection.criteriaSource]
         ? ' · Criteria origin: ' + escape(criteriaLabels[inspection.criteriaSource]) : '') + '</p>'
     : '';
+  // A reserved child is neither a native leaf attempt nor a passing parent
+  // seat. Display root reviewer activity separately from the task-owned
+  // child reservations, including when M4 has no root reviewer attempts.
+  const childReservations = Array.isArray(inspection.reservedChildren) ? inspection.reservedChildren : [];
   const sourceBreakdown = nativeMode
     ? '<p class="council-native-mode">Native mode: ' + escape(nativeMode) +
-      ' · Observed attempts (not a passing quorum): ' +
+      ' · Observed root reviewer attempts (not a passing quorum): ' +
       escape(String(inspection.attempts.filter(a => a.reviewerSource === 'direct_bot').length)) + ' direct bot, ' +
-      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic</p>'
+      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic' +
+      ' · Task-owned child Council reservations: ' + escape(String(childReservations.length)) +
+      ' (each may become at most one composite parent seat after native verification; reservations are not approvals)</p>'
     : '';
   const reported = (inspection.reportedFindings ?? []).slice(-32);
   const findingRow = (f: CouncilReportedFinding): string =>
@@ -149,7 +155,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '<p>The matching reviewer attempt is not in this display.</p><ul>' +
       unlinked.map(findingRow).join('') + '</ul></section>'
     : '';
-  const children = (inspection.reservedChildren ?? []).slice(0,8);
+  const children = childReservations.slice(0,8);
   const childHtml = children.length
     ? '<section aria-label="Task-owned child Councils" class="council-child-reservations">' +
       '<h4>Task-owned child Councils (not approvals)</h4>' +

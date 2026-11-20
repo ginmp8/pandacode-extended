@@ -104,11 +104,11 @@
 .bc-council-panel :is(input,button):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 @media(max-width:420px){.bc-council-panel .bc-council-value-row{flex-wrap:wrap}.bc-council-panel .bc-council-value-row>.ds-seg{flex-basis:100%}.bc-council-panel .bc-council-value-row>input[type=number]{margin-left:auto}}
 @media(prefers-reduced-transparency:reduce){.bc-council-panel[popover]{background:var(--bg)}}
-.bc-council-report { padding: 2px 8px; font-size: 12px; }
-.bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
+.bc-council-report { max-inline-size: 100%; padding: 2px 8px; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.bc-council-summary { display: inline-flex; flex-wrap: wrap; min-inline-size: 0; max-inline-size: 100%; gap: 4px; align-items: baseline; color: var(--text); overflow-wrap: anywhere; }
 .bc-council-summary strong { font-weight: 600; }
-.bc-council-reviewers { color: var(--muted); }
-.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; }
+.bc-council-reviewers { min-inline-size: 0; color: var(--muted); overflow-wrap: anywhere; }
+.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; min-inline-size: 0; max-inline-size: 100%; overflow-wrap: anywhere; }
 .bc-create-form, .bc-settings-form { display: grid; gap: 11px; padding: 0 20px 18px; }
 .bc-create-form .dialog-description { margin: 0; }
 .bc-create-form input[name=name], .bc-settings-form input[name=name], .bc-settings-form select { min-height: 36px; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--fill-hover); color: var(--text); font: inherit; }

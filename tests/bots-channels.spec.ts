@@ -366,6 +366,61 @@ test.describe('shared bot channels', () => {
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
   });
 
+  test('narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 320, height: 640 });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const longName = 'SpecialistSecurityReviewerWithAnUnbrokenDisplayName'.repeat(4);
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = sharedChannelThreadHtml({
+        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'long-council-delivery', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'cycle-one', sessionId: 'task-owned-channel-session',
+            state: 'Reviewing', round: 1, target: 9, lowest: null,
+            artifactRevision: 'frozen-revision', reviewers: [{
+              botId: 'security-bot', name: longName, lens: longName,
+              round: 1, score: null, skills: [],
+            }],
+          },
+        }],
+      }, []);
+      const assignment = wrapper.querySelector('.bc-assigned');
+      const history = document.querySelector('.bc-history');
+      if (!assignment || !history) throw new Error('Channel assignment fixture is missing');
+      history.append(assignment);
+    });
+    const assignment = page.locator('.bc-history .bc-assigned[data-message-id="long-council-delivery"]');
+    const inspector = assignment.getByRole('button', { name: 'Inspect Council evidence' });
+    await expect(assignment.locator('.bc-council-reviewers')).toContainText('SpecialistSecurityReviewer');
+    await expect(inspector).toBeVisible();
+    await expect(assignment.getByRole('button', { name: 'View Council report' })).toBeVisible();
+    const overflow = await assignment.evaluate(element => {
+      const history = element.closest<HTMLElement>('.bc-history')!;
+      const summary = element.querySelector<HTMLElement>('.bc-council-summary')!;
+      const parentBounds = history.getBoundingClientRect();
+      const assignmentBounds = element.getBoundingClientRect();
+      return {
+        assignment: element.scrollWidth - element.clientWidth,
+        summary: summary.scrollWidth - summary.clientWidth,
+        left: parentBounds.left - assignmentBounds.left,
+        right: assignmentBounds.right - parentBounds.right,
+      };
+    });
+    expect(overflow.assignment).toBeLessThanOrEqual(1);
+    expect(overflow.summary).toBeLessThanOrEqual(1);
+    expect(overflow.left).toBeLessThanOrEqual(1);
+    expect(overflow.right).toBeLessThanOrEqual(1);
+    await inspector.focus();
+    await expect(inspector).toBeFocused();
+  });
+
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {

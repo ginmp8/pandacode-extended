@@ -716,6 +716,20 @@ fn mutate_task(
     }
 }
 
+/// The normal PandaCode task-tool catalog is not a SuperAgent capability grant.
+/// Revalidate the original native Assignment at the effect boundary even when
+/// a previously advertised tool handler is invoked after stop or revocation.
+/// A detached or invalid internal session must fail closed; ordinary chats
+/// retain their existing task-tool behavior.
+pub(crate) fn ensure_ambient_agent_tool_permission(
+    store: &crate::storage::Store, session_id: &str,
+) -> Result<()> {
+    if crate::superagent::read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent assignments cannot invoke ambient task tools.".into());
+    }
+    Ok(())
+}
+
 async fn dispatch(
     app: tauri::AppHandle,
     sid: &str,
@@ -724,11 +738,11 @@ async fn dispatch(
     stopped: Arc<AtomicBool>,
 ) -> Result<Value> {
     let state = app.state::<AppState>();
-    let current = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .session(sid)?;
+    let current = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        ensure_ambient_agent_tool_permission(&store, sid)?;
+        store.session(sid)?
+    };
     let target_id = args["taskId"].as_str().unwrap_or(sid);
     let target = if args.get("taskId").is_some() {
         scoped_task(&state, &current, target_id)?

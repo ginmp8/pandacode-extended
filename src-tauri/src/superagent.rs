@@ -9729,6 +9729,7 @@ mod tests {
             &store, &worker, "desktop", "independent-normal", "Normal bot chat",
         ).unwrap().0;
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(&store, &ordinary).is_ok());
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(&store, &ordinary).is_ok());
 
         let (ticket, launched) = admit(
             &mut store, &config.id, "No ambient tool rights", "ambient-tool-fence", false,
@@ -9740,6 +9741,10 @@ mod tests {
             &store, &session_id,
         ).unwrap_err();
         assert!(error.contains("cannot invoke ambient bot tools"));
+        let task_tool_error = crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).unwrap_err();
+        assert!(task_tool_error.contains("cannot invoke ambient task tools"));
 
         // A stopped assignment is denied by the same effect-time check even
         // if the native session and its original bot binding still exist.
@@ -9751,6 +9756,22 @@ mod tests {
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
             &store, &ordinary,
         ).is_ok(), "ordinary direct bot conversations must not inherit the task fence");
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).is_err(), "stopped native sessions cannot regain ambient task tools");
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "ordinary bot chats must retain native app tool access");
+
+        // Changing a persisted mandate must never make a writable or stale
+        // SuperAgent session fall back to ordinary task-tool authorization.
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=0,allowed_side_effects=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).is_err());
     }
 
     #[test]

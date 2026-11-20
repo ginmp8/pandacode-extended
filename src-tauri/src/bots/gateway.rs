@@ -16,6 +16,19 @@ fn command_allowed_for_channel(channel_id: &str, command: &Command) -> bool {
     channel_id != crate::superagent::CHANNEL || *command == Command::Message
 }
 
+/// Native SuperAgent messages carry only the admitted task objective and
+/// task-scoped evidence references. Ambient desktop image and moodboard IDs
+/// can resolve private resources outside that Ticket's immutable Mandate.
+/// Reject those attachments before thread/session creation and before any
+/// project-scoped resource lookup; ordinary bot channels retain attachments.
+fn task_attachments_allowed(
+    channel_id: &str, image_ids: Option<&[String]>, moodboard_ids: Option<&[String]>,
+) -> bool {
+    channel_id != crate::superagent::CHANNEL
+        || (image_ids.is_none_or(|ids| ids.is_empty())
+            && moodboard_ids.is_none_or(|ids| ids.is_empty()))
+}
+
 /// A message for a bot from the desktop, the web UI or a chat channel.
 #[derive(Debug, Clone)]
 pub(crate) struct Inbound {
@@ -300,6 +313,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let bot = super::get(&store, &inbound.bot_id)?;
         if inbound.channel_id == crate::superagent::CHANNEL {
+            if !task_attachments_allowed(
+                &inbound.channel_id, inbound.image_ids.as_deref(), inbound.moodboard_ids.as_deref(),
+            ) {
+                return Err("policy_unsupported: SuperAgent task cannot attach unscoped images or moodboards.".into());
+            }
             crate::superagent::guard_gateway_inbound(
                 &store, &bot.id, &inbound.thread, &inbound.sender_id, inbound.trusted,
             )?;
@@ -733,6 +751,30 @@ mod tests {
             assert!(command_allowed_for_channel(super::super::DESKTOP, &command));
         }
         assert!(command_allowed_for_channel("schedule", &Command::Stop));
+    }
+
+    #[test]
+    fn superagent_gateway_blocks_unscoped_media_before_resource_resolution() {
+        let image_ids = vec!["private-desktop-image".to_string()];
+        let moodboard_ids = vec!["unrelated-project-board".to_string()];
+        let internal = crate::superagent::CHANNEL;
+        for channel in [internal, super::super::DESKTOP, "schedule", "telegram", "shared-channel"] {
+            let expected = channel != internal;
+            assert_eq!(
+                task_attachments_allowed(channel, Some(&image_ids), None),
+                expected, "image isolation differs for {channel}",
+            );
+            assert_eq!(
+                task_attachments_allowed(channel, None, Some(&moodboard_ids)),
+                expected, "moodboard isolation differs for {channel}",
+            );
+            assert_eq!(
+                task_attachments_allowed(channel, Some(&image_ids), Some(&moodboard_ids)),
+                expected, "mixed media isolation differs for {channel}",
+            );
+            assert!(task_attachments_allowed(channel, None, None));
+            assert!(task_attachments_allowed(channel, Some(&[]), Some(&[])));
+        }
     }
 
     #[test]

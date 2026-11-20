@@ -9783,7 +9783,10 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
         &store, &sid, &project, &assignment, &artifact, &task.request_id,
     ).unwrap();
     assert_eq!(terminal.outcome, "passed");
-    assert_eq!(terminal.reviewed_round, Some(2));
+    // The terminal records the root review round, not the independent child S2 wave.
+    // Fresh child leaves have already been checked above as native round two.
+    assert_eq!(saved.council_status.as_ref().unwrap().round, 1);
+    assert_eq!(terminal.reviewed_round, Some(1));
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, &assignment, &artifact, &task.request_id,
     ).unwrap(), terminal);

@@ -313,6 +313,8 @@ test.describe('shared bot channels', () => {
       cycleStartedAt: 1000, teamRevision: 9,
       status: { state: 'passed', round: 1, lowest: 9.7, target: 9, stale: false },
       verifiedPass: false, criteria: [],
+      reservedChildren: [{ botId: 'security-child', childSessionId: 'channel-child-one',
+        rootCycleId: 'channel-root:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
       attempts: [{
         workerId: 'a', round: 1, lens: '<script>alert(1)</script>',
         reviewerSource: 'direct_bot', name: 'Review', status: 'completed',
@@ -361,6 +363,14 @@ test.describe('shared bot channels', () => {
     await expect(dialog.getByText('Tokens unknown', { exact: false })).toBeVisible();
     await expect(dialog.getByText('<script>alert(1)</script>', { exact: false })).toBeVisible();
     await expect(dialog.locator('script')).toHaveCount(0);
+    const child = dialog.locator('.council-child-reservations details[data-council-child-key="channel-root:1000:channel-child-one"]');
+    await child.locator('summary').click();
+    await expect(child).toHaveAttribute('open', '');
+    const refresh = dialog.getByRole('button', { name: 'Refresh native evidence' });
+    await refresh.click();
+    await expect(refresh).toBeEnabled();
+    await expect(child).toHaveAttribute('open', '');
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
     // The browser must use the channel's delivery identity rather than allowing
     // an arbitrary DOM session id to select an unrelated Council.
     await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))

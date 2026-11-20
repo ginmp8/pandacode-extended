@@ -320,7 +320,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
             ids.map(id => '<li>' + escape(id) + '</li>').join('') + '</ul>'
           : '<p role="alert">Child evidence receipt correlation or reviewer count mismatch; no approval.</p>')
           : '<p>No verified child receipt is available; no parent vote.</p>';
-        return '<li><details><summary>' + escape(child.botId) +
+        return '<li><details data-council-child-key="' + escape(child.rootCycleId + ':' + child.childSessionId) + '"><summary>' + escape(child.botId) +
           ' · ' + escape(child.status.replaceAll('_', ' ')) + '</summary>' +
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
@@ -415,11 +415,17 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   const load = () => {
     const current = ++serial;
     refresh.disabled = true;
+    const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
+      .map(child => child.dataset.councilChildKey));
     body.textContent = 'Loading native Council result…';
     // A synchronous read failure must also fail closed and release the button.
     void Promise.resolve().then(read).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
       body.innerHTML = councilInspectionHtml(result);
+      // Only the same frozen child task keeps its expanded drill-down after refresh.
+      // New reservations or changed cycles must not inherit a previous disclosure.
+      body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]')
+        .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
     }).catch(reason => {
       if (serial !== current || !details.open || !details.isConnected) return;
       body.replaceChildren();

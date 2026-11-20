@@ -159,6 +159,51 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(refresh).toBeEnabled();
 });
 
+test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    reservedChildren: [
+      { botId: 'security-child', childSessionId: 'child-a', rootCycleId: 'task:1000',
+        requiredLeafReviewers: 2, status: 'reviewing' },
+      { botId: 'quality-child', childSessionId: 'child-b', rootCycleId: 'task:1000',
+        requiredLeafReviewers: 2, status: 'reviewing' },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').first().click();
+  const children = inspector.getByRole('region', { name: 'Task-owned child Councils' });
+  const first = children.locator('details[data-council-child-key="task:1000:child-a"]');
+  const second = children.locator('details[data-council-child-key="task:1000:child-b"]');
+  await first.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(first).toHaveAttribute('open', '');
+  await expect(second).not.toHaveAttribute('open', '');
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(first).toHaveAttribute('open', '');
+  await expect(second).not.toHaveAttribute('open', '');
+
+  // A new child reservation cannot inherit the prior task's expanded state.
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection,
+    reservedChildren: [
+      { ...inspection.reservedChildren[0], childSessionId: 'new-child-a', rootCycleId: 'task:2000' },
+      inspection.reservedChildren[1],
+    ],
+  });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(children.locator('details[data-council-child-key="task:2000:new-child-a"]'))
+    .not.toHaveAttribute('open', '');
+  await expect(second).not.toHaveAttribute('open', '');
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
 test('Council inspector exposes native mandatory evidence gaps without manufacturing a passed criterion', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'parallel', criteriaSource: 'user',

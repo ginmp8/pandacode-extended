@@ -3414,3 +3414,121 @@ test('native Team creation clears stale directory filters after creation is ackn
   expect(calls.filter(command=>command==='superagent_create')).toHaveLength(1);
   expect(calls).not.toContain('superagent_submit');
 });
+
+test('new Team ACK retries a stale directory read without duplicating creation',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-create-ack';document.body.appendChild(host);
+    let reads=0,writes=0;
+    let created:Record<string,unknown>|null=null;
+    (window as unknown as {saCreateAckCounts:()=>{reads:number;writes:number}}).saCreateAckCounts=
+      ()=>({reads,writes});
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list'){
+        reads++;
+        return (created && reads>=3 ? [created] : []) as never;
+      }
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        writes++;
+        const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+        created={...input,id:'verified-new-team',enabled:false,policyRevision:1};
+        return created as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-create-ack');
+  await expect(host.getByText('No orchestrations created.')).toBeVisible();
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Verified Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Verified Team');
+  await expect(host.getByRole('button',{name:'Demands / Runs'}))
+    .toHaveAttribute('aria-current','page');
+  const counts=await page.evaluate(()=>
+    (window as unknown as {saCreateAckCounts:()=>{reads:number;writes:number}})
+      .saCreateAckCounts());
+  expect(counts).toEqual({reads:3,writes:1});
+});
+
+test('missing native Team after a successful ACK exposes an error without retrying the write',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-create-missing';document.body.appendChild(host);
+    const commands:string[]=[];
+    (window as unknown as {saMissingCommands:string[]}).saMissingCommands=commands;
+    mountSuperagent(host,async(command,args)=>{
+      commands.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list'||command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+        return {...input,id:'persisted-but-unlisted',enabled:false,policyRevision:1} as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-create-missing');
+  await expect(host.getByText('No orchestrations created.')).toBeVisible();
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Unlisted Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.getByRole('alert'))
+    .toContainText('its disabled identity could not be verified');
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveCount(0);
+  const commands=await page.evaluate(()=>
+    (window as unknown as {saMissingCommands:string[]}).saMissingCommands);
+  expect(commands.filter(command=>command==='superagent_create')).toHaveLength(1);
+  expect(commands.filter(command=>command==='superagent_list')).toHaveLength(3);
+});
+
+test('portable confirmation rejects a manifest changed after native preview',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-preview-bound';document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {saPreviewCommands:string[]}).saPreviewCommands=calls;
+    mountSuperagent(host,async command=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [] as never;
+      if(command==='superagent_manifest_preview')return {
+        wouldCreate:['Reviewed Team'],unchanged:[],importedPresetsDisabled:true,
+      } as never;
+      if(command==='superagent_manifest_import')throw Error('Unreviewed import reached native mutation.');
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-preview-bound');
+  await host.getByRole('button',{name:'Portable configuration'}).click();
+  const manifest=host.getByRole('textbox',{name:'Companion manifest JSON'});
+  await manifest.fill('{"schemaVersion":1,"orchestrations":[]}');
+  await host.getByRole('button',{name:'Preview import'}).click();
+  await expect(host.getByRole('button',{name:'Confirm import'})).toBeVisible();
+  await host.getByRole('button',{name:'Confirm import'}).click();
+  await expect(host.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toBeVisible();
+  await manifest.fill('{"schemaVersion":1,"orchestrations":[{"name":"Changed"}]}');
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText('Manifest changed since preview');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saPreviewCommands:string[]}).saPreviewCommands);
+  expect(calls.filter(command=>command==='superagent_manifest_preview')).toHaveLength(1);
+  expect(calls).not.toContain('superagent_manifest_import');
+});

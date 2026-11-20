@@ -1190,6 +1190,31 @@ export function mountSuperagent(
     reloadTail = next.catch(() => {});
     return next;
   }
+  // Never treat the create/duplicate ACK as a verified directory state.
+  // A stale native read may be repeated; an acknowledged write never is.
+  async function reloadCreatedTeam(created: Config): Promise<void> {
+    if (!created || typeof created.id !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(created.id) || created.enabled !== false) {
+      throw new Error('Native Team creation returned an invalid or enabled identity.');
+    }
+    selected = created.id;
+    teamSearch = ''; teamStatusFilter = 'all';
+    await reload();
+    let persisted = presets.find(item => item.id === created.id);
+    if (!persisted) {
+      selected = created.id;
+      await reload();
+      persisted = presets.find(item => item.id === created.id);
+    }
+    if (!persisted || persisted.enabled ||
+        persisted.coordinatorBotId !== created.coordinatorBotId ||
+        persisted.workerBotId !== created.workerBotId) {
+      selected = '';
+      throw new Error('Native Team creation was acknowledged but its disabled identity could not be verified. Refresh before retrying; the Team may already exist.');
+    }
+    selected = created.id;
+  }
+
   async function loadNativeSnapshot(): Promise<void> {
     loading = true;
     // Mutations invalidate the cross-Team index. Never show stale global
@@ -1550,11 +1575,10 @@ export function mountSuperagent(
         const created = await call<Config>('superagent_duplicate', {
           sourceId:source.id, expectedRevision:source.policyRevision, name,
         });
-        if (created.enabled) throw new Error('New Team did not remain disabled.');
-        selected = created.id; workspaceView = 'teams';
+        workspaceView = 'teams';
         selectedDemandWorkerId = ''; demandPreflight = null;
         roleRoster = null; workerOrder = []; reviewerDraft = []; sourcesLoaded = false; sources = [];
-        await reload();
+        await reloadCreatedTeam(created);
         feedback = 'Disabled Team duplicated. No prior Tickets, source grants or approvals were copied.';
       });
       return;
@@ -2290,8 +2314,12 @@ export function mountSuperagent(
       }); return;
     }
     if (target.hasAttribute('data-sa-import') && inspected) {
-      const document = inspected;
+      const document = inspected, reviewedText = importText;
       ask('Import these configurations, disabled, without changing existing bots?', async () => {
+        // Editing the textarea after preview invalidates an already open
+        // confirmation. Never submit a document the user did not review.
+        if (inspected !== document || !preview || importText !== reviewedText)
+          throw new Error('Manifest changed since preview; preview again before importing.');
         const result = await call<ImportResult>('superagent_manifest_import',{ document, confirmed:true });
         preview = null; inspected = null; await reload();
         feedback = result.created.length + ' presets imported; ' + result.unchanged.length +
@@ -2630,11 +2658,8 @@ export function mountSuperagent(
         draftPresetPurpose = ''; draftPresetStrategy = 'balanced';
         draftCoordinatorBotId = ''; draftWorkerBotId = '';
         draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
-        selected = created.id; selectedDemandWorkerId = ''; demandPreflight = null;
-        // A newly confirmed Team must be visible even if a search or status
-        // filter previously excluded disabled Teams.
-        teamSearch = ''; teamStatusFilter = 'all';
-        workspaceView = 'runs'; await reload();
+        selectedDemandWorkerId = ''; demandPreflight = null;
+        workspaceView = 'runs'; await reloadCreatedTeam(created);
       });
     }
     if (form.dataset.saForm === 'reject') {

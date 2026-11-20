@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS sa_source_history_gaps (
 );
 "#;
 
+/// v52 preserves the original incident even after a later bounded feed
+/// verifies continuity through the durable cursor. NULL means unresolved.
+pub(crate) const HISTORY_GAP_RECONCILIATION_SCHEMA: &str = r#"
+ALTER TABLE sa_source_history_gaps ADD COLUMN verified_at INTEGER CHECK(verified_at>0);
+ALTER TABLE sa_source_history_gaps ADD COLUMN verified_sequence INTEGER CHECK(verified_sequence>0);
+"#;
+
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
@@ -615,6 +622,8 @@ pub struct SourceIntegrity {
     pub history_gap_detected_at: Option<i64>,
     pub history_gap_reason: Option<String>,
     pub history_gap_occurrences: i64,
+    pub history_gap_verified_at: Option<i64>,
+    pub history_gap_verified_sequence: Option<i64>,
     pub next_action: &'static str,
     pub observational_only: bool,
 }
@@ -633,15 +642,19 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
          FROM sa_event_decisions WHERE source_id=?1",
         [source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|e| e.to_string())?;
-    let gap: Option<(i64,i64,String,i64)> = store.db.query_row(
-        "SELECT cursor_sequence,last_detected_at,reason,occurrences
+    let gap: Option<(i64,i64,String,i64,Option<i64>,Option<i64>)> = store.db.query_row(
+        "SELECT cursor_sequence,last_detected_at,reason,occurrences,
+                verified_at,verified_sequence
          FROM sa_source_history_gaps WHERE source_id=?1",
-        [source_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        [source_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,
+                              row.get(3)?,row.get(4)?,row.get(5)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let (history_gap_cursor,history_gap_detected_at,history_gap_reason,history_gap_occurrences) =
+    let (history_gap_cursor,history_gap_detected_at,history_gap_reason,
+         history_gap_occurrences,history_gap_verified_at,history_gap_verified_sequence) =
         match gap {
-            Some((cursor,at,reason,count)) => (Some(cursor),Some(at),Some(reason),count),
-            None => (None,None,None,0),
+            Some((cursor,at,reason,count,verified_at,verified_sequence)) =>
+                (Some(cursor),Some(at),Some(reason),count,verified_at,verified_sequence),
+            None => (None,None,None,0,None,None),
         };
     let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
     let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
@@ -649,7 +662,7 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "investigate_cursor_receipt_mismatch"
     } else if receipt_capacity_reached {
         "receipt_limit_requires_operator_intervention"
-    } else if history_gap_cursor.is_some() {
+    } else if history_gap_cursor.is_some() && history_gap_verified_at.is_none() {
         "investigate_unverified_github_history"
     } else if selected.mode == "off" {
         "source_off_no_poll"
@@ -663,7 +676,8 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         last_sequence:selected.last_sequence, receipt_count, permitted_receipt_count,
         max_receipt_sequence, cursor_consistent, receipt_capacity_reached,
         history_gap_cursor, history_gap_detected_at, history_gap_reason,
-        history_gap_occurrences, next_action, observational_only:true,
+        history_gap_occurrences, history_gap_verified_at, history_gap_verified_sequence,
+        next_action, observational_only:true,
     })
 }
 
@@ -727,7 +741,9 @@ fn record_observe_fetch_failure(
            cursor_sequence=excluded.cursor_sequence,
            policy_revision=excluded.policy_revision,
            reason=excluded.reason,
-           last_detected_at=excluded.last_detected_at",
+           last_detected_at=excluded.last_detected_at,
+           verified_at=NULL,
+           verified_sequence=NULL",
         params![&expected.id,expected.last_sequence,expected.policy_revision,reason,at],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
@@ -1576,6 +1592,31 @@ fn poll_authenticated_events_with_repository_id(
              WHERE id=?1 AND mode='observe' AND policy_revision=?3
                AND last_sequence<?2",
             params![&current_policy.id, newest, current_policy.policy_revision],
+        ).map_err(|e| e.to_string())?;
+    }
+    // A later verified window can resolve a diagnostic without erasing it
+    // or claiming unavailable events were replayed. Require the exact
+    // prior cursor in a full bounded feed and commit the verification
+    // marker atomically with the native decisions and new cursor.
+    let unresolved: Option<i64> = tx.query_row(
+        "SELECT cursor_sequence FROM sa_source_history_gaps
+         WHERE source_id=?1 AND cursor_sequence=?2
+           AND policy_revision<=?3 AND verified_at IS NULL",
+        params![&current_policy.id,current_policy.last_sequence,
+                current_policy.policy_revision],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(cursor) = unresolved {
+        let pages: Vec<serde_json::Value> = events.chunks(GITHUB_PAGE_SIZE)
+            .map(|entries| serde_json::Value::Array(entries.to_vec()))
+            .collect();
+        combine_github_pages(&pages, since, cursor)?;
+        tx.execute(
+            "UPDATE sa_source_history_gaps SET verified_at=?4,verified_sequence=?5
+             WHERE source_id=?1 AND cursor_sequence=?2
+               AND policy_revision<=?3 AND verified_at IS NULL",
+            params![&current_policy.id,cursor,current_policy.policy_revision,
+                    storage::now(),feed_watermark.unwrap_or(cursor)],
         ).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -3597,6 +3638,84 @@ mod tests {
         assert_eq!(health.history_gap_occurrences, 1);
         assert_eq!(health.max_receipt_sequence, 0);
         assert_eq!(health.receipt_count, 0);
+    }
+
+    #[test]
+    fn github_observe_gap_requires_exact_recovery_anchor_and_preserves_diagnostic() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let item = |id: i64| serde_json::json!({
+            "id": id.to_string(), "type":"IssuesEvent",
+            "created_at":"2026-11-12T08:59:00Z",
+            "repo":{"name":"owner/repo"}, "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        let first = serde_json::json!([item(5_000_000_600)]);
+        poll_authenticated_events(&store, &active, 0, &first).unwrap();
+        let current = source(&store, &active.id).unwrap();
+        let gap = combine_github_pages(
+            &[serde_json::json!([item(5_000_000_603),item(5_000_000_602)])],
+            0, current.last_sequence,
+        ).unwrap_err();
+        record_observe_fetch_failure(&store, &current, &gap).unwrap();
+
+        // A new but incomplete window is not a resolution. Its receipts
+        // and updated cursor also roll back in the same SQLite transaction.
+        let incomplete = serde_json::json!([item(5_000_000_603),item(5_000_000_602)]);
+        assert!(poll_authenticated_events(&store, &current, 0, &incomplete).is_err());
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 5_000_000_600);
+        assert_eq!(inspect_source_integrity(&store, &active.id).unwrap().history_gap_verified_at, None);
+        assert_eq!(list_decisions(&store, &active.id, 20).unwrap().len(), 1);
+
+        let complete = serde_json::json!([
+            item(5_000_000_604),item(5_000_000_603),item(5_000_000_602),
+            item(5_000_000_601),item(5_000_000_600)
+        ]);
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_gap_resolution
+             BEFORE UPDATE OF verified_at ON sa_source_history_gaps
+             BEGIN SELECT RAISE(ABORT,'simulated verification failure'); END;",
+        ).unwrap();
+        assert!(poll_authenticated_events(&store, &current, 0, &complete).is_err());
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 5_000_000_600);
+        assert_eq!(list_decisions(&store, &active.id, 20).unwrap().len(), 1);
+        store.db.execute_batch("DROP TRIGGER fail_gap_resolution").unwrap();
+
+        let result = poll_authenticated_events(&store, &current, 0, &complete).unwrap();
+        assert_eq!(result.recorded, 4);
+        assert_eq!(result.duplicates, 1);
+        let verified = inspect_source_integrity(&store, &active.id).unwrap();
+        assert_eq!(verified.history_gap_cursor, Some(5_000_000_600));
+        assert_eq!(verified.history_gap_reason.as_deref(), Some("cursor_missing"));
+        assert_eq!(verified.history_gap_occurrences, 1);
+        assert!(verified.history_gap_verified_at.is_some());
+        assert_eq!(verified.history_gap_verified_sequence, Some(5_000_000_604));
+        assert_eq!(verified.next_action, "explicit_observe_available");
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let persisted = inspect_source_integrity(&reopened, &active.id).unwrap();
+        assert_eq!(persisted.history_gap_verified_at, verified.history_gap_verified_at);
+        assert_eq!(persisted.history_gap_verified_sequence, Some(5_000_000_604));
+        assert_eq!(list_decisions(&reopened, &active.id, 20).unwrap().len(), 5);
+        // A fresh failure reopens the incident rather than hiding it behind
+        // the previous verification or discarding the older evidence.
+        let now = source(&reopened, &active.id).unwrap();
+        record_observe_fetch_failure(
+            &reopened, &now, "GitHub Events window exceeds three pages; no source cursor advanced.",
+        ).unwrap();
+        let fresh = inspect_source_integrity(&reopened, &active.id).unwrap();
+        assert_eq!(fresh.history_gap_cursor, Some(5_000_000_604));
+        assert_eq!(fresh.history_gap_reason.as_deref(), Some("window_unverified"));
+        assert_eq!(fresh.history_gap_verified_at, None);
+        assert_eq!(fresh.history_gap_occurrences, 1);
+        assert_eq!(fresh.next_action, "investigate_unverified_github_history");
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
     }
 
     fn github_page(start: i64, size: usize) -> serde_json::Value {

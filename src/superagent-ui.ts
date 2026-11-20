@@ -113,7 +113,9 @@ interface SourceIntegrity {
   receiptCapacityReached: boolean;
   historyGapCursor?: number | null; historyGapDetectedAt?: number | null;
   historyGapReason?: 'cursor_missing' | 'window_unverified' | null;
-  historyGapOccurrences?: number; nextAction: string;
+  historyGapOccurrences?: number;
+  historyGapVerifiedAt?: number | null; historyGapVerifiedSequence?: number | null;
+  nextAction: string;
   observationalOnly: boolean;
 }
 
@@ -608,12 +610,20 @@ export function mountSuperagent(
               : 'Cursor behind durable receipts — new observations denied until reconciled.') +
             ' Native next action: ' + safe(sourceIntegrity.nextAction) + '</p>' +
             (sourceIntegrity.historyGapCursor
-              ? '<p role="alert">GitHub history continuity not verified since cursor ' +
-                safe(sourceIntegrity.historyGapCursor) + ' (' +
-                safe(sourceIntegrity.historyGapReason === 'cursor_missing'
-                  ? 'stored cursor absent from bounded feed' : 'bounded feed exhausted') +
-                '). Observed ' + safe(sourceIntegrity.historyGapOccurrences ?? 1) +
-                ' time(s). Operator reconciliation required; no lost events have been inferred or replayed.</p>'
+              ? (sourceIntegrity.historyGapVerifiedAt
+                ? '<p>Historical GitHub continuity warning at cursor ' +
+                  safe(sourceIntegrity.historyGapCursor) + ' (' +
+                  safe(sourceIntegrity.historyGapReason === 'cursor_missing'
+                    ? 'stored cursor absent from bounded feed' : 'bounded feed exhausted') +
+                  ') was verified by a later bounded feed through event ' +
+                  safe(sourceIntegrity.historyGapVerifiedSequence ?? 'unknown') +
+                  '. Original incident retained; no missing events were invented or replayed.</p>'
+                : '<p role="alert">GitHub history continuity not verified since cursor ' +
+                  safe(sourceIntegrity.historyGapCursor) + ' (' +
+                  safe(sourceIntegrity.historyGapReason === 'cursor_missing'
+                    ? 'stored cursor absent from bounded feed' : 'bounded feed exhausted') +
+                  '). Observed ' + safe(sourceIntegrity.historyGapOccurrences ?? 1) +
+                  ' time(s). Operator reconciliation required; no lost events have been inferred or replayed.</p>')
               : '') +
             '<p>Observation only. No GitHub subscription completeness, worker admission, Council pass, or Auto authorization is implied.</p>' +
             '</section>' : '') +

@@ -690,18 +690,42 @@ fn create_source(
         return Err("Multiple legacy source actors differ only by case; reconcile before creating a source.".into());
     }
     if let Some(id) = matches.first() { return source(store, id); }
-    let count: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id=?1",
-        [orchestration_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    if count >= MAX_SOURCES { return Err("SuperAgent source limit reached.".into()); }
     let id = storage::id();
     let now = storage::now();
-    store.db.execute(
+    // A separate desktop/headless connection can pass the same preliminary
+    // lookup concurrently. Both the case-insensitive uniqueness fence and
+    // Team capacity limit must be checked in the INSERT's write statement,
+    // not by a preceding SELECT that can become stale across connections.
+    let inserted = store.db.execute(
         "INSERT INTO sa_event_sources(id,orchestration_id,repository,actor_filter,event_kind,
-            mode,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'off',?6,?6)",
-        params![id,orchestration_id,repository,&actor_key,event_kind,now],
+            mode,created_at,updated_at)
+         SELECT ?1,?2,?3,?4,?5,'off',?6,?6
+         WHERE NOT EXISTS (
+             SELECT 1 FROM sa_event_sources
+             WHERE orchestration_id=?2 AND repository=?3 COLLATE NOCASE
+               AND actor_filter=?4 COLLATE NOCASE AND event_kind=?5
+         ) AND (SELECT COUNT(*) FROM sa_event_sources
+                 WHERE orchestration_id=?2) < ?7",
+        params![id,orchestration_id,repository,&actor_key,event_kind,now,MAX_SOURCES],
     ).map_err(|e| e.to_string())?;
+    if inserted == 0 {
+        // An independent connection may have created this exact logical
+        // source while ours waited for SQLite's write lock. Preserve its
+        // policy, cursor, repository pin and receipts rather than adding a
+        // case-variant source or reporting a false capacity failure.
+        let matches = statement.query_map(
+            params![orchestration_id,repository,&actor_key,event_kind],
+            |row| row.get::<_,String>(0),
+        ).map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        if matches.len() > 1 {
+            return Err("Multiple legacy source actors differ only by case; reconcile before creating a source.".into());
+        }
+        return matches.first().map_or_else(
+            || Err("SuperAgent source limit reached.".into()),
+            |existing| source(store, existing),
+        );
+    }
     source(store, &id)
 }
 
@@ -3132,6 +3156,56 @@ mod tests {
             "SELECT COUNT(*) FROM sa_event_decisions", [],
             |row| row.get::<_,i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn concurrent_source_creation_preserves_one_case_insensitive_identity() {
+        let (store, path) = fixture();
+        let other = Store::open(&path).unwrap();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let left_gate = gate.clone();
+        let right_gate = gate.clone();
+        let first = std::thread::spawn(move || {
+            left_gate.wait();
+            create_source(&store, "orch", "owner/repo", "TRUSTED-BOT", "issues.opened")
+        });
+        let second = std::thread::spawn(move || {
+            right_gate.wait();
+            create_source(&other, "orch", "owner/repo", "trusted-bot", "issues.opened")
+        });
+        gate.wait();
+        let left = first.join().unwrap().unwrap();
+        let right = second.join().unwrap().unwrap();
+        assert_eq!(left.id, right.id);
+        assert_eq!(left.mode, "off");
+        assert_eq!(right.policy_revision, 1);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_sources(&reopened, "orch").unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn source_capacity_is_atomic_and_existing_alias_is_idempotent_when_full() {
+        let (store, path) = fixture();
+        let mut original_id = String::new();
+        for i in 0..MAX_SOURCES {
+            let created = create_source(
+                &store, "orch", "owner/repo", &format!("actor-{i}"), "issues.opened",
+            ).unwrap();
+            if i == 0 { original_id = created.id; }
+        }
+        let reopened = Store::open(&path).unwrap();
+        assert!(create_source(
+            &reopened, "orch", "owner/repo", "overflow", "issues.opened",
+        ).unwrap_err().contains("limit reached"));
+        let alias = create_source(
+            &reopened, "orch", "owner/repo", "ACTOR-0", "issues.opened",
+        ).unwrap();
+        assert_eq!(alias.id, original_id);
+        assert_eq!(alias.mode, "off");
+        assert_eq!(list_sources(&reopened, "orch").unwrap().len(), MAX_SOURCES as usize);
     }
 
     #[test]

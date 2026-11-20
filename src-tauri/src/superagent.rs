@@ -1258,10 +1258,13 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // Contain that native execution before acting on uncertain remote
         // effects; reconciliation cannot race an unrevoked provider.
         "investigate_native_assignment_state"
+    } else if running > 0 {
+        // A still-running provider may be executing the reserved effect.
+        // Contain or verify that native execution before considering a remote
+        // outcome for reconciliation; never infer that it has stopped.
+        "verify_live_serve_provider_before_intervention"
     } else if pending + uncertain > 0 {
         "reconcile_authoritative_remote_effects"
-    } else if running > 0 {
-        "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
         "await_fresh_task_bound_native_council"
     } else if ticket.state == "waiting_approval" {
@@ -7197,8 +7200,10 @@ mod tests {
         ).unwrap();
         assert_eq!(pending["recovery"]["pendingExternalEffects"], 1);
         assert_eq!(pending["recovery"]["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(pending["recovery"]["requiresLiveHostVerification"], true);
         assert_eq!(pending["recovery"]["nextOperatorAction"],
-            "reconcile_authoritative_remote_effects");
+            "verify_live_serve_provider_before_intervention",
+            "A live provider must be verified before reconciling its pending effect");
         assert_eq!(pending["recovery"]["automaticReplayAllowed"], false);
         assert_eq!(store.db.query_row(
             "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
@@ -7221,6 +7226,53 @@ mod tests {
             [&ticket.id], |row| row.get::<_, String>(0),
         ).unwrap(), "uncertain");
         assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn headless_uncertain_effect_does_not_preempt_live_provider_recovery() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private uncertain effect recovery",
+            "headless-live-uncertain-recovery", false,
+        ).unwrap();
+        assert!(launched);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'remote-uncertain',?2,'uncertain',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let path = store.path.clone();
+        let audit_before = history(&store, &ticket.id, 100).unwrap().len();
+        for _ in 0..2 {
+            let observed: serde_json::Value = serde_json::from_str(
+                &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+            ).unwrap();
+            assert_eq!(observed["recovery"]["uncertainExternalEffects"], 1);
+            assert_eq!(observed["recovery"]["requiresIndependentRemoteReconciliation"], true);
+            assert_eq!(observed["recovery"]["requiresLiveHostVerification"], true);
+            assert_eq!(observed["recovery"]["nextOperatorAction"],
+                "verify_live_serve_provider_before_intervention");
+            assert_eq!(observed["recovery"]["automaticReplayAllowed"], false);
+        }
+        assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_before);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state,
+            "uncertain", "read-only inspection may not settle or replay an effect");
+        // After native Stop removes the running Assignment, the same effect
+        // must remain unresolved and become eligible for independent inquiry.
+        stop(&store, &ticket.id).unwrap();
+        let reopened = Store::open_read_only(&path).unwrap();
+        let observed: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(observed["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(observed["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 5).unwrap()[0].state,
+            "uncertain");
+        assert_eq!(observed["recovery"]["automaticReplayAllowed"], false);
     }
 
     #[test]

@@ -150,6 +150,25 @@ and audit failures abort without a partial transition. The CLI does **not**
 stop a live external provider, launch work, acknowledge a remote effect or
 allow automatic replay. Uncertain effects need independent reconciliation.
 
+### Quarantine an orphaned running Ticket
+
+A legacy or corrupted native store can leave a Ticket marked running with no
+active Assignment link, a lost Team, or zero/multiple running Assignments.
+An authorized local operator can safely quarantine this exact anomaly:
+
+```sh
+pandacode serve --list-recovery-inbox
+pandacode serve --quarantine-orphan-ticket <ticket-id> <expected-revision>
+```
+
+The native revision-checked transaction interrupts the Ticket and all surviving
+running Assignments, revokes its Mandate, makes pending external effects
+`uncertain`, and records an audit. Healthy Tickets, stale revisions and
+duplicate quarantine calls are denied; an audit failure rolls back the
+transaction. No provider or effect is replayed or presumed stopped. The
+owning live host must cancel the revoked provider; uncertain remote outcomes
+require independent reconciliation before retry.
+
 ### Quarantine an expired native Assignment
 
 When the read-only recovery inbox identifies a running Ticket whose current

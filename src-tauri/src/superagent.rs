@@ -2130,6 +2130,84 @@ pub(crate) fn headless_quarantine_pending_effect(
     })).map_err(|e| e.to_string())
 }
 
+
+/** Locally quarantine a running Ticket that lost its Team or unique active
+ * native Assignment. A detached CLI never stops a provider or replays effects.
+ */
+pub(crate) fn headless_quarantine_orphan_running_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    if expected_revision < 0 {
+        return Err("Expected a nonnegative Ticket revision.".into());
+    }
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    // Match the owning watchdog's structural fault predicate. Healthy
+    // assignments are not operator-recoverable through this command.
+    let fault_revision: Option<i64> = tx.query_row(
+        "SELECT t.revision FROM sa_tickets t
+         WHERE t.id=?1 AND t.state='running' AND (
+           t.active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o WHERE o.id=t.orchestration_id)
+           OR (SELECT COUNT(*) FROM sa_assignments a
+               WHERE a.ticket_id=t.id AND a.state='running')<>1
+           OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+               WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                 AND a.state='running')
+         )", [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if fault_revision != Some(expected_revision) {
+        return Err("Ticket revision changed or running Assignment is structurally healthy.".into());
+    }
+    let now = storage::now();
+    // Repeat the guard in the CAS update: a competing repair/stop cannot be
+    // transformed into a new interruption by this stale operator command.
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+                revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND (
+           active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                         WHERE o.id=sa_tickets.orchestration_id)
+           OR (SELECT COUNT(*) FROM sa_assignments a
+               WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
+           OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+               WHERE a.id=sa_tickets.active_assignment_id
+                 AND a.ticket_id=sa_tickets.id AND a.state='running')
+         )", params![ticket_id,expected_revision,now],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Running Assignment structure changed before quarantine.".into());
+    }
+    // An already missing Mandate is a possible legacy corruption, not a
+    // reason to leave a running Ticket; revoke every remaining grant.
+    tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [ticket_id])
+        .map_err(|e| e.to_string())?;
+    let quarantined = tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_orphan_running_quarantined',
+           'Running Ticket lost its Team or unique active Assignment; revoked without provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id,"state":"interrupted","revision":expected_revision+1,
+        "quarantinedAssignments":quarantined,
+        "pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false,"liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Quarantine an explicit, revisioned running Ticket whose single active native
 /// Assignment has no SQLite provider session. The detached process never
 /// claims a provider was stopped, replays a remote effect or grants a retry.
@@ -6014,6 +6092,103 @@ mod tests {
         assert_eq!(effects::receipt_history(&reopened,&ticket.id,5).unwrap()[0].state,"applied");
         assert_eq!(history(&reopened,&ticket.id,30).unwrap().iter()
             .filter(|audit|audit.kind=="headless_effect_quarantined").count(),1);
+    }
+
+
+    #[test]
+    fn headless_orphan_running_quarantine_requires_fault_cas_and_survives_restart() {
+        for fault in ["missing-link","wrong-link","assignment-not-running","team-missing"] {
+            let mut store=fixture();
+            let cfg=enabled(&store);
+            let (ticket,started)=admit(&mut store,&cfg.id,"Private work",
+                "headless-running-orphan",false).unwrap();
+            assert!(started);
+            let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+            let path=store.path.clone();
+            let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision).is_err(),"Healthy Ticket cannot be quarantined");
+            match fault {
+                "missing-link" => { store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                    [&ticket.id]).unwrap(); }
+                "wrong-link" => { store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id='missing-id' WHERE id=?1",
+                    [&ticket.id]).unwrap(); }
+                "assignment-not-running" => { store.db.execute(
+                    "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+                    [&ticket.id]).unwrap(); }
+                "team-missing" => {
+                    store.db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+                    store.db.execute("DELETE FROM sa_orchestrations WHERE id=?1",
+                        [&cfg.id]).unwrap();
+                    store.db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let now=storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'orphan-effect',?2,'pending',?3,?3)",
+                params![&ticket.id,"a".repeat(64),now]).unwrap();
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision+1).is_err());
+            let output: serde_json::Value=serde_json::from_str(
+                &headless_quarantine_orphan_running_ticket(
+                    &path,&ticket.id,revision).unwrap()).unwrap();
+            assert_eq!(output["state"],"interrupted","{fault}");
+            assert_eq!(output["revision"],revision+1);
+            assert_eq!(output["providerStoppedByCommand"],false);
+            assert_eq!(output["externalEffectReplayAllowed"],false);
+            assert_eq!(output["pendingEffectsMarkedUncertain"],1);
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision+1).is_err());
+            assert!(mandate(&store,&ticket.id).unwrap().revoked);
+            assert!(assignments(&store,&ticket.id,10).unwrap().iter()
+                .all(|a|a.state!="running"));
+            assert_eq!(effects::receipt_history(&store,&ticket.id,5)
+                .unwrap()[0].state,"uncertain");
+            assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+                .filter(|entry|entry.kind=="headless_orphan_running_quarantined").count(),1);
+            assert!(!on_run_finished(&store,&session,true,"Late result").unwrap());
+            drop(store);
+            let reopened=Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+            assert_eq!(effects::unresolved_count(&reopened,&ticket.id).unwrap(),1);
+        }
+    }
+
+    #[test]
+    fn headless_orphan_running_quarantine_is_atomic_on_audit_failure() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(&mut store,&cfg.id,"Private rollback",
+            "headless-orphan-rollback",false).unwrap();
+        assert!(started);
+        let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+        store.db.execute("UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id]).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'orphan-rollback-effect',?2,'pending',?3,?3)",
+            params![&ticket.id,"b".repeat(64),now]).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_orphan_headless_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_orphan_running_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;").unwrap();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &store.path,&ticket.id,revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,revision);
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+        assert_eq!(effects::receipt_history(&store,&ticket.id,5).unwrap()[0].state,"pending");
+        store.db.execute_batch("DROP TRIGGER deny_orphan_headless_audit").unwrap();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &store.path,&ticket.id,revision).is_ok());
     }
 
     #[test]

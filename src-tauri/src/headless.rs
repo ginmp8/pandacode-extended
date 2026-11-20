@@ -81,6 +81,7 @@ enum Command {
     QuarantineDetachedTicket { ticket_id: String, expected_revision: i64 },
     QuarantineExpiredTicket { ticket_id: String, expected_revision: i64 },
     QuarantinePendingEffect { ticket_id: String, expected_revision: i64, effect_key: String, payload_sha256: String },
+    QuarantineOrphanRunning { ticket_id: String, expected_revision: i64 },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     EnableOrchestration { orchestration_id: String, expected_revision: i64 },
@@ -746,6 +747,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::QuarantineDetachedTicket { .. }
                 | Command::QuarantineExpiredTicket { .. }
                 | Command::QuarantinePendingEffect { .. }
+                | Command::QuarantineOrphanRunning { .. }
                 | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
@@ -778,6 +780,9 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                             Command::QuarantinePendingEffect { ticket_id, expected_revision, effect_key, payload_sha256 } =>
                                 crate::superagent::headless_quarantine_pending_effect(
                                     &database, ticket_id, *expected_revision, effect_key, payload_sha256),
+                            Command::QuarantineOrphanRunning { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_orphan_running_ticket(
+                                    &database,ticket_id,*expected_revision),
                             Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_terminal_orphan(
                                     &database, ticket_id, *expected_revision),
@@ -865,6 +870,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
                 | Command::QuarantineDetachedTicket { .. }
         | Command::QuarantineExpiredTicket { .. }
         | Command::QuarantinePendingEffect { .. }
+        | Command::QuarantineOrphanRunning { .. }
         | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
@@ -2118,6 +2124,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 4;
             }
+            "--quarantine-orphan-ticket" => {
+                let ticket_id=args.get(index+1)
+                    .ok_or("--quarantine-orphan-ticket needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision=args.get(index+2)
+                    .ok_or("--quarantine-orphan-ticket needs a Ticket revision.")?;
+                command=Command::QuarantineOrphanRunning {
+                    ticket_id:ticket_id.clone(),
+                    expected_revision:parse_ticket_revision(revision)?,
+                };
+                ops+=1;
+                index+=2;
+            }
             "--quarantine-terminal-orphan" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
@@ -2390,6 +2409,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --quarantine-expired-ticket <id> <revision>
                          Revoke one expired or invalid-clock running native assignment;
                          the live server handles provider cancellation. No replay.
+  --quarantine-orphan-ticket <id> <revision>
+                          Quarantine a structurally orphaned running Ticket;
+                          no provider or external-effect replay.
   --quarantine-terminal-orphan <id> <revision>
                          Quarantine orphaned native attempts on terminal Tickets;
                          do not launch providers or replay external effects.
@@ -3088,6 +3110,20 @@ mod tests {
         )).is_err(), "noncanonical SHA-256 must be rejected");
         assert!(parsed(&format!("{valid} --stop-ticket ticket_123")).is_err());
 
+        assert_eq!(parsed("--quarantine-orphan-ticket ticket_123 8"),
+            Ok(Command::QuarantineOrphanRunning {
+                ticket_id:"ticket_123".into(),expected_revision:8,
+            }));
+        for invalid in [
+            "--quarantine-orphan-ticket",
+            "--quarantine-orphan-ticket ticket_123",
+            "--quarantine-orphan-ticket ../unsafe 8",
+            "--quarantine-orphan-ticket ticket_123 nope",
+            "--quarantine-orphan-ticket ticket_123 -1",
+            "--quarantine-orphan-ticket ticket_123 8 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
         assert_eq!(parsed("--quarantine-terminal-orphan ticket_123 8"),
             Ok(Command::QuarantineTerminalOrphan {
                 ticket_id: "ticket_123".into(), expected_revision: 8,

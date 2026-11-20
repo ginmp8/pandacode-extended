@@ -79,7 +79,7 @@ fn legacy_automatic_findings_require_a_real_native_reviewer_session_link() {
     let project = store.session(&sid).unwrap().project_id;
     let legitimate = store.create_session(&project, "codex", "", "full").unwrap();
     let foreign = store.create_session(&project, "codex", "", "full").unwrap();
-    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"privacy\",\"title\":\"Private report\",\"explanation\":\"Must stay in its owner session\"}]\\nCouncil score: 9.5/10";
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"privacy\",\"title\":\"Private report\",\"explanation\":\"Must stay in its owner session\"}]\nCouncil score: 9.5/10";
     store.message(&legitimate.id, "assistant", report).unwrap();
     store.message(&foreign.id, "assistant", report).unwrap();
     let mut team = load(&store, &sid).unwrap().unwrap();

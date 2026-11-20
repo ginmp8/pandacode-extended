@@ -4223,6 +4223,27 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
 /// This is an explanation of current local eligibility, never a grant or
 /// reservation. The same native checks are repeated when enabling with CAS.
 fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
+    // A disabled Team may be left with an unfinished Ticket or a running
+    // orphan Assignment after a legacy or interrupted policy write. Enabling
+    // it must not admit fresh work beside the unreconciled provider/lease.
+    // Block only this Team; normal terminal history and uncertain receipts
+    // without live Assignments remain available for independent work.
+    if !current.enabled {
+        let unsettled: bool = store.db.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+                   AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                     OR EXISTS(SELECT 1 FROM sa_assignments a
+                               WHERE a.ticket_id=t.id AND a.state='running'))
+             )",
+            [&current.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if unsettled {
+            return Ok(Some(
+                "Disabled Team retains unfinished or orphaned native work; repeat Off or quarantine the affected Ticket before enabling.".into(),
+            ));
+        }
+    }
     let members=roster::read(store,&current.id)?;
     if !members.reviewer_bot_ids.is_empty() {
         return Ok(Some(
@@ -4340,11 +4361,17 @@ fn change_enabled(
     let now = storage::now();
     let updated = tx.execute(
         "UPDATE sa_orchestrations SET enabled=?2,policy_revision=policy_revision+1,
-         updated_at=?3 WHERE id=?1 AND policy_revision=?4",
+         updated_at=?3 WHERE id=?1 AND policy_revision=?4
+           AND (?2=0 OR NOT EXISTS(
+             SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+               AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running'))
+           ))",
         params![orchestration_id,enabled,now,expected_revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 {
-        return Err("Concurrent orchestration policy change; update rejected.".into());
+        return Err("Concurrent orchestration policy change or unreconciled native work; enable rejected.".into());
     }
     if !enabled {
         // Off is a native revocation, not just a UI preference. Record the
@@ -10453,6 +10480,74 @@ mod tests {
         ).unwrap();
         assert!(started);
         assert_eq!(fresh.state, "running");
+    }
+
+    #[test]
+    fn disabled_team_cannot_reenable_with_unsettled_native_work() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Repair disabled Team", "reenable-unsettled", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // Simulate an interrupted legacy Off write: the Team flag was stored,
+        // but the Ticket, mandate and Assignment were never settled.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1", [&team.id],
+        ).unwrap();
+        let stale = configuration(&store, &team.id).unwrap();
+        let blocker = manual_enable_blocker(&store, &stale).unwrap().unwrap();
+        assert!(blocker.contains("unreconciled") || blocker.contains("orphaned"));
+        assert!(change_enabled(&store, &team.id, stale.policy_revision, true).is_err());
+        assert!(headless_enable_orchestration(
+            &store.path, &team.id, stale.policy_revision,
+        ).is_err(), "detached CLI must share the same native guard");
+        assert!(!configuration(&store, &team.id).unwrap().enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+
+        // Repeating Off is the existing audited, transactional repair path.
+        let repaired = change_enabled(&store, &team.id, stale.policy_revision, false).unwrap();
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "late provider completion").unwrap());
+        assert!(change_enabled(&store, &team.id, repaired.policy_revision, true).unwrap().enabled);
+    }
+
+    #[test]
+    fn terminal_orphan_assignment_blocks_reenable_until_quarantined() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Preserve terminal evidence", "reenable-orphan", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let terminal = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(terminal.state, "stopped");
+
+        // A damaged legacy settlement can leave a running Assignment even
+        // on a terminal Ticket. Off does not fabricate provider termination.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let disabled = change_enabled(&store, &team.id, team.policy_revision, false).unwrap();
+        assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(configuration(&store, &team.id).unwrap().policy_revision, disabled.policy_revision);
+
+        let receipt: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(
+                &store.path, &ticket.id, terminal.revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["quarantinedAssignments"], 1);
+        assert_eq!(receipt["providerStoppedByCommand"], false);
+        assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).unwrap().enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
     }
 
     #[test]

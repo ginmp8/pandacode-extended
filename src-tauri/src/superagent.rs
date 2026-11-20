@@ -275,6 +275,10 @@ pub struct OrchestrationOverview {
     pub ticket_count: i64,
     pub running_count: i64,
     pub blocked_count: i64,
+    /// Pending human acceptance, not a successful native review.
+    pub waiting_approval_count: i64,
+    /// Pending native Council verdict, never a passing decision.
+    pub waiting_review_count: i64,
     pub last_activity_at: i64,
     pub worker_count: i64,
     pub reviewer_count: i64,
@@ -294,6 +298,8 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
                 COUNT(t.id),
                 COALESCE(SUM(CASE WHEN t.state='running' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN t.state='blocked' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='waiting_approval' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='waiting_review' THEN 1 ELSE 0 END),0),
                 COALESCE(MAX(t.updated_at),o.updated_at),
                 1 + (SELECT COUNT(*) FROM sa_team_roles r
                      WHERE r.orchestration_id=o.id AND r.role='worker'),
@@ -309,9 +315,11 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             ticket_count: row.get(7)?,
             running_count: row.get(8)?,
             blocked_count: row.get(9)?,
-            last_activity_at: row.get(10)?,
-            worker_count: row.get(11)?,
-            reviewer_count: row.get(12)?,
+            waiting_approval_count: row.get(10)?,
+            waiting_review_count: row.get(11)?,
+            last_activity_at: row.get(12)?,
+            worker_count: row.get(13)?,
+            reviewer_count: row.get(14)?,
             manual_enable_blocker: None,
             policy_edit_blocker: None,
         })
@@ -9003,6 +9011,7 @@ mod tests {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
             assert_eq!(item.blocked_count, 0);
+            assert_eq!((item.waiting_approval_count, item.waiting_review_count), (0, 0));
             assert!(item.last_activity_at > 0);
         }
         let (active, launched) = admit(
@@ -9033,6 +9042,21 @@ mod tests {
         let selected = after.iter().find(|c| c.config.id == config.id).unwrap();
         assert_eq!((selected.ticket_count, selected.running_count, selected.blocked_count), (2,0,1));
         assert!(selected.last_activity_at >= before[0].last_activity_at);
+        // Projection-only oracle: raw test fixtures enter both native waiting
+        // states without implying an actual approval, reviewer or tool grant.
+        store.db.execute("UPDATE sa_tickets SET state='waiting_approval' WHERE id=?1",
+            [&blocked.id]).unwrap();
+        store.db.execute("UPDATE sa_tickets SET state='waiting_review' WHERE id=?1",
+            [&active.id]).unwrap();
+        let waiting = orchestration_overview(&store).unwrap();
+        let selected = waiting.iter().find(|c| c.config.id == config.id).unwrap();
+        assert_eq!((selected.waiting_approval_count, selected.waiting_review_count), (1, 1));
+        assert_eq!((selected.running_count, selected.blocked_count), (0, 0));
+        let unrelated = waiting.iter().find(|c| c.config.id == other.id).unwrap();
+        assert_eq!((unrelated.waiting_approval_count, unrelated.waiting_review_count), (0, 0));
+        let serialized = serde_json::to_value(selected).unwrap();
+        assert_eq!(serialized["waitingApprovalCount"], 1);
+        assert_eq!(serialized["waitingReviewCount"], 1);
     }
 
     #[test]

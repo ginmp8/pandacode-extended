@@ -3219,3 +3219,40 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
   expect(calls.some(item=>/superagent_reject|dispatch|effect_reserve|council_pass/.test(item.command)))
     .toBe(false);
 });
+
+
+test('Team directory uses durable native human and Council pending counts independently of paging', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-pending-counts';document.body.appendChild(host);
+    const calls:string[]=[];(window as unknown as {saPendingCalls:string[]}).saPendingCalls=calls;
+    mountSuperagent(host,async command=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'a',name:'Coordinator',paused:false},{id:'b',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-1',name:'Needs review',coordinatorBotId:'a',workerBotId:'b',enabled:false,
+          policyRevision:1,ticketCount:260,runningCount:2,blockedCount:3,
+          waitingApprovalCount:4,waitingReviewCount:2},
+        {id:'team-2',name:'No reviews',coordinatorBotId:'a',workerBotId:'b',enabled:false,
+          policyRevision:1,ticketCount:1,runningCount:0,blockedCount:0,
+          waitingApprovalCount:0,waitingReviewCount:0},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-pending-counts');
+  await expect(host.locator('.sa-list .sa-review-counts')).toHaveText([
+    '4 awaiting human approval · 2 awaiting Council (not approved)',
+    '0 awaiting human approval · 0 awaiting Council (not approved)',
+  ]);
+  await expect(host.locator('.sa-list .sa-counts').first()).toContainText('260 tasks');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  await expect(host.locator('.sa-list .sa-review-counts').first())
+    .toContainText('2 awaiting Council (not approved)');
+  const calls=await page.evaluate(()=> (window as unknown as {saPendingCalls:string[]}).saPendingCalls);
+  expect(calls).toEqual(['bots_list','superagent_list','superagent_tickets']);
+});

@@ -9,7 +9,8 @@ interface Bot { id: string; name: string; paused: boolean; avatar?: string; colo
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   projectId?: string; enabled: boolean; policyRevision: number;
-  ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
+  ticketCount?: number; runningCount?: number; blockedCount?: number;
+  waitingApprovalCount?: number; waitingReviewCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
   manualEnableBlocker?: string | null;
   policyEditBlocker?: string | null;
@@ -273,6 +274,12 @@ export function mountSuperagent(
       safe(roleSummary(item)) + '</small><small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
+      '<small class="sa-review-counts" aria-label="Native pending review counts">' +
+      (Number.isSafeInteger(item.waitingApprovalCount) && Number.isSafeInteger(item.waitingReviewCount) &&
+       (item.waitingApprovalCount ?? -1) >= 0 && (item.waitingReviewCount ?? -1) >= 0
+        ? safe(item.waitingApprovalCount) + ' awaiting human approval · ' +
+          safe(item.waitingReviewCount) + ' awaiting Council (not approved)'
+        : 'Native review counts unavailable') + '</small>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +

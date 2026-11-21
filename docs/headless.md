@@ -611,6 +611,8 @@ The one-shot CLI commands above retain their explicit, exit-after-poll behavior.
 pandacode serve --list-tickets
 pandacode serve --list-ticket-activity <ticket-id>
 pandacode serve --list-ticket-activity <ticket-id> --before <audit-id>
+pandacode serve --list-team-member-activity <team-id> <bot-id>
+pandacode serve --list-team-member-activity <team-id> <bot-id> --before <created-at-ms> <assignment-id>
 pandacode serve --list-review-inbox
 pandacode serve --list-review-inbox --before <updated-at-ms> <ticket-id>
 pandacode serve --list-team-review-inbox <team-id>
@@ -629,6 +631,15 @@ The Ticket activity command pages a durable audit stream in descending event-ID 
 event ID, controlled event kind and timestamp; private reasons, objectives,
 provider output, secrets and evidence are excluded. It neither authorizes
 execution nor runs startup recovery beside another live host.
+
+Team member activity uses the same native page handler as Bots → Orchestrations:
+100 assignment records per page, ordered by immutable creation time and ID.
+The `nextCursor.createdAt` and `nextCursor.assignmentId` pair must both be
+provided to continue. Cursors from another Team or bot, or fabricated
+boundaries, are rejected. The CLI uses a read-only SQLite connection, returns
+assignment status and session metadata without objective/result text, and never
+starts a provider, modifies audit records, acknowledges effects or performs
+startup recovery.
 
 Accept and reject use the current Ticket revision; reject also requires a
 nonempty reason. Use the revision reported by `--inspect-ticket` or the recovery

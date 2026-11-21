@@ -1082,6 +1082,37 @@ pub(crate) fn inspect_headless_ticket_graph(
     })).map_err(|e| e.to_string())
 }
 
+/// Headless Team-member activity uses the same native page handler as the
+/// desktop workspace, but only opens the persisted database read-only.
+/// It cannot trigger startup recovery, provider work or task approval.
+pub(crate) fn list_headless_team_member_activity(
+    database_path: &std::path::Path, orchestration_id: &str, bot_id: &str,
+    before_created_at: Option<i64>, before_assignment_id: Option<&str>,
+) -> Result<String> {
+    let before = match (before_created_at, before_assignment_id) {
+        (None, None) => None,
+        (Some(created_at), Some(assignment_id)) => Some(member_activity::MemberActivityCursor {
+            created_at,
+            assignment_id: assignment_id.into(),
+        }),
+        _ => return Err("An activity cursor requires both creation time and assignment ID.".into()),
+    };
+    let store = Store::open_read_only(database_path)?;
+    let page = member_activity::page(&store, orchestration_id, bot_id, before, 100)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": page.orchestration_id,
+        "botId": page.bot_id,
+        "items": page.items,
+        "hasMore": page.has_more,
+        "nextCursor": page.next_cursor,
+        "pageLimit": 100,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+        "providerDispatched": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Keyset-paginated, redacted native audit metadata for one Ticket. Unlike
 /// Store::open, this inspector cannot migrate, interrupt or replay live work.
 /// Only controlled audit kinds and timestamps are exposed; details may contain

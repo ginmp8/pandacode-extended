@@ -226,6 +226,38 @@ mod tests {
         let stored_path = store.path.clone();
         drop(store);
         let reopened = Store::open(&stored_path).unwrap();
+        let audit_before: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        let headless: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_team_member_activity(
+                &stored_path, &team.id, "worker", None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(headless["pageLimit"], 100);
+        assert_eq!(headless["observationalOnly"], true);
+        assert_eq!(headless["recoveryPerformed"], false);
+        assert_eq!(headless["providerDispatched"], false);
+        assert_eq!(headless["items"][0]["ticketId"], ticket.id);
+        assert!(!headless.to_string().contains("Private authorized work"));
+        let next: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_team_member_activity(
+                &stored_path, &team.id, "worker",
+                Some(cursor.created_at), Some(&cursor.assignment_id),
+            ).unwrap(),
+        ).unwrap();
+        assert!(next["items"].as_array().unwrap().is_empty());
+        assert!(superagent::list_headless_team_member_activity(
+            &stored_path, &other.id, "other-worker",
+            Some(cursor.created_at), Some(&cursor.assignment_id),
+        ).is_err());
+        assert!(superagent::list_headless_team_member_activity(
+            &stored_path, &team.id, "worker", Some(cursor.created_at), None,
+        ).is_err());
+        let audit_after: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_before, audit_after, "headless reads cannot append audit");
         assert!(page(&reopened, &team.id, "worker", Some(cursor.clone()), 25)
             .unwrap().items.is_empty());
         assert!(page(&reopened, &other.id, "other-worker", Some(cursor), 25)

@@ -188,7 +188,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 &database, path,
                             )?;
                             Ok(format!(
-                                "Would create disabled presets: {}\\nUnchanged presets: {}",
+                                "Would create disabled presets: {}\nUnchanged presets: {}",
                                 plan.would_create.join(", "), plan.unchanged.join(", "),
                             ))
                         }
@@ -201,7 +201,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 imported.created.len(), imported.unchanged.len(),
                             );
                             if let Some(backup) = imported.backup_path {
-                                summary.push_str(&format!("\\nVerified orchestration backup: {backup}"));
+                                summary.push_str(&format!("\nVerified orchestration backup: {backup}"));
                             }
                             Ok(summary)
                         }

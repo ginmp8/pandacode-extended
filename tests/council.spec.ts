@@ -2125,8 +2125,12 @@ test('panel hierarchy: one description, labels in text ink, a footer checkbox fo
 /** A new thread draws its composer twice (at once, then when its page loads); a draft typed in between is lost. Waits
  *  until the prompt stays the same element across two polls. */
 const composerSettled = (page: Page) => page.waitForFunction(() => {
-  const seen = window as any, now = document.querySelector('#prompt'), same = Boolean(now) && seen.__prompt === now;
-  seen.__prompt = now; return same;
+  const seen = window as any, now = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const send = document.querySelector<HTMLButtonElement>('#composer button[type="submit"]');
+  const same = Boolean(now) && seen.__prompt === now;
+  seen.__prompt = now;
+  // A stable textarea is not enough: thread history can still be loading.
+  return same && !now?.disabled && Boolean(send && !send.disabled);
 }, undefined, { polling: 300 });
 
 async function newThreadsOn(page: Page): Promise<void> {
@@ -2136,6 +2140,24 @@ async function newThreadsOn(page: Page): Promise<void> {
   await page.locator('.new-task-button').click();
   await composerSettled(page);
 }
+
+test('new Council threads keep Send disabled until native history has loaded', async ({ page }) => {
+  await open(page);
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
+  await page.evaluate(() => {
+    (window as any).__hold = {
+      get_messages: new Promise<void>(resolve => { (window as any).__releaseMessages = resolve; }),
+    };
+  });
+  await page.locator('.new-task-button').click();
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const send = page.getByRole('button', { name: 'Send message' });
+  await expect(prompt).toBeDisabled();
+  await expect(send).toBeDisabled();
+  await page.evaluate(() => (window as any).__releaseMessages());
+  await expect(prompt).toBeEnabled();
+  await expect(send).toBeEnabled();
+});
 
 test('with Classic team setup, a first send starts no automatic team for Council', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'true'));

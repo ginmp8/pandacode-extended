@@ -349,6 +349,9 @@ pub(crate) fn unresolved_effects_page(
 
 /// Team-scoped recovery is a filtered native projection, never a grant to
 /// reconcile or replay an effect from another Team.
+/// Order by immutable creation identity rather than mutable updated_at.
+/// A pending -> uncertain transition during pagination must not move an unseen
+/// receipt ahead of the cursor and silently omit it from the recovery inbox.
 pub(crate) fn unresolved_effects_page_for_team(
     store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
     orchestration_id: Option<&str>,
@@ -384,7 +387,7 @@ pub(crate) fn unresolved_effects_page_for_team(
             "SELECT EXISTS(
                SELECT 1 FROM sa_effect_receipts r
                JOIN sa_tickets t ON t.id=r.ticket_id
-               WHERE r.updated_at=?1 AND r.ticket_id=?2 AND r.effect_key=?3
+               WHERE r.created_at=?1 AND r.ticket_id=?2 AND r.effect_key=?3
                  AND r.state IN ('pending','uncertain')
                  AND (?4 IS NULL OR t.orchestration_id=?4)
              )",
@@ -406,10 +409,10 @@ pub(crate) fn unresolved_effects_page_for_team(
          JOIN sa_tickets t ON t.id=r.ticket_id
          WHERE r.state IN ('pending','uncertain')
            AND (?5 IS NULL OR t.orchestration_id=?5)
-           AND (?1 IS NULL OR r.updated_at<?1
-                OR (r.updated_at=?1 AND (r.ticket_id<?2
+           AND (?1 IS NULL OR r.created_at<?1
+                OR (r.created_at=?1 AND (r.ticket_id<?2
                      OR (r.ticket_id=?2 AND r.effect_key<?3))))
-         ORDER BY r.updated_at DESC,r.ticket_id DESC,r.effect_key DESC LIMIT ?4",
+         ORDER BY r.created_at DESC,r.ticket_id DESC,r.effect_key DESC LIMIT ?4",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(
         params![before_at,before_ticket,before_key,limit+1,orchestration_id],
@@ -423,7 +426,7 @@ pub(crate) fn unresolved_effects_page_for_team(
     let mut items = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
     let next = if items.len()>limit as usize {
         items.truncate(limit as usize);
-        items.last().map(|r| (r.updated_at,r.ticket_id.clone(),r.effect_key.clone()))
+        items.last().map(|r| (r.created_at,r.ticket_id.clone(),r.effect_key.clone()))
     } else { None };
     Ok((items,next))
 }
@@ -458,6 +461,64 @@ mod tests{
         let (ticket,started)=superagent::admit(&mut store,&cfg.id,"Safe work","receipt-fixture",false).unwrap();
         assert!(started);
         (store,ticket.id)
+    }
+
+    #[test]
+    fn unresolved_effect_cursor_does_not_skip_receipt_when_remote_outcome_becomes_uncertain() {
+        let (store, ticket_id) = fixture();
+        for index in 0..110_i64 {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'uncertain',?4,?4)",
+                params![&ticket_id,format!("effect:{index:03}"),
+                    format!("{index:064x}"),10_000+index],
+            ).unwrap();
+        }
+        let first:serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_unresolved_effects(
+                &store.path,None,None,None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(),100);
+        let cursor = &first["nextCursor"];
+        assert_eq!(cursor["createdAt"],cursor["updatedAt"],
+            "old clients may still round-trip the legacy opaque cursor field");
+        // A real timeout/restart changes updated_at, not receipt identity.
+        // The unseen effect would move before the first page's updated_at
+        // boundary and be lost if recovery pagination sorted by that field.
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET updated_at=99999999
+             WHERE ticket_id=?1 AND effect_key='effect:005'",
+            [&ticket_id],
+        ).unwrap();
+        let second:serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_unresolved_effects(
+                &store.path,cursor["createdAt"].as_i64(),
+                cursor["ticketId"].as_str(),cursor["effectKey"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        let keys = first["items"].as_array().unwrap().iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|row| row["effectKey"].as_str().unwrap().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(second["items"].as_array().unwrap().len(),10);
+        assert_eq!(keys.len(),110);
+        assert!(keys.contains("effect:005"),
+            "unseen receipt must remain discoverable after uncertainty update");
+        assert!(second["items"].as_array().unwrap().iter().any(|row|
+            row["effectKey"]=="effect:005" && row["updatedAt"]==99999999));
+        // A previous headless client following its opaque updatedAt cursor
+        // alias must see the identical stable second page.
+        let legacy:serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_unresolved_effects(
+                &store.path,cursor["updatedAt"].as_i64(),
+                cursor["ticketId"].as_str(),cursor["effectKey"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(legacy["items"],second["items"]);
+        assert_eq!(second["observationalOnly"],true);
+        assert_eq!(second["automaticReplayAllowed"],false);
     }
 
     #[test]

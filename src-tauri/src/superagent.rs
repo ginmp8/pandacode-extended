@@ -1444,6 +1444,8 @@ pub(crate) fn inspect_headless_effect_receipts_page(
 /// Inspect every unresolved effect across Tickets, rather than relying on
 /// a bounded per-Ticket view or confusing a missing first-page item with safety.
 /// Read-only snapshots do not start recovery or contact the remote provider.
+/// The cursor's historical updatedAt field is an opaque compatibility alias for
+/// immutable createdAt; each receipt item's updatedAt remains the true update time.
 pub(crate) fn list_headless_unresolved_effects(
     database_path: &std::path::Path,
     before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
@@ -1496,8 +1498,11 @@ fn list_headless_unresolved_effects_scoped(
         "unresolvedTotal": total,
         "pageLimit": 100,
         "items": items,
-        "nextCursor": next.map(|(updated_at,ticket_id,effect_key)| serde_json::json!({
-            "updatedAt":updated_at, "ticketId":ticket_id, "effectKey":effect_key
+        "nextCursor": next.map(|(created_at,ticket_id,effect_key)| serde_json::json!({
+            "createdAt":created_at,
+            // Retain the existing opaque cursor key for headless clients.
+            // It now carries immutable creation order, not mutable update time.
+            "updatedAt":created_at, "ticketId":ticket_id, "effectKey":effect_key
         })),
         "observationalOnly": true,
         "automaticReplayAllowed": false,

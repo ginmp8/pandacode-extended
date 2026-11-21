@@ -345,6 +345,52 @@ fn native_usage_totals_dedupe_attempt_ids_and_never_treat_absent_receipts_as_zer
 }
 
 #[test]
+fn native_composed_usage_ignores_invalid_child_duration_samples() {
+    let mut measured = seat("valid", 1, Some(9.0), SINCE + 1);
+    measured.council.as_mut().unwrap().started_at = SINCE + 3;
+    measured.updated_at = SINCE + 7;
+    let mut attempts = council::inspection(&team_with(on(9.0, 3, 2), vec![measured]), false)
+        .unwrap().attempts;
+    let valid = attempts.remove(0);
+    let mut invalid = valid.clone();
+    invalid.worker_id = "invalid-child-leaf".into();
+    invalid.round = 2;
+    invalid.reviewer_source = "nested_child";
+    invalid.queue_wait_ms = Some(-7);
+    invalid.observed_span_ms = Some(-8);
+    invalid.started_at = SINCE + 10;
+    invalid.last_updated_at = SINCE + 11;
+
+    let totals = council::composed_usage(&[valid.clone(), invalid.clone()], &[]);
+    assert_eq!(totals.unique_attempts, 2);
+    assert_eq!(totals.queue_measured_attempts, 1);
+    assert_eq!(totals.span_measured_attempts, 1);
+    assert_eq!(totals.cumulative_queue_wait_ms, Some(2));
+    assert_eq!(totals.cumulative_observed_span_ms, Some(4));
+    assert_eq!(totals.settled_review_window_ms, Some(4),
+        "invalid child timestamps must not extend the settled native review window");
+    assert!(totals.token_count.is_none() && totals.cost_amount.is_none());
+
+    let by_source = council::composed_usage_by_round_source(
+        &[valid, invalid.clone()], &[]);
+    assert_eq!(by_source.len(), 2);
+    assert_eq!(by_source[0].reviewer_source, "automatic");
+    assert_eq!(by_source[1].reviewer_source, "nested_child");
+    assert_eq!(by_source[1].usage.unique_attempts, 1);
+    assert_eq!(by_source[1].usage.queue_measured_attempts, 0);
+    assert_eq!(by_source[1].usage.span_measured_attempts, 0);
+    assert_eq!(by_source[1].usage.cumulative_queue_wait_ms, None);
+    assert_eq!(by_source[1].usage.cumulative_observed_span_ms, None);
+    assert_eq!(by_source[1].usage.settled_review_window_ms, None);
+
+    let unmeasured = council::composed_usage(&[invalid], &[]);
+    assert_eq!(unmeasured.unique_attempts, 1);
+    assert_eq!(unmeasured.cumulative_queue_wait_ms, None);
+    assert_eq!(unmeasured.cumulative_observed_span_ms, None);
+    assert_eq!(unmeasured.settled_review_window_ms, None);
+}
+
+#[test]
 fn native_root_usage_breakdown_counts_each_attempt_once_across_rounds() {
     let mut first = seat("same-id", 1, Some(9.2), SINCE + 1);
     first.council.as_mut().unwrap().started_at = SINCE + 3;

@@ -693,15 +693,19 @@ fn usage_by_round_source(attempts: &[CouncilInspectionAttempt]) -> Vec<CouncilUs
 fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
     let mut ids = std::collections::HashSet::new();
     let unique: Vec<_> = attempts.iter().filter(|attempt| ids.insert(attempt.worker_id.as_str())).collect();
-    let queue: Vec<i64> = unique.iter().filter_map(|attempt| attempt.queue_wait_ms).collect();
-    let spans: Vec<i64> = unique.iter().filter_map(|attempt| attempt.observed_span_ms).collect();
+    // Invalid child attempt durations are unknown, not measured work.
+    // Keep actual zero-duration observations distinct from malformed negatives.
+    let queue: Vec<i64> = unique.iter().filter_map(|attempt|
+        attempt.queue_wait_ms.filter(|ms| *ms >= 0)).collect();
+    let spans: Vec<i64> = unique.iter().filter_map(|attempt|
+        attempt.observed_span_ms.filter(|ms| *ms >= 0)).collect();
     let add = |values: &[i64]| (!values.is_empty())
         .then(|| values.iter().try_fold(0_i64, |sum, value| sum.checked_add(*value)))
         .flatten();
     // A sum of reviewer spans is not elapsed task time when independent reviewers
     // overlap. Exclude queued/live attempts and never invent a completed window.
     let settled: Vec<_> = unique.iter().filter(|attempt|
-        attempt.observed_span_ms.is_some() && attempt.started_at > 0
+        attempt.observed_span_ms.is_some_and(|ms| ms >= 0) && attempt.started_at > 0
             && attempt.last_updated_at >= attempt.started_at).collect();
     let settled_review_window_ms = settled.iter().map(|attempt| attempt.started_at).min()
         .zip(settled.iter().map(|attempt| attempt.last_updated_at).max())

@@ -279,6 +279,8 @@ pub struct OrchestrationOverview {
     pub queued_count: i64,
     pub completed_count: i64,
     pub blocked_count: i64,
+    /// Durable Tickets blocked, failed, interrupted or inconclusive.
+    pub needs_attention_count: i64,
     /// Pending human acceptance, not a successful native review.
     pub waiting_approval_count: i64,
     /// Pending native Council verdict, never a passing decision.
@@ -310,7 +312,9 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
                 (SELECT COUNT(*) FROM sa_team_roles r
                  WHERE r.orchestration_id=o.id AND r.role='reviewer'),
                 COALESCE(SUM(CASE WHEN t.state='queued' THEN 1 ELSE 0 END),0),
-                COALESCE(SUM(CASE WHEN t.state='completed' THEN 1 ELSE 0 END),0)
+                COALESCE(SUM(CASE WHEN t.state='completed' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state IN
+                    ('blocked','failed','interrupted','inconclusive') THEN 1 ELSE 0 END),0)
          FROM sa_orchestrations o
          LEFT JOIN sa_tickets t ON t.orchestration_id=o.id
          GROUP BY o.id ORDER BY o.created_at,o.id",
@@ -321,6 +325,7 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             ticket_count: row.get(7)?,
             running_count: row.get(8)?,
             blocked_count: row.get(9)?,
+            needs_attention_count: row.get(17)?,
             waiting_approval_count: row.get(10)?,
             waiting_review_count: row.get(11)?,
             last_activity_at: row.get(12)?,
@@ -9585,6 +9590,7 @@ mod tests {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
             assert_eq!(item.blocked_count, 0);
+            assert_eq!(item.needs_attention_count, 0);
             assert_eq!((item.queued_count, item.completed_count), (0, 0));
             assert_eq!((item.waiting_approval_count, item.waiting_review_count), (0, 0));
             assert!(item.last_activity_at > 0);
@@ -9616,6 +9622,7 @@ mod tests {
         let after = orchestration_overview(&store).unwrap();
         let selected = after.iter().find(|c| c.config.id == config.id).unwrap();
         assert_eq!((selected.ticket_count, selected.running_count, selected.blocked_count), (2,0,1));
+        assert_eq!(selected.needs_attention_count, 1);
         assert!(selected.last_activity_at >= before[0].last_activity_at);
         // Projection-only oracle: raw test fixtures enter both native waiting
         // states without implying an actual approval, reviewer or tool grant.
@@ -9627,6 +9634,7 @@ mod tests {
         let selected = waiting.iter().find(|c| c.config.id == config.id).unwrap();
         assert_eq!((selected.waiting_approval_count, selected.waiting_review_count), (1, 1));
         assert_eq!((selected.running_count, selected.blocked_count), (0, 0));
+        assert_eq!(selected.needs_attention_count, 0);
         let unrelated = waiting.iter().find(|c| c.config.id == other.id).unwrap();
         assert_eq!((unrelated.waiting_approval_count, unrelated.waiting_review_count), (0, 0));
         let serialized = serde_json::to_value(selected).unwrap();
@@ -9641,6 +9649,19 @@ mod tests {
         let owned=projected.iter().find(|item|item.config.id==config.id).unwrap();
         let unrelated=projected.iter().find(|item|item.config.id==other.id).unwrap();
         assert_eq!((owned.queued_count,owned.completed_count),(1,1));
+        assert_eq!(owned.needs_attention_count, 0);
+        for state in ["failed", "interrupted", "inconclusive"] {
+            store.db.execute("UPDATE sa_tickets SET state=?1 WHERE id=?2",
+                params![state, &blocked.id]).unwrap();
+            let counts = orchestration_overview(&store).unwrap();
+            let own = counts.iter().find(|item| item.config.id == config.id).unwrap();
+            let other_team = counts.iter().find(|item| item.config.id == other.id).unwrap();
+            assert_eq!((own.blocked_count, own.needs_attention_count), (0, 1));
+            assert_eq!(other_team.needs_attention_count, 0);
+            assert_eq!(serde_json::to_value(own).unwrap()["needsAttentionCount"], 1);
+        }
+        store.db.execute("UPDATE sa_tickets SET state='queued' WHERE id=?1",
+            [&blocked.id]).unwrap();
         assert_eq!((unrelated.queued_count,unrelated.completed_count),(0,0));
         let encoded=serde_json::to_value(owned).unwrap();
         assert_eq!(encoded["queuedCount"],1);

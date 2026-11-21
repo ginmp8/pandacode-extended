@@ -3550,10 +3550,10 @@ test('Team directory uses durable native human and Council pending counts indepe
       if(command==='superagent_list')return [
         {id:'team-1',name:'Needs review',coordinatorBotId:'a',workerBotId:'b',enabled:false,
           policyRevision:1,ticketCount:260,runningCount:2,blockedCount:3,
-          queuedCount:8,completedCount:40,waitingApprovalCount:4,waitingReviewCount:2},
+          queuedCount:8,completedCount:40,needsAttentionCount:5,waitingApprovalCount:4,waitingReviewCount:2},
         {id:'team-2',name:'No reviews',coordinatorBotId:'a',workerBotId:'b',enabled:false,
           policyRevision:1,ticketCount:1,runningCount:0,blockedCount:0,
-          queuedCount:0,completedCount:1,waitingApprovalCount:0,waitingReviewCount:0},
+          queuedCount:0,completedCount:1,needsAttentionCount:0,waitingApprovalCount:0,waitingReviewCount:0},
       ] as never;
       if(command==='superagent_tickets')return [] as never;
       throw Error('Unexpected native command: '+command);
@@ -3565,6 +3565,9 @@ test('Team directory uses durable native human and Council pending counts indepe
     '0 awaiting human approval · 0 awaiting Council (not approved)',
   ]);
   await expect(host.locator('.sa-list .sa-counts').first()).toContainText('260 tasks');
+  await expect(host.locator('.sa-list .sa-attention-counts')).toHaveText([
+    '5 needing attention','0 needing attention',
+  ]);
   await expect(host.locator('.sa-list .sa-lifecycle-counts')).toHaveText([
     '8 queued · 40 completed','0 queued · 1 completed',
   ]);

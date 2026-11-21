@@ -54,6 +54,11 @@ The global Demands workspace can filter by the exact native project ID already a
   on the native-loaded Team directory and do not change the selected Team,
   stored policies, permissions or execution. Older fixtures without counts
   are marked unavailable rather than inferred.
+  A separate native **needs attention** counter includes blocked, failed,
+  interrupted and inconclusive durable Tickets, not just blocked; it is
+  computed across the entire Team in SQLite (not from loaded page rows).
+  Council-pending and human-approval states remain separate, and no status
+  count implies a verified review or task completion.
 - **Demands/Runs:** a read-only native Ticket index with stable 200-row
   cursor pages and an explicit **All Teams / specific Team** filter. The Team
   filter is enforced by the native SQL query **before pagination**, so sparse

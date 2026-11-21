@@ -9,7 +9,7 @@ interface Bot { id: string; name: string; paused: boolean; avatar?: string; colo
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   projectId?: string; enabled: boolean; policyRevision: number;
-  ticketCount?: number; runningCount?: number; blockedCount?: number;
+  ticketCount?: number; runningCount?: number; blockedCount?: number; needsAttentionCount?: number;
   queuedCount?: number; completedCount?: number;
   waitingApprovalCount?: number; waitingReviewCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
@@ -356,6 +356,8 @@ export function mountSuperagent(
       safe(nativeCount(item.ticketCount,'tasks')) + ' · ' +
       safe(nativeCount(item.runningCount,'running')) + ' · ' +
       safe(nativeCount(item.blockedCount,'blocked')) + '</small>' +
+      '<small class="sa-attention-counts" aria-label="Native Demands needing attention">' +
+      safe(nativeCount(item.needsAttentionCount,'needing attention')) + '</small>' +
       '<small class="sa-lifecycle-counts" aria-label="Native queued and completed Demand counts">' +
       safe(nativeCount(item.queuedCount,'queued')) + ' · ' +
       safe(nativeCount(item.completedCount,'completed')) + '</small>' +

@@ -1689,7 +1689,11 @@ pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> R
 }
 
 /// Cursor pagination keeps old unresolved remote effects discoverable beyond
-/// the initial 200 results. Each call is a fresh read-only SQLite snapshot:
+/// the initial 200 results. Use the immutable Ticket creation time, not the
+/// mutable updated_at, so an unseen Ticket cannot move ahead of the cursor
+/// when its status changes between pages. The legacy `updatedAt` cursor field
+/// remains an alias for the stable `createdAt` boundary.
+/// Each call is a fresh read-only SQLite snapshot:
 /// after concurrent changes, operators must reconcile current native state
 /// again before attempting any authorized recovery.
 pub(crate) fn list_headless_recovery_inbox_page(
@@ -1739,7 +1743,7 @@ fn list_headless_recovery_inbox_page_scoped(
             "WITH scoped_tickets AS (
                SELECT * FROM sa_tickets WHERE (?7 IS NULL OR orchestration_id=?7)
              ), candidates AS (
-               SELECT t.id,t.updated_at,
+               SELECT t.id,t.created_at,
                  CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
                                   WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
                       THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
@@ -1820,20 +1824,20 @@ fn list_headless_recovery_inbox_page_scoped(
                                (active.bot_id=t.worker_bot_id
                                 AND assignee.project_id=t.project_id)))))
              ), page AS (
-               SELECT id,priority,updated_at FROM candidates
+               SELECT id,priority,created_at FROM candidates
                WHERE ?3 IS NULL OR priority>?3
-                  OR (priority=?3 AND (updated_at<?4
-                      OR (updated_at=?4 AND id<?5)))
-               ORDER BY priority ASC,updated_at DESC,id DESC
+                  OR (priority=?3 AND (created_at<?4
+                      OR (created_at=?4 AND id<?5)))
+               ORDER BY priority ASC,created_at DESC,id DESC
                LIMIT 201
              )
-             SELECT page.id,page.priority,page.updated_at,
+             SELECT page.id,page.priority,page.created_at,
                CASE WHEN ?3 IS NULL THEN 1 ELSE EXISTS(
                  SELECT 1 FROM candidates anchor
-                 WHERE anchor.id=?5 AND anchor.priority=?3 AND anchor.updated_at=?4
+                 WHERE anchor.id=?5 AND anchor.priority=?3 AND anchor.created_at=?4
                ) END AS cursor_valid
              FROM (SELECT 1) singleton LEFT JOIN page ON 1=1
-             ORDER BY page.priority ASC,page.updated_at DESC,page.id DESC",
+             ORDER BY page.priority ASC,page.created_at DESC,page.id DESC",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
             params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL,orchestration_id],
@@ -1866,9 +1870,12 @@ fn list_headless_recovery_inbox_page_scoped(
         }));
     }
     let next_cursor=if ids.len()>200 {
-        ids.get(199).map(|(id,priority,updated_at)| serde_json::json!({
+        ids.get(199).map(|(id,priority,created_at)| serde_json::json!({
             "priority": priority,
-            "updatedAt": updated_at,
+            "createdAt": created_at,
+            // Compatibility alias for existing --before consumers. This is a
+            // stable cursor value, not the Ticket\'s mutable updated_at.
+            "updatedAt": created_at,
             "ticketId": id
         }))
     } else {None};
@@ -7238,6 +7245,64 @@ mod tests {
             .contains("Private batch objective"));
         assert!(!serde_json::to_string(&second).unwrap()
             .contains("Private batch objective"));
+    }
+
+    #[test]
+    fn headless_recovery_cursor_survives_ticket_updates_between_pages() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let mut created_ids = Vec::new();
+        for index in 0..202 {
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Private recovery pagination objective",
+                &format!("stable-recovery-page-{index}"), true,
+            ).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+            created_ids.push(ticket.id);
+        }
+        let initial_audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get(0),
+        ).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(&store.path, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 200);
+        assert_eq!(first["mayHaveMore"], true);
+        let cursor = &first["nextCursor"];
+        assert_eq!(cursor["createdAt"], cursor["updatedAt"]);
+        let observed: std::collections::HashSet<String> = first["items"]
+            .as_array().unwrap().iter()
+            .map(|item| item["ticketId"].as_str().unwrap().to_owned())
+            .collect();
+        let unseen = created_ids.iter()
+            .find(|id| !observed.contains(id.as_str())).unwrap();
+        // Updating an unseen Ticket and the cursor's own Ticket used to
+        // reorder the first one ahead of the boundary or invalidate it.
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=updated_at+100000
+             WHERE id=?1 OR id=?2",
+            params![unseen.as_str(), cursor["ticketId"].as_str().unwrap()],
+        ).unwrap();
+        let second: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path, cursor["priority"].as_i64(),
+                cursor["createdAt"].as_i64(), cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+        assert_eq!(second["mayHaveMore"], false);
+        let mut all = observed;
+        for item in second["items"].as_array().unwrap() {
+            assert!(all.insert(item["ticketId"].as_str().unwrap().to_owned()),
+                "Recovery pagination must not repeat Tickets");
+        }
+        assert_eq!(all.len(), 202, "Status updates must not hide unresolved Tickets");
+        assert!(all.contains(unseen.as_str()));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), initial_audit_count, "Read-only pages must not mutate audit");
+        assert!(!second.to_string().contains("Private recovery pagination objective"));
     }
 
     #[test]

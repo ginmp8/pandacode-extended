@@ -226,12 +226,13 @@ pub(super) fn dispatch_state(
     let store = state.store.lock().map_err(|err| err.to_string())?;
     let mut team = load(&store, parent)?.ok_or("reviewer_session_mismatch: Council unavailable.")?;
     // A persisted TeamSnapshot may still be running after the native root
-    // session was interrupted, completed or archived. Never mint additional
+    // session was interrupted, paused, stopped, completed or archived. Never mint additional
     // host-observed evidence from a revoked task, even through an old tool host.
     let root_session = store.session(parent)
         .map_err(|_| "reviewer_session_mismatch: native root session unavailable.".to_string())?;
     if root_session.archived || root_session.task_stage == "completed"
-        || matches!(root_session.status.as_str(), "interrupted" | "error")
+        || matches!(root_session.status.as_str(),
+            "interrupted" | "error" | "paused" | "stopped")
     {
         return Err("reviewer_session_mismatch: native root Council session is no longer authorized.".into());
     }
@@ -257,7 +258,8 @@ pub(super) fn dispatch_state(
         || reviewer_session.worktree_branch != root_session.worktree_branch
         || reviewer_session.mode != root_session.mode
         || reviewer_session.archived || reviewer_session.task_stage == "completed"
-        || matches!(reviewer_session.status.as_str(), "interrupted" | "error" | "completed")
+        || matches!(reviewer_session.status.as_str(),
+            "interrupted" | "error" | "completed" | "paused" | "stopped")
     {
         return Err("reviewer_session_mismatch: native reviewer session is no longer authorized.".into());
     }
@@ -353,7 +355,8 @@ fn dispatch_file_state(
     let root = store.session(parent)
         .map_err(|_| "reviewer_session_mismatch: native Council session unavailable.".to_string())?;
     if root.archived || root.task_stage == "completed"
-        || matches!(root.status.as_str(), "interrupted" | "error")
+        || matches!(root.status.as_str(),
+            "interrupted" | "error" | "paused" | "stopped")
         || team.generation != generation || !active(&team.status)
     {
         return Err("reviewer_session_mismatch: Council is no longer authorized.".into());
@@ -369,7 +372,8 @@ fn dispatch_file_state(
         || native.project_id != root.project_id || native.worktree_path != root.worktree_path
         || native.worktree_branch != root.worktree_branch
         || native.mode != root.mode || native.archived || native.task_stage == "completed"
-        || matches!(native.status.as_str(), "interrupted" | "error" | "completed")
+        || matches!(native.status.as_str(),
+            "interrupted" | "error" | "completed" | "paused" | "stopped")
         || !worker.read_only || worker.wrote_at != 0 || !worker.files.is_empty()
     {
         return Err("reviewer_session_mismatch: native reviewer scope or read-only authority changed.".into());

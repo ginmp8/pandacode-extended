@@ -816,6 +816,8 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     for (status, stage, archived) in [
         ("interrupted", original_root.task_stage.as_str(), false),
         ("error", original_root.task_stage.as_str(), false),
+        ("paused", original_root.task_stage.as_str(), false),
+        ("stopped", original_root.task_stage.as_str(), false),
         (original_root.status.as_str(), "completed", false),
         (original_root.status.as_str(), original_root.task_stage.as_str(), true),
     ] {
@@ -850,6 +852,8 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     for (status, stage, archived) in [
         ("interrupted", native_reviewer_session.task_stage.as_str(), false),
         ("error", native_reviewer_session.task_stage.as_str(), false),
+        ("paused", native_reviewer_session.task_stage.as_str(), false),
+        ("stopped", native_reviewer_session.task_stage.as_str(), false),
         (native_reviewer_session.status.as_str(), "completed", false),
         (native_reviewer_session.status.as_str(), native_reviewer_session.task_stage.as_str(), true),
     ] {
@@ -1253,6 +1257,47 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
         store.db.execute("UPDATE sessions SET worktree_branch=?2 WHERE id=?1",
             rusqlite::params![&first_file_session, original_branch]).unwrap();
     }
+    // A retained file-check host must not mint fresh evidence when the
+    // native root or reviewer session is paused/stopped but TeamSnapshot
+    // and worker status still say running.
+    let original_root_status = state.store.lock().unwrap().session(&sid).unwrap().status;
+    let original_leaf_status = state.store.lock().unwrap().session(&first_file_session).unwrap().status;
+    let before_pause = serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap();
+    for revoked in ["paused", "stopped"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sid, revoked]).unwrap();
+        }
+        let denied = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &first_actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"file-proof"})).unwrap_err();
+        assert!(denied.contains("Council is no longer authorized"),
+            "paused/stopped root must deny native file evidence: {denied}");
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sid, &original_root_status]).unwrap();
+            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&first_file_session, revoked]).unwrap();
+        }
+        let denied = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &first_actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"file-proof"})).unwrap_err();
+        assert!(denied.contains("native reviewer scope or read-only authority changed"),
+            "paused/stopped reviewer must deny native file evidence: {denied}");
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&first_file_session, &original_leaf_status]).unwrap();
+        }
+        assert_eq!(serde_json::to_value(
+            load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+        ).unwrap(), before_pause, "revoked host calls must not persist file evidence");
+    }
+
     for id in &reviewer_ids {
         let actor = coordination::Actor::Worker { id: id.clone(), attempt: 1 };
         assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,

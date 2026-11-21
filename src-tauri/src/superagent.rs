@@ -3772,12 +3772,15 @@ pub(crate) fn guard_run_admission(
     // A bot lease protects its native identity across all provider sessions,
     // even when an older conversation still points at a different project.
     let session_bot_id = bots::owner_of(store, session_id)?.map(|(bot, _)| bot.id);
+    // A terminal Ticket with a still-running orphan Assignment has not proved
+    // provider settlement. Keep its bot/checkout leased until native quarantine
+    // settles that Assignment; a lost in-memory registry cannot release it.
     let leased_by_other: bool = store.db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
-            JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+            JOIN sa_tickets t ON t.id=a.ticket_id
             LEFT JOIN sessions assigned ON assigned.id=a.session_id
-            WHERE a.state='running' AND t.state='running'
+            WHERE a.state='running'
               AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL
                     OR (?3 IS NOT NULL AND a.bot_id=?3)
                     OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
@@ -3797,9 +3800,9 @@ pub(crate) fn guard_run_admission(
     let mut statement=store.db.prepare(
         "SELECT t.project_id, assigned.project_id
          FROM sa_assignments a
-         JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+         JOIN sa_tickets t ON t.id=a.ticket_id
          LEFT JOIN sessions assigned ON assigned.id=a.session_id
-         WHERE a.state='running' AND t.state='running' AND a.session_id<>?1",
+         WHERE a.state='running' AND a.session_id<>?1",
     ).map_err(|e|e.to_string())?;
     let leased=statement.query_map([session_id],|r|Ok((
         r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
@@ -3815,10 +3818,9 @@ pub(crate) fn guard_run_admission(
             }
         }
     }
-    // A stopped or revoked Ticket releases its durable lease immediately,
-    // but the underlying provider may still be running until cancellation
-    // finishes. Keep ordinary sessions off the same checkout or bot until
-    // the native session actually leaves the live agent registry.
+    // A stopped or revoked Ticket releases its durable lease when its
+    // Assignment settles. A still-running provider may outlive cancellation,
+    // so also check the in-memory registry after the durable orphan fence.
     if !superagent_run && !running_sessions.is_empty() {
         let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
@@ -10992,6 +10994,19 @@ mod tests {
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
         assert_eq!(configuration(&store, &team.id).unwrap().policy_revision, disabled.policy_revision);
 
+        // The Ticket is terminal, but its orphan Assignment still records a
+        // running provider. An ordinary chat must not reuse that checkout
+        // merely because the in-memory registry was lost after restart.
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let conflict = guard_run_admission(&store, &ordinary.id, &[]).unwrap_err();
+        assert!(conflict.contains("reserved"), "{conflict}");
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('disjoint', 'Disjoint', '/tmp/disjoint-sa-orphan-admission')", [],
+        ).unwrap();
+        let unrelated = store.create_session("disjoint", "codex", "default", "ask").unwrap();
+        assert!(guard_run_admission(&store, &unrelated.id, &[]).is_ok(),
+            "An orphan lease cannot block a distinct physical checkout");
+
         let receipt: serde_json::Value = serde_json::from_str(
             &headless_quarantine_terminal_orphan(
                 &store.path, &ticket.id, terminal.revision,
@@ -10999,6 +11014,8 @@ mod tests {
         ).unwrap();
         assert_eq!(receipt["quarantinedAssignments"], 1);
         assert_eq!(receipt["providerStoppedByCommand"], false);
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok(),
+            "Verified quarantine must release the stale checkout lease");
         assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).unwrap().enabled);
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
     }

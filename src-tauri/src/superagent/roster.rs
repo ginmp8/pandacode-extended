@@ -153,6 +153,10 @@ pub struct AdmittedMemberProfile {
     /// Legacy read-only Tickets may omit this field; absence never authorizes tools.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub prompt_identity_sha256:Option<String>,
+    /// SuperAgent's actual assignment brief includes the bot name. Pin it for
+    /// new Tickets without changing the meaning of legacy prompt digests.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub brief_name_sha256:Option<String>,
 }
 #[derive(Debug,Clone,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -191,6 +195,14 @@ pub(super) fn prompt_identity(bot:&bots::Bot)->String {
     format!("{:x}",digest.finalize())
 }
 
+// Unlike ordinary bot conversations, SuperAgent briefs deliberately omit
+// goals and soul. The bot name is included and must not drift mid-Demand.
+fn brief_name_identity(bot:&bots::Bot)->String {
+    let mut digest=Sha256::new();
+    digest.update(bot.name.as_bytes());
+    format!("{:x}",digest.finalize())
+}
+
 fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<AdmittedMemberProfile> {
     if let Some(issue)=member_execution_issue(bot) {
         return Err(issue.into());
@@ -221,6 +233,7 @@ fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<
         reasoning_effort:bot.reasoning_effort.clone(),
         assigned_skill_ids:bot.skills.clone(),
         prompt_identity_sha256:Some(prompt_identity(bot)),
+        brief_name_sha256:Some(brief_name_identity(bot)),
     })
 }
 
@@ -311,6 +324,11 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
             }) {
                 return Err("Invalid persisted task-effective bot prompt identity.".into());
             }
+            if member.brief_name_sha256.as_deref().is_some_and(|digest| {
+                digest.len()!=64 || !digest.bytes().all(|b| matches!(b,b'0'..=b'9'|b'a'..=b'f'))
+            }) {
+                return Err("Invalid persisted task-effective bot brief name identity.".into());
+            }
             if member.checkout_existed_at_admission.is_some_and(|existed|
                 existed != member.resolved_project_path.is_some()
             ) {
@@ -394,6 +412,9 @@ pub(super) fn require_current_profile(
         current.checkout_existed_at_admission=None;
     }
     if recorded.prompt_identity_sha256.is_none() {current.prompt_identity_sha256=None;}
+    // Older admitted snapshots did not pin display names. Keep their historical
+    // admission semantics; never reinterpret a missing digest as a new grant.
+    if recorded.brief_name_sha256.is_none() {current.brief_name_sha256=None;}
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
     }
@@ -1320,6 +1341,66 @@ mod tests {
         assert_eq!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members,original);
         let reopened=Store::open_read_only(&path).unwrap();
         assert_eq!(ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,original);
+    }
+
+    #[test]
+    fn admitted_brief_name_is_frozen_without_breaking_legacy_tickets() {
+        let path=std::env::temp_dir().join(format!("sa-brief-name-{}.sqlite3",storage::id()));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-brief-name')",[],
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team=super::super::create_configuration(&store,NewOrchestration {
+            name:"Brief identity".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        super::super::change_enabled(&store,&team.id,team.policy_revision,true).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&team.id,"Inspect the fixture","brief-name",false,
+        ).unwrap();
+        assert!(started);
+        let frozen=ticket_profile(&store,&ticket.id).unwrap().unwrap().members;
+        assert!(frozen.iter().all(|member|member.brief_name_sha256.is_some()));
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+
+        // The name is part of bots::brief::superagent. A new assignment
+        // cannot silently adopt a different effective prompt after admission.
+        store.db.execute("UPDATE bots SET name='Renamed worker' WHERE id='worker'",[])
+            .unwrap();
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        assert_eq!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members,frozen);
+        store.db.execute("UPDATE bots SET name='worker' WHERE id='worker'",[]).unwrap();
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+
+        // Historical v46 snapshots omitted the name digest. Treat that
+        // absence as legacy read-only evidence, not as a fabricated digest.
+        let mut legacy=frozen.clone();
+        legacy[1].brief_name_sha256=None;
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![&ticket.id,serde_json::to_string(&legacy).unwrap()],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET name='Renamed worker' WHERE id='worker'",[])
+            .unwrap();
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+        // The original legacy role/instructions identity still rejects drift.
+        store.db.execute(
+            "UPDATE bots SET instructions='New instruction' WHERE id='worker'",[],
+        ).unwrap();
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(
+            ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,legacy,
+        );
+        assert!(require_current_profile(&reopened,&ticket.id,"worker","worker").is_err());
     }
 
     #[test]

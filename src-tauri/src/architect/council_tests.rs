@@ -5545,6 +5545,25 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
         store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
         (old, serde_json::to_value(&root).unwrap())
     };
+    // Terminal native root status must not mint a replacement child even when
+    // the old paused TeamSnapshot and frozen reservations are unchanged.
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let original_status = store.session(&sid).unwrap().status;
+        store.db.execute("UPDATE sessions SET status='completed' WHERE id=?1", [&sid]).unwrap();
+        let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+        assert!(denied.contains("child_council_recovery_denied"), "{denied}");
+        let reserved: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &old_child], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reserved, old_child, "terminal root must not replace a child reservation");
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sid, original_status],
+        ).unwrap();
+    }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
@@ -6857,48 +6876,55 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
     let child_before = serde_json::to_value(
         load(&store, &launch.admission.parent).unwrap().unwrap()
     ).unwrap();
-    // A persisted interrupted session revokes child authority even when an
-    // older root team snapshot still reads running after a partial restart.
+    // A stale running root team must not outlive the native root session.
+    // Paused, stopped and completed sessions revoke new leaf dispatch just
+    // as an interrupted provider session does.
     let previous_status = store.session(&sid).unwrap().status;
-    store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid]).unwrap();
-    for denied in [
-        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
-        child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
-            .err().expect("interrupted root must not launch native child leaves"),
-        child_council::admit_leaves(&store, &root).unwrap_err(),
-    ] {
-        assert!(denied.contains("child_council_revoked"), "{denied}");
+    for revoked in ["interrupted", "paused", "stopped", "completed"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sid, revoked],
+        ).unwrap();
+        for denied in [
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+                .err().expect("revoked root must not launch native child leaves"),
+            child_council::admit_leaves(&store, &root).unwrap_err(),
+        ] {
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap()
+        ).unwrap(), child_before, "revoked root cannot mutate a native child");
     }
-    assert_eq!(serde_json::to_value(
-        load(&store, &launch.admission.parent).unwrap().unwrap()
-    ).unwrap(), child_before, "interrupted root cannot mutate a native child");
     store.db.execute(
         "UPDATE sessions SET status=?2 WHERE id=?1",
-        rusqlite::params![sid, previous_status],
+        rusqlite::params![&sid, previous_status],
     ).unwrap();
     child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
 
-    // A restarted child may be interrupted independently of its root. A
-    // persisted running child team is not proof of a live, authorized session.
+    // A child with a revoked native session cannot dispatch a sibling or
+    // authenticate an old composite seat, even if its team still says running.
     let child_session_status = store.session(&launch.admission.parent).unwrap().status;
-    store.db.execute(
-        "UPDATE sessions SET status='interrupted' WHERE id=?1",
-        [&launch.admission.parent],
-    ).unwrap();
-    for denied in [
-        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
-        child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
-            .err().expect("interrupted child must not launch a sibling leaf"),
-        child_council::admit_leaves(&store, &root).unwrap_err(),
-        child_council::inspect(&store, &root).unwrap_err(),
-    ] {
-        assert!(denied.contains("child_council_revoked"), "{denied}");
+    for revoked in ["interrupted", "paused", "stopped", "completed"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&launch.admission.parent, revoked],
+        ).unwrap();
+        for denied in [
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+                .err().expect("revoked child must not launch a sibling leaf"),
+            child_council::admit_leaves(&store, &root).unwrap_err(),
+            child_council::inspect(&store, &root).unwrap_err(),
+        ] {
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        assert_eq!(
+            serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+            child_before, "revoked child session cannot mutate the native child team",
+        );
     }
-    assert_eq!(
-        serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
-        child_before,
-        "revoked child session cannot mutate the native child team",
-    );
     store.db.execute(
         "UPDATE sessions SET status=?2 WHERE id=?1",
         rusqlite::params![&launch.admission.parent, child_session_status],
@@ -6938,7 +6964,7 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
     // A crashed leaf can retain an old running worker snapshot. The real
     // interrupted/error session must revoke callbacks, new leaves and results.
     let leaf_status = store.session(&launch.sid).unwrap().status;
-    for revoked in ["interrupted", "error"] {
+    for revoked in ["interrupted", "error", "paused", "stopped"] {
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![&launch.sid, revoked],

@@ -118,10 +118,10 @@ fn frozen_with_recovery_status(
     // across restart, even when its old child TeamSnapshot still says running.
     // Recheck the native session on every inspection, launch and callback.
     if session.archived || session.task_stage == "completed" || session.status == "completed"
-        || (matches!(session.status.as_str(), "interrupted" | "error")
+        || (matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped")
             && !allow_revoked_for_recovery)
     {
-        return Err("child_council_revoked: reserved child task is archived, completed, interrupted or failed.".into());
+        return Err("child_council_revoked: reserved child task is archived, completed, paused, stopped, interrupted or failed.".into());
     }
     if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
         || session.worktree_branch != parent.worktree_branch || session.mode != "plan"
@@ -262,9 +262,9 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
 fn require_live_root_session(store: &Store, root_id: &str) -> Result<()> {
     let session = store.session(root_id)?;
     if session.archived || session.task_stage == "completed"
-        || matches!(session.status.as_str(), "interrupted" | "error")
+        || matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped" | "completed")
     {
-        return Err("child_council_revoked: root task is archived, completed, interrupted or failed.".into());
+        return Err("child_council_revoked: root task is archived, completed, paused, stopped, interrupted or failed.".into());
     }
     Ok(())
 }
@@ -503,7 +503,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
     }
     config.validate()?;
     let parent = store.session(&root.session_id)?;
-    if parent.archived || parent.task_stage == "completed" {
+    if parent.archived || parent.task_stage == "completed" || parent.status == "completed" {
         return Err("child_council_recovery_denied: root task is settled.".into());
     }
     // Crash recovery is not a way to bypass an active, unpaused root.
@@ -856,7 +856,7 @@ fn validate_admitted(
         // launch, callbacks or Resume. Only explicit recovery of a fully
         // stopped, unscored first wave under a paused root may inspect their
         // original native grants before permanently detaching those sessions.
-        if matches!(session.status.as_str(), "interrupted" | "error")
+        if matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped")
             && !(allow_revoked_leaf_session
                 && ((root.status == "paused"
                         && matches!(leaf.status.as_str(), "queued" | "stopped"))

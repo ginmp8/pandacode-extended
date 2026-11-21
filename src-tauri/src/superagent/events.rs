@@ -2432,6 +2432,199 @@ fn observe_authenticated_check_run(
     )
 }
 
+/// A single explicit local operator command correlates one already-linked
+/// GitHub PR's bounded Check Runs with existing native Observe receipts.
+/// It is never a CI acceptance gate or an authorization to execute work.
+fn linked_pr_check_source(store: &Store, source_id: &str, ticket_id: &str,
+    pull_key: &str) -> Result<EventSource>
+{
+    if !valid_thread_key(pull_key) || !pull_key.starts_with("pull:") {
+        return Err("Choose one canonical pull:123 thread key.".into());
+    }
+    let selected = source(store, source_id)?;
+    if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
+        return Err("Linked PR Checks require an enabled Check Run Observe source.".into());
+    }
+    require_observe_preflight(store, &selected)?;
+    let ticket = super::get_ticket(store, ticket_id)?;
+    if ticket.orchestration_id != selected.orchestration_id {
+        return Err("Check Run source and Ticket belong to different Teams.".into());
+    }
+    let linked: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_source_thread_links
+          WHERE source_id=?1 AND ticket_id=?2 AND subject_key=?3)",
+        params![source_id, ticket_id, pull_key], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !linked {
+        return Err("Explicitly link this PR to this Ticket and Check Run source first.".into());
+    }
+    Ok(selected)
+}
+
+const LINKED_PR_CHECK_LIMIT: usize = 100;
+
+/// Validate the entire, finite authenticated API response before writing any
+/// receipts. A truncated response must never be reported as all PR checks.
+fn authenticated_linked_pr_checks(
+    selected: &EventSource, repository_id: u64, pull_key: &str,
+    pull: &serde_json::Value, listing: &serde_json::Value,
+) -> Result<(String, Vec<(i64, serde_json::Value)>, usize)> {
+    let number = pull_key.strip_prefix("pull:")
+        .filter(|_| valid_thread_key(pull_key))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("Invalid linked PR thread key.")?;
+    let canonical_url = format!("https://github.com/{}/pull/{number}", selected.repository);
+    if pull.get("number").and_then(serde_json::Value::as_u64) != Some(number)
+        || pull.get("id").and_then(serde_json::Value::as_u64).is_none_or(|id| id == 0)
+        || !pull.get("html_url").and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.eq_ignore_ascii_case(&canonical_url))
+        || pull.pointer("/base/repo/id").and_then(serde_json::Value::as_u64) != Some(repository_id)
+        || !pull.pointer("/base/repo/full_name").and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(&selected.repository))
+    {
+        return Err("Authenticated PR does not match the linked thread and immutable repository.".into());
+    }
+    let sha = pull.pointer("/head/sha").and_then(serde_json::Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|ch| ch.is_ascii_hexdigit()))
+        .ok_or("Authenticated PR has no valid exact head SHA.")?;
+    let total = listing.get("total_count").and_then(serde_json::Value::as_u64)
+        .ok_or("Check Runs listing is missing its total count.")?;
+    let runs = listing.get("check_runs").and_then(serde_json::Value::as_array)
+        .ok_or("Check Runs listing has no native result array.")?;
+    if total > LINKED_PR_CHECK_LIMIT as u64 || runs.len() != total as usize {
+        return Err("Check Runs window is incomplete or exceeds 100; inspect individual runs instead.".into());
+    }
+    let mut selected_runs = Vec::new();
+    let mut pending = 0;
+    let mut seen_ids = std::collections::HashSet::new();
+    for run in runs {
+        let Some(slug) = run.pointer("/app/slug").and_then(serde_json::Value::as_str) else {
+            return Err("Authenticated Check Run has no app identity.".into());
+        };
+        if !token_ok(slug, 80) {
+            return Err("Authenticated Check Run has an invalid app identity.".into());
+        }
+        if !slug.eq_ignore_ascii_case(&selected.actor_filter) { continue; }
+        let id = run.get("id").and_then(serde_json::Value::as_i64)
+            .filter(|value| *value > 0).ok_or("Check Run has no positive identity.")?;
+        if !seen_ids.insert(id) {
+            return Err("Authenticated Check Runs listing repeats the same run identity.".into());
+        }
+        let status = run.get("status").and_then(serde_json::Value::as_str)
+            .ok_or("Check Run has no status.")?;
+        if matches!(status, "queued" | "in_progress") {
+            pending += 1;
+            continue;
+        }
+        if status != "completed" {
+            return Err("Unsupported Check Run status; no receipts committed.".into());
+        }
+        if run.get("head_sha").and_then(serde_json::Value::as_str) != Some(sha) {
+            return Err("Check Run head differs from the authenticated PR revision.".into());
+        }
+        let envelope = authenticated_check_run(selected, run, id, 1, repository_id)?;
+        if envelope.subject_key != pull_key {
+            return Err("Check Run is associated with a different PR.".into());
+        }
+        selected_runs.push((id, run.clone()));
+    }
+    Ok((sha.to_owned(), selected_runs, pending))
+}
+
+/// Read-only authenticated gh lookup. Query a single verified PR head, never
+/// an unbounded repository-wide Checks feed or provider-supplied action.
+fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
+    -> Result<(String, serde_json::Value, serde_json::Value, u64)>
+{
+    if !repo_ok(repository) || !valid_thread_key(pull_key)
+        || !pull_key.starts_with("pull:") {
+        return Err("Invalid authenticated PR Checks scope.".into());
+    }
+    let root = std::env::temp_dir();
+    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
+    let endpoint = format!("repos/{repository}");
+    let repo = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    )?)?;
+    let repository_id = authenticated_repository_id(&repo, repository)?;
+    let number = pull_key.trim_start_matches("pull:");
+    let endpoint = format!("repos/{repository}/pulls/{number}");
+    let pull = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    )?)?;
+    // Validate the head and repository BEFORE using them in the Checks URL.
+    let empty = serde_json::json!({"total_count":0,"check_runs":[]});
+    let (head_sha, _, _) = authenticated_linked_pr_checks(
+        &EventSource { id: String::new(), orchestration_id: String::new(),
+            repository: repository.to_owned(), actor_filter: "checks".into(),
+            event_kind: "check_run.completed".into(), mode: "observe".into(),
+            policy_revision: 1, last_sequence: 0 },
+        repository_id, pull_key, &pull, &empty,
+    )?;
+    let endpoint = format!(
+        "repos/{repository}/commits/{head_sha}/check-runs?per_page={LINKED_PR_CHECK_LIMIT}"
+    );
+    let listing = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    )?)?;
+    // A PR head may move during the request. Do not attribute stale runs to
+    // its newer revision; this is a read-only GET and safe to retry explicitly.
+    let endpoint = format!("repos/{repository}/pulls/{number}");
+    let current = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    )?)?;
+    if current != pull {
+        // GitHub may update unrelated PR counters; compare only identity and
+        // the immutable head targeted by this batch.
+        let (current_sha, _, _) = authenticated_linked_pr_checks(
+            &EventSource { id: String::new(), orchestration_id: String::new(),
+                repository: repository.to_owned(), actor_filter: "checks".into(),
+                event_kind: "check_run.completed".into(), mode: "observe".into(),
+                policy_revision: 1, last_sequence: 0 },
+            repository_id, pull_key, &current, &empty,
+        )?;
+        if head_sha != current_sha {
+            return Err("PR head changed while fetching Checks; retry explicitly.".into());
+        }
+    }
+    recheck_authenticated_operator(&root, &signed_in, operator_id)?;
+    Ok((signed_in, pull, listing, repository_id))
+}
+
+/// A local headless read of authenticated Checks with durable, deduplicated,
+/// source-scoped Observe receipts. No new Ticket, native grant or final result.
+pub(crate) fn headless_observe_linked_pr_checks(
+    path: &std::path::Path, source_id: &str, ticket_id: &str, pull_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    let selected = linked_pr_check_source(&store, source_id, ticket_id, pull_key)?;
+    let (signed_in, pull, listing, repository_id) =
+        fetch_authenticated_linked_pr_checks(&selected.repository, pull_key)?;
+    let (head_sha, runs, pending) = authenticated_linked_pr_checks(
+        &selected, repository_id, pull_key, &pull, &listing,
+    )?;
+    // Re-check link and source policy after network IO, then before every
+    // native source receipt. Revocation cannot re-enable a stale Check Run.
+    linked_pr_check_source(&store, source_id, ticket_id, pull_key)?;
+    let mut observed = 0;
+    let mut duplicates = 0;
+    for (id, raw) in &runs {
+        linked_pr_check_source(&store, source_id, ticket_id, pull_key)?;
+        let receipt = observe_authenticated_check_run_with_repository_id(
+            &store, &selected, *id, raw, &signed_in, repository_id,
+        )?;
+        if receipt.duplicate { duplicates += 1; }
+        else if receipt.decision == "observed_permitted" { observed += 1; }
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "sourceId":source_id, "ticketId":ticket_id, "pullKey":pull_key,
+        "headSha":head_sha, "observed":observed, "duplicates":duplicates,
+        "pendingSkipped":pending, "bounded":true, "observationalOnly":true,
+        "authorizationIssued":false, "councilApproved":false,
+    })).map_err(|e| e.to_string())
+}
+
 /// One operator-requested, authenticated Check Run lookup; no webhook, source
 /// subscription, inferred task, privilege grant, external write or Council pass.
 /// A missing/ambiguous PR association fails closed (including fork checks).
@@ -5055,6 +5248,110 @@ mod tests {
         assert_eq!(list_decisions(&after, &on.id, 10).unwrap().len(), 1);
         assert_eq!(after.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn linked_pr_checks_require_complete_verified_window_and_exact_identity() {
+        let (store, _) = fixture();
+        let src = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let src = set_mode(&store, &src.id, src.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let pull = serde_json::json!({
+            "id":99,"number":42,
+            "html_url":"https://github.com/owner/repo/pull/42",
+            "base":{"repo":{"id":900,"full_name":"owner/repo"}},
+            "head":{"sha":sha}
+        });
+        let run = serde_json::json!({
+            "id":77,"status":"completed","conclusion":"success",
+            "head_sha":sha, "completed_at":chrono::Utc::now().to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        let listing = serde_json::json!({"total_count":2,"check_runs":[run.clone(),
+            {"id":78,"app":{"slug":"trusted-bot","id":44},"status":"in_progress"}]});
+        let (head, found, pending) = authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&listing).unwrap();
+        assert_eq!(head,sha);
+        assert_eq!(found.len(),1);
+        assert_eq!(pending,1);
+        let mut broken = listing.clone();
+        broken["total_count"] = serde_json::json!(101);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["total_count"] = serde_json::json!(3);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1] = run.clone();
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][0]["head_sha"] = serde_json::json!("0000000000000000000000000000000000000000");
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][0]["pull_requests"][0]["number"] = serde_json::json!(43);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        let mut foreign = pull.clone();
+        foreign["base"]["repo"]["id"] = serde_json::json!(901);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&foreign,&listing).is_err());
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:43",&pull,&listing).is_err());
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:042",&pull,&listing).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_event_decisions",
+            [],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn linked_pr_checks_use_real_source_receipts_without_creating_task_authority() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store,"existing-ticket","orch");
+        let off = create_source(&store,"orch","owner/repo","trusted-bot",
+            "check_run.completed").unwrap();
+        link_thread(&store,&off.id,"existing-ticket","pull:42").unwrap();
+        assert!(linked_pr_check_source(&store,&off.id,"existing-ticket","pull:42").is_err());
+        let active = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        assert!(linked_pr_check_source(&store,&active.id,"existing-ticket","pull:42").is_ok());
+        assert!(linked_pr_check_source(&store,&active.id,"existing-ticket","pull:43").is_err());
+        assert!(linked_pr_check_source(&store,&active.id,"missing-ticket","pull:42").is_err());
+        let sha="0123456789012345678901234567890123456789";
+        let run=serde_json::json!({
+            "id":7701,"status":"completed","conclusion":"failure",
+            "head_sha":sha,"completed_at":chrono::Utc::now().to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        let first=observe_authenticated_check_run_with_repository_id(
+            &store,&active,7701,&run,"local-operator",900).unwrap();
+        assert_eq!(first.decision,"observed_permitted");
+        assert!(!first.duplicate);
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store,&active,7701,&run,"local-operator",900).unwrap().duplicate);
+        let records=linked_decisions(&store,"existing-ticket",50).unwrap();
+        assert_eq!(records.len(),1);
+        assert_eq!(records[0].check_conclusion.as_deref(),Some("failure"));
+        assert_eq!(records[0].check_head_sha.as_deref(),Some(sha));
+        let off = set_mode(&store,&active.id,active.policy_revision,"off").unwrap();
+        assert!(linked_pr_check_source(&store,&off.id,"existing-ticket","pull:42").is_err());
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store,&active,7701,&run,"local-operator",900).is_err());
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened,"existing-ticket",50).unwrap().len(),1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates",
+            [],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments",
+            [],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
 
     #[test]

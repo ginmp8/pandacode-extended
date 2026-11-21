@@ -76,6 +76,7 @@ enum Command {
     ObserveSource { source_id: String },
     ObserveTeamSources { orchestration_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
+    ObserveLinkedPrChecks { source_id: String, ticket_id: String, pull_key: String },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
     QueueSelectedWorkerDemand { orchestration_id: String, worker_bot_id: String, request_key: String, objective_file: PathBuf },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
@@ -760,6 +761,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ObserveLinkedPrChecks { source_id, ticket_id, pull_key } = &command {
+                // Exact operator-linked PR and authenticated Checks only;
+                // no WorkItem, Council pass, provider admission or remote write.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_linked_pr_checks(
+                        &dir.join("kingcode.sqlite3"), source_id, ticket_id, pull_key,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent linked PR Checks observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
                 // The objective is a bounded local file, never a command-line
                 // argument or console payload. This command stages but does not run.
@@ -946,7 +963,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::CreateSource { .. } | Command::ListTeamSources { .. }
         | Command::SetSourceMode { .. }
         | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
-        | Command::ObserveCheckRun { .. }
+        | Command::ObserveCheckRun { .. } | Command::ObserveLinkedPrChecks { .. }
         | Command::QueueDemand { .. } | Command::QueueSelectedWorkerDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
@@ -1841,6 +1858,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--observe-linked-pr-checks" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--observe-linked-pr-checks needs source, Ticket and pull:123.")?;
+                validate_member_identity(source_id)?;
+                let ticket_id = args.get(index + 2)
+                    .ok_or("--observe-linked-pr-checks needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let pull_key = args.get(index + 3)
+                    .ok_or("--observe-linked-pr-checks needs a canonical pull:123 key.")?;
+                if !crate::superagent::events::valid_thread_key(pull_key)
+                    || !pull_key.starts_with("pull:") {
+                    return Err("--observe-linked-pr-checks requires an exact pull:123 key.".into());
+                }
+                command = Command::ObserveLinkedPrChecks {
+                    source_id: source_id.clone(), ticket_id: ticket_id.clone(),
+                    pull_key: pull_key.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--queue-worker-demand" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or("--queue-worker-demand needs a Team ID, Worker ID, request key and objective file.")?;
@@ -2428,7 +2465,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2523,6 +2560,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --observe-check-run <id> <check-run-id>
                          Verify one completed GitHub Checks API result for an Observe source;
                          record a durable receipt, never approve a Ticket or invoke Auto.
+  --observe-linked-pr-checks <source-id> <ticket-id> <pull:123>
+                         Read at most 100 authenticated Checks for the explicitly linked
+                         PR head, store deduplicated Observe receipts and skip pending runs.
+                         Incomplete/ambiguous windows fail; this never approves work.
   --queue-demand <team-id> <request-key> <objective-file>
                          Persist a blocked, read-only manual Ticket from a local UTF-8 file
                          (max 16 KiB). Does not grant tools or dispatch a provider.
@@ -3041,6 +3082,23 @@ mod tests {
             "--observe-team-sources ../unsafe",
             "--observe-team-sources team_123 --stop-ticket ticket_123",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--observe-linked-pr-checks source_123 ticket_123 pull:42"),
+            Ok(Command::ObserveLinkedPrChecks {
+                source_id:"source_123".into(), ticket_id:"ticket_123".into(),
+                pull_key:"pull:42".into(),
+            }));
+        for invalid in [
+            "--observe-linked-pr-checks",
+            "--observe-linked-pr-checks source_123",
+            "--observe-linked-pr-checks source_123 ticket_123",
+            "--observe-linked-pr-checks ../foreign ticket_123 pull:42",
+            "--observe-linked-pr-checks source_123 ../foreign pull:42",
+            "--observe-linked-pr-checks source_123 ticket_123 issue:42",
+            "--observe-linked-pr-checks source_123 ticket_123 pull:042",
+            "--observe-linked-pr-checks source_123 ticket_123 pull:42 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--observe-check-run source_123 456"),
             Ok(Command::ObserveCheckRun { source_id:"source_123".into(), check_run_id:456 }));
         for invalid in [
@@ -3530,6 +3588,7 @@ mod tests {
             "--observe-source",
             "--observe-team-sources",
             "--observe-check-run",
+            "--observe-linked-pr-checks",
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",

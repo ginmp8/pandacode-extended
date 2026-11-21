@@ -544,6 +544,7 @@ pandacode serve --set-source-mode <source-id> <expected-policy-revision> off
 pandacode serve --observe-source <source-id>
 pandacode serve --observe-team-sources <team-id>
 pandacode serve --observe-check-run <source-id> <check-run-id>
+pandacode serve --observe-linked-pr-checks <check-source-id> <ticket-id> pull:123
 ```
 
 The local operator may create an exact source for an existing Team without the
@@ -582,6 +583,23 @@ receipts and never expose event bodies. They do **not** register a subscription,
 run continuously, enable Auto, launch a Worker, approve a Council review or
 execute an external effect.
 
+
+For a PR explicitly linked to an existing Ticket under the same enabled Check
+Run source, \`--observe-linked-pr-checks\` verifies the repository's numeric ID,
+the PR base identity and exact head revision via authenticated \`gh api\`, then
+reads at most 100 Check Runs for that head. Link the exact \`pull:123\` key
+first using \`--link-source-thread <check-source-id> <ticket-id> pull:123\`.
+Only completed runs matching the configured GitHub App slug and a unique exact
+PR association are persisted through the existing immutable, revision-guarded
+Observe receipt path. Pending runs are counted but not marked as passed.
+A result set larger than 100, a truncated page, ambiguous PR association or
+head change is denied rather than claimed complete. The command never infers
+Issue→PR causality, approves a Ticket, launches workers or issues tool grants.
+Receipts are committed independently and deduplicated; if a later Check Run
+fails verification, earlier committed receipts remain inspectable and a new
+operator-initiated invocation safely deduplicates them. This is a bounded
+snapshot, **not** continuous CI subscription, a complete quality gate, or a
+Council verdict.
 
 The explicit `--observe-team-sources` command processes every enabled GitHub
 Events source configured for one Team using the same individual authenticated

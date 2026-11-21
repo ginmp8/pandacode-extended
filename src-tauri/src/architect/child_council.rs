@@ -289,6 +289,17 @@ fn require_current_child_reservation_roster(
     Ok(())
 }
 
+/// A terminal native root cannot be reanimated through a stale paused or
+/// interrupted TeamSnapshot. The ordinary Architect control checks task_stage,
+/// but independently completed sessions can retain an older active task stage.
+fn require_unsettled_root_on_resume(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    let session = store.session(&root.session_id)?;
+    if session.archived || session.task_stage == "completed" || session.status == "completed" {
+        return Err("child_council_revoked: completed native root session cannot resume a hierarchical Council.".into());
+    }
+    Ok(())
+}
+
 /// A physical restart interrupts child Architect snapshots and invalidates
 /// their native reviewer grants. Resume must not present a running root with
 /// unusable child reservations; an explicit fresh Council cycle is required.
@@ -301,6 +312,7 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     )?;
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
+    require_unsettled_root_on_resume(store, root)?;
     // Restart preflight must not adopt an unselected child reservation from
     // this immutable cycle. Per-choice validation alone misses foreign rows.
     for choice in &config.nested_bot_reviewers {
@@ -335,6 +347,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     )?;
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
+    require_unsettled_root_on_resume(store, root)?;
     let root_session = store.session(&root.session_id)?;
     // A paused root must not silently adopt an extra or duplicated native
     // child reservation. Old cycles are excluded from this immutable roster.

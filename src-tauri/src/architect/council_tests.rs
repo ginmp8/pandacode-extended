@@ -6463,6 +6463,40 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
         child.status = "blocked".into();
         save(&store, &mut child).unwrap();
     }
+    // A root's native session may complete independently while the saved
+    // TeamSnapshot still says paused or interrupted. Neither Resume path may
+    // resurrect the old task-owned child authority.
+    let previous_native_status = {
+        let store = state.store.lock().unwrap();
+        let before = store.session(&sid).unwrap().status;
+        store.db.execute(
+            "UPDATE sessions SET status='completed' WHERE id=?1", [&sid],
+        ).unwrap();
+        before
+    };
+    for root_team_status in ["paused", "interrupted"] {
+        {
+            let store = state.store.lock().unwrap();
+            let mut root = load(&store, &sid).unwrap().unwrap();
+            root.status = root_team_status.into();
+            save(&store, &mut root).unwrap();
+        }
+        let frozen = serde_json::to_value(saved(&state, &sid)).unwrap();
+        let denied = control_state(&state, &sid, "resume").unwrap_err();
+        assert!(denied.contains("completed native root session"), "{denied}");
+        assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen,
+            "a completed native root must not resurrect its child cycle");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sid, previous_native_status],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+    }
     // A genuine pause with intact child reservations remains resumable.
     assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");
 }

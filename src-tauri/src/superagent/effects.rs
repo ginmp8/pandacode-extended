@@ -278,12 +278,20 @@ pub(crate) fn receipt_history_page(
         return Err("SuperAgent Ticket not found.".into());
     }
     if let Some((created_at, key)) = before {
-        // A well-formed cursor cannot claim another Ticket's receipt, or an
-        // already-applied receipt in the unresolved-only view.
+        // A well-formed cursor cannot claim another Ticket's receipt. If an
+        // unresolved page boundary was subsequently reconciled, allow its
+        // immutable identity only when native effect_applied audit proves the
+        // transition. Synthetic applied receipts cannot skip unresolved work.
         let anchored: bool = store.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
-             WHERE ticket_id=?1 AND created_at=?2 AND effect_key=?3
-               AND (?4=0 OR state IN ('pending','uncertain')))",
+            "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts r
+             WHERE r.ticket_id=?1 AND r.created_at=?2 AND r.effect_key=?3
+               AND (?4=0 OR r.state IN ('pending','uncertain')
+                 OR (r.state='applied' AND EXISTS(
+                   SELECT 1 FROM sa_audit a
+                   WHERE a.ticket_id=r.ticket_id AND a.kind='effect_applied'
+                     AND a.detail='Effect ' || r.effect_key ||
+                       ' marked applied by reconciliation caller; provider verification is caller responsibility'
+                 ))))",
             params![ticket_id, created_at, key, i64::from(unresolved_only)],
             |row| row.get(0),
         ).map_err(|e| e.to_string())?;
@@ -381,14 +389,21 @@ pub(crate) fn unresolved_effects_page_for_team(
         }
     }
     if let Some((at, ticket_id, effect_key)) = before {
-        // A fabricated, cross-Team or reconciled boundary cannot skip an
-        // unresolved effect during local recovery inspection.
+        // Keep a page boundary valid when its effect is genuinely reconciled
+        // between reads, but reject synthetic applied receipts without the
+        // native task-bound audit and all cross-Team or fabricated cursors.
         let anchored: bool = store.db.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM sa_effect_receipts r
                JOIN sa_tickets t ON t.id=r.ticket_id
                WHERE r.created_at=?1 AND r.ticket_id=?2 AND r.effect_key=?3
-                 AND r.state IN ('pending','uncertain')
+                 AND (r.state IN ('pending','uncertain') OR
+                   (r.state='applied' AND EXISTS(
+                     SELECT 1 FROM sa_audit a
+                     WHERE a.ticket_id=r.ticket_id AND a.kind='effect_applied'
+                       AND a.detail='Effect ' || r.effect_key ||
+                         ' marked applied by reconciliation caller; provider verification is caller responsibility'
+                   )))
                  AND (?4 IS NULL OR t.orchestration_id=?4)
              )",
             params![at, ticket_id, effect_key, orchestration_id],
@@ -519,6 +534,98 @@ mod tests{
         assert_eq!(legacy["items"],second["items"]);
         assert_eq!(second["observationalOnly"],true);
         assert_eq!(second["automaticReplayAllowed"],false);
+    }
+
+
+    #[test]
+    fn audited_reconciliation_keeps_unresolved_recovery_cursors_stable() {
+        let (store, ticket_id) = fixture();
+        let team_id: String = store.db.query_row(
+            "SELECT orchestration_id FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        let confirmed_payload = b"verified-by-independent-test-caller";
+        let native_digest = format!("{:x}", Sha256::digest(confirmed_payload));
+        for index in 0..102_i64 {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'uncertain',?4,?4)",
+                params![&ticket_id, format!("effect:{index:03}"),
+                    if index == 2 {native_digest.clone()} else {format!("{index:064x}")},
+                    10_000 + index],
+            ).unwrap();
+        }
+        let (first_global, global_cursor) = unresolved_effects_page(&store, 100, None).unwrap();
+        let (first_team, team_cursor) = unresolved_effects_page_for_team(
+            &store, 100, None, Some(&team_id),
+        ).unwrap();
+        let (first_ticket, ticket_cursor) = receipt_history_page(
+            &store, &ticket_id, 100, None, true,
+        ).unwrap();
+        assert_eq!(first_global.len(), 100);
+        assert_eq!(first_team.len(), 100);
+        assert_eq!(first_ticket.len(), 100);
+        let global_cursor = global_cursor.unwrap();
+        let team_cursor = team_cursor.unwrap();
+        let ticket_cursor = ticket_cursor.unwrap();
+        assert_eq!(global_cursor.2, "effect:002");
+        assert_eq!(team_cursor.2, "effect:002");
+        assert_eq!(ticket_cursor.1, "effect:002");
+
+        // This test-only caller explicitly simulates independent verification;
+        // the receipt primitive does not execute or verify any remote effect.
+        acknowledge_applied(&store, &ticket_id, "effect:002", confirmed_payload).unwrap();
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 101);
+        let (global_rest, global_next) = unresolved_effects_page(
+            &store, 100, Some((
+                global_cursor.0, &global_cursor.1, &global_cursor.2,
+            )),
+        ).unwrap();
+        let (team_rest, team_next) = unresolved_effects_page_for_team(
+            &store, 100, Some((
+                team_cursor.0, &team_cursor.1, &team_cursor.2,
+            )), Some(&team_id),
+        ).unwrap();
+        let (ticket_rest, ticket_next) = receipt_history_page(
+            &store, &ticket_id, 100, Some((
+                ticket_cursor.0, &ticket_cursor.1,
+            )), true,
+        ).unwrap();
+        assert!(global_next.is_none() && team_next.is_none() && ticket_next.is_none());
+        assert_eq!(global_rest.len(), 2);
+        assert_eq!(team_rest.len(), 2);
+        assert_eq!(global_rest[0].effect_key, "effect:001");
+        assert_eq!(global_rest[1].effect_key, "effect:000");
+        assert_eq!(team_rest[0].effect_key, "effect:001");
+        assert_eq!(team_rest[1].effect_key, "effect:000");
+        assert_eq!(ticket_rest.len(), 2);
+        assert_eq!(ticket_rest[0].effect_key, "effect:001");
+        assert_eq!(ticket_rest[1].effect_key, "effect:000");
+
+        // An applied receipt without a matching native reconciliation audit is
+        // not a valid boundary, even if its Ticket and timestamp are genuine.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'synthetic-applied',?2,'applied',9999,9999)",
+            params![&ticket_id, "f".repeat(64)],
+        ).unwrap();
+        assert!(unresolved_effects_page_for_team(
+            &store, 100, Some((9999, &ticket_id, "synthetic-applied")),
+            Some(&team_id),
+        ).is_err());
+        assert!(unresolved_effects_page(
+            &store, 100, Some((9999, &ticket_id, "synthetic-applied")),
+        ).is_err());
+        let reopened = Store::open_read_only(&store.path).unwrap();
+        let (after_reopen, _) = unresolved_effects_page_for_team(
+            &reopened, 100, Some((
+                team_cursor.0, &team_cursor.1, &team_cursor.2,
+            )), Some(&team_id),
+        ).unwrap();
+        assert_eq!(after_reopen, team_rest);
+        assert_eq!(unresolved_count(&reopened, &ticket_id).unwrap(), 101);
     }
 
     #[test]

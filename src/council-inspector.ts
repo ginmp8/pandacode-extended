@@ -33,7 +33,9 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && proof.round === inspection.status.round
     && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
     && proof.lowest >= inspection.status.target;
-  const verdict = inspection.status.state === 'accepted'
+  // A historical user exception is not authorization for a newer revision.
+  // The read-only presenter must never promote stale acceptance to a current gate.
+  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale
     ? 'Accepted by user (not a native pass)'
     : verified ? 'Verified native pass' : 'Native pass not verified';
   const modeLabels: Record<CouncilInspection['mode'], string> = {

@@ -159,6 +159,28 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(refresh).toBeEnabled();
 });
 
+test('Council inspector does not present stale human acceptance as current approval', async ({ page }) => {
+  const accepted = {
+    sessionId: 'accepted-task', mode: 'm1', cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'accepted', round: 1, lowest: 8.8, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, accepted);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector).toContainText('Accepted by user (not a native pass)');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+  }, { ...accepted, status: { ...accepted.status, stale: true } });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Accepted by user (not a native pass)');
+  await expect(inspector).not.toContainText('Verified native pass');
+});
+
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {
     mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,

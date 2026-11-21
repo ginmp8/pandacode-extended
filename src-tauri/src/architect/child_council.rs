@@ -503,8 +503,14 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
     }
     config.validate()?;
     let parent = store.session(&root.session_id)?;
-    if parent.archived || parent.task_stage == "completed" || parent.status == "completed" {
-        return Err("child_council_recovery_denied: root task is settled.".into());
+    // Explicit recovery may replace interrupted child reservations, but it
+    // cannot mint new task authority under a separately revoked root session.
+    // An interrupted/error native root remains recoverable only through the
+    // existing confirmed-crash path below.
+    if parent.archived || parent.task_stage == "completed"
+        || matches!(parent.status.as_str(), "completed" | "paused" | "stopped")
+    {
+        return Err("child_council_recovery_denied: root task is settled or native authority revoked.".into());
     }
     // Crash recovery is not a way to bypass an active, unpaused root.
     // The caller also checks the actual live-agent registry before entry.

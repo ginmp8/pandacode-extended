@@ -5553,14 +5553,20 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
         let original_status = store.session(&sid).unwrap().status;
-        store.db.execute("UPDATE sessions SET status='completed' WHERE id=?1", [&sid]).unwrap();
-        let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
-        assert!(denied.contains("child_council_recovery_denied"), "{denied}");
-        let reserved: String = store.db.query_row(
-            "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
-            rusqlite::params![&sid, &old_child], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(reserved, old_child, "terminal root must not replace a child reservation");
+        for revoked_status in ["paused", "stopped", "completed"] {
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sid, revoked_status],
+            ).unwrap();
+            let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+            assert!(denied.contains("child_council_recovery_denied"), "{denied}");
+            let reserved: String = store.db.query_row(
+                "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, &old_child], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(reserved, old_child,
+                "revoked native root must not replace a child reservation");
+        }
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![&sid, original_status],

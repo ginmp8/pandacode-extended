@@ -1800,10 +1800,12 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     {
         let root_needed = config.reviewer_bot_ids.len() + config.automatic_reviewers;
         let issued = in_round(team, 1).filter(|(worker, seat)| counts(worker, seat)).count();
-        let low_root_score = in_round(team, 1).any(|(_, seat)|
-            seat.score.is_some_and(|score| score.is_finite() && score < config.target));
+        // Keep the round allocator aligned with the native S2 admission and
+        // terminal gates: a stricter required criterion or missing mandatory
+        // evidence can trigger a fresh wave even when global scores pass.
+        let triggered = root_s2_unforced_trigger(team, config, 1);
         if root_needed > 0 && issued >= root_needed
-            && (config.force_escalation || low_root_score)
+            && (config.force_escalation || triggered)
         {
             if view.at_limit(config) {
                 return Err(format!("The Council round limit of {} is reached.", config.max_rounds));

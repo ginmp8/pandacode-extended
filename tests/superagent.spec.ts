@@ -139,6 +139,12 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
       ] as never;
       if (command === 'superagent_list') return [...configs] as never;
       if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_roster') return {
+        orchestrationId:'created-team',policyRevision:1,coordinatorBotId:'coordinator',
+        workerBotIds:['worker','worker-b'],reviewerBotIds:['reviewer'],
+        maxWorkerAttempts:3,purpose:'Prioritize thorough verification within explicit time and cost budgets.',
+        strategy:'performance',executionReady:false,
+      } as never;
       if (command === 'superagent_create') {
         (window as unknown as {saCreateTeamPayload: unknown}).saCreateTeamPayload = args;
         const input = args?.input as Record<string, string>;
@@ -193,6 +199,56 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     purpose:'Prioritize thorough verification within explicit time and cost budgets.',
     strategy:'performance',
   });
+});
+
+
+test('new multi-role Team rejects a stale native roster after creation without repeating the write', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-stale-created-roster';
+    document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {saStaleRosterCalls:string[]}).saStaleRosterCalls=calls;
+    let created:Record<string,unknown>|null=null;
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+        {id:'reviewer',name:'Reviewer',paused:false},
+      ] as never;
+      if(command==='superagent_list')return (created ? [created] : []) as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+        created={...input,id:'stale-roster-team',enabled:false,policyRevision:1,
+          workerCount:1,reviewerCount:0};
+        return created as never;
+      }
+      if(command==='superagent_roster')return {
+        orchestrationId:'stale-roster-team',policyRevision:1,
+        coordinatorBotId:'coordinator',workerBotIds:['worker'],
+        reviewerBotIds:[],maxWorkerAttempts:2,purpose:'',strategy:'balanced',
+        executionReady:true,
+      } as never;
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-stale-created-roster');
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Reviewed Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.locator('details.sa-new-members summary').click();
+  await host.getByRole('group',{name:'Optional Reviewers'})
+    .getByRole('checkbox',{name:'Reviewer'}).check();
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.getByRole('alert')).toContainText('configured roles could not be verified');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saStaleRosterCalls:string[]}).saStaleRosterCalls);
+  expect(calls.filter(command=>command==='superagent_create')).toHaveLength(1);
+  expect(calls.filter(command=>command==='superagent_roster')).toHaveLength(1);
+  expect(calls).not.toContain('superagent_submit');
 });
 
 

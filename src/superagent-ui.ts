@@ -1215,7 +1215,9 @@ export function mountSuperagent(
   }
   // Never treat the create/duplicate ACK as a verified directory state.
   // A stale native read may be repeated; an acknowledged write never is.
-  async function reloadCreatedTeam(created: Config): Promise<void> {
+  async function reloadCreatedTeam(
+    created: Config, expectedRoster?: {workerBotIds:string[]; reviewerBotIds:string[]},
+  ): Promise<void> {
     if (!created || typeof created.id !== 'string' ||
         !/^[A-Za-z0-9_-]{1,128}$/.test(created.id) || created.enabled !== false) {
       throw new Error('Native Team creation returned an invalid or enabled identity.');
@@ -1234,6 +1236,28 @@ export function mountSuperagent(
         persisted.workerBotId !== created.workerBotId) {
       selected = '';
       throw new Error('Native Team creation was acknowledged but its disabled identity could not be verified. Refresh before retrying; the Team may already exist.');
+    }
+    if (expectedRoster) {
+      // A create ACK and a directory row do not prove the requested roster
+      // persisted. Recheck native membership before announcing creation.
+      let saved: TeamRoster;
+      try {
+        saved = await call<TeamRoster>('superagent_roster',{orchestrationId:created.id});
+      } catch {
+        selected = '';
+        throw new Error('Native Team creation was acknowledged but its configured roles could not be read. Refresh before retrying; the Team may already exist.');
+      }
+      if (saved.orchestrationId !== created.id ||
+          saved.policyRevision !== persisted.policyRevision ||
+          saved.coordinatorBotId !== created.coordinatorBotId ||
+          !Array.isArray(saved.workerBotIds) || !Array.isArray(saved.reviewerBotIds) ||
+          saved.workerBotIds.length !== expectedRoster.workerBotIds.length ||
+          saved.reviewerBotIds.length !== expectedRoster.reviewerBotIds.length ||
+          saved.workerBotIds.some((id,index)=>id !== expectedRoster.workerBotIds[index]) ||
+          saved.reviewerBotIds.some((id,index)=>id !== expectedRoster.reviewerBotIds[index])) {
+        selected = '';
+        throw new Error('Native Team creation was acknowledged but its configured roles could not be verified. Refresh before retrying; the Team may already exist.');
+      }
     }
     selected = created.id;
   }
@@ -2696,7 +2720,7 @@ export function mountSuperagent(
         draftCoordinatorBotId = ''; draftWorkerBotId = '';
         draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
         selectedDemandWorkerId = ''; demandPreflight = null;
-        workspaceView = 'runs'; await reloadCreatedTeam(created);
+        workspaceView = 'runs'; await reloadCreatedTeam(created,roster);
       });
     }
     if (form.dataset.saForm === 'reject') {

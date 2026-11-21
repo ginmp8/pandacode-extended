@@ -462,10 +462,12 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
             _=>return Err("Malformed Team role metadata; no authority granted.".into()),
         }
     }
+    // Role/position keys do not prohibit one bot from occupying multiple
+    // persisted slots. Legacy or damaged rosters must fail closed on read.
+    let mut unique=HashSet::new();
+    unique.insert(config.coordinator_bot_id.as_str());
     if workers.iter().chain(reviewers.iter())
-           .any(|id|id==&config.coordinator_bot_id)
-        || workers.iter().skip(1).chain(reviewers.iter())
-           .any(|id|id==&config.worker_bot_id) {
+        .any(|id|!unique.insert(id.as_str())) {
         return Err("Malformed Team role identity; no authority granted.".into());
     }
     let ready=workers.len()==1 && reviewers.is_empty();
@@ -995,6 +997,44 @@ pub async fn superagent_roster_update(window:tauri::WebviewWindow,state:State<'_
 mod tests {
     use super::*;
     use crate::storage;
+
+    #[test]
+    fn persisted_duplicate_worker_and_reviewer_identities_fail_closed_after_restart() {
+        let path=std::env::temp_dir().join(format!("sa-duplicate-roles-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-duplicate-roles')",[],
+        ).unwrap();
+        for id in ["lead","worker","additional","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=create_with_roster(&store,NewOrchestration {
+            name:"Role identity".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker".into(),
+        },RosterInput {
+            worker_bot_ids:vec!["worker".into(),"additional".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        }).unwrap();
+        assert_eq!(read(&store,&cfg.id).unwrap().reviewer_bot_ids,vec!["reviewer"]);
+        // Simulate legacy/corrupt metadata bypassing the validated write API.
+        store.db.execute(
+            "UPDATE sa_team_roles SET bot_id='additional'
+             WHERE orchestration_id=?1 AND role='reviewer'",
+            [&cfg.id],
+        ).unwrap();
+        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role identity"));
+        assert!(effective_team(&store,&cfg.id,&HashMap::new()).unwrap_err()
+            .contains("Malformed Team role identity"));
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert!(read(&reopened,&cfg.id).unwrap_err().contains("Malformed Team role identity"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0,"invalid metadata must never imply an authorized Demand");
+    }
 
     #[cfg(unix)]
     #[test]

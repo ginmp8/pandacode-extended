@@ -1423,6 +1423,28 @@ test('M3 mixed Council preserves a direct bot plus one explicitly added automati
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
+test('M3 automatic reviewer count keeps keyboard focus through repeated roster previews', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'sonnet', paused: false },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await eligibleReviewers(page).first().check();
+  const automatic = panel(page).getByLabel('Additional automatic Architect reviewers');
+  await automatic.focus();
+  await automatic.selectOption('1');
+  await expect(automatic).toBeFocused();
+  await expect(panel(page).getByText('Root Council: 2 of 2–8 combined seats; every source is required.')).toBeVisible();
+  await automatic.selectOption('2');
+  await expect(automatic).toBeFocused();
+  await expect(automatic).toHaveValue('2');
+  await expect(panel(page).getByText('Root Council: 3 of 2–8 combined seats; every source is required.')).toBeVisible();
+  expect(await calls(page)).toEqual([]);
+});
+
 test('M3 one selected bot and one automatic seat persist native reviewer grants and skill checks', async ({ page }) => {
   const bots = [
     { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },

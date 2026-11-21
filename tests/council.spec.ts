@@ -183,7 +183,7 @@ test('Council inspector does not present stale human acceptance as current appro
 
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {
-    mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'task', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
     reservedChildren: [
@@ -210,9 +210,19 @@ test('Council inspector preserves expanded child drill-down only for the same na
   await expect(first).toHaveAttribute('open', '');
   await expect(second).not.toHaveAttribute('open', '');
 
+  // The same child reservation cannot inherit disclosure across an artifact revision.
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, teamRevision: 8,
+  });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(first).not.toHaveAttribute('open', '');
+  await first.locator('summary').click();
+  await expect(first).toHaveAttribute('open', '');
+
   // A new child reservation cannot inherit the prior task's expanded state.
   await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
-    ...inspection,
+    ...inspection, teamRevision: 8,
     reservedChildren: [
       { ...inspection.reservedChildren[0], childSessionId: 'new-child-a', rootCycleId: 'task:2000' },
       inspection.reservedChildren[1],

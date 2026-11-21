@@ -310,7 +310,7 @@ test.describe('shared bot channels', () => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 360, height: 640 });
     const inspection = {
-      cycleStartedAt: 1000, teamRevision: 9,
+      sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 9,
       status: { state: 'passed', round: 1, lowest: 9.7, target: 9, stale: false },
       verifiedPass: false, criteria: [],
       reservedChildren: [{ botId: 'security-child', childSessionId: 'channel-child-one',
@@ -327,7 +327,7 @@ test.describe('shared bot channels', () => {
       const response = await route.fetch();
       const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
         'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") return ' +
-        JSON.stringify(inspection) + '; switch (command) {');
+        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); switch (command) {');
       await route.fulfill({ response, body });
     });
     await showBots(page);
@@ -373,6 +373,14 @@ test.describe('shared bot channels', () => {
     await refresh.click();
     await expect(refresh).toBeEnabled();
     await expect(child).toHaveAttribute('open', '');
+    // Even with the same channel delivery and child reservation, a newer native
+    // artifact revision must not reopen the earlier revision's drill-down.
+    await page.evaluate(next => { (window as any).__channelCouncilInspectorOverride = next; }, {
+      ...inspection, teamRevision: 10,
+    });
+    await refresh.click();
+    await expect(refresh).toBeEnabled();
+    await expect(child).not.toHaveAttribute('open', '');
     await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
     // The browser must use the channel's delivery identity rather than allowing
     // an arbitrary DOM session id to select an unrelated Council.

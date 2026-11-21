@@ -430,10 +430,18 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   // A collapsed disclosure must never offer an un-focusable refresh as a Tab stop.
   refresh.disabled = true;
   body.before(refresh);
+  // Disclosure state belongs to one native root task, cycle, and frozen artifact revision.
+  // A child reservation ID can remain unchanged after the artifact is revised.
+  const scopeOf = (snapshot: CouncilInspection | null): string | null =>
+    snapshot && typeof snapshot.sessionId === 'string' && snapshot.sessionId.trim().length > 0
+      && Number.isSafeInteger(snapshot.cycleStartedAt) && Number.isSafeInteger(snapshot.teamRevision)
+      ? JSON.stringify([snapshot.sessionId, snapshot.cycleStartedAt, snapshot.teamRevision]) : null;
+  let shownScope: string | null = null;
   let serial = 0;
   const load = () => {
     const current = ++serial;
     refresh.disabled = true;
+    const priorScope = shownScope;
     const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
       .map(child => child.dataset.councilChildKey));
     body.textContent = 'Loading native Council result…';
@@ -441,12 +449,17 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     void Promise.resolve().then(read).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
       body.innerHTML = councilInspectionHtml(result);
-      // Only the same frozen child task keeps its expanded drill-down after refresh.
-      // New reservations or changed cycles must not inherit a previous disclosure.
-      body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]')
-        .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
+      const nextScope = scopeOf(result);
+      // The reservation and the root task/revision must still match. A new
+      // artifact revision must not inherit an earlier review's open drill-down.
+      if (priorScope !== null && priorScope === nextScope) {
+        body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]')
+          .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
+      }
+      shownScope = nextScope;
     }).catch(reason => {
       if (serial !== current || !details.open || !details.isConnected) return;
+      shownScope = null;
       body.replaceChildren();
       const error = document.createElement('p');
       error.setAttribute('role', 'alert');

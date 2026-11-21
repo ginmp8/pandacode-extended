@@ -926,6 +926,9 @@ export function mountSuperagent(
           ' · Demand ' + safe(item.ticketState) +
           ' · ' + safe(activityTime(item.createdAt)) +
           ' · ' + (item.hasResult ? 'Provider result recorded (unverified)' : 'No provider result') +
+          ' <button type="button" data-sa-member-open-demand="' + safe(item.assignmentId) +
+          '" aria-label="Open demand for assignment ' + safe(item.assignmentId) +
+          '">Open demand</button>' +
           (item.chatAvailable && openAssignmentChat
             ? ' <button type="button" data-sa-member-open-chat="' + safe(item.assignmentId) +
               '" aria-label="Open chat for assignment ' + safe(item.assignmentId) + '">Open chat</button>'
@@ -2213,6 +2216,59 @@ export function mountSuperagent(
         memberActivityItems = [...memberActivityItems, ...page.items];
         memberActivityHasMore = page.hasMore;
         memberActivityCursor = page.nextCursor;
+      });
+      return;
+    }
+
+    if (target.dataset.saMemberOpenDemand) {
+      const item = memberActivityItems.find(entry =>
+        entry.assignmentId === target.dataset.saMemberOpenDemand);
+      const cfg = current();
+      if (!item || busy || !cfg || cfg.id !== memberActivityTeamId ||
+          item.orchestrationId !== cfg.id || item.botId !== memberActivityBotId) return;
+      void work(async () => {
+        // A historical activity row is not authority to open an unrelated
+        // Ticket. Recheck its immutable Team and exact native Assignment.
+        const fresh = await call<TicketDetails>('superagent_snapshot', {
+          ticketId:item.ticketId,limit:200,
+        });
+        if (!fresh?.ticket || !fresh.mandate ||
+            fresh.ticket.id !== item.ticketId ||
+            fresh.ticket.orchestrationId !== item.orchestrationId ||
+            !Array.isArray(fresh.assignments) ||
+            !fresh.assignments.some(assignment =>
+              assignment.id === item.assignmentId &&
+              assignment.botId === item.botId &&
+              assignment.sessionId === item.sessionId &&
+              assignment.attempt === item.attempt)) {
+          throw new Error('Native Demand or Assignment identity changed; refresh member activity.');
+        }
+        const latest = await call<Ticket[]>('superagent_tickets', {
+          orchestrationId:item.orchestrationId,limit:50,
+        });
+        if (!Array.isArray(latest) ||
+            latest.some(ticket => ticket.orchestrationId !== item.orchestrationId)) {
+          throw new Error('Native Team Ticket list returned foreign records; navigation denied.');
+        }
+        const page = await fetchDemandPage({limit:200,orchestrationId:item.orchestrationId});
+        if (selected !== item.orchestrationId ||
+            memberActivityTeamId !== item.orchestrationId ||
+            memberActivityBotId !== item.botId) {
+          throw new Error('Team selection changed while opening the Demand; retry from activity.');
+        }
+        // The selected assignment may be older than the Team's last 50
+        // Tickets; inject only its reverified canonical Ticket snapshot.
+        tickets = [fresh.ticket, ...latest.filter(ticket => ticket.id !== item.ticketId)];
+        inspectedTicket = item.ticketId;
+        inspectedAssignmentId = item.assignmentId;
+        ticketDetails = null; threadLinks = [];
+        await refreshTicketDetails();
+        demandTeamFilter = item.orchestrationId;
+        demandProjectFilter = ''; demandStateFilter = '';
+        demandSearch = ''; demandSearchDraft = '';
+        allDemands = page; allDemandsLoaded = true; allDemandsHasMore = page.length === 200;
+        workspaceView = 'runs';
+        effectiveTeam = null; clearMemberActivity();
       });
       return;
     }

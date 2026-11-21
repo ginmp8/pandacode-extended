@@ -2918,8 +2918,22 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
       }
       if (command==='superagent_snapshot') {
         if (args?.ticketId!=='ticket-old') throw Error('wrong Ticket requested');
-        return {ticket:{id:'ticket-old',orchestrationId:'team',revision:2,state:'waiting_approval'},
-          assignments:[{id:'a-old',botId:'worker',sessionId:'real-session',attempt:1}]} as never;
+        return {
+          ticket:{id:'ticket-old',orchestrationId:'team',objective:'Historical native demand',
+            revision:2,state:'waiting_approval',evidence:'Worker evidence'},
+          mandate:{actor:'operator',authorizationId:'manual',policyRevision:3,
+            projectId:'worker-project',expiresAt:1800000000000,revoked:false,
+            allowedTools:[],allowedSideEffects:false},
+          assignments:[{id:'a-old',botId:'worker',sessionId:'real-session',attempt:1,
+            state:'finished',createdAt:499,updatedAt:499}],activity:[],
+        } as never;
+      }
+      if (command==='superagent_source_thread_links') return [] as never;
+      if (command==='superagent_all_demands') {
+        if ((args?.query as {orchestrationId?:string} | undefined)?.orchestrationId!=='team')
+          throw Error('Historical Demand query crossed Team boundary');
+        return [{id:'ticket-old',orchestrationId:'team',objective:'Historical native demand',
+          state:'waiting_approval',revision:2,projectId:'worker-project',updatedAt:499}] as never;
       }
       throw Error('Unexpected command: '+command);
     }, async route => { routes.push(route); });
@@ -2933,6 +2947,10 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await expect(activity).toContainText('ticket-new');
   await expect(activity).toContainText('Native chat unavailable');
   await expect(activity.getByRole('button',{name:'Open chat for assignment a-new'})).toHaveCount(0);
+  // A historical row cannot navigate if native ownership/assignment proof is missing.
+  await activity.getByRole('button',{name:'Open demand for assignment a-new'}).click();
+  await expect(host).toContainText('wrong Ticket requested');
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
   await activity.getByRole('button',{name:'Older activity'}).click();
   await expect(activity).toContainText('ticket-old');
   await activity.getByRole('button',{name:'Open chat for assignment a-old'}).click();
@@ -2958,6 +2976,29 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await expect(host).toContainText('invalid or out-of-scope history');
   await expect(roles.getByRole('region',{name:'Team member activity'}))
     .not.toContainText('foreign-ticket');
+  // An older Assignment outside the Team's latest 50 Tickets resolves to
+  // the original canonical Demand and selects its native attempt inspector.
+  await roles.getByRole('button',{name:'View activity for Worker'}).click();
+  await roles.getByRole('region',{name:'Team member activity'})
+    .getByRole('button',{name:'Older activity'}).click();
+  await roles.getByRole('region',{name:'Team member activity'})
+    .getByRole('button',{name:'Open demand for assignment a-old'}).click();
+  await expect(host.getByRole('button',{name:'Demands / Runs'}))
+    .toHaveAttribute('aria-current','page');
+  await expect(host.getByRole('combobox',{name:'Filter Demands by Team'}))
+    .toHaveValue('team');
+  await expect(host.getByRole('region',{name:'Ticket evidence'}))
+    .toContainText('ticket-old');
+  await expect(host.getByRole('button',{name:'Inspect attempt 1'}))
+    .toHaveAttribute('aria-expanded','true');
+  const finalEvidence=await page.evaluate(() =>
+    (window as unknown as {saMemberActivityEvidence:()=>{
+      seen:Array<{command:string;args?:Record<string,unknown>}>;routes:unknown[]
+    }}).saMemberActivityEvidence());
+  expect(finalEvidence.seen.some(call=>call.command==='superagent_all_demands' &&
+    (call.args?.query as {orchestrationId?:string} | undefined)?.orchestrationId==='team')).toBe(true);
+  expect(finalEvidence.seen.some(call=>
+    /submit|dispatch|accept|grant|enable|reserve|stop/.test(call.command))).toBe(false);
 });
 
 test('native Team directory counts configured roles and filters without creating tasks', async ({page}) => {

@@ -2363,7 +2363,8 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
 test('at 900×420 the composer panel fits above its button without scrolling', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 420 });
   await open(page, '/?council');
-  await composerSettled(page);
+  // Panel geometry is independent of whether task history has enabled Send.
+  // A preview task may show Stop instead of a submit button while still permitting Council settings.
   await button(page).click();
   await expect(panel(page)).toBeVisible();
   expect(await panel(page).evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);

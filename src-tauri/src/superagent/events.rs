@@ -2152,6 +2152,14 @@ fn list_decisions_page(
     Ok(SourceDecisionPage { decisions, next_cursor })
 }
 
+/// GitHub App slugs can be renamed or reused. Bind every Check Run source
+/// to the numeric app identity from the authenticated Checks API response.
+fn authenticated_check_run_app_id(raw: &serde_json::Value) -> Result<i64> {
+    raw.pointer("/app/id").and_then(serde_json::Value::as_i64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "Checks API response has no valid numeric GitHub App identity.".into())
+}
+
 /// Checks API lookup is explicitly operator-driven. Its pull_requests array
 /// identifies PRs currently matching the head, not a proven triggering PR.
 /// Only a unique exact head SHA match is safe to correlate as read-only context.
@@ -2177,6 +2185,7 @@ fn authenticated_check_run(
     if !token_ok(actor, 80) || !actor.eq_ignore_ascii_case(&selected.actor_filter) {
         return Err("Check Run app does not match the exact configured source actor.".into());
     }
+    authenticated_check_run_app_id(raw)?;
     let sha = raw.get("head_sha").and_then(serde_json::Value::as_str)
         .ok_or("Check Run head SHA is missing.")?;
     if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -2280,6 +2289,9 @@ fn observe_authenticated_check_run_with_repository_id(
             .ok_or("Check Run observation cursor is exhausted.")?,
     };
     let envelope = authenticated_check_run(&current, raw, requested_id, sequence, repository_id)?;
+    // Pin within the same transaction as the source receipt and result sidecar.
+    // A reused App slug or failed write cannot rebind the configured source.
+    pin_authenticated_actor_identity(&tx, &current.id, authenticated_check_run_app_id(raw)?)?;
     let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in)?;
     // Replays must preserve their original result. A v41-v44 receipt with no
     // original verified result stays unknown; never backfill it on replay.
@@ -3268,7 +3280,7 @@ mod tests {
         let mut raw = serde_json::json!({
             "id": 701, "status":"completed", "conclusion":"success",
             "head_sha":sha, "completed_at":chrono::Utc::now().to_rfc3339(),
-            "app":{"slug":"trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests":[{"number":42,"head":{"sha":sha},
                 "base":{"repo":{"url":"https://api.github.com/repos/owner/repo", "id": 73}}}]
         });
@@ -3298,7 +3310,7 @@ mod tests {
         let mut run = serde_json::json!({
             "id": 810, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{
                 "number": 42, "head": {"sha": sha},
                 "base": {"repo": {
@@ -4865,7 +4877,7 @@ mod tests {
         let run = serde_json::json!({
             "id": 801, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
@@ -4903,7 +4915,7 @@ mod tests {
         let mut run = serde_json::json!({
             "id": 240, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
@@ -4936,6 +4948,97 @@ mod tests {
         assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
     }
 
+
+    #[test]
+    fn check_run_pins_numeric_app_identity_across_replay_reactivation_and_restart() {
+        let (store, path) = fixture();
+        let disabled = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let active = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let original = serde_json::json!({
+            "id": 8801, "status": "completed", "conclusion": "success",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot", "id": 44},
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
+        });
+        let first = observe_authenticated_check_run(&store, &active, 8801, &original, "operator").unwrap();
+        assert_eq!(first.decision, "observed_permitted");
+        assert!(observe_authenticated_check_run(&store, &active, 8801, &original, "operator")
+            .unwrap().duplicate);
+        let recorded_app: i64 = store.db.query_row(
+            "SELECT actor_id FROM sa_source_actor_identity WHERE source_id=?1",
+            [&active.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recorded_app, 44);
+        let mut replacement = original.clone();
+        replacement["app"]["id"] = serde_json::json!(45);
+        assert!(observe_authenticated_check_run(&store, &active, 8801, &replacement, "operator").is_err(),
+            "A replay cannot replace the original GitHub App identity");
+        replacement["id"] = serde_json::json!(8802);
+        assert!(observe_authenticated_check_run(&store, &active, 8802, &replacement, "operator").is_err(),
+            "An app using the same slug cannot inherit this source");
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
+        let disabled = set_mode(&store, &active.id, active.policy_revision, "off").unwrap();
+        let restored = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        replacement["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        assert!(observe_authenticated_check_run(&reopened, &restored, 8802, &replacement, "operator").is_err());
+        replacement["app"]["id"] = serde_json::json!(44);
+        let second = observe_authenticated_check_run(&reopened, &restored, 8802, &replacement, "operator").unwrap();
+        assert_eq!(second.decision, "observed_permitted");
+        assert_eq!(source(&reopened, &restored.id).unwrap().last_sequence, 2);
+        assert_eq!(list_decisions(&reopened, &restored.id, 10).unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn check_run_rejects_missing_app_id_and_rolls_back_app_pin_on_failed_sidecar() {
+        let (store, _) = fixture();
+        let disabled = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let active = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 8803, "status": "completed", "conclusion": "success",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot", "id": 44},
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
+        });
+        let mut missing = run.clone();
+        missing["app"].as_object_mut().unwrap().remove("id");
+        assert!(observe_authenticated_check_run(&store, &active, 8803, &missing, "operator").is_err());
+        for invalid in [serde_json::json!(0), serde_json::json!(-1),
+                        serde_json::json!("44"), serde_json::Value::Null] {
+            let mut malformed = run.clone();
+            malformed["app"]["id"] = invalid;
+            assert!(observe_authenticated_check_run(&store, &active, 8803, &malformed, "operator").is_err());
+        }
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_check_app_sidecar BEFORE INSERT ON sa_check_run_results
+             BEGIN SELECT RAISE(ABORT,'simulated outcome failure'); END;"
+        ).unwrap();
+        assert!(observe_authenticated_check_run(&store, &active, 8803, &run, "operator").is_err());
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &active.id, 10).unwrap().is_empty());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_actor_identity WHERE source_id=?1",
+            [&active.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "A rejected outcome cannot pin an actor or advance any receipt");
+        store.db.execute_batch("DROP TRIGGER reject_check_app_sidecar").unwrap();
+        assert_eq!(observe_authenticated_check_run(&store, &active, 8803, &run, "operator")
+            .unwrap().decision, "observed_permitted");
+        assert_eq!(store.db.query_row(
+            "SELECT actor_id FROM sa_source_actor_identity WHERE source_id=?1",
+            [&active.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 44);
+    }
+
     #[test]
     fn check_run_replay_after_reactivation_keeps_original_receipt_without_admitting_old_runs() {
         let (store, path) = fixture();
@@ -4953,7 +5056,7 @@ mod tests {
             "id": 803, "status": "completed", "conclusion": "failure",
             "head_sha": sha,
             "completed_at": (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
@@ -5004,7 +5107,7 @@ mod tests {
         let run = serde_json::json!({
             "id": 701, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
@@ -5054,7 +5157,7 @@ mod tests {
         let run = serde_json::json!({
             "id": 702, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
@@ -5090,7 +5193,7 @@ mod tests {
         let run = serde_json::json!({
             "id": 390, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
-            "app": {"slug": "trusted-bot"},
+            "app": {"slug": "trusted-bot", "id": 44},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
                 "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });

@@ -5667,6 +5667,72 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
 }
 
 
+
+#[test]
+fn user_accepted_root_council_cannot_recover_interrupted_child_reservations() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["accepted-security", "accepted-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["accepted-security", "accepted-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review before explicit user acceptance", None, None).unwrap();
+    let old_child = {
+        let store = state.store.lock().unwrap();
+        child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone()
+    };
+    control_state(&state, &sid, "pause").unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child]).unwrap();
+    }
+    // User acceptance closes this Council cycle's reviewer admission even
+    // if the interrupted child has not yet produced a native result.
+    let accepted = council::accept(&state, &sid).unwrap();
+    assert_eq!(accepted.council_accepted, Some(started.council_since));
+    let root_before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    let reservations_before: Vec<String> = {
+        let store = state.store.lock().unwrap();
+        let mut query = store.db.prepare(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' ORDER BY key"
+        ).unwrap();
+        let rows = query.query_map([&sid], |row| row.get(0)).unwrap();
+        rows.collect::<rusqlite::Result<Vec<String>>>().unwrap()
+    };
+    let denied = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(denied.contains("user-accepted Council cycle"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), root_before,
+        "recovery denial must preserve explicit acceptance and frozen root evidence");
+    let store = state.store.lock().unwrap();
+    let mut query = store.db.prepare(
+        "SELECT worker_id FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child' ORDER BY key"
+    ).unwrap();
+    let rows = query.query_map([&sid], |row| row.get(0)).unwrap();
+    let reservations_after = rows.collect::<rusqlite::Result<Vec<String>>>().unwrap();
+    assert_eq!(reservations_after, reservations_before,
+        "accepted Council must not issue fresh child reviewer sessions");
+    assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+}
+
 #[test]
 fn failed_unstarted_child_requires_explicit_recovery_and_new_native_session() {
     let (state, sid) = state_fixture();

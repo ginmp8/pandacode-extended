@@ -515,6 +515,9 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         return Err("child_council_recovery_denied: only an unchanged resting hierarchical Council may recover.".into());
     }
     config.validate()?;
+    if root.council_accepted == Some(root.council_since) {
+        return Err("child_council_recovery_denied: a user-accepted Council cycle cannot restart child reviewers.".into());
+    }
     let parent = store.session(&root.session_id)?;
     // Explicit recovery may replace interrupted child reservations, but it
     // cannot mint new task authority under a separately revoked root session.

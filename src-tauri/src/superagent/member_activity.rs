@@ -7,7 +7,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemberActivityCursor {
     pub created_at: i64,
@@ -68,6 +68,22 @@ pub(super) fn page(
         }
     }
     configuration(store, orchestration_id)?;
+    if let Some(cursor) = &before {
+        // A syntactically valid keyset boundary is not authority to skip
+        // arbitrary history. Tie it to the exact Team, bot and immutable
+        // assignment identity, including after a process restart.
+        let owned: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id
+             WHERE t.orchestration_id=?1 AND a.bot_id=?2
+               AND a.id=?3 AND a.created_at=?4)",
+            params![orchestration_id, bot_id, &cursor.assignment_id, cursor.created_at],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !owned {
+            return Err("Team member activity cursor does not belong to this Team and bot.".into());
+        }
+    }
     let cursor_at = before.as_ref().map(|cursor| cursor.created_at);
     let cursor_id = before.as_ref().map(|cursor| cursor.assignment_id.as_str());
     let mut stmt = store.db.prepare(
@@ -139,4 +155,80 @@ pub async fn superagent_member_activity_page(
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     page(&store, &orchestration_id, &bot_id, before, limit.unwrap_or(25))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage;
+    use crate::superagent::{self, NewOrchestration};
+
+    #[test]
+    fn activity_cursor_serializes_and_rejects_cross_team_or_forged_boundaries() {
+        let path = std::env::temp_dir()
+            .join(format!("sa-member-activity-{}.db", storage::id()));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Disposable','/tmp/sa-member-activity')",
+            [],
+        ).unwrap();
+        for id in ["coordinator", "worker", "other-coordinator", "other-worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team = superagent::create_configuration(&store, NewOrchestration {
+            name: "Activity Team".into(),
+            coordinator_bot_id: "coordinator".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = superagent::create_configuration(&store, NewOrchestration {
+            name: "Other Team".into(),
+            coordinator_bot_id: "other-coordinator".into(),
+            worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations
+             SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit(
+            &mut store, &team.id, "Private authorized work", "activity-cursor", false,
+        ).unwrap();
+        assert!(launched);
+        let activity = page(&store, &team.id, "worker", None, 25).unwrap();
+        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items[0].ticket_id, ticket.id);
+        let item = &activity.items[0];
+        let cursor = MemberActivityCursor {
+            created_at: item.created_at,
+            assignment_id: item.assignment_id.clone(),
+        };
+        let value = serde_json::to_value(&cursor).unwrap();
+        assert_eq!(value["createdAt"], item.created_at);
+        assert_eq!(value["assignmentId"], item.assignment_id);
+        let roundtrip: MemberActivityCursor = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip.created_at, cursor.created_at);
+        assert_eq!(roundtrip.assignment_id, cursor.assignment_id);
+        assert!(page(&store, &team.id, "worker", Some(cursor.clone()), 25)
+            .unwrap().items.is_empty());
+        assert!(page(&store, &team.id, "coordinator", Some(cursor.clone()), 25)
+            .is_err(), "A different bot cannot borrow a real assignment cursor");
+        assert!(page(&store, &other.id, "other-worker", Some(cursor.clone()), 25)
+            .is_err(), "A different Team cannot borrow a real assignment cursor");
+        assert!(page(&store, &team.id, "worker", Some(MemberActivityCursor {
+            created_at: cursor.created_at,
+            assignment_id: "forged-assignment".into(),
+        }), 25).is_err(), "A well-formed fabricated cursor cannot skip native history");
+        let stored_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&stored_path).unwrap();
+        assert!(page(&reopened, &team.id, "worker", Some(cursor.clone()), 25)
+            .unwrap().items.is_empty());
+        assert!(page(&reopened, &other.id, "other-worker", Some(cursor), 25)
+            .is_err(), "Isolation must survive SQLite reopening");
+    }
 }

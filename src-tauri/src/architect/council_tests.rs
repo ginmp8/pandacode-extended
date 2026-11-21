@@ -6607,6 +6607,30 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
         root.status = "paused".into();
         save(&store, &mut root).unwrap();
     }
+    // A human-accepted root cycle is terminal review authority even before
+    // its native session becomes completed. Both Resume variants must reject
+    // it without replacing or reactivating any task-owned child grants.
+    for root_team_status in ["paused", "interrupted"] {
+        {
+            let store = state.store.lock().unwrap();
+            let mut root = load(&store, &sid).unwrap().unwrap();
+            root.status = root_team_status.into();
+            root.council_accepted = Some(root.council_since);
+            save(&store, &mut root).unwrap();
+        }
+        let frozen = serde_json::to_value(saved(&state, &sid)).unwrap();
+        let denied = control_state(&state, &sid, "resume").unwrap_err();
+        assert!(denied.contains("user-accepted root Council"), "{denied}");
+        assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen,
+            "accepted root Resume must not mutate the Council cycle");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        root.council_accepted = None;
+        save(&store, &mut root).unwrap();
+    }
     // A genuine pause with intact child reservations remains resumable.
     assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");
 }
@@ -10592,6 +10616,17 @@ fn nested_m5_unforced_s2_severe_root_report_triggers_native_review_without_false
         completed_state(&state, &launch.sid, Some(&launch.admission),
             true, false, &mut |_| {});
     }
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_none(),
+            "native leaf callbacks alone are not a settled composite parent receipt");
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Verify child first-wave receipts"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false,
+        "a severe unresolved root finding cannot finish the task");
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
     assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_some());
@@ -10609,6 +10644,18 @@ fn nested_m5_unforced_s2_severe_root_report_triggers_native_review_without_false
         worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 1);
     assert_ne!(council::status(&root).unwrap().state, "passed",
         "admission cannot suppress the unresolved first-wave security finding");
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (second_run, _) = claim(&state, action);
+    assert!(second_run.config.reviewer_boundary);
+    finish(&state, &second_run,
+        "Fresh review does not resolve the original severe finding.\nCouncil score: 9.9/10",
+        true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(authenticated_hierarchical_status(&store, &root).is_none(),
+        "a second high score cannot erase a first-wave unresolved severe finding");
+    assert!(!verified_council_pass(&store, &root),
+        "high-severity findings remain unapproved without a changed artifact");
 }
 
 #[test]

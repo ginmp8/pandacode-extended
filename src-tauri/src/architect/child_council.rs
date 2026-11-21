@@ -297,6 +297,11 @@ fn require_unsettled_root_on_resume(store: &Store, root: &TeamSnapshot) -> Resul
     if session.archived || session.task_stage == "completed" || session.status == "completed" {
         return Err("child_council_revoked: completed native root session cannot resume a hierarchical Council.".into());
     }
+    // A recorded human acceptance is terminal for this immutable Council
+    // cycle, even if its native root session has not yet settled independently.
+    if root.council_accepted == Some(root.council_since) {
+        return Err("child_council_revoked: user-accepted root Council cannot resume child reviewers.".into());
+    }
     Ok(())
 }
 

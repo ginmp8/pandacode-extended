@@ -673,6 +673,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 ).map_err(|e| e.to_string())?;
                 let started = leaf.council.as_ref()
                     .is_some_and(|seat| seat.started_at > 0);
+                // A native leaf that settled independently is not an unstarted
+                // reviewer merely because its old TeamSnapshot still says queued.
+                // Never revoke its native completion to replace a sibling seat.
+                if session.status == "completed" {
+                    return Err("child_council_recovery_denied: completed native reviewer session cannot be replaced.".into());
+                }
                 // An unpaused abrupt crash cannot be inferred solely from
                 // persisted worker status. Every started leaf must have a
                 // separately interrupted native session, not an active host.

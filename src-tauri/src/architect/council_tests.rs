@@ -5886,6 +5886,38 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
             [&old_child],
         ).unwrap();
     }
+    // A queued sibling with an independently completed native session must
+    // abort the entire recovery transaction, including a replacement of the
+    // interrupted first child already considered earlier in the roster.
+    let original_leaf_status = {
+        let store = state.store.lock().unwrap();
+        let status = store.session(&sibling_leaves[0]).unwrap().status;
+        store.db.execute("UPDATE sessions SET status='completed' WHERE id=?1",
+            [&sibling_leaves[0]]).unwrap();
+        status
+    };
+    let completed_leaf_denial = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(completed_leaf_denial.contains("completed native reviewer session"),
+        "{completed_leaf_denial}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot);
+    {
+        let store = state.store.lock().unwrap();
+        let mut query = store.db.prepare(
+            "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1
+             AND kind='council_child' ORDER BY key").unwrap();
+        let reservations = query.query_map([&sid], |row| row.get::<_, String>(0))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(reservations.len(), 2);
+        assert!(reservations.contains(&old_child) && reservations.contains(&sibling_child),
+            "a failed sibling check must roll back all child replacements");
+        assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        assert_eq!(store.session(&sibling_leaves[0]).unwrap().status, "completed");
+        assert_eq!(parent_of(&store, &old_leaves[0]).unwrap().as_deref(),
+            Some(old_child.as_str()), "failed recovery must preserve old reviewer ownership");
+        drop(query);
+        store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sibling_leaves[0], original_leaf_status]).unwrap();
+    }
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
     {
         let store = state.store.lock().unwrap();

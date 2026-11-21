@@ -915,13 +915,14 @@ fn validate_admitted(
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
             // A queued snapshot cannot authorize a second provider launch if
-            // its task-scoped native session is actually running or waiting.
+            // its task-scoped native session is running, waiting or independently
+            // completed. A queued worker cannot relaunch a completed native run.
             // Check the entire issued roster before allowing any sibling
             // launch, escalation, callback or composite evidence inspection.
             // Explicit recovery checks every live native session again before
             // any revocation; ordinary dispatch and callbacks must fail here.
             || (!allow_revoked_leaf_session && leaf.status == "queued"
-                && matches!(session.status.as_str(), "running" | "waiting"))
+                && matches!(session.status.as_str(), "running" | "waiting" | "completed"))
             || !matches!(leaf.status.as_str(), "queued" | "running" | "waiting" | "completed" | "failed" | "stopped")
             || leaf.council.as_ref().is_none_or(|seat| seat.round != expected_round)
             || super::parent_of(store, &record.child_session_id)?.as_deref()

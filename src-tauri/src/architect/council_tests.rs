@@ -6991,7 +6991,7 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
 }
 
 #[test]
-fn queued_native_child_reviewer_cannot_be_dispatched_while_its_session_is_live() {
+fn queued_native_child_reviewer_cannot_relaunch_a_live_or_completed_session() {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -7033,8 +7033,8 @@ fn queued_native_child_reviewer_cannot_be_dispatched_while_its_session_is_live()
     let leaf_sid = load(&store, &child_id).unwrap().unwrap().workers[0]
         .session_id.clone();
     let previous_status = store.session(&leaf_sid).unwrap().status;
-    assert!(!matches!(previous_status.as_str(), "running" | "waiting"));
-    for native_status in ["running", "waiting"] {
+    assert!(!matches!(previous_status.as_str(), "running" | "waiting" | "completed"));
+    for native_status in ["running", "waiting", "completed"] {
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![&leaf_sid, native_status],

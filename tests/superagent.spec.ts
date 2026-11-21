@@ -2853,6 +2853,113 @@ test('Team effective policy view is native-backed and never grants or launches t
   expect(calls.some(c=>/submit|dispatch|accept|reserve|enable|activate/.test(c))).toBe(false);
 });
 
+test('Team member Activity pages are native-backed, Team-scoped and open the original bot chat only after recheck', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-member-activity-test'; document.body.appendChild(host);
+    const seen: {command:string;args?:Record<string,unknown>}[]=[];
+    const routes: unknown[]=[];
+    (window as unknown as {saMemberActivityEvidence:()=>unknown}).saMemberActivityEvidence=
+      ()=>({seen,routes});
+    mountSuperagent(host, async(command,args) => {
+      seen.push({command,args});
+      if (command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},
+        {id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if (command==='superagent_list') return [
+        {id:'team',name:'Scoped Team',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:3,ticketCount:2}
+      ] as never;
+      if (command==='superagent_tickets') return [] as never;
+      if (command==='superagent_roster') return {
+        orchestrationId:'team',policyRevision:3,coordinatorBotId:'lead',
+        workerBotIds:['worker'],reviewerBotIds:[],executionReady:true
+      } as never;
+      if (command==='superagent_effective_team') return {
+        orchestrationId:'team',policyRevision:3,enabled:false,executionReady:true,
+        grantsIssued:false,manualAdmissionBlockers:[],members:[
+          {role:'coordinator',position:0,botId:'lead',name:'Lead',
+            provider:'codex',model:'model',mode:'plan',reasoningEffort:'',
+            projectId:'lead-project',paused:false,skills:[],configurationIssues:[]},
+          {role:'worker',position:0,botId:'worker',name:'Worker',
+            provider:'codex',model:'model',mode:'plan',reasoningEffort:'',
+            projectId:'worker-project',paused:false,skills:[],configurationIssues:[]}
+        ]
+      } as never;
+      if (command==='superagent_member_activity_page') {
+        if (args?.orchestrationId!=='team') throw Error('wrong Team requested');
+        if (args?.botId==='lead') return {
+          orchestrationId:'unrelated-team',botId:'lead',items:[{
+            assignmentId:'foreign',ticketId:'foreign-ticket',orchestrationId:'unrelated-team',
+            botId:'lead',sessionId:'foreign-session',role:'coordinator',attempt:1,
+            assignmentState:'finished',ticketState:'completed',createdAt:800,updatedAt:800,
+            hasResult:true,chatAvailable:true
+          }],hasMore:false,nextCursor:null
+        } as never;
+        if (!args?.before) return {
+          orchestrationId:'team',botId:'worker',items:[{
+            assignmentId:'a-new',ticketId:'ticket-new',orchestrationId:'team',
+            botId:'worker',sessionId:'missing-session',role:'worker',attempt:2,
+            assignmentState:'finished',ticketState:'blocked',createdAt:500,updatedAt:501,
+            hasResult:false,chatAvailable:false
+          }],hasMore:true,nextCursor:{createdAt:500,assignmentId:'a-new'}
+        } as never;
+        return {
+          orchestrationId:'team',botId:'worker',items:[{
+            assignmentId:'a-old',ticketId:'ticket-old',orchestrationId:'team',
+            botId:'worker',sessionId:'real-session',role:'worker',attempt:1,
+            assignmentState:'finished',ticketState:'waiting_approval',createdAt:499,updatedAt:499,
+            hasResult:true,chatAvailable:true
+          }],hasMore:false,nextCursor:null
+        } as never;
+      }
+      if (command==='superagent_snapshot') {
+        if (args?.ticketId!=='ticket-old') throw Error('wrong Ticket requested');
+        return {ticket:{id:'ticket-old',orchestrationId:'team',revision:2,state:'waiting_approval'},
+          assignments:[{id:'a-old',botId:'worker',sessionId:'real-session',attempt:1}]} as never;
+      }
+      throw Error('Unexpected command: '+command);
+    }, async route => { routes.push(route); });
+  });
+  const host=page.locator('#sa-member-activity-test');
+  const roles=host.getByRole('region',{name:'Configured Team roles'});
+  await roles.getByRole('button',{name:'Load native members'}).click();
+  await roles.getByRole('button',{name:'Inspect effective policy and Skills'}).click();
+  await roles.getByRole('button',{name:'View activity for Worker'}).click();
+  const activity=roles.getByRole('region',{name:'Team member activity'});
+  await expect(activity).toContainText('ticket-new');
+  await expect(activity).toContainText('Native chat unavailable');
+  await expect(activity.getByRole('button',{name:'Open chat for assignment a-new'})).toHaveCount(0);
+  await activity.getByRole('button',{name:'Older activity'}).click();
+  await expect(activity).toContainText('ticket-old');
+  await activity.getByRole('button',{name:'Open chat for assignment a-old'}).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const evidence=(window as unknown as {saMemberActivityEvidence:()=>{
+      routes:Array<{teamId:string;ticketId:string;assignmentId:string;botId:string;sessionId:string}>
+    }}).saMemberActivityEvidence();
+    return evidence.routes.length;
+  })).toBe(1);
+  const evidence=await page.evaluate(() =>
+    (window as unknown as {saMemberActivityEvidence:()=>{
+      seen:Array<{command:string;args?:Record<string,unknown>}>;routes:unknown[]
+    }}).saMemberActivityEvidence());
+  expect(evidence.routes[0]).toEqual({
+    teamId:'team',ticketId:'ticket-old',assignmentId:'a-old',
+    botId:'worker',sessionId:'real-session',
+  });
+  expect(evidence.seen.filter(call=>call.command==='superagent_member_activity_page'))
+    .toHaveLength(2);
+  expect(evidence.seen.some(call => /submit|dispatch|accept|grant|enable|reserve/.test(call.command)))
+    .toBe(false);
+  await roles.getByRole('button',{name:'View activity for Lead'}).click();
+  await expect(host).toContainText('invalid or out-of-scope history');
+  await expect(roles.getByRole('region',{name:'Team member activity'}))
+    .not.toContainText('foreign-ticket');
+});
+
 test('native Team directory counts configured roles and filters without creating tasks', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

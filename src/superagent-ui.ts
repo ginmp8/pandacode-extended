@@ -59,6 +59,17 @@ interface ManualPreflight {
 }
 interface Activity { id: number; kind: string; detail: string; at: number }
 interface ActivityPage { ticketId: string; items: Activity[]; hasMore: boolean; nextCursor: number | null }
+interface MemberActivityCursor { createdAt: number; assignmentId: string }
+interface MemberActivityItem {
+  assignmentId: string; ticketId: string; orchestrationId: string; botId: string;
+  sessionId: string; role: 'coordinator' | 'worker'; attempt: number;
+  assignmentState: string; ticketState: string; createdAt: number; updatedAt: number;
+  hasResult: boolean; chatAvailable: boolean;
+}
+interface MemberActivityPage {
+  orchestrationId: string; botId: string; items: MemberActivityItem[];
+  hasMore: boolean; nextCursor: MemberActivityCursor | null;
+}
 interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
   nativePassVerified: boolean; ticketArtifactBound: boolean;
@@ -168,6 +179,13 @@ export function mountSuperagent(
   // Keep unsaved reviewer choices across Worker selection and reorder renders.
   let reviewerDraft: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
+  let memberActivityTeamId = '', memberActivityBotId = '';
+  let memberActivityItems: MemberActivityItem[] = [];
+  let memberActivityHasMore = false, memberActivityCursor: MemberActivityCursor | null = null;
+  const clearMemberActivity = () => {
+    memberActivityTeamId = ''; memberActivityBotId = '';
+    memberActivityItems = []; memberActivityHasMore = false; memberActivityCursor = null;
+  };
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let sourceIntegrity: SourceIntegrity | null = null;
@@ -254,6 +272,47 @@ export function mountSuperagent(
           return false;
         })) {
       throw new Error('Native review inbox returned invalid, overlapping or out-of-scope decisions; refresh before acting.');
+    }
+    return page;
+  };
+  // Require a native Team+bot match on EVERY page before exposing chat routes.
+  // A reused bot ID cannot make another Team's assignments visible.
+  const fetchMemberActivity = async (
+    teamId: string, botId: string, before?: MemberActivityCursor,
+  ): Promise<MemberActivityPage> => {
+    const page = await call<MemberActivityPage>('superagent_member_activity_page', {
+      orchestrationId: teamId, botId, limit: 25, ...(before ? {before} : {}),
+    });
+    const ids = new Set<string>();
+    const ordered = (older: MemberActivityCursor, newer: MemberActivityCursor): boolean =>
+      older.createdAt < newer.createdAt ||
+      (older.createdAt === newer.createdAt && older.assignmentId < newer.assignmentId);
+    if (!page || page.orchestrationId !== teamId || page.botId !== botId ||
+        !Array.isArray(page.items) || page.items.length > 25 ||
+        typeof page.hasMore !== 'boolean' ||
+        page.items.some((entry, index) => {
+          if (!entry || entry.orchestrationId !== teamId || entry.botId !== botId ||
+              typeof entry.ticketId !== 'string' || !entry.ticketId ||
+              typeof entry.assignmentId !== 'string' || !entry.assignmentId ||
+              typeof entry.sessionId !== 'string' || !entry.sessionId ||
+              !['worker','coordinator'].includes(entry.role) ||
+              !Number.isSafeInteger(entry.attempt) || entry.attempt < 1 ||
+              !Number.isSafeInteger(entry.createdAt) || entry.createdAt <= 0 ||
+              !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt <= 0 ||
+              typeof entry.ticketState !== 'string' ||
+              typeof entry.assignmentState !== 'string' ||
+              typeof entry.hasResult !== 'boolean' || typeof entry.chatAvailable !== 'boolean' ||
+              ids.has(entry.assignmentId)) return true;
+          ids.add(entry.assignmentId);
+          const newer = index === 0 ? before : page.items[index - 1];
+          return !!newer && !ordered(entry, newer);
+        }) ||
+        (page.hasMore &&
+          (!page.items.length || !page.nextCursor ||
+            page.nextCursor.createdAt !== page.items[page.items.length - 1].createdAt ||
+            page.nextCursor.assignmentId !== page.items[page.items.length - 1].assignmentId)) ||
+        (!page.hasMore && page.nextCursor !== null)) {
+      throw new Error('Native Team member activity returned invalid or out-of-scope history.');
     }
     return page;
   };
@@ -852,6 +911,31 @@ export function mountSuperagent(
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>' : '';
+    const memberActivityView = chosen && effectiveTeam &&
+      memberActivityTeamId === chosen.id && memberActivityBotId &&
+      effectiveTeam.members.some(member => member.botId === memberActivityBotId)
+      ? '<section class="sa-pane" role="region" aria-label="Team member activity">' +
+        '<h5>Team activity: ' + safe(botName(memberActivityBotId)) + '</h5>' +
+        '<p>Actual native Assignment history for this Team only. A recorded result is not verified delivery or Council approval.</p>' +
+        '<button type="button" data-sa-member-clear>Close activity</button>' +
+        '<ol aria-label="Member assignment history">' +
+        (memberActivityItems.map(item =>
+          '<li>Demand ' + safe(item.ticketId) + ' · ' + safe(item.role) +
+          ' · Attempt ' + safe(item.attempt) +
+          ' · Assignment ' + safe(item.assignmentState) +
+          ' · Demand ' + safe(item.ticketState) +
+          ' · ' + safe(activityTime(item.createdAt)) +
+          ' · ' + (item.hasResult ? 'Provider result recorded (unverified)' : 'No provider result') +
+          (item.chatAvailable && openAssignmentChat
+            ? ' <button type="button" data-sa-member-open-chat="' + safe(item.assignmentId) +
+              '" aria-label="Open chat for assignment ' + safe(item.assignmentId) + '">Open chat</button>'
+            : ' · Native chat unavailable') +
+          '</li>').join('') || '<li class="sa-empty">No Team assignments recorded for this bot.</li>') +
+        '</ol>' +
+        (memberActivityHasMore
+          ? '<button type="button" data-sa-member-older>Older activity</button>'
+          : '<p>End of recorded Team activity.</p>') + '</section>'
+      : '';
     const effectivePolicy = chosen && effectiveTeam &&
       effectiveTeam.orchestrationId === chosen.id &&
       effectiveTeam.policyRevision === chosen.policyRevision
@@ -874,6 +958,8 @@ export function mountSuperagent(
           ' · Bot mode ' + safe(member.mode) +
           ' · Reasoning effort ' + safe(member.reasoningEffort || 'not specified') +
           ' · Project ' + safe(member.projectId) +
+          ' <button type="button" data-sa-member-activity="' + safe(member.botId) +
+          '" aria-label="View activity for ' + safe(member.name) + '">Activity</button>' +
           (member.present === false ? ' · Missing bot (not executable)' :
             member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
           '<section class="sa-member-issues" aria-label="Local configuration checks">' +
@@ -888,7 +974,7 @@ export function mountSuperagent(
             ' · Invocation/evidence ' + safe(skill.invocationEvidence) + '</li>').join('') ||
             '<li>' + (member.present === false
               ? 'Skill inventory unavailable for missing bot' : 'No bot-assigned Skills') +
-            '</li>') + '</ul></li>').join('') + '</ol></section>'
+            '</li>') + '</ul></li>').join('') + '</ol>' + memberActivityView + '</section>'
       : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
@@ -1320,7 +1406,7 @@ export function mountSuperagent(
         reviewerDraft = [...roleRoster.reviewerBotIds];
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
-      effectiveTeam = null;
+      effectiveTeam = null; clearMemberActivity();
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -2094,6 +2180,72 @@ export function mountSuperagent(
       });
       return;
     }
+    if (target.dataset.saMemberActivity) {
+      const cfg = current(), botId = target.dataset.saMemberActivity;
+      if (!cfg || !effectiveTeam || effectiveTeam.orchestrationId !== cfg.id ||
+          effectiveTeam.policyRevision !== cfg.policyRevision ||
+          !effectiveTeam.members.some(member => member.botId === botId)) return;
+      clearMemberActivity();
+      memberActivityTeamId = cfg.id; memberActivityBotId = botId;
+      void work(async () => {
+        const page = await fetchMemberActivity(cfg.id, botId);
+        if (selected !== cfg.id || memberActivityBotId !== botId) return;
+        memberActivityItems = page.items;
+        memberActivityHasMore = page.hasMore;
+        memberActivityCursor = page.nextCursor;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-member-clear')) {
+      clearMemberActivity(); render(); return;
+    }
+    if (target.hasAttribute('data-sa-member-older')) {
+      const teamId = memberActivityTeamId, botId = memberActivityBotId;
+      const before = memberActivityCursor;
+      if (!teamId || teamId !== selected || !botId || !memberActivityHasMore || !before) return;
+      void work(async () => {
+        const page = await fetchMemberActivity(teamId, botId, before);
+        if (selected !== teamId || memberActivityBotId !== botId) return;
+        const seen = new Set(memberActivityItems.map(item => item.assignmentId));
+        if (page.items.some(item => seen.has(item.assignmentId))) {
+          throw new Error('Native activity page overlaps already inspected Team history.');
+        }
+        memberActivityItems = [...memberActivityItems, ...page.items];
+        memberActivityHasMore = page.hasMore;
+        memberActivityCursor = page.nextCursor;
+      });
+      return;
+    }
+    if (target.dataset.saMemberOpenChat) {
+      const item = memberActivityItems.find(entry =>
+        entry.assignmentId === target.dataset.saMemberOpenChat);
+      if (!item || !item.chatAvailable || !openAssignmentChat ||
+          !memberActivityTeamId || memberActivityTeamId !== selected ||
+          item.orchestrationId !== selected || item.botId !== memberActivityBotId) return;
+      void work(async () => {
+        // A visible audit row alone is insufficient for navigation. Recheck
+        // immutable Ticket ownership and the actual assignment/session binding.
+        const fresh = await call<TicketDetails>('superagent_snapshot', {
+          ticketId: item.ticketId, limit: 200,
+        });
+        if (selected !== item.orchestrationId ||
+            fresh.ticket.id !== item.ticketId ||
+            fresh.ticket.orchestrationId !== item.orchestrationId ||
+            !fresh.assignments.some(assignment =>
+              assignment.id === item.assignmentId &&
+              assignment.botId === item.botId &&
+              assignment.sessionId === item.sessionId &&
+              assignment.attempt === item.attempt)) {
+          throw new Error('Native assignment identity changed; refresh Team activity before opening chat.');
+        }
+        await openAssignmentChat({
+          teamId: item.orchestrationId, ticketId: item.ticketId,
+          assignmentId: item.assignmentId, botId: item.botId,
+          sessionId: item.sessionId,
+        });
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-effective-load')) {
       const cfg=current();
       if (cfg && roleRoster?.orchestrationId===cfg.id) void work(async () => {
@@ -2163,6 +2315,7 @@ export function mountSuperagent(
         return;
       }
       selected = next;
+      clearMemberActivity();
       selectedDemandWorkerId = ''; demandPreflight = null;
       if (assigning) {
         // No cross-Team reuse of another user's unsent objective or task key.

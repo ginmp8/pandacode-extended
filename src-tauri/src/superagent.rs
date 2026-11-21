@@ -8,6 +8,7 @@ pub(crate) mod manifest;
 pub(crate) mod roster;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
+pub mod member_activity;
 pub mod effects;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -5233,6 +5234,96 @@ pub async fn superagent_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_team_member_activity_is_scoped_keyset_paginated_and_restart_safe() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (live, launched) = admit(
+            &mut store, &team.id, "Native member activity", "activity-live", false,
+        ).unwrap();
+        assert!(launched);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Unrelated Team Activity".into(),
+            coordinator_bot_id: team.coordinator_bot_id.clone(),
+            worker_bot_id: team.worker_bot_id.clone(),
+        }).unwrap();
+        let now = storage::now();
+        for i in 0..5 {
+            let owner = if i == 4 { &second } else { &team };
+            let ticket_id = format!("activity-ticket-{i}");
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                 source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Old activity','local-user','manual',
+                 ?4,?5,?6,'completed',?7,?7)",
+                params![ticket_id,owner.id,format!("activity-key-{i}"),owner.project_id,
+                    owner.worker_bot_id,owner.policy_revision,now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                 result,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'finished',1,'Evidence recorded',?5,?5)",
+                params![format!("activity-assignment-{i}"),ticket_id,owner.worker_bot_id,
+                    format!("old-session-{i}"),now],
+            ).unwrap();
+        }
+
+        let mut cursor = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let result = member_activity::page(
+                &store, &team.id, &team.worker_bot_id, cursor.clone(), 2,
+            ).unwrap();
+            assert_eq!(result.orchestration_id, team.id);
+            assert_eq!(result.bot_id, team.worker_bot_id);
+            for item in &result.items {
+                assert_eq!(item.orchestration_id, team.id);
+                assert_eq!(item.bot_id, team.worker_bot_id);
+                assert!(seen.insert(item.assignment_id.clone()), "duplicate assignment");
+                if item.assignment_id.starts_with("activity-assignment-") {
+                    assert!(!item.chat_available, "missing legacy chat is not navigable");
+                    assert!(item.has_result);
+                }
+            }
+            if !result.has_more {
+                assert!(result.next_cursor.is_none());
+                break;
+            }
+            cursor = result.next_cursor;
+            assert!(cursor.is_some());
+        }
+        assert_eq!(seen.len(), 5, "all four historical attempts and one live attempt");
+        assert!(!seen.contains("activity-assignment-4"), "foreign Team must never leak");
+        let foreign = member_activity::page(
+            &store, &second.id, &team.worker_bot_id, None, 25,
+        ).unwrap();
+        assert_eq!(foreign.items.len(), 1);
+        assert_eq!(foreign.items[0].ticket_id, "activity-ticket-4");
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id, None, 0,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id, None, 101,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id,
+            Some(member_activity::MemberActivityCursor {
+                created_at: now, assignment_id: "../escape".into(),
+            }), 25,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, "unknown-team", &team.worker_bot_id, None, 25,
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let reread = member_activity::page(
+            &reopened, &team.id, &team.worker_bot_id, None, 25,
+        ).unwrap();
+        assert_eq!(reread.items.len(), 5);
+        assert!(reread.items.iter().any(|item| item.ticket_id == live.id));
+    }
 
     #[test]
     fn team_policy_projection_sees_unpaged_review_and_restart_uncertain_effect() {

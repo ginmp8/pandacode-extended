@@ -1003,6 +1003,23 @@ pandacode serve --link-source-thread <issue-source-id> <ticket-id> issue:42
 pandacode serve --link-issue-pull <pr-source-id> <ticket-id> issue:42 pull:123
 ```
 
+For an optional authenticated GitHub object-existence check, use:
+
+```sh
+pandacode serve --verify-link-issue-pull <pr-source-id> <ticket-id> issue:42 pull:123
+```
+
+This one-shot command uses the signed-in `gh api` identity, verifies the exact
+Issue and PR number plus immutable base-repository ID, and rechecks the GitHub
+account before committing an operator-asserted native link. Its Issue context
+link must already exist with a matching attested repository identity. A changed
+source revision, deleted/recreated repository, missing object or network/auth
+error cannot produce a new association. The receipt distinguishes
+`githubObjectsVerified: true`, `authenticatedRelationship: false` and
+`authorizationIssued: false`. Object existence is **not** proof that the
+PR genuinely resolves the Issue. No providers, grants, Auto work, reviews,
+external writes or new subscriptions are started.
+
 The Issue and PR source IDs must resolve to the same Team, Ticket, and
 repository identity. A conflicting, missing or terminal Ticket, unlinked
 Issue, or wrong key is rejected atomically. Replays are idempotent. The JSON

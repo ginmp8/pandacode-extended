@@ -376,11 +376,30 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
 fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
     issue_key: &str, pull_key: &str) -> Result<SourceThreadLink>
 {
+    link_issue_to_pull_scoped(store, source_id, ticket_id, issue_key, pull_key, None)
+}
+
+/// Only native GitHub verification may supply an attestation. It is never
+/// accepted from model text, an event envelope, or the desktop Webview.
+fn link_issue_to_pull_scoped(store: &Store, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str,
+    attestation: Option<(&str, i64, u64)>,
+) -> Result<SourceThreadLink>
+{
     if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
         || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:") {
         return Err("Issue-to-PR association requires exact issue:123 and pull:123 keys.".into());
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if let Some((repository, expected_revision, repository_id)) = attestation {
+        let current = source(store, source_id)?;
+        if current.policy_revision != expected_revision
+            || !current.repository.eq_ignore_ascii_case(repository)
+        {
+            return Err("GitHub source changed during authenticated Issue/PR verification; link denied.".into());
+        }
+        pin_authenticated_repository_identity(&tx, source_id, repository_id)?;
+    }
     let issue_linked: Option<i64> = tx.query_row(
         "SELECT 1 FROM sa_source_thread_links l
          JOIN sa_event_sources initial ON initial.id=l.source_id
@@ -453,6 +472,84 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
     list_thread_links(store,ticket_id)?.into_iter()
         .find(|link|link.source_id==source_id && link.subject_key==pull_key)
         .ok_or_else(||"Source PR link unavailable after association.".into())
+}
+
+/// Verify both GitHub objects belong to the immutable base repository.
+/// Their *relationship* is still an operator assertion, never inferred from
+/// untrusted issue/PR body text, closing keywords or provider suggestions.
+fn authenticated_issue_pull_resources(
+    repository: &str, issue_key: &str, pull_key: &str,
+    repo: &serde_json::Value, issue: &serde_json::Value,
+    pull: &serde_json::Value,
+) -> Result<u64> {
+    let issue_number: u64 = issue_key.strip_prefix("issue:")
+        .filter(|_| valid_thread_key(issue_key))
+        .and_then(|number| number.parse().ok())
+        .ok_or("Invalid Issue context key.")?;
+    let pull_number: u64 = pull_key.strip_prefix("pull:")
+        .filter(|_| valid_thread_key(pull_key))
+        .and_then(|number| number.parse().ok())
+        .ok_or("Invalid PR context key.")?;
+    let repository_id = authenticated_repository_id(repo, repository)?;
+    let issue_url = format!("https://github.com/{repository}/issues/{issue_number}");
+    let pr_url = format!("https://github.com/{repository}/pull/{pull_number}");
+    let repo_url = format!("https://api.github.com/repos/{repository}");
+    if issue.get("number").and_then(serde_json::Value::as_u64) != Some(issue_number)
+        || issue.get("id").and_then(serde_json::Value::as_u64).is_none_or(|id| id == 0)
+        || issue.get("pull_request").is_some()
+        || !issue.get("repository_url").and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.eq_ignore_ascii_case(&repo_url))
+        || !issue.get("html_url").and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.eq_ignore_ascii_case(&issue_url))
+    {
+        return Err("Authenticated GitHub Issue identity differs from the requested context.".into());
+    }
+    if pull.get("number").and_then(serde_json::Value::as_u64) != Some(pull_number)
+        || pull.get("id").and_then(serde_json::Value::as_u64).is_none_or(|id| id == 0)
+        || pull.pointer("/base/repo/id").and_then(serde_json::Value::as_u64) != Some(repository_id)
+        || !pull.pointer("/base/repo/full_name").and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        || !pull.get("html_url").and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.eq_ignore_ascii_case(&pr_url))
+    {
+        return Err("Authenticated GitHub PR identity or base repository differs from the requested context.".into());
+    }
+    Ok(repository_id)
+}
+
+/// Authenticated read-only gh API calls; recheck the immutable user identity
+/// after every provider response and before any local association is written.
+fn fetch_authenticated_issue_pull_resources(
+    repository: &str, issue_key: &str, pull_key: &str,
+) -> Result<u64> {
+    if !repo_ok(repository) || !valid_thread_key(issue_key)
+        || !issue_key.starts_with("issue:")
+        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:")
+    {
+        return Err("Verified Issue/PR association requires exact source and thread keys.".into());
+    }
+    let root = std::env::temp_dir();
+    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let (login, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
+    let repo_endpoint = format!("repos/{repository}");
+    let issue_endpoint = format!("repos/{repository}/issues/{}",
+        issue_key.trim_start_matches("issue:"));
+    let pull_endpoint = format!("repos/{repository}/pulls/{}",
+        pull_key.trim_start_matches("pull:"));
+    let repo = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &repo_endpoint], crate::github::TIMEOUT,
+    )?)?;
+    let issue = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &issue_endpoint], crate::github::TIMEOUT,
+    )?)?;
+    let pull = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &pull_endpoint], crate::github::TIMEOUT,
+    )?)?;
+    let id = authenticated_issue_pull_resources(
+        repository, issue_key, pull_key, &repo, &issue, &pull,
+    )?;
+    recheck_authenticated_operator(&root, &login, operator_id)?;
+    Ok(id)
 }
 
 /// Revocation affects only the operator's exact Team/Ticket/source/thread
@@ -2639,6 +2736,61 @@ pub(crate) fn headless_link_issue_pull(
         "issueKey":issue_key, "pullKey":link.subject_key,
         "linked":true, "operatorAsserted":true,
         "authenticatedRelationship":false, "authorizationIssued":false
+    })).map_err(|e| e.to_string())
+}
+
+/// Native local-user command: authenticated GitHub object existence/identity,
+/// then an explicit local Issue/PR context link. No inferred task authority.
+pub(crate) fn headless_verify_link_issue_pull(
+    path: &std::path::Path, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str,
+) -> Result<String> {
+    if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
+        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:")
+    {
+        return Err("Verified association requires exact issue:123 and pull:123 keys.".into());
+    }
+    let (repository, expected_revision) = {
+        let store = Store::open_read_only(path)?;
+        let src = source(&store, source_id)?;
+        let ticket = super::get_ticket(&store, ticket_id)?;
+        if ticket.orchestration_id != src.orchestration_id
+            || matches!(ticket.state.as_str(),
+                "completed" | "stopped" | "failed" | "interrupted" | "inconclusive")
+        {
+            return Err("Ticket is terminal or outside the source Team.".into());
+        }
+        let linked: bool = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_source_thread_links l
+                JOIN sa_event_sources s ON s.id=l.source_id
+                WHERE l.ticket_id=?1 AND l.subject_key=?2
+                  AND s.orchestration_id=?3 AND s.repository=?4 COLLATE NOCASE
+            )",
+            params![ticket_id,issue_key,&src.orchestration_id,&src.repository],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !linked {
+            return Err("Verified PR association requires an existing operator-linked Issue.".into());
+        }
+        (src.repository, src.policy_revision)
+    };
+    // No SQLite writer lock across network IO. The exact revision and numeric
+    // repository identity are checked again in the final local transaction.
+    let github_repo_id = fetch_authenticated_issue_pull_resources(
+        &repository, issue_key, pull_key,
+    )?;
+    let store = super::open_headless_transition_store(path)?;
+    let link = link_issue_to_pull_scoped(
+        &store, source_id, ticket_id, issue_key, pull_key,
+        Some((&repository, expected_revision, github_repo_id)),
+    )?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId":link.source_id, "ticketId":link.ticket_id,
+        "issueKey":issue_key, "pullKey":link.subject_key,
+        "linked":true, "operatorAsserted":true,
+        "githubObjectsVerified":true, "authenticatedRelationship":false,
+        "repositoryId":github_repo_id, "authorizationIssued":false
     })).map_err(|e| e.to_string())
 }
 
@@ -5849,6 +6001,95 @@ mod tests {
             "SELECT COUNT(*) FROM sa_audit
              WHERE ticket_id='ticket-one' AND kind='source_issue_pull_associated'",
             [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn authenticated_issue_pull_resources_require_exact_objects_and_base_repo() {
+        let repo=serde_json::json!({"full_name":"test/fixture","id":900});
+        let issue=serde_json::json!({"id":42,"number":42,
+            "repository_url":"https://api.github.com/repos/test/fixture",
+            "html_url":"https://github.com/test/fixture/issues/42"});
+        let pull=serde_json::json!({"id":99,"number":99,
+            "base":{"repo":{"id":900,"full_name":"test/fixture"}},
+            "html_url":"https://github.com/test/fixture/pull/99"});
+        assert_eq!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&issue,&pull).unwrap(),900);
+        let mut invalid=issue.clone();
+        invalid["pull_request"]=serde_json::json!({"url":"fake"});
+        assert!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&invalid,&pull).is_err());
+        invalid=issue.clone();
+        invalid["number"]=serde_json::json!(43);
+        assert!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&invalid,&pull).is_err());
+        let mut invalid_pr=pull.clone();
+        invalid_pr["base"]["repo"]["id"]=serde_json::json!(901);
+        assert!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&issue,&invalid_pr).is_err());
+        invalid_pr=pull.clone();
+        invalid_pr["html_url"]=serde_json::json!("https://github.com/other/repo/pull/99");
+        assert!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&issue,&invalid_pr).is_err());
+        for (issue_key,pull_key) in [("issue:0","pull:99"),
+            ("issue:42","pull:01"),("pull:42","issue:99"),
+            ("issue:42","pull:100")] {
+            assert!(authenticated_issue_pull_resources(
+                "test/fixture",issue_key,pull_key,&repo,&issue,&pull).is_err());
+        }
+    }
+
+    #[test]
+    fn attested_issue_pull_links_pin_revision_identity_and_survive_restart() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"ticket-one","orch");
+        insert_manual_ticket(&store,"ticket-two","orch");
+        let issue=create_source(&store,"orch","test/fixture",
+            "trusted-bot","issues.opened").unwrap();
+        let pull=create_source(&store,"orch","test/fixture",
+            "trusted-bot","pull_request.opened").unwrap();
+        link_thread(&store,&issue.id,"ticket-one","issue:42").unwrap();
+        let tx=store.db.unchecked_transaction().unwrap();
+        pin_authenticated_repository_identity(&tx,&issue.id,900).unwrap();
+        tx.commit().unwrap();
+        assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision+1,900))).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&pull.id],|row|row.get::<_,i64>(0)).unwrap(),0);
+        assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-two",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision,900))).is_err());
+        assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("other/repo",pull.policy_revision,900))).is_err());
+        let link=link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision,900))).unwrap();
+        assert_eq!(link.subject_key,"pull:99");
+        assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision,901))).is_err());
+        link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision,900))).unwrap();
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='ticket-one'
+             AND kind='source_issue_pull_associated'",[],
+            |row|row.get::<_,i64>(0)).unwrap(),1);
+        let changed=set_mode(&store,&pull.id,pull.policy_revision,"observe").unwrap();
+        assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
+            "issue:42","pull:99",
+            Some(("test/fixture",pull.policy_revision,900))).is_err());
+        assert_eq!(changed.policy_revision,pull.policy_revision+1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened,"ticket-one").unwrap().len(),2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
+            [&pull.id],|row|row.get::<_,i64>(0)).unwrap(),900);
     }
 
     #[test]

@@ -1102,22 +1102,33 @@ fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
     Ok(login.to_owned())
 }
 
-/// A local GitHub CLI login can change while a bounded read is in flight.
-/// Recheck the signed-in operator before any Observe receipt is committed,
-/// or the earlier identity could misclassify the new operator's own events.
+/// GitHub logins can be renamed or reused. Verify the immutable numeric
+/// identity provided by the native authenticated account API as well.
+fn authenticated_operator(raw: &serde_json::Value) -> Result<(String, u64)> {
+    let login = authenticated_login(raw)?;
+    let id = raw.get("id").and_then(|value| value.as_u64())
+        .filter(|id| *id > 0)
+        .ok_or("Authenticated GitHub account has no valid numeric identity.")?;
+    Ok((login, id))
+}
+
+/// Recheck both login and numeric ID after the authenticated feed is fetched.
+/// A changed account cannot persist old-operator source decisions or receipts.
 fn require_same_authenticated_operator(
-    expected: &str, response: &serde_json::Value,
+    expected_login: &str, expected_id: u64, response: &serde_json::Value,
 ) -> Result<()> {
-    let current = authenticated_login(response)?;
-    if !current.eq_ignore_ascii_case(expected) {
+    let (current_login, current_id) = authenticated_operator(response)?;
+    if !current_login.eq_ignore_ascii_case(expected_login) || current_id != expected_id {
         return Err("Signed-in GitHub operator changed during Observe; no source receipt recorded.".into());
     }
     Ok(())
 }
 
-fn recheck_authenticated_operator(root: &std::path::Path, expected: &str) -> Result<()> {
+fn recheck_authenticated_operator(
+    root: &std::path::Path, expected_login: &str, expected_id: u64,
+) -> Result<()> {
     let response = crate::github::run_gh(root, &["api", "user"], crate::github::TIMEOUT)?;
-    require_same_authenticated_operator(expected, &crate::github::json(&response)?)
+    require_same_authenticated_operator(expected_login, expected_id, &crate::github::json(&response)?)
 }
 
 /// Resolve the exact repository identity through an independently
@@ -1708,7 +1719,7 @@ fn fetch_authenticated_github_window(
     let user = crate::github::run_gh(
         &root, &["api", "user"], crate::github::TIMEOUT,
     )?;
-    let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     // Resolve ID on every explicit Observe request, including after a rename
     // or delete/recreate of the same repository display name.
     let repository_endpoint = format!("repos/{repo}");
@@ -1730,7 +1741,7 @@ fn fetch_authenticated_github_window(
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
     require_authenticated_feed_repository(&response, repository_id)?;
-    recheck_authenticated_operator(&root, &signed_in)?;
+    recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, response, pages.len(), repository_id))
 }
 
@@ -2228,7 +2239,7 @@ fn fetch_authenticated_check_run(
 ) -> Result<(String, serde_json::Value, u64)> {
     let root = std::env::temp_dir();
     let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
-    let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     let metadata_endpoint = format!("repos/{repository}");
     let metadata = crate::github::run_gh(
         &root, &["api", &metadata_endpoint], crate::github::TIMEOUT,
@@ -2239,7 +2250,7 @@ fn fetch_authenticated_check_run(
     let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
     let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
     let verified = crate::github::json(&output)?;
-    recheck_authenticated_operator(&root, &signed_in)?;
+    recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, verified, repository_id))
 }
 
@@ -3682,21 +3693,30 @@ mod tests {
     #[test]
     fn observe_operator_identity_drift_fails_closed_for_events_and_checks() {
         assert!(require_same_authenticated_operator(
-            "Operator", &serde_json::json!({"login":"operator"})
+            "Operator", 101, &serde_json::json!({"login":"operator","id":101})
         ).is_ok());
         for response in [
+            serde_json::json!({"login":"operator","id":202}),
+            serde_json::json!({"login":"other-operator","id":101}),
+            serde_json::json!({"login":"operator","id":0}),
+            serde_json::json!({"login":"operator","id":-1}),
+            serde_json::json!({"login":"operator","id":"101"}),
+            serde_json::json!({"login":"operator"}),
             serde_json::json!({"login":"other-operator"}),
             serde_json::json!({"login":""}),
             serde_json::json!({"login":null}),
             serde_json::json!({}),
         ] {
-            assert!(require_same_authenticated_operator("Operator", &response).is_err());
+            assert!(require_same_authenticated_operator("Operator", 101, &response).is_err());
         }
     }
 
     #[test]
     fn authenticated_login_and_self_event_filter_are_native_and_restart_durable() {
         assert_eq!(authenticated_login(&serde_json::json!({"login":"Operator"})).unwrap(), "Operator");
+        assert_eq!(authenticated_operator(&serde_json::json!({"login":"Operator","id":101})).unwrap(),
+            ("Operator".to_owned(), 101));
+        assert!(authenticated_operator(&serde_json::json!({"login":"Operator"})).is_err());
         for invalid in [serde_json::json!({}), serde_json::json!({"login":"bad login"}),
                         serde_json::json!({"login":""})] {
             assert!(authenticated_login(&invalid).is_err());

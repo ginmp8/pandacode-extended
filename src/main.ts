@@ -2813,16 +2813,58 @@ function renderComposer(): void {
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
+    // Channel events redraw the composer while Council settings may be open.
+    // Capture its live keyboard/scroll state before removing the old popover.
+    const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
+    const councilWasOpen = oldCouncilPanel?.matches(':popover-open') ?? false;
+    const councilControls = 'button, input, select, textarea, summary';
+    const councilFocusedIndex = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      ? [...oldCouncilPanel.querySelectorAll<HTMLElement>(councilControls)].indexOf(document.activeElement as HTMLElement)
+      : -1;
+    const councilScrollTop = councilWasOpen ? oldCouncilPanel?.scrollTop ?? 0 : 0;
+    // A channel event can replace a text field while the user edits the middle
+    // of a criterion or file scope. Retain the caret as well as the focus.
+    const councilFocusedText = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      && (document.activeElement instanceof HTMLTextAreaElement
+        || (document.activeElement instanceof HTMLInputElement
+          && ['text', 'search', 'tel', 'url'].includes(document.activeElement.type)))
+      ? document.activeElement : null;
+    const councilCaret = councilFocusedText ? {
+      start: councilFocusedText.selectionStart ?? 0,
+      end: councilFocusedText.selectionEnd ?? 0,
+      direction: councilFocusedText.selectionDirection ?? 'none',
+    } : null;
+    const promptWasFocused = document.activeElement === oldChannelComposer?.querySelector('#shared-channel-prompt');
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
-      restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
-    }
+    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    if (!posting) restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
     bindSharedChannelCouncil(channelComposer);
+    if (!posting && councilWasOpen && channelComposer) {
+      const nextTrigger = channelComposer.querySelector<HTMLElement>('.bc-council-trigger');
+      const nextPanel = channelComposer.querySelector<HTMLElement>('.bc-council-panel');
+      if (nextTrigger && nextPanel) {
+        toggleSharedChannelCouncil(nextTrigger);
+        if (councilFocusedIndex >= 0) {
+          const focus = [...nextPanel.querySelectorAll<HTMLElement>(councilControls)][councilFocusedIndex];
+          if (focus?.getClientRects().length && !focus.matches(':disabled')) {
+            focus.focus({ preventScroll: true });
+            // A roster change may shift the numeric Tab position to a different
+            // control. Never apply a text selection to a number input or checkbox.
+            if (councilCaret && councilFocusedText && focus.getAttribute('name') === councilFocusedText.name
+              && (focus instanceof HTMLTextAreaElement
+                || (focus instanceof HTMLInputElement && ['text', 'search', 'tel', 'url'].includes(focus.type))))
+              focus.setSelectionRange(councilCaret.start, councilCaret.end, councilCaret.direction);
+          }
+        } else if (promptWasFocused) {
+          channelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.focus({ preventScroll: true });
+        }
+        nextPanel.scrollTop = councilScrollTop;
+      }
+    }
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
-    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
     if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;
@@ -2841,7 +2883,7 @@ function renderComposer(): void {
     ? `<button type="button" class="send-button stop-button" data-action="stop" title="Stop task (Esc)" aria-label="${remoteStartCancels.has(s.id) ? 'Stopping…' : 'Stop task'}" ${remoteStartCancels.has(s.id) ? 'disabled' : ''}>${icon('stop')}</button>`
     : checking ? '<button type="button" class="secondary-button remote-checking" aria-label="Checking…" disabled>Checking…</button>'
     : offline ? `<button type="button" class="secondary-button remote-composer-retry" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}<span>${retrying ? 'Reconnecting…' : 'Retry'}</span></button>`
-    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
+    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam || state.messagesLoading || Boolean(state.messagesError) ? 'disabled' : ''}>${icon('arrow')}</button>`;
   // The composer redraws on every session change; the orchestration slot's nodes outlive it.
   const orchestrationSlot = document.querySelector('#machine-orchestration');
   $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name })}${s.remoteDevice ? '' : council.strip(s.id)}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" dir="auto" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${escape(promptDescription())}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}${s.remoteDevice ? '' : council.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
@@ -7176,6 +7218,25 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       }
       break;
     }
+    case 'channel-council-inspect': {
+      const deliveryId = element.dataset.deliveryId;
+      const channelId = state.sharedChannelId;
+      if (!deliveryId || !channelId) break;
+      // Native resolves and revalidates the delivery's owning channel, policy,
+      // isolated task and frozen cycle. DOM-provided task ids have no authority.
+      const { createCouncilInspector } = await import('./council-inspector');
+      const dialog = modal('Council inspection',
+        '<div class="bc-council-inspector-host" role="region" aria-label="Native Council evidence"></div>',
+        'bc-council-inspector-dialog');
+      const inspector = createCouncilInspector(() =>
+        call<import('./architect-types').CouncilInspection>('bot_shared_channel_council_inspect',
+          { channelId, deliveryId }));
+      dialog.querySelector('.bc-council-inspector-host')?.append(inspector);
+      const summary = inspector.querySelector<HTMLElement>('summary');
+      summary?.focus();
+      summary?.click();
+      break;
+    }
     case 'channel-council-report': {
       const taskId = element.dataset.sessionId;
       if (!taskId) break;
@@ -7336,21 +7397,84 @@ document.addEventListener('submit', event => {
     if (!text) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
     const councilMode = data.get('councilMode');
-    const reviewerBotIds = [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value);
+    const isSelected = councilMode === 'selected';
+    const channel = state.sharedChannelDetail;
+    const selectedBotIds = isSelected
+      ? [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value)
+      : [];
+    const directBotIds: string[] = [], nestedBotReviewers: { botId: string; childReviewers: number; childTarget: number; childMaxRounds: number }[] = [];
+    const roles = [...form.querySelectorAll<HTMLSelectElement>('select[name=councilReviewerRole]')];
+    const childValue = (name: string, botId: string): number => Number(
+      [...form.querySelectorAll<HTMLInputElement>('input[name=' + name + ']')].find(input => input.dataset.botId === botId)?.value ?? NaN
+    );
+    let rolesValid = true;
+    for (const id of selectedBotIds) {
+      const role = roles.find(select => select.dataset.botId === id)?.value;
+      if (role === 'direct') directBotIds.push(id);
+      else if (role === 'nested') nestedBotReviewers.push({
+        botId: id, childReviewers: childValue('councilChildReviewers', id),
+        childTarget: childValue('councilChildTarget', id), childMaxRounds: childValue('councilChildMaxRounds', id),
+      });
+      else rolesValid = false;
+    }
+    const automaticReviewers = isSelected ? Number(data.get('councilAutomaticReviewers')) : 0;
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
-    if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
+    const strategy = String(data.get('councilStrategy') ?? 'parallel');
+    const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
+    const criteria = [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => ({
+      id: row.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.value.trim() ?? '',
+      lens: row.querySelector<HTMLInputElement>('input[name="councilCriterionLens"]')?.value.trim() ?? '',
+      target: Number(row.querySelector<HTMLInputElement>('input[name="councilCriterionTarget"]')?.value ?? NaN),
+      required: true,
+      evidenceRequired: row.querySelector<HTMLInputElement>('input[name="councilCriterionEvidence"]')?.checked ?? false,
+    }));
+    const criteriaValid = criteriaSource === 'architect' || (
+      criteria.length >= 1 && criteria.length <= 8
+      && criteria.every(criterion => /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id)
+        && criterion.lens.length > 0 && criterion.lens.length <= 80
+        && Number.isFinite(criterion.target) && criterion.target >= 1 && criterion.target <= 10)
+      && new Set(criteria.map(c => c.id)).size === criteria.length
+      && new Set(criteria.map(c => c.lens.toLowerCase())).size === criteria.length
+      && (!isSelected || criteria.length <= selectedBotIds.length + automaticReviewers)
+    );
+    const childAttempts = nestedBotReviewers.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
+    const totalSeats = selectedBotIds.length + automaticReviewers;
+    const validSelection = !isSelected || (
+      rolesValid && selectedBotIds.length >= (automaticReviewers > 0 ? 1 : 2)
+      && selectedBotIds.length <= 8 && totalSeats >= 2 && totalSeats <= 8
+      && new Set(selectedBotIds).size === selectedBotIds.length
+      && selectedBotIds.every(id => channel?.memberIds.includes(id))
+      && Number.isInteger(automaticReviewers) && automaticReviewers >= 0 && automaticReviewers <= 7
+      && nestedBotReviewers.every(child =>
+        Number.isInteger(child.childReviewers) && child.childReviewers >= 2 && child.childReviewers <= 8
+        && Number.isFinite(child.childTarget) && child.childTarget >= 1 && child.childTarget <= 10
+        && Number.isInteger(child.childMaxRounds) && child.childMaxRounds >= 1 && child.childMaxRounds <= 100)
+      && Number.isSafeInteger(childAttempts) && childAttempts <= 256
+      && Number.isSafeInteger((totalSeats + childAttempts) * maxRounds)
+      && (totalSeats + childAttempts) * maxRounds <= 1024
+    );
+    if (councilEnabled && (
+      !['auto', 'selected'].includes(String(councilMode))
+      || !Number.isFinite(target) || target < 1 || target > 10
       || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
-      || (councilMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)))) {
-      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+      || !['parallel', 'escalated', 'two_phase'].includes(strategy)
+      || !['architect', 'user', 'hybrid'].includes(criteriaSource)
+      || !criteriaValid || !validSelection
+    )) {
+      notify('Check Council seats (2–8), child limits, strategy and required criteria before sending.');
       return;
     }
-    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    const scopedRequested = data.get('councilScopedFile') === 'on' && isSelected;
+    if (councilEnabled && scopedRequested && !directBotIds.length) {
+      notify('Scoped reviewer grants require at least one direct bot, not only child Councils.');
+      return;
+    }
     const filePath = String(data.get('councilFilePath') ?? '').trim();
     const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
       && !filePath.startsWith('\\') && !filePath.includes(':')
       && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
-    if (councilEnabled && scopedFile && !validFilePath) {
+    if (councilEnabled && scopedRequested && !validFilePath) {
       notify('Choose one valid relative file path for the scoped reviewer action.');
       return;
     }
@@ -7363,19 +7487,23 @@ document.addEventListener('submit', event => {
       return;
     }
     const council = councilEnabled ? {
-      target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      target, maxRounds, reviewers: 0,
+      ...(directBotIds.length ? { reviewerBotIds: directBotIds } : {}),
+      ...(nestedBotReviewers.length ? { nestedBotReviewers } : {}),
+      ...(automaticReviewers ? { automaticReviewers } : {}),
+      ...(strategy !== 'parallel' ? { strategy, forceEscalation: strategy === 'escalated' } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
-      ...(scopedFile ? { reviewPermissions: {
+      ...(scopedRequested ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
         grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],
       } } : {}),
     } : undefined;
-    const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id)) && councilMode === 'selected') {
+    if (councilEnabled && selectedBotIds.some(id => recipients.includes(id)) && isSelected) {
       notify('A message executor cannot also be one of its Council reviewers.');
       return;
     }

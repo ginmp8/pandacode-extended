@@ -143,6 +143,51 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
         [&message_id],|row|row.get(0),
     ).unwrap();
     assert_eq!(cycles,2,"delivery cycles must be distinct and persisted");
+    // Channel admission creates one durable native-only review request for each
+    // isolated task. Replays reuse a request; no cached label is an approval.
+    let session_for = |delivery: &str| -> String {
+        f.store.db.query_row(
+            "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+            [delivery], |row| row.get(0),
+        ).unwrap()
+    };
+    let first_session = session_for(&first_id);
+    let second_session = session_for(&second_id);
+    let first_request = crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap();
+    let second_request = crate::architect::council_requests::admit_channel(&f.store, &second_id).unwrap();
+    let pending_team = crate::architect::load(&f.store, &second_session).unwrap().unwrap();
+    assert_eq!(pending_team.council_status.as_ref().map(|status| status.state.as_str()), Some("waiting"),
+        "native save computes a waiting status for a valid unstarted Council");
+    assert!(crate::architect::council_requests::channel_request_is_current(&f.store, &second_id, &second_session));
+    assert_ne!(first_request.request_id, second_request.request_id);
+    assert_ne!(first_request.delivery_cycle_id, second_request.delivery_cycle_id);
+    assert_eq!(first_request.session_id, first_session);
+    assert_eq!(second_request.session_id, second_session);
+    assert_eq!(crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap(), first_request);
+    let current = crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &first_session,
+    ).unwrap();
+    assert!(!current.native.verified_pass, "admission never fabricates native approval");
+    assert!(current.native.verified_completion.is_none());
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &second_id, &second_session,
+    ).is_err(), "a sibling delivery cannot inspect another request");
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &second_session,
+    ).is_err(), "a foreign task cannot inspect another request");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='replaced objective' WHERE delivery_id=?1",
+        [&first_id],
+    ).unwrap();
+    assert!(crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &first_session,
+    ).unwrap_err().contains("stale"), "a changed objective invalidates task-bound inspection");
+    assert!(crate::architect::council_requests::admit_channel(&f.store, &first_id)
+        .unwrap_err().contains("conflict"), "idempotency never silently replaces a changed request");
+    let unaffected = crate::architect::council_requests::inspect_channel(
+        &f.store, &second_request.request_id, &second_id, &second_session,
+    ).unwrap();
+    assert!(!unaffected.native.verified_pass);
     let detail = shared_channels::detail(&f.store,&channel.id,100).unwrap();
     let first = detail.messages.iter().find(|item| item.id==first_id).unwrap();
     let second = detail.messages.iter().find(|item| item.id==second_id).unwrap();
@@ -150,8 +195,15 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     assert_ne!(first.council.as_ref().unwrap().session_id,second.council.as_ref().unwrap().session_id);
     assert!(owned.iter().any(|(_,sid)| sid == &first.council.as_ref().unwrap().session_id));
     assert!(owned.iter().any(|(_,sid)| sid == &second.council.as_ref().unwrap().session_id));
-    assert_eq!(first.council.as_ref().unwrap().state,"Reviewing");
-    assert_eq!(second.council.as_ref().unwrap().state,"Reviewing");
+    let tampered = first.council.as_ref().unwrap();
+    assert_eq!(tampered.state, "Inconclusive",
+        "an altered native request cannot appear to be actively reviewing");
+    assert!(tampered.reviewers.is_empty() && tampered.lowest.is_none());
+    assert!(tampered.notice.as_deref().unwrap_or_default().contains("differ"));
+    let pending = second.council.as_ref().unwrap();
+    assert_eq!(pending.state, "Reviewing",
+        "an authenticated, empty task is pending until its native cycle starts");
+    assert!(pending.reviewers.is_empty() && pending.lowest.is_none());
     // Stopping one delivery cannot mark its sibling stopped or passed.
     f.store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",
@@ -196,14 +248,16 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
         "INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,'Review','0',?6)",
         params![delivery_id,channel.id,message_id,executor.id,crate::storage::id(),crate::storage::now()],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids).is_ok());
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&[])
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config).is_ok());
+    let mut missing_reviewers = config.clone();
+    missing_reviewers.reviewer_bot_ids.clear();
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&missing_reviewers)
         .unwrap_err().contains("roster changed"));
     f.store.db.execute(
         "DELETE FROM bot_shared_channel_members WHERE channel_id=?1 AND bot_id=?2",
         params![channel.id,b.id],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("no longer a channel member"));
     f.store.db.execute(
         "INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,2)",
@@ -215,13 +269,95 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
         "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
         params![reassigned,channel.id,message_id,a.id,other_session,crate::storage::now()],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("message executor"));
     f.store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",[&delivery_id],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("no longer active"));
+}
+
+#[test]
+fn channel_nested_council_rechecks_frozen_policy_membership_and_executor() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let a = create(&f.store, &input("Nested Security"), &f.root).unwrap();
+    let b = create(&f.store, &input("Nested Architecture"), &f.root).unwrap();
+    let channel = shared_channels::create(
+        &f.store, "nested-scope", &[executor.id.clone(), a.id.clone(), b.id.clone()],
+    ).unwrap();
+    let delivery_id = crate::storage::id();
+    let session_id = thread_session(
+        &f.store, &executor, DESKTOP, &format!("channel-council:{delivery_id}"), "Nested",
+    ).unwrap().0;
+    let message_id = crate::storage::id();
+    let config = crate::architect::CouncilConfig {
+        nested_bot_reviewers: [a.id.clone(), b.id.clone()].into_iter()
+            .map(|bot_id| serde_json::from_value(serde_json::json!({
+                "botId": bot_id, "childReviewers": 2,
+                "childTarget": 9.0, "childMaxRounds": 2,
+            })).unwrap()).collect(),
+        ..Default::default()
+    };
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review nested','in_progress',?3)",
+        params![message_id, channel.id, crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id, serde_json::to_string(&config).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(), crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(
+            id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![delivery_id, channel.id, message_id, executor.id, session_id, crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_deliveries(
+            delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at)
+         VALUES(?1,?2,?3,?4,?5,'Review nested','0',?6)",
+        params![delivery_id, channel.id, message_id, executor.id,
+            crate::storage::id(), crate::storage::now()],
+    ).unwrap();
+    let mut missing_nested = config.clone();
+    missing_nested.nested_bot_reviewers.clear();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &missing_nested)
+        .unwrap_err().contains("roster changed"));
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config).is_ok());
+    let mut weakened = config.clone();
+    weakened.nested_bot_reviewers[0].child_target = 8.0;
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &weakened)
+        .unwrap_err().contains("roster changed"));
+    f.store.db.execute(
+        "DELETE FROM bot_shared_channel_members WHERE channel_id=?1 AND bot_id=?2",
+        params![channel.id, b.id],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("no longer a channel member"));
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,2)",
+        params![channel.id, b.id],
+    ).unwrap();
+    f.store.db.execute("UPDATE bots SET paused=1 WHERE id=?1", [&a.id]).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("paused"));
+    f.store.db.execute("UPDATE bots SET paused=0 WHERE id=?1", [&a.id]).unwrap();
+    let reassigned = crate::storage::id();
+    let other_session = thread_session(&f.store, &a, DESKTOP, DESKTOP, "Reassigned").unwrap().0;
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(
+            id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![reassigned, channel.id, message_id, a.id, other_session, crate::storage::now()],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("message executor"));
 }
 
 #[test]
@@ -308,6 +444,13 @@ fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
         "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
         params![contexts[0].1,serde_json::to_string(&team).unwrap()],
     ).unwrap();
+    let unbound = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let unbound_view = unbound.messages.iter().find(|m| m.id == contexts[0].0)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(unbound_view.state, "Inconclusive");
+    assert!(unbound_view.reviewers.is_empty() && unbound_view.lowest.is_none(),
+        "unbound native reviewer data must stay private");
+    shared_channels::bind_delivery_cycle(&f.store, &contexts[0].1, team.council_since).unwrap();
     let details = shared_channels::detail(&f.store,&channel.id,100).unwrap();
     let first_skills = &details.messages.iter().find(|m| m.id==contexts[0].0)
         .unwrap().council.as_ref().unwrap().reviewers[0].skills;
@@ -590,6 +733,17 @@ fn a_cached_pass_without_native_scores_cannot_approve_a_channel_delivery() {
     ).unwrap();
     shared_channels::bind_delivery_cycle(&f.store, &session_id, team.council_since).unwrap();
 
+    // An old scored snapshot must not advertise an accepted Council in the
+    // Channel list even when the actual callback correctly denies it.
+    let view = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let visible = view.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(visible.state, "Inconclusive");
+    assert_eq!(visible.lowest, None, "unverified scores must not look like a native pass");
+    assert!(visible.notice.as_deref().unwrap_or_default().contains("verified native reviewer evidence"));
+    let inspection = shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).unwrap();
+    assert_eq!(inspection["verifiedPass"], false);
+
     assert!(matches!(
         channel_council_outcome(&f.store, &session_id).unwrap(),
         ChannelCouncilOutcome::Denied(_),
@@ -710,6 +864,43 @@ fn an_approved_council_with_no_text_still_posts_one_truthful_final_result() {
         [&delivery_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(status,"completed");
+    let request_id: String = f.store.db.query_row(
+        "SELECT request_id FROM extended_council_task_requests WHERE delivery_id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    let terminal = crate::architect::council_requests::read_terminal_channel(
+        &f.store, &request_id, &delivery_id, &session_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "accepted_by_user");
+    assert_eq!(terminal.lowest_verified_score, None,
+        "human acceptance must not invent a passing score");
+    assert_eq!(terminal.evidence_sha256.len(), 64);
+    assert_eq!(terminal.delivery_id, delivery_id);
+    assert!(crate::architect::council_requests::read_terminal_channel(
+        &f.store, &request_id, &message_id, &session_id,
+    ).is_err(), "a sibling or foreign delivery cannot read this receipt");
+    assert!(shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "a task-bound accepted Council remains eligible for its original callback");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries
+         SET objective='Unapproved replacement objective' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(!shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "a changed frozen objective revokes callback authority even after delivery settled");
+    assert!(crate::architect::council_requests::read_terminal_channel(
+        &f.store, &request_id, &delivery_id, &session_id,
+    ).is_err(), "a changed objective also revokes terminal receipt inspection");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries
+         SET objective='Please review' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "restoring the same authorized request does not invent or replay another result");
+    assert_eq!(crate::architect::council_requests::read_terminal_channel(
+        &f.store, &request_id, &delivery_id, &session_id,
+    ).unwrap(), terminal, "recovery must read the same single immutable receipt");
 }
 
 #[test]
@@ -1212,6 +1403,157 @@ fn fresh_bot_message_keeps_active_desktop_queue_memory_and_schedules() {
     shared_channels::launch_failed(&f.store, &fresh, &running);
     assert_eq!(status("fresh-request"), "queued", "a failed launch must leave the request recoverable");
     assert_eq!(crate::message_queue::list(&f.store, Some(&desktop)).unwrap().len(), 1);
+}
+
+#[test]
+fn channel_council_inspector_requires_owning_delivery_and_frozen_cycle() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let reviewer = bot(&f);
+    let channel = shared_channels::create(&f.store, "review", std::slice::from_ref(&reviewer.id)).unwrap();
+    let unrelated = shared_channels::create(&f.store, "unrelated", std::slice::from_ref(&reviewer.id)).unwrap();
+    let council = crate::architect::CouncilConfig::default();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review task','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![reviewer.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    shared_channels::provision_channel_delivery(
+        &f.store, &channel.id, &message_id, &reviewer.id, "Review task",
+        shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },
+        &delivery_id,
+    ).unwrap();
+    let session_id: String = f.store.db.query_row(
+        "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    let mut team = crate::architect::load(&f.store, &session_id).unwrap().unwrap();
+    team.council_since = 1234;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![session_id,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    shared_channels::bind_delivery_cycle(&f.store, &session_id, team.council_since).unwrap();
+    let inspection = shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).unwrap();
+    assert_eq!(inspection["sessionId"], session_id);
+    assert_eq!(inspection["verifiedPass"], false, "a read-only report is not an approval");
+
+    // A drifted policy cannot disclose reviewer details or cached scores
+    // through the compact Channel view while the inspector refuses it.
+    team.council_status = Some(crate::architect::CouncilStatus {
+        state: "reviewing".into(), round: 1, lowest: Some(8.0), target: 9.0,
+        stale: false, notice: None,
+    });
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![session_id,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    let valid_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    assert_eq!(valid_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+    // A modified objective is as stale as a modified Council policy.
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='Different task'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    let stale_objective = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let objective_view = stale_objective.messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(objective_view.state, "Inconclusive");
+    assert!(objective_view.lowest.is_none() && objective_view.reviewers.is_empty());
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET objective='Review task'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    assert_eq!(shared_channels::detail(&f.store, &channel.id, 100).unwrap()
+        .messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap().lowest, Some(8.0));
+
+    // Altering the durable task cycle ID cannot manufacture a new inspection
+    // even if the artifact revision, root config and scores remain unchanged.
+    let original_cycle: String = f.store.db.query_row(
+        "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET cycle_id='forged-cycle' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    let forged_cycle = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let forged_view = forged_cycle.messages.iter().find(|m| m.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(forged_view.state, "Inconclusive");
+    assert!(forged_view.lowest.is_none() && forged_view.reviewers.is_empty());
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET cycle_id=?2 WHERE delivery_id=?1",
+        params![delivery_id,original_cycle],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).is_ok());
+
+    let mut changed_council = council.clone();
+    changed_council.target = 8.0;
+    f.store.db.execute(
+        "UPDATE extended_channel_council_requests SET council_json=?2 WHERE message_id=?1",
+        params![message_id,serde_json::to_string(&changed_council).unwrap()],
+    ).unwrap();
+    let stale_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    let stale_view = stale_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.as_ref().unwrap();
+    assert_eq!(stale_view.state, "Inconclusive");
+    assert_eq!(stale_view.lowest, None, "stale policy must hide scores");
+    assert!(stale_view.reviewers.is_empty(), "stale policy must hide reviewer identities");
+    assert!(stale_view.notice.as_deref().unwrap_or_default().contains("differ"));
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_requests SET council_json=?2 WHERE message_id=?1",
+        params![message_id,serde_json::to_string(&council).unwrap()],
+    ).unwrap();
+
+    // A link into another Channel's message must never disclose the task.
+    let foreign_message = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Unrelated task','in_progress',?3)",
+        params![foreign_message,unrelated.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET source_message_id=?2
+         WHERE delivery_id=?1", params![delivery_id,foreign_message],
+    ).unwrap();
+    let foreign_list = shared_channels::detail(&f.store, &channel.id, 100).unwrap();
+    assert!(foreign_list.messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.is_none());
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET source_message_id=?2
+         WHERE delivery_id=?1", params![delivery_id,message_id],
+    ).unwrap();
+    assert!(shared_channels::detail(&f.store, &channel.id, 100).unwrap()
+        .messages.iter().find(|message| message.id == delivery_id)
+        .unwrap().council.is_some());
+
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &unrelated.id, &delivery_id)
+        .unwrap_err().contains("does not belong"));
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, "foreign-delivery")
+        .unwrap_err().contains("does not belong"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET artifact_revision='cycle:old'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"), "an old channel cycle must not inspect a new task review");
 }
 
 #[test]

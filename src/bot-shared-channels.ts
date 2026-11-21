@@ -118,7 +118,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
         : '';
       return `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}${skillNote}`;
     }).join(' · ') ?? '';
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button><button type="button" class="secondary-button bc-council-report" data-action="channel-council-inspect" data-delivery-id="${escape(message.id)}">Inspect Council evidence</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -168,20 +168,45 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
 /** Preserve unsent, per-message Council inputs across a channel refresh only. */
 export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
   if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
-  const oldInputs = [...previous.querySelectorAll<HTMLInputElement>('input[name^="council"]')];
-  for (const input of next.querySelectorAll<HTMLInputElement>('input[name^="council"]')) {
-    const old = oldInputs.find(item => item.name === input.name
-      && (item.type === 'checkbox' || item.type === 'radio' ? item.value === input.value : true));
+  // A refresh rebuilds the form: recreate every criterion row before restoring
+  // values, so distinct user-required lenses cannot collapse into the first row.
+  const previousRows = previous.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
+  const newRows = next.querySelector<HTMLElement>('.bc-council-criterion-rows');
+  const template = newRows?.querySelector<HTMLElement>('[data-council-criterion-row]');
+  if (newRows && template) {
+    for (let i = 1; i < Math.min(previousRows.length, 8); i++) {
+      newRows.append(template.cloneNode(true));
+    }
+  }
+  const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
+  const nextInputs = [...next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
+  for (const input of nextInputs) {
+    const match = (item: HTMLInputElement | HTMLSelectElement): boolean =>
+      item.name === input.name && item.dataset.botId === input.dataset.botId
+      && (!(item instanceof HTMLInputElement) || (item.type !== 'checkbox' && item.type !== 'radio')
+        || item.value === input.value);
+    // Multiple criterion rows have identical field names; restore by row order.
+    const index = nextInputs.filter(match).indexOf(input);
+    const old = oldInputs.filter(match)[index];
     if (!old) continue;
-    if (input.type === 'checkbox' || input.type === 'radio') input.checked = old.checked;
-    else input.value = old.value;
+    if (input instanceof HTMLInputElement && (input.type === 'checkbox' || input.type === 'radio')) {
+      input.checked = (old as HTMLInputElement).checked;
+    } else input.value = old.value;
   }
 }
 
 export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
   const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
-  const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
+  const options = members.map(bot => '<div class="bc-council-reviewer" data-bot-id="' + escape(bot.id) + '">' +
+    '<label><input name="councilReviewer" type="checkbox" value="' + escape(bot.id) + '"><span>' + escape(bot.name) + '</span></label>' +
+    '<label class="bc-council-role" hidden>Review role<select name="councilReviewerRole" data-bot-id="' + escape(bot.id) + '" aria-label="Review role for ' + escape(bot.name) + '">' +
+      '<option value="direct">Direct reviewer</option><option value="nested">Own Council</option></select></label>' +
+    '<div class="bc-council-child-settings" hidden>' +
+      '<label>Child reviewers<input name="councilChildReviewers" data-bot-id="' + escape(bot.id) + '" type="number" min="2" max="8" step="1" value="2"></label>' +
+      '<label>Child target<input name="councilChildTarget" data-bot-id="' + escape(bot.id) + '" type="number" min="1" max="10" step="0.5" value="9"></label>' +
+      '<label>Child max rounds<input name="councilChildMaxRounds" data-bot-id="' + escape(bot.id) + '" type="number" min="1" max="100" step="1" value="10"></label>' +
+    '</div></div>').join('');
   return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
     <div class="composer-toolbar"><button type="button" class="bc-council-trigger composer-council-button" data-action="channel-council" aria-label="Council: off" aria-haspopup="dialog" aria-expanded="false" aria-controls="bc-council-panel" title="Council settings"><span class="council-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg></span></button><span class="bc-composer-spacer"></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div>
     <section id="bc-council-panel" class="floating-menu council-panel bc-council-panel" role="dialog" aria-labelledby="bc-council-title" popover="auto">
@@ -197,7 +222,29 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
             <label><input type="radio" name="councilMode" value="selected"><span>Bots</span></label>
           </div>
         </div>
-        <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
+        <div class="bc-council-reviewer-options"><p>Choose channel members who are not message executors. Two to eight combined root seats are required.</p>
+          <label class="bc-council-automatic">Additional automatic reviewers<input name="councilAutomaticReviewers" type="number" aria-label="Additional automatic reviewers" min="0" max="7" step="1" value="0"></label>
+          ${options}
+        </div>
+        <div class="bc-council-advanced">
+          <label>Review strategy<select name="councilStrategy" aria-label="Review strategy"><option value="parallel">Parallel</option><option value="escalated">Escalated (fresh review)</option><option value="two_phase">Two-phase adversarial</option></select></label>
+          <label>Criteria source<select name="councilCriteriaSource" aria-label="Criteria source"><option value="architect">Architect-defined</option><option value="user">User-defined</option><option value="hybrid">Hybrid</option></select></label>
+          <div class="bc-council-criterion-fields" hidden>
+            <div class="bc-council-criterion-rows">
+              <fieldset class="bc-council-criterion-row" data-council-criterion-row>
+                <legend>Required criterion</legend>
+                <label>Criterion ID<input name="councilCriterionId" type="text" maxlength="64" autocomplete="off"></label>
+                <label>Review lens<input name="councilCriterionLens" type="text" maxlength="80" autocomplete="off"></label>
+                <label>Minimum criterion score<input name="councilCriterionTarget" type="number" min="1" max="10" step="0.1" value="9"></label>
+                <label><input name="councilCriterionEvidence" type="checkbox"> Require independently verified native evidence</label>
+                <button type="button" class="secondary-button" data-council-criterion-remove disabled>Remove criterion</button>
+              </fieldset>
+            </div>
+            <button type="button" class="secondary-button" data-council-criterion-add>Add criterion</button>
+            <small>Up to eight unique required criteria. Required user criteria cannot be removed or weakened by automatic reviewers.</small>
+          </div>
+          <p class="bc-council-plan" role="status" aria-live="polite">Council preview: automatic native reviewers.</p>
+        </div>
         <div class="bc-council-followup"><label><input type="checkbox" name="councilGithubIssue"> After Council approval, create one GitHub issue with accepted findings</label>
           <label>Authorized repository (owner/name) <input type="text" name="councilGithubRepo" maxlength="201" placeholder="owner/repository" autocomplete="off"></label>
           <small>Uses the existing signed-in GitHub CLI. A failed or uncertain external write is reported separately; it never changes the Council verdict.</small></div>
@@ -220,6 +267,26 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     const enabled = form.querySelector<HTMLInputElement>('input[name="councilEnabled"]')?.checked ?? false;
     trigger.dataset.on = enabled ? 'true' : 'false';
     trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
+    const selected = panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected';
+    const selectedBots = [...panel.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')];
+    for (const row of panel.querySelectorAll<HTMLElement>('.bc-council-reviewer')) {
+      const checked = row.querySelector<HTMLInputElement>('input[name="councilReviewer"]')?.checked ?? false;
+      const role = row.querySelector<HTMLSelectElement>('select[name="councilReviewerRole"]')?.value;
+      row.querySelector<HTMLElement>('.bc-council-role')!.hidden = !selected || !checked;
+      row.querySelector<HTMLElement>('.bc-council-child-settings')!.hidden = !selected || !checked || role !== 'nested';
+    }
+    const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;
+    panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!.hidden = source === 'architect';
+    const rows = panel.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
+    for (const remove of panel.querySelectorAll<HTMLButtonElement>('[data-council-criterion-remove]')) {
+      remove.disabled = rows.length <= 1;
+    }
+    const extra = selected ? Number(panel.querySelector<HTMLInputElement>('input[name="councilAutomaticReviewers"]')?.value ?? 0) : 0;
+    const seats = selected ? selectedBots.length + extra : 0;
+    const criteriaNote = source !== 'architect' ? ` · ${rows.length} required criterion${rows.length === 1 ? '' : 's'} (not yet verified)` : '';
+    panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = (selected
+      ? `Council preview: ${seats} root seats (${selectedBots.length} selected bots + ${extra} automatic). Each child Council counts once.`
+      : 'Council preview: automatic native reviewers.') + criteriaNote;
     for (const choice of panel.querySelectorAll<HTMLButtonElement>('button[data-council-preset]')) {
       const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
       const input = form.elements.namedItem(name) as HTMLInputElement | null;
@@ -227,6 +294,32 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     }
   };
   panel.addEventListener('click', event => {
+    const action = (event.target as Element).closest<HTMLButtonElement>('[data-council-criterion-add], [data-council-criterion-remove]');
+    if (action) {
+      const rows = panel.querySelector<HTMLElement>('.bc-council-criterion-rows')!;
+      const first = rows.querySelector<HTMLElement>('[data-council-criterion-row]')!;
+      if (action.hasAttribute('data-council-criterion-add')) {
+        if (rows.children.length >= 8) {
+          panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = 'Council allows at most eight required criteria.';
+          return;
+        }
+        const next = first.cloneNode(true) as HTMLElement;
+        for (const input of next.querySelectorAll<HTMLInputElement>('input')) {
+          if (input.type === 'checkbox') input.checked = false;
+          else if (input.name === 'councilCriterionTarget') input.value = form.querySelector<HTMLInputElement>('input[name="councilTarget"]')?.value ?? '9';
+          else input.value = '';
+        }
+        rows.append(next);
+        next.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.focus({ preventScroll: true });
+      } else if (rows.children.length > 1) {
+        const row = action.closest<HTMLElement>('[data-council-criterion-row]')!;
+        const neighbor = (row.nextElementSibling ?? row.previousElementSibling) as HTMLElement;
+        row.remove();
+        neighbor.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.focus({ preventScroll: true });
+      }
+      sync();
+      return;
+    }
     const choice = (event.target as Element).closest<HTMLButtonElement>('button[data-council-preset]');
     if (!choice) return;
     const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
@@ -236,6 +329,21 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   panel.addEventListener('keydown', event => {
+    if (event.key === 'Tab' && panel.matches(':popover-open') && panel.contains(document.activeElement)) {
+      // This is a dialog, not an ordinary form disclosure: keyboard navigation
+      // must not leave the Council settings while its popover is open.
+      const controls = [...panel.querySelectorAll<HTMLElement>(
+        'input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), details > summary, a[href]'
+      )].filter(control => control.tabIndex >= 0 && control.getClientRects().length > 0);
+      if (!controls.length) return;
+      const at = controls.indexOf(document.activeElement as HTMLElement);
+      const next = event.shiftKey
+        ? (at <= 0 ? controls.length - 1 : at - 1)
+        : (at < 0 || at === controls.length - 1 ? 0 : at + 1);
+      event.preventDefault();
+      controls[next].focus();
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();

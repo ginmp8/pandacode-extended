@@ -581,7 +581,7 @@ fn list_all_demands_page_for_project(
     if let Some(state) = state_filter {
         if !matches!(state, "queued" | "running" | "waiting_approval" |
             "waiting_review" | "blocked" | "completed" | "failed" |
-            "stopped" | "interrupted" | "inconclusive") {
+            "stopped" | "interrupted" | "inconclusive" | "needs_attention") {
             return Err("Demand state filter must be an exact native Ticket state.".into());
         }
     }
@@ -615,7 +615,9 @@ fn list_all_demands_page_for_project(
                     ON o.id=t.orchestration_id
                 WHERE t.id=?1 AND t.updated_at=?2
                   AND (?3 IS NULL OR t.orchestration_id=?3)
-                  AND (?4 IS NULL OR t.state=?4)
+                  AND (?4 IS NULL OR t.state=?4 OR
+                       (?4='needs_attention' AND t.state IN
+                        ('blocked','failed','interrupted','inconclusive')))
                   AND (?5 IS NULL OR instr(lower(t.objective),lower(?5)) > 0)
                   AND (?6 IS NULL OR t.project_id=?6)
             )",
@@ -632,7 +634,9 @@ fn list_all_demands_page_for_project(
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
            AND (?4 IS NULL OR t.orchestration_id=?4)
-           AND (?5 IS NULL OR t.state=?5)
+           AND (?5 IS NULL OR t.state=?5 OR
+                (?5='needs_attention' AND t.state IN
+                 ('blocked','failed','interrupted','inconclusive')))
            AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
            AND (?7 IS NULL OR t.project_id=?7)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
@@ -8663,6 +8667,20 @@ mod tests {
                     'local-user','manual',?2,'worker',?3,'blocked',4000,4000)",
             params![second.id,second.project_id,second.policy_revision],
         ).unwrap();
+        // The Team's durable attention count must open the same four
+        // actual native Ticket states, filtered before the first 200 rows.
+        for (index, state) in ["failed", "interrupted", "inconclusive"].into_iter().enumerate() {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Attention state objective','local-user','manual',
+                        ?4,'worker',?5,?6,?7,?7)",
+                params![format!("attention-{index}"), first.id,
+                    format!("attention-key-{index}"), first.project_id,
+                    first.policy_revision, state, 5000 + index as i64],
+            ).unwrap();
+        }
         let first_page = list_all_demands_page_filtered(
             &store,200,None,None,Some(&first.id),Some("blocked"),
         ).unwrap();
@@ -8687,6 +8705,28 @@ mod tests {
         assert_eq!(list_all_demands_page_filtered(
             &store,200,None,None,None,Some("blocked"),
         ).unwrap()[0].orchestration_id,second.id);
+        let attention_first = list_all_demands_page_filtered(
+            &store, 200, None, None, Some(&first.id), Some("needs_attention"),
+        ).unwrap();
+        assert_eq!(attention_first.len(), 200);
+        assert_eq!(attention_first[0].state, "inconclusive");
+        assert!(attention_first.iter().all(|item|
+            item.orchestration_id == first.id
+                && matches!(item.state.as_str(),
+                    "blocked" | "failed" | "interrupted" | "inconclusive")));
+        let attention_anchor = attention_first.last().unwrap();
+        let attention_second = list_all_demands_page_filtered(
+            &store, 200, Some(attention_anchor.updated_at),
+            Some(&attention_anchor.id), Some(&first.id), Some("needs_attention"),
+        ).unwrap();
+        assert_eq!(attention_second.len(), 8);
+        let all_attention: std::collections::HashSet<_> = attention_first.iter()
+            .chain(attention_second.iter()).map(|item| item.id.as_str()).collect();
+        assert_eq!(all_attention.len(), 208);
+        assert!(list_all_demands_page_filtered(
+            &store, 200, Some(3002), Some("running-2"),
+            Some(&first.id), Some("needs_attention"),
+        ).is_err(), "A running Ticket must never anchor an attention-only page");
         for invalid in ["all","BLOCKED","blocked' OR 1=1 --","", "running "] {
             assert!(list_all_demands_page_filtered(
                 &store,200,None,None,Some(&first.id),Some(invalid),
@@ -8700,6 +8740,9 @@ mod tests {
         assert_eq!(list_all_demands_page_filtered(
             &reopened,200,None,None,Some(&first.id),Some("running"),
         ).unwrap().len(),3);
+        assert_eq!(list_all_demands_page_filtered(
+            &reopened,200,None,None,Some(&first.id),Some("needs_attention"),
+        ).unwrap().len(),200);
     }
 
     #[test]

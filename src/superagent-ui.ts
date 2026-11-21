@@ -196,6 +196,10 @@ export function mountSuperagent(
   // without locale-sensitive case conversion that would reject valid UTF-8.
   const nativeCaseFold = (value: string): string =>
     value.replace(/[A-Z]/g, character => character.toLowerCase());
+  const isDemandStateMatch = (filter: string | undefined, state: string): boolean =>
+    !filter || filter === state ||
+      (filter === 'needs_attention' &&
+        ['blocked','failed','interrupted','inconclusive'].includes(state));
   const fetchDemandPage = async (query: DemandQuery): Promise<DemandIndex[]> => {
     const page = await call<DemandIndex[]>('superagent_all_demands', {query});
     // A first page is untrusted until its native filter scope and identities
@@ -218,7 +222,7 @@ export function mountSuperagent(
                 (index > 0 && !(item.updatedAt < page[index - 1].updatedAt ||
                   (item.updatedAt === page[index - 1].updatedAt && item.id < page[index - 1].id))) ||
                 (query.orchestrationId && item.orchestrationId !== query.orchestrationId) ||
-                (query.stateFilter && item.state !== query.stateFilter) ||
+                !isDemandStateMatch(query.stateFilter, item.state) ||
                 (query.projectId && item.projectId !== query.projectId) ||
                 seen.has(item.id)) return true;
             seen.add(item.id);
@@ -356,8 +360,11 @@ export function mountSuperagent(
       safe(nativeCount(item.ticketCount,'tasks')) + ' · ' +
       safe(nativeCount(item.runningCount,'running')) + ' · ' +
       safe(nativeCount(item.blockedCount,'blocked')) + '</small>' +
-      '<small class="sa-attention-counts" aria-label="Native Demands needing attention">' +
-      safe(nativeCount(item.needsAttentionCount,'needing attention')) + '</small>' +
+      '<button type="button" class="sa-attention-counts" data-sa-attention-team="' +
+      safe(item.id) + '" aria-label="Show Demands needing attention for ' + safe(item.name) + '"' +
+      (!Number.isSafeInteger(item.needsAttentionCount) || (item.needsAttentionCount ?? 0) < 1
+        ? ' disabled' : '') + '>' +
+      safe(nativeCount(item.needsAttentionCount,'needing attention')) + '</button>' +
       '<small class="sa-lifecycle-counts" aria-label="Native queued and completed Demand counts">' +
       safe(nativeCount(item.queuedCount,'queued')) + ' · ' +
       safe(nativeCount(item.completedCount,'completed')) + '</small>' +
@@ -774,7 +781,7 @@ export function mountSuperagent(
       '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
       '<option value="">All States</option>' +
       (['queued','running','waiting_approval','waiting_review','blocked','completed',
-        'failed','stopped','interrupted','inconclusive'] as const)
+        'failed','stopped','interrupted','inconclusive','needs_attention'] as const)
         .map(state => '<option value="' + state + '"' +
           (demandStateFilter === state ? ' selected' : '') + '>' +
           state.split('_').join(' ') + '</option>').join('') +
@@ -786,7 +793,7 @@ export function mountSuperagent(
       '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
       (demandProjectFilter ? ' in native project ' + safe(demandProjectFilter) : '') +
-      (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
+      (demandStateFilter ? ' in state ' + safe(demandStateFilter.split('_').join(' ')) : '') +
       (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
       ', loaded 200 at a time in newest-first order. Search filters native records ' +
       'before pagination (ASCII case-insensitive, literal text). Board counts cover ' +
@@ -1559,7 +1566,7 @@ export function mountSuperagent(
       if (busy) { target.value = demandStateFilter; return; }
       const filter = target.value;
       const allowed = ['queued','running','waiting_approval','waiting_review','blocked',
-        'completed','failed','stopped','interrupted','inconclusive'];
+        'completed','failed','stopped','interrupted','inconclusive','needs_attention'];
       if (filter && !allowed.includes(filter)) {
         target.value = demandStateFilter; return;
       }
@@ -2026,7 +2033,7 @@ export function mountSuperagent(
                   !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
                   !descends(index === 0 ? last : loaded[index - 1], item) ||
                   (team && item.orchestrationId !== team) ||
-                  (state && item.state !== state) ||
+                  !isDemandStateMatch(state, item.state) ||
                   (project && item.projectId !== project) ||
                   (search && (typeof item.objective !== 'string' ||
                     !nativeCaseFold(item.objective).includes(nativeCaseFold(search)))) ||
@@ -2343,15 +2350,19 @@ export function mountSuperagent(
       });
       return;
     }
-    if (target.dataset.saSelect || target.dataset.saAssignTeam) {
+    if (target.dataset.saSelect || target.dataset.saAssignTeam || target.dataset.saAttentionTeam) {
       if (busy || loading) return;
-      const next = target.dataset.saSelect ?? target.dataset.saAssignTeam ?? '';
+      const next = target.dataset.saSelect ?? target.dataset.saAssignTeam ??
+        target.dataset.saAttentionTeam ?? '';
       if (!presets.some(item => item.id === next)) return;
       const assigning = target.hasAttribute('data-sa-assign-team');
+      const attentionOnly = target.hasAttribute('data-sa-attention-team');
+      const loadScopedDemands = assigning || attentionOnly;
       workspaceView = 'runs';
-      if (assigning) {
+      if (loadScopedDemands) {
         // Choose this Team's durable Demand scope; never infer admission.
-        demandTeamFilter = next; demandProjectFilter = ''; demandStateFilter = '';
+        demandTeamFilter = next; demandProjectFilter = '';
+        demandStateFilter = attentionOnly ? 'needs_attention' : '';
         demandSearch = ''; demandSearchDraft = '';
         allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       }
@@ -2368,7 +2379,7 @@ export function mountSuperagent(
         allDemandsLoaded = true;
       };
       if (selected === next) {
-        if (assigning) void work(loadTeamDemands).then(focusObjective);
+        if (loadScopedDemands) void work(loadTeamDemands).then(focusObjective);
         else render();
         return;
       }
@@ -2387,7 +2398,7 @@ export function mountSuperagent(
       sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
-        if (assigning) await loadTeamDemands();
+        if (loadScopedDemands) await loadTeamDemands();
       }).then(focusObjective);
       return;
     }

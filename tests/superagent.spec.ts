@@ -3880,3 +3880,58 @@ test('confirmed portable Team import forwards the current native-reviewed plan d
   }]);
 });
 
+
+test('Team attention badge opens a native pre-paginated four-state Demand scope without dispatch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-attention-nav';
+    document.body.appendChild(host);
+    const calls: Array<{command:string;args?:Record<string,unknown>}> = [];
+    (window as unknown as {saAttentionCalls:typeof calls}).saAttentionCalls = calls;
+    mountSuperagent(host, async (command,args) => {
+      calls.push({command,args});
+      if (command === 'bots_list') return [
+        {id:'co',name:'Coordinator',paused:false},{id:'wo',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [
+        {id:'attention-team',name:'Repair Team',coordinatorBotId:'co',workerBotId:'wo',
+          enabled:false,policyRevision:1,needsAttentionCount:4},
+      ] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_all_demands') {
+        const query = args?.query as {orchestrationId?:string;stateFilter?:string} | undefined;
+        if (query?.orchestrationId !== 'attention-team' ||
+            query.stateFilter !== 'needs_attention') {
+          throw Error('Unscoped native attention Demand request');
+        }
+        return ['blocked','failed','interrupted','inconclusive'].map((state,index) => ({
+          id:'attention-'+index,orchestrationId:'attention-team',
+          objective:'Repair '+state,state,revision:1,updatedAt:4000-index,
+          projectId:'project',
+        })) as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host = page.locator('#sa-attention-nav');
+  await host.getByRole('button',{name:'Show Demands needing attention for Repair Team'}).click();
+  const runs = host.getByRole('region',{name:'All Demands across Teams'});
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toHaveAttribute('aria-current','page');
+  await expect(runs.getByRole('combobox',{name:'Filter Demands by Team'})).toHaveValue('attention-team');
+  await expect(runs.getByRole('combobox',{name:'Filter Demands by State'})).toHaveValue('needs_attention');
+  await expect(runs).toContainText('4 native Demands loaded.');
+  for (const state of ['blocked','failed','interrupted','inconclusive']) {
+    await expect(runs).toContainText('Repair '+state);
+  }
+  const calls = await page.evaluate(() =>
+    (window as unknown as {saAttentionCalls:Array<{command:string;args?:Record<string,unknown>}>})
+      .saAttentionCalls);
+  expect(calls.filter(item=>item.command==='superagent_all_demands')).toEqual([
+    {command:'superagent_all_demands',
+      args:{query:{limit:200,orchestrationId:'attention-team',stateFilter:'needs_attention'}}},
+  ]);
+  expect(calls.some(item=>/submit|dispatch|accept|grant|reserve|effect/.test(item.command)))
+    .toBe(false);
+});

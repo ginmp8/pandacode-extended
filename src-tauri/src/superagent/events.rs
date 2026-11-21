@@ -1461,12 +1461,21 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
         // the authenticated adapter. If a PR payload carries base.repo.id,
         // it must agree before the subject becomes durable context. A PR
         // from a fork still uses its base repository as the source identity.
-        if let (Some(event_repo), Some(base_repo)) = (
-            raw.pointer("/repo/id"),
-            raw.pointer("/payload/pull_request/base/repo/id"),
-        ) {
-            if event_repo.as_u64().is_none() || event_repo.as_u64() != base_repo.as_u64() {
+        if let Some(base_repo) = raw.pointer("/payload/pull_request/base/repo") {
+            // Partial base-repository metadata must not bypass the numeric
+            // identity fence. A base URL, when present, must agree as well.
+            let event_repo_id = raw.pointer("/repo/id")
+                .and_then(serde_json::Value::as_u64).filter(|id| *id > 0);
+            let base_repo_id = base_repo.get("id")
+                .and_then(serde_json::Value::as_u64).filter(|id| *id > 0);
+            if event_repo_id.is_none() || event_repo_id != base_repo_id {
                 return Err("GitHub PR base repository differs from the authenticated event repository.".into());
+            }
+            if let Some(url) = base_repo.get("url") {
+                let expected = format!("https://api.github.com/repos/{}", source.repository);
+                if !url.as_str().is_some_and(|value| value.eq_ignore_ascii_case(&expected)) {
+                    return Err("GitHub PR base repository URL conflicts with its authenticated identity.".into());
+                }
             }
         }
     }
@@ -2902,7 +2911,9 @@ mod tests {
             "type": "PullRequestEvent", "repo": {"name": "owner/repo", "id": 101},
             "actor": {"login": "trusted-bot"},
             "payload": {"action": "opened", "number": 42,
-                "pull_request": {"number": 42, "base": {"repo": {"id": 101}}}}
+                "pull_request": {"number": 42, "base": {"repo": {
+                    "id": 101, "url": "https://api.github.com/repos/owner/repo"
+                }}}}
         }]);
         let mut wrong_number = valid.clone();
         wrong_number[0]["payload"]["number"] = serde_json::json!(43);
@@ -2911,7 +2922,17 @@ mod tests {
             serde_json::json!(202);
         let mut malformed_number = valid.clone();
         malformed_number[0]["payload"]["number"] = serde_json::json!("42");
-        for invalid in [&wrong_number, &wrong_base, &malformed_number] {
+        let mut missing_base_id = valid.clone();
+        missing_base_id[0]["payload"]["pull_request"]["base"]["repo"] =
+            serde_json::json!({"url": "https://api.github.com/repos/owner/repo"});
+        let mut malformed_base_id = valid.clone();
+        malformed_base_id[0]["payload"]["pull_request"]["base"]["repo"]["id"] =
+            serde_json::json!("101");
+        let mut wrong_base_url = valid.clone();
+        wrong_base_url[0]["payload"]["pull_request"]["base"]["repo"]["url"] =
+            serde_json::json!("https://api.github.com/repos/foreign/repo");
+        for invalid in [&wrong_number, &wrong_base, &malformed_number,
+                        &missing_base_id, &malformed_base_id, &wrong_base_url] {
             assert!(poll_authenticated_events_with_repository_id(
                 &store, &observed, 0, invalid, "operator", 1, 101,
             ).is_err());

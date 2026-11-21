@@ -999,7 +999,7 @@ mod tests {
     use crate::storage;
 
     #[test]
-    fn persisted_duplicate_worker_and_reviewer_identities_fail_closed_after_restart() {
+    fn duplicate_member_identity_and_malformed_persisted_position_fail_closed_after_restart() {
         let path=std::env::temp_dir().join(format!("sa-duplicate-roles-{}.sqlite3",storage::id()));
         let store=Store::open(&path).unwrap();
         store.db.execute(
@@ -1020,17 +1020,27 @@ mod tests {
             reviewer_bot_ids:vec!["reviewer".into()],
         }).unwrap();
         assert_eq!(read(&store,&cfg.id).unwrap().reviewer_bot_ids,vec!["reviewer"]);
-        // Simulate legacy/corrupt metadata bypassing the validated write API.
-        store.db.execute(
+        // The persisted UNIQUE(orchestration_id,bot_id) constraint already
+        // rejects duplicate Worker/Reviewer IDs before the native reader.
+        let duplicate = store.db.execute(
             "UPDATE sa_team_roles SET bot_id='additional'
              WHERE orchestration_id=?1 AND role='reviewer'",
             [&cfg.id],
+        );
+        assert!(duplicate.is_err(), "SQLite must reject duplicate Team member identities");
+        assert_eq!(read(&store,&cfg.id).unwrap().reviewer_bot_ids,vec!["reviewer"]);
+        // A legal SQLite value can still corrupt role ordering; test the
+        // independent native preflight guard on the persistent database.
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=2
+             WHERE orchestration_id=?1 AND role='reviewer'",
+            [&cfg.id],
         ).unwrap();
-        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role identity"));
+        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role metadata"));
         assert!(effective_team(&store,&cfg.id,&HashMap::new()).unwrap_err()
-            .contains("Malformed Team role identity"));
+            .contains("Malformed Team role metadata"));
         let reopened=Store::open_read_only(&path).unwrap();
-        assert!(read(&reopened,&cfg.id).unwrap_err().contains("Malformed Team role identity"));
+        assert!(read(&reopened,&cfg.id).unwrap_err().contains("Malformed Team role metadata"));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
         ).unwrap(),0,"invalid metadata must never imply an authorized Demand");

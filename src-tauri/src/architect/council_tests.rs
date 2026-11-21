@@ -8990,15 +8990,19 @@ fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
 /// Exercise direct-bot and automatic-root seats alongside a real child Council.
 /// Native reviewer callbacks and task-owned child receipts must both settle
 /// before the existing root gate can approve M6 or M7.
-fn assert_nested_mixed_root_callbacks(include_automatic: bool) {
+fn assert_nested_mixed_root_callbacks(
+    include_automatic: bool, strategy: council::CouncilExecutionStrategy,
+) {
     // The fixture exercises real native issuance, callback and terminal gates,
     // but deliberately does not start a provider CLI. Do not require one in CI.
     crate::providers::with_test_executable_override("codex", || {
-        run_nested_mixed_root_callbacks(include_automatic);
+        run_nested_mixed_root_callbacks(include_automatic, strategy);
     });
 }
 
-fn run_nested_mixed_root_callbacks(include_automatic: bool) {
+fn run_nested_mixed_root_callbacks(
+    include_automatic: bool, strategy: council::CouncilExecutionStrategy,
+) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -9014,6 +9018,7 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
         let mut config = on(9.0, 3, 0);
         config.reviewer_bot_ids = vec!["quality-direct".into()];
         config.automatic_reviewers = usize::from(include_automatic);
+        config.strategy = strategy;
         config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
             bot_id: "security-child".into(),
             child_reviewers: 2, child_target: 9.5, child_max_rounds: 2,
@@ -9113,6 +9118,19 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
     assert_eq!(inspected.composed_usage.unwrap().unique_attempts,
         if include_automatic { 4 } else { 3 },
         "one child composite is never double-counted as a root review");
+    if strategy == council::CouncilExecutionStrategy::Escalated {
+        assert!(saved.workers.iter().filter_map(|worker| worker.council.as_ref())
+            .all(|seat| seat.round == 1),
+            "a clean M6/M7 S2 review cannot invent a second root wave");
+        let child = child_council::inspect(&store, &saved).unwrap();
+        assert_eq!(child.len(), 1);
+        assert_eq!(child[0].leaf_attempts.len(), 2,
+            "a clean M6/M7 S2 review must not create extra child reviewers");
+        assert!(child[0].leaf_attempts.iter().all(|leaf| leaf.round == 1),
+            "a clean M6/M7 S2 child must retain its first-wave receipt");
+        assert!(child[0].verified_escalation_receipt.is_none(),
+            "no trigger means no native S2 second-wave evidence");
+    }
 
     let children = child_council::verified_parent_seats(&store, &saved)
         .unwrap().unwrap();
@@ -10295,12 +10313,22 @@ fn nested_m7_s3_requires_fresh_direct_automatic_and_child_challenges() {
 
 #[test]
 fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
-    assert_nested_mixed_root_callbacks(false);
+    assert_nested_mixed_root_callbacks(false, council::CouncilExecutionStrategy::Parallel);
 }
 
 #[test]
 fn nested_m7_direct_bot_automatic_and_child_require_independent_native_callbacks() {
-    assert_nested_mixed_root_callbacks(true);
+    assert_nested_mixed_root_callbacks(true, council::CouncilExecutionStrategy::Parallel);
+}
+
+#[test]
+fn nested_m6_escalated_clean_review_uses_only_direct_and_child_native_callbacks() {
+    assert_nested_mixed_root_callbacks(false, council::CouncilExecutionStrategy::Escalated);
+}
+
+#[test]
+fn nested_m7_escalated_clean_review_uses_all_three_native_sources_without_a_second_wave() {
+    assert_nested_mixed_root_callbacks(true, council::CouncilExecutionStrategy::Escalated);
 }
 
 #[test]

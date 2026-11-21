@@ -7278,6 +7278,9 @@ fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
     for (status, stage, archived) in [
         ("interrupted", original_stage.as_str(), false),
         ("error", original_stage.as_str(), false),
+        ("completed", original_stage.as_str(), false),
+        ("stopped", original_stage.as_str(), false),
+        ("paused", original_stage.as_str(), false),
         (original_status.as_str(), "completed", false),
         (original_status.as_str(), original_stage.as_str(), true),
     ] {

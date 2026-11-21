@@ -515,7 +515,9 @@ pub(crate) fn admit_native_task(
     // archived or completed. Do not mint new task authority from stale state.
     // Identical requests above remain idempotently readable after settlement.
     let session = store.session(session_id)?;
-    if session.archived || session.task_stage == "completed" || matches!(session.status.as_str(), "interrupted" | "error") {
+    if session.archived || session.task_stage == "completed"
+        || matches!(session.status.as_str(), "interrupted" | "error" | "completed" | "stopped" | "paused")
+    {
         return Err("council_task_denied: new requests require a live root session.".into());
     }
     if team.workers.iter().any(|worker|

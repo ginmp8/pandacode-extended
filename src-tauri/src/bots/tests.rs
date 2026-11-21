@@ -164,6 +164,27 @@ fn council_channel_deliveries_use_distinct_native_tasks_and_never_touch_desktop_
     assert_eq!(first_request.session_id, first_session);
     assert_eq!(second_request.session_id, second_session);
     assert_eq!(crate::architect::council_requests::admit_channel(&f.store, &first_id).unwrap(), first_request);
+    // A Channel review request is bound to the actual native Council cycle,
+    // not merely to the objective and policy. A forged or stale revision may
+    // neither expose a different generation nor be reported as current.
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET artifact_revision='cycle:999' WHERE delivery_id=?1",
+        [&first_id],
+    ).unwrap();
+    assert!(!crate::architect::council_requests::channel_request_is_current(
+        &f.store, &first_id, &first_session,
+    ));
+    let stale = crate::architect::council_requests::inspect_channel(
+        &f.store, &first_request.request_id, &first_id, &first_session,
+    ).unwrap_err();
+    assert!(stale.contains("council_task_stale"), "{stale}");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET artifact_revision='0' WHERE delivery_id=?1",
+        [&first_id],
+    ).unwrap();
+    assert!(crate::architect::council_requests::channel_request_is_current(
+        &f.store, &first_id, &first_session,
+    ));
     let current = crate::architect::council_requests::inspect_channel(
         &f.store, &first_request.request_id, &first_id, &first_session,
     ).unwrap();

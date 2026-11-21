@@ -87,7 +87,7 @@ fn channel_scope(store: &Store, delivery_id: &str) -> Result<ChannelScope> {
         .ok_or_else(|| "council_task_denied: linked channel delivery not found.".to_owned())
 }
 
-fn frozen_config(store: &Store, session_id: &str) -> Result<(CouncilConfig, bool)> {
+fn frozen_config(store: &Store, session_id: &str) -> Result<(CouncilConfig, bool, i64)> {
     if super::parent_of(store, session_id)?.is_some() {
         return Err("council_task_denied: a reviewer worker cannot own a root request.".into());
     }
@@ -95,7 +95,7 @@ fn frozen_config(store: &Store, session_id: &str) -> Result<(CouncilConfig, bool
         .ok_or("council_task_denied: native Council task was not configured.")?;
     let config = team.config.council
         .ok_or("council_task_denied: task Council is disabled.")?;
-    Ok((config, team.council_since == 0 && team.workers.is_empty()))
+    Ok((config, team.council_since == 0 && team.workers.is_empty(), team.council_since))
 }
 
 fn request_for(scope: &ChannelScope, delivery_id: &str, config: &CouncilConfig, request_id: String) -> Result<CouncilTaskReviewRequest> {
@@ -118,7 +118,7 @@ fn request_for(scope: &ChannelScope, delivery_id: &str, config: &CouncilConfig, 
 /// transaction. No permissions, reviewers or approvals are created here.
 pub(crate) fn admit_channel(store: &Store, delivery_id: &str) -> Result<CouncilTaskReviewRequest> {
     let scope = channel_scope(store, delivery_id)?;
-    let (config, fresh) = frozen_config(store, &scope.session_id)?;
+    let (config, fresh, _) = frozen_config(store, &scope.session_id)?;
     let existing: Option<String> = store.db.query_row(
         "SELECT context_json FROM extended_council_task_requests WHERE delivery_id=?1",
         [delivery_id], |row| row.get(0),
@@ -161,7 +161,25 @@ fn validated_channel_request(
         return Err("council_task_denied: request identity is inconsistent.".into());
     }
     let scope = channel_scope(store, delivery_id)?;
-    let (config, _) = frozen_config(store, session_id)?;
+    let (config, fresh, cycle_since) = frozen_config(store, session_id)?;
+    // The original request also owns one native Council generation. A later
+    // root cycle must not expose its reviewers or terminal proof through an old
+    // Channel delivery, even if objective and policy still match.
+    let frozen_revision: String = store.db.query_row(
+        "SELECT artifact_revision FROM extended_channel_council_deliveries
+         WHERE delivery_id=?1 AND channel_id=?2 AND source_message_id=?3 AND executor_bot_id=?4",
+        params![delivery_id, &scope.channel_id, &scope.source_message_id, &scope.executor_bot_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("council_task_denied: frozen Channel review cycle is missing.")?;
+    let matches_cycle = if cycle_since == 0 {
+        fresh && frozen_revision == "0"
+    } else {
+        cycle_since > 0 && frozen_revision == format!("cycle:{cycle_since}")
+    };
+    if !matches_cycle {
+        return Err("council_task_stale: Channel delivery is bound to another native Council cycle.".into());
+    }
     let current = request_for(&scope, delivery_id, &config, recorded.request_id.clone())?;
     if current != recorded {
         return Err("council_task_stale: source, objective, cycle or policy has changed.".into());

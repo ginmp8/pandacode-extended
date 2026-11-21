@@ -1371,7 +1371,7 @@ fn missing_required_criteria(team: &TeamSnapshot, config: &CouncilConfig, round:
 /// Validate a native tool's pinned-input integrity receipt for every matching
 /// completed read-only seat. This narrowly scoped check cannot prove that the
 /// reviewer performed project tests or that another user criterion is satisfied.
-fn native_criterion_check_verified(
+pub(super) fn native_criterion_check_verified(
     team: &TeamSnapshot, criterion: &CouncilCriterion, round: usize,
 ) -> bool {
     let Some(check) = criterion.native_evidence.as_ref() else { return false };

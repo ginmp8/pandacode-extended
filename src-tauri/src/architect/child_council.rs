@@ -2641,6 +2641,16 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
 /// An observed unforced S2 trigger only exists after every first-wave leaf
 /// supplied an independently authenticated native callback and read-only grant.
 /// It cannot create another wave or approve the root; both need separate gates.
+/// Only a host-executed, criterion- and revision-bound receipt can close a
+/// mandatory first-wave evidence obligation. A model score alone cannot.
+pub(super) fn missing_required_first_wave_evidence(
+    child: &TeamSnapshot, config: &CouncilConfig,
+) -> bool {
+    config.criteria.iter().any(|criterion|
+        criterion.required && criterion.evidence_required
+            && !super::council::native_criterion_check_verified(child, criterion, 1))
+}
+
 fn authenticated_first_wave_s2_triggers(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
@@ -2705,8 +2715,7 @@ fn authenticated_first_wave_s2_triggers(
                 && seat.score.is_some_and(|score| score >= config.target.max(criterion.target))
         }));
     // A scored report never replaces required independent host evidence.
-    let missing_evidence = config.criteria.iter()
-        .any(|criterion| criterion.required && criterion.evidence_required);
+    let missing_evidence = missing_required_first_wave_evidence(child, config);
     let mut reasons = Vec::new();
     if below_target { reasons.push("below_target"); }
     if severe { reasons.push("high_severity_finding"); }

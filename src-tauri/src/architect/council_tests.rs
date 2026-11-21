@@ -1363,10 +1363,22 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
     }
     let mut verified = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
     for worker in &mut verified.workers { worker.status = "completed".into(); }
+    assert!(!child_council::missing_required_first_wave_evidence(
+        &verified, verified.config.council.as_ref().unwrap(),
+    ), "fresh native file-check receipts must not force an unnecessary S2 escalation");
+    let mut missing_receipt = verified.clone();
+    missing_receipt.workers[0].reviewer_binding.as_mut().unwrap()
+        .skill_evidence.remove("criterion-file:file-proof");
+    assert!(child_council::missing_required_first_wave_evidence(
+        &missing_receipt, missing_receipt.config.council.as_ref().unwrap(),
+    ), "a single missing reviewer receipt must require escalation despite passing scores");
     assert_eq!(council::status(&verified).unwrap().state, "passed");
     assert_eq!(council::inspection(&verified, false).unwrap()
         .criterion_observations[0].state, "reviewed_file_sha256_verified");
     verified.config.council.as_mut().unwrap().criteria[0].target = 9.8;
+    assert!(child_council::missing_required_first_wave_evidence(
+        &verified, verified.config.council.as_ref().unwrap(),
+    ), "changing frozen criterion policy must invalidate native first-wave evidence");
     assert_eq!(council::status(&verified).unwrap().state, "fixing",
         "a changed required target invalidates prior host proof");
     std::fs::remove_file(file_path).unwrap();

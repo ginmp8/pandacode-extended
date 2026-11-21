@@ -570,11 +570,12 @@ fn save(store: &Store, team: &mut TeamSnapshot) -> Result<()> {
     Ok(())
 }
 /// A persisted Council score is not live approval after the owning native
-/// session is interrupted, has failed, or is archived. This applies to root-only
+/// session is interrupted, failed, paused, stopped, or archived. This applies to root-only
 /// M1/M2/M3 as well as hierarchical Councils.
 fn root_session_allows_council_proof(store: &Store, team: &TeamSnapshot) -> bool {
     store.session(&team.session_id).is_ok_and(|session|
-        !session.archived && !matches!(session.status.as_str(), "interrupted" | "error"))
+        !session.archived && !matches!(session.status.as_str(),
+            "interrupted" | "error" | "paused" | "stopped"))
 }
 
 /// Recompute the existing Council verdict from all current native receipts.
@@ -588,9 +589,10 @@ fn authenticated_hierarchical_status(
     // caller still holds an older active team snapshot. Surviving receipts
     // cannot authorize a passed projection until the task is recovered.
     // Completed Councils retain historical proof, but a paused or stopped
-    // team and archived or interrupted native sessions revoke approval authority.
+    // team and revoked native sessions (including pause/stop) revoke approval authority.
     let root_session = store.session(&team.session_id).ok()?;
-    if root_session.archived || matches!(root_session.status.as_str(), "interrupted" | "error")
+    if root_session.archived || matches!(root_session.status.as_str(),
+        "interrupted" | "error" | "paused" | "stopped")
         || !(active(&team.status) || team.status == "completed")
     {
         return None;

@@ -9282,6 +9282,31 @@ fn nested_m4_parallel_task_receipt_requires_both_child_council_callbacks() {
         &store, &sid, &project, "nested-m4-parallel-task",
         &artifact, &request.request_id,
     ).unwrap(), terminal, "one task must retain one idempotent terminal receipt");
+
+    // A native session may be paused or stopped independently of a stale,
+    // still-completed root snapshot. Historical child proof is not live authority.
+    let previous_status = store.session(&sid).unwrap().status;
+    for revoked in ["paused", "stopped", "interrupted", "error"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![sid, revoked],
+        ).unwrap();
+        assert!(!verified_council_pass(&store, &root),
+            "M4: {revoked} native root session must revoke current child approval");
+        assert!(council_requests::read_native_terminal(
+            &store, &sid, &project, "nested-m4-parallel-task",
+            &artifact, &request.request_id,
+        ).is_err(), "M4: {revoked} native root cannot replay a terminal receipt");
+    }
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![sid, previous_status],
+    ).unwrap();
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel-task",
+        &artifact, &request.request_id,
+    ).unwrap(), terminal,
+        "M4: restoring the original native session revalidates the same receipt");
 }
 
 #[test]
@@ -10576,7 +10601,7 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                         // interrupted, fails, or is archived. Historical scores
                         // and stored receipts cannot authorize a new callback.
                         let previous_status = store.session(&sid).unwrap().status;
-                        for revoked_status in ["interrupted", "error"] {
+                        for revoked_status in ["interrupted", "error", "paused", "stopped"] {
                             store.db.execute(
                                 "UPDATE sessions SET status=?2 WHERE id=?1",
                                 rusqlite::params![sid, revoked_status],

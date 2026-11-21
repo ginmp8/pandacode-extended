@@ -332,6 +332,9 @@ test.describe('shared bot channels', () => {
     });
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    // Channel rendering is async at narrow widths; fixture insertion must
+    // target the real, visible thread rather than racing the navigation.
+    await expect(page.locator('.conversation-pane.channel-thread .bc-history')).toBeVisible();
     await page.evaluate(async () => {
       const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
       const wrapper = document.createElement('div');
@@ -387,6 +390,9 @@ test.describe('shared bot channels', () => {
     await page.setViewportSize({ width: 320, height: 640 });
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    // Channel rendering is async at narrow widths; fixture insertion must
+    // target the real, visible thread rather than racing the navigation.
+    await expect(page.locator('.conversation-pane.channel-thread .bc-history')).toBeVisible();
     await page.evaluate(async () => {
       const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
       const longName = 'SpecialistSecurityReviewerWithAnUnbrokenDisplayName'.repeat(4);

@@ -342,6 +342,30 @@ test('Council inspector shows disjoint root usage per round/source without claim
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
 
+test('Council inspector does not present invalid native reviewer scores or usage as evidence', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [{
+      workerId: 'reviewer-one', name: 'Security reviewer', round: 1, lens: 'Security',
+      reviewerSource: 'direct_bot', status: 'completed', score: -1,
+      provider: 'codex', model: 'native', tokenCount: -3,
+      costAmount: -2, costCurrency: 'USD', usageProvenance: 'unknown',
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('No native score');
+  await expect(panel(page)).toContainText('Tokens unknown');
+  await expect(panel(page)).toContainText('Cost unknown');
+  await expect(panel(page)).not.toContainText('-1.0/10');
+  await expect(panel(page)).not.toContainText('-3 tokens');
+  await expect(panel(page)).not.toContainText('-2 USD');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
 test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
   const inspection = {
     mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',

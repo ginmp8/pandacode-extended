@@ -128,9 +128,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     : '';
   const attempts = rounds.map(round => {
     const entries = shown.filter(a => a.round === round).map(a => {
-      const score = a.score === null ? 'No native score' : a.score.toFixed(1) + '/10';
-      const usage = a.tokenCount === null ? 'Tokens unknown' : a.tokenCount + ' tokens';
-      const cost = a.costAmount === null || !a.costCurrency ? 'Cost unknown' : a.costAmount + ' ' + a.costCurrency;
+      // Malformed or legacy provider data must never look like a valid
+      // reviewer score or billable usage in this read-only inspection.
+      const score = typeof a.score === 'number' && Number.isFinite(a.score)
+        && a.score >= 0 && a.score <= 10 ? a.score.toFixed(1) + '/10' : 'No native score';
+      const usage = Number.isSafeInteger(a.tokenCount) && a.tokenCount !== null
+        && a.tokenCount >= 0 ? a.tokenCount + ' tokens' : 'Tokens unknown';
+      const cost = typeof a.costAmount === 'number' && Number.isFinite(a.costAmount)
+        && a.costAmount >= 0 && a.costCurrency
+        ? a.costAmount + ' ' + a.costCurrency : 'Cost unknown';
       const observed = observedDuration('Queue', a.queueWaitMs) + ' · ' +
         observedDuration('Observed span (last update)', a.observedSpanMs);
       const attributed = reported.filter(f => f.workerId === a.workerId && f.round === a.round);
@@ -301,6 +307,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           ? '<section aria-label="Child native reviewer attempts"><h5>Native child reviewer attempts (not root votes)</h5><ul>' +
             leafAttempts.map(attempt => {
               const score = attempt.score === null || !Number.isFinite(attempt.score)
+                || attempt.score < 0 || attempt.score > 10
                 ? 'No native score' : attempt.score.toFixed(1) + '/10 (reported)';
               return '<li><strong>' + escape(attempt.name + ' — ' + attempt.lens) + '</strong>' +
                 '<small>' + escape('Round ' + (attempt.round ?? 'unknown') + ' · ' + attempt.status + ' · ' + score + ' · ' + attempt.workerId) +

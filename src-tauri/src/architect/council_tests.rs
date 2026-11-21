@@ -5667,6 +5667,29 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
         child.workers[0].council.as_mut().unwrap().started_at = 0;
         save(&store, &mut child).unwrap();
     }
+    // A terminal native child coordinator must not be recycled as an
+    // unfinished first-wave review after Pause, even if its task_stage
+    // has not yet been finalized and its child TeamSnapshot still runs.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='completed' WHERE id=?1",
+            [&old_child],
+        ).unwrap();
+    }
+    let terminal_denial = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(terminal_denial.contains("child_council_revoked"), "{terminal_denial}");
+    let recovery_denial = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(recovery_denial.contains("completed"), "{recovery_denial}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot,
+        "terminal child denial must leave the frozen root unchanged");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child],
+        ).unwrap();
+    }
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
     {
         let store = state.store.lock().unwrap();

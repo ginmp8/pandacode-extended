@@ -117,7 +117,7 @@ fn frozen_with_recovery_status(
     // A persisted interrupted child cannot retain leaf review authority
     // across restart, even when its old child TeamSnapshot still says running.
     // Recheck the native session on every inspection, launch and callback.
-    if session.archived || session.task_stage == "completed"
+    if session.archived || session.task_stage == "completed" || session.status == "completed"
         || (matches!(session.status.as_str(), "interrupted" | "error")
             && !allow_revoked_for_recovery)
     {

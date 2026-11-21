@@ -69,6 +69,13 @@ the native session-aware lease check used by initial admission and retry:
 another Team's active coordinator checkout and missing session records cannot
 silently permit an overlapping Worker before the SQLite lease guard runs.
 
+The owning watchdog also quarantines live Assignments stranded under queued,
+blocked, waiting_approval or waiting_review Tickets. Unlike terminal verdicts,
+these inconsistent non-running Tickets become interrupted. Mandate revocation,
+Assignment settlement, pending-effect uncertainty and audit are atomic; the
+owning serve process then cancels the provider. No detached CLI claims that a
+remote effect failed or that a late callback succeeded.
+
 Headless generic usage-limit resets and message-queue drain explicitly skip
 every session recorded in native SuperAgent assignment history, including
 settled and revoked attempts after process restart. Missing assignment-history

@@ -2887,25 +2887,23 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             }
         }
     }
-    // Legacy or partially persisted terminal settlements can leave an
-    // Assignment in 'running' even though the Ticket cannot run again.
-    // That orphan still occupies native leases and may have a live provider.
-    // Only the owning server performs this cleanup: return provider sessions
-    // for native cancellation, preserve the terminal outcome, and never replay
-    // an external effect whose remote outcome may be unknown.
-    let terminal_orphans: Vec<(String, i64)> = {
+    // A non-running Ticket must never retain a live Assignment. This includes
+    // queued, blocked, waiting_approval and waiting_review, not just terminal
+    // states. Quarantine without approving work, reusing a checkout, or replaying
+    // an external effect; the owning serve process cancels provider handles.
+    let inactive_orphans: Vec<(String, i64, String)> = {
         let mut stmt = store.db.prepare(
-            "SELECT t.id,t.revision FROM sa_tickets t
-             WHERE t.state IN ('completed','failed','stopped','interrupted','inconclusive')
+            "SELECT t.id,t.revision,t.state FROM sa_tickets t
+             WHERE t.state!='running'
                AND EXISTS(SELECT 1 FROM sa_assignments a
                           WHERE a.ticket_id=t.id AND a.state='running')
              ORDER BY t.updated_at,t.id",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
             .map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
-    for (ticket_id, revision) in terminal_orphans {
+    for (ticket_id, revision, previous_state) in inactive_orphans {
         let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
         let provider_sessions: Vec<String> = {
             let mut stmt = tx.prepare(
@@ -2916,16 +2914,19 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                 .map_err(|e| e.to_string())?;
             rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
         };
-        // The revision and structural fault must still match at mutation time.
-        // Never change a terminal verdict into a running or retryable Ticket.
+        // Guard the exact previously observed state as well as the revision.
+        // A terminal verdict is preserved; waiting/blocked/queued Tickets with
+        // a live attempt are interrupted rather than made eligible for approval.
+        let terminal = matches!(previous_state.as_str(),
+            "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
+        let next_state = if terminal { previous_state.as_str() } else { "interrupted" };
         let changed = tx.execute(
             "UPDATE sa_tickets
-             SET active_assignment_id=NULL,revision=revision+1,updated_at=?3
-             WHERE id=?1 AND revision=?2
-               AND state IN ('completed','failed','stopped','interrupted','inconclusive')
+             SET state=?4,active_assignment_id=NULL,revision=revision+1,updated_at=?3
+             WHERE id=?1 AND revision=?2 AND state=?5 AND state!='running'
                AND EXISTS(SELECT 1 FROM sa_assignments a
                           WHERE a.ticket_id=sa_tickets.id AND a.state='running')",
-            params![&ticket_id,revision,now],
+            params![&ticket_id,revision,now,next_state,&previous_state],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
             tx.rollback().map_err(|e| e.to_string())?;
@@ -2943,11 +2944,16 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              WHERE ticket_id=?1 AND state='pending'",
             params![&ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        let (kind, detail) = if terminal {
+            ("watchdog_terminal_orphan_quarantined",
+             "Terminal Ticket retained a running native Assignment; revoke, cancel provider and reconcile effects before any new action")
+        } else {
+            ("watchdog_inactive_orphan_quarantined",
+             "Non-running Ticket retained a live Assignment; interrupted and revoked without approval or replay")
+        };
         tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'watchdog_terminal_orphan_quarantined',
-               'Terminal Ticket retained a running native Assignment; revoke, cancel provider and reconcile effects before any new action',?2)",
-            params![&ticket_id,now],
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+            params![&ticket_id,kind,detail,now],
         ).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         for session_id in provider_sessions {
@@ -9260,6 +9266,92 @@ mod tests {
             assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, terminal_state);
             assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
         }
+    }
+
+
+    #[test]
+    fn watchdog_quarantines_nonrunning_orphans_without_approval_or_replay() {
+        for inactive_state in ["queued", "blocked", "waiting_approval", "waiting_review"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(&mut store, &config.id,
+                "Private inactive orphan work", "watchdog-inactive-orphan", false).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let now = storage::now();
+            store.db.execute(
+                "UPDATE sa_tickets SET state=?2,revision=revision+1 WHERE id=?1",
+                params![&ticket.id,inactive_state],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'unverified-inactive-effect',?2,'pending',?3,?3)",
+                params![&ticket.id,"c".repeat(64),now],
+            ).unwrap();
+            let before = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(watchdog_expired_assignments(&store, now).unwrap(),
+                vec![session.clone()], "{inactive_state}");
+            let after = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(after.state, "interrupted", "{inactive_state}");
+            assert_eq!(after.revision, before.revision + 1);
+            assert!(after.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+                .filter(|entry| entry.kind == "watchdog_inactive_orphan_quarantined")
+                .count(), 1);
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+            assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn watchdog_inactive_orphan_audit_failure_rolls_back_quarantine() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &config.id,
+            "Private audit rollback", "watchdog-inactive-orphan-audit", false).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_approval',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unverified-effect',?2,'pending',?3,?3)",
+            params![&ticket.id,"d".repeat(64),storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_inactive_orphan_audit
+             BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_inactive_orphan_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(watchdog_expired_assignments(&store, storage::now()).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "pending");
+        store.db.execute_batch("DROP TRIGGER reject_inactive_orphan_audit").unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(),
+            vec![session.clone()]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "uncertain");
+        assert!(!on_run_finished(&store, &session, true, "Late approval").unwrap());
     }
 
     #[test]

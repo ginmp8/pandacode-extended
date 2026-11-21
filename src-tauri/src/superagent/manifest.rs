@@ -114,6 +114,10 @@ struct Resolved {
     purpose: String,
     strategy: String,
     existing: bool,
+    // Bind no-op imports to the exact version and state the operator reviewed.
+    // A Team that was enabled, disabled or edited must be previewed again.
+    existing_policy_revision: Option<i64>,
+    existing_enabled: Option<bool>,
     reviewed_members: Vec<ReviewedMember>,
 }
 
@@ -330,6 +334,8 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             max_worker_attempts,
             purpose,strategy,
             existing: existing.is_some(),
+            existing_policy_revision: existing.as_ref().map(|team| team.policy_revision),
+            existing_enabled: existing.as_ref().map(|team| team.enabled),
             reviewed_members,
         });
     }
@@ -738,6 +744,64 @@ mod tests {
         ).unwrap();
         assert_eq!(second.unchanged, vec!["Reviewed Team"]);
         assert!(second.backup_path.is_none());
+        assert_eq!(std::fs::read_dir(root.join("bot-backups")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reviewed_noop_import_rejects_team_policy_changes_before_mutating_or_backing_up() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-reviewed-existing-policy-{}", storage::id(),
+        ));
+        let document = document("Existing reviewed Team");
+        let create_plan = preview(&store, &document).unwrap();
+        let created = apply_reviewed_with_backup(
+            &store, &root, &document, true, &create_plan.review_digest,
+        ).unwrap();
+        assert_eq!(created.created, vec!["Existing reviewed Team"]);
+        let team_id: String = store.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Existing reviewed Team'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let before = preview(&store, &document).unwrap();
+        assert_eq!(before.unchanged, vec!["Existing reviewed Team"]);
+
+        // Existing roles and manifest bytes are unchanged. A native policy
+        // transition must still invalidate the reviewed no-op confirmation.
+        let original = super::super::configuration(&store, &team_id).unwrap();
+        let enabled = super::super::change_enabled(
+            &store, &team_id, original.policy_revision, true,
+        ).unwrap();
+        assert!(enabled.enabled);
+        let enabled_plan = preview(&store, &document).unwrap();
+        assert_ne!(before.review_digest, enabled_plan.review_digest);
+        let stale = apply_reviewed_with_backup(
+            &store, &root, &document, true, &before.review_digest,
+        ).unwrap_err();
+        assert!(stale.contains("stale"), "{stale}");
+
+        let disabled = super::super::change_enabled(
+            &store, &team_id, enabled.policy_revision, false,
+        ).unwrap();
+        assert!(!disabled.enabled);
+        let disabled_plan = preview(&store, &document).unwrap();
+        assert_ne!(before.review_digest, disabled_plan.review_digest);
+        assert_ne!(enabled_plan.review_digest, disabled_plan.review_digest);
+        assert!(apply_reviewed_with_backup(
+            &store, &root, &document, true, &before.review_digest,
+        ).unwrap_err().contains("stale"));
+
+        let accepted = apply_reviewed_with_backup(
+            &store, &root, &document, true, &disabled_plan.review_digest,
+        ).unwrap();
+        assert_eq!(accepted.unchanged, vec!["Existing reviewed Team"]);
+        assert!(accepted.created.is_empty());
+        assert!(accepted.backup_path.is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
         assert_eq!(std::fs::read_dir(root.join("bot-backups")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(root);
     }

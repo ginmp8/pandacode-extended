@@ -16,6 +16,19 @@ fn command_allowed_for_channel(channel_id: &str, command: &Command) -> bool {
     channel_id != crate::superagent::CHANNEL || *command == Command::Message
 }
 
+/// Native SuperAgent messages carry only the admitted task objective and
+/// task-scoped evidence references. Ambient desktop image and moodboard IDs
+/// can resolve private resources outside that Ticket's immutable Mandate.
+/// Reject those attachments before thread/session creation and before any
+/// project-scoped resource lookup; ordinary bot channels retain attachments.
+fn task_attachments_allowed(
+    channel_id: &str, image_ids: Option<&[String]>, moodboard_ids: Option<&[String]>,
+) -> bool {
+    channel_id != crate::superagent::CHANNEL
+        || (image_ids.is_none_or(|ids| ids.is_empty())
+            && moodboard_ids.is_none_or(|ids| ids.is_empty()))
+}
+
 /// A message for a bot from the desktop, the web UI or a chat channel.
 #[derive(Debug, Clone)]
 pub(crate) struct Inbound {
@@ -183,6 +196,13 @@ fn workspace_skills_with(
     (brief::skills(&text, &[], &skipped), skipped)
 }
 
+/// Native task sessions cannot silently switch to an ambient bot backup model.
+/// Model/provider fallback needs separately issued task authority, which the
+/// current read-only Mandate does not grant.
+fn bot_model_failover_allowed(channel_id: &str) -> bool {
+    channel_id != crate::superagent::CHANNEL
+}
+
 /// Starts a turn, or queues the message when the task is already working.
 fn steer_while_busy(bot: &Bot, image_ids: &[String], sender_id: &str, fresh: bool) -> bool {
     !fresh && bot.while_working == "steer" && image_ids.is_empty()
@@ -193,7 +213,21 @@ fn image_attachments(image_ids: &[String]) -> Value {
     json!(image_ids.iter().map(|id| json!({"kind": "image", "id": id, "name": "Attached image"})).collect::<Vec<_>>())
 }
 
-async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, text: String, image_ids: Option<Vec<String>>, sender_id: &str, force_queue: bool) -> Result<()> {
+/// Turn routing context; native task channels never inherit bot model fallback.
+struct TurnRoute<'a> {
+    sender_id: &'a str,
+    channel_id: &'a str,
+    force_queue: bool,
+}
+
+async fn start_or_queue(
+    app: &tauri::AppHandle,
+    bot: &Bot,
+    session_id: &str,
+    text: String,
+    image_ids: Option<Vec<String>>,
+    route: TurnRoute<'_>,
+) -> Result<()> {
     if crate::feature_controls::get().bots_paused {
         return Err("All bots are paused in Settings > Feature controls.".into());
     }
@@ -213,7 +247,7 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
             let store = state.store.lock().map_err(|e| e.to_string())?;
             super::extended::enabled_for_session(&store, session_id)?
         };
-        if !force_queue && !team_busy && steer_while_busy(bot, &image_ids, sender_id, fresh)
+        if !route.force_queue && !team_busy && steer_while_busy(bot, &image_ids, route.sender_id, fresh)
             && crate::message_queue::steer_task(app.clone(), app.state::<AppState>(), session_id.to_owned(), text.clone()).await.is_ok()
         {
             return Ok(());
@@ -223,7 +257,11 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
         return Ok(());
     }
     super::failover::remember_images(session_id, &image_ids);
-    super::failover::before_turn(app, bot, session_id);
+    // A task's frozen native Mandate has not authorized provider/model changes.
+    // Ordinary bot conversations keep their existing failover behavior.
+    if bot_model_failover_allowed(route.channel_id) {
+        super::failover::before_turn(app, bot, session_id);
+    }
     let (is_team, request) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         // The bot message or channel assignment this turn carries is now the one running.
@@ -275,6 +313,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let bot = super::get(&store, &inbound.bot_id)?;
         if inbound.channel_id == crate::superagent::CHANNEL {
+            if !task_attachments_allowed(
+                &inbound.channel_id, inbound.image_ids.as_deref(), inbound.moodboard_ids.as_deref(),
+            ) {
+                return Err("policy_unsupported: SuperAgent task cannot attach unscoped images or moodboards.".into());
+            }
             crate::superagent::guard_gateway_inbound(
                 &store, &bot.id, &inbound.thread, &inbound.sender_id, inbound.trusted,
             )?;
@@ -339,7 +382,11 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         let briefed = super::brief_version_of(&store, &session_id)?;
         (compose(app, &store, &bot, &session_id, &kind, &inbound.sender_name, &format!("{text}{moodboard}"))?, briefed)
     };
-    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, inbound.image_ids, &inbound.sender_id, force_queue).await {
+    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, inbound.image_ids, TurnRoute {
+        sender_id: &inbound.sender_id,
+        channel_id: &inbound.channel_id,
+        force_queue,
+    }).await {
         unbrief(app, &session_id, briefed, bot.memory_version);
         return Err(error);
     }
@@ -366,7 +413,11 @@ pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &
         let turn = compose(app, &store, &bot, &session, "schedule", "", &format!("{label}\n\n{prompt}"))?;
         (bot, session, turn, briefed)
     };
-    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, None, "schedule", false).await {
+    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, None, TurnRoute {
+        sender_id: "schedule",
+        channel_id: "schedule",
+        force_queue: false,
+    }).await {
         unbrief(app, &session_id, briefed, bot.memory_version);
         return Err(error);
     }
@@ -412,6 +463,12 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let held = if successful {
         super::failover::completed(session_id);
         None
+    } else if !bot_model_failover_allowed(&thread.channel_id) {
+        // A failed task turn must settle against its original Assignment.
+        // Never switch to a bot-wide backup model or hold a task for an
+        // ambient approval card, even if that bot has automatic fallback.
+        super::failover::cancel(session_id);
+        None
     } else {
         match super::failover::after_failure(app, &bot, session_id).await {
             super::failover::Outcome::Switched => return false,
@@ -444,7 +501,7 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         reply(app, &bot, &thread.channel_id, &thread.external_id, &text).await;
     }
     if let Ok(store) = state.store.lock() {
-        let _ = super::log(&store, &bot.id, if successful { "reply" } else { "error" }, &text.chars().take(200).collect::<String>(), json!({"sessionId": session_id}));
+        let _ = log_turn_result(&store, &bot.id, &thread.channel_id, successful, &text, session_id);
     }
     let _ = app.emit("bots-changed", ());
     // Send the next queued message natively, so bot threads keep moving without the window.
@@ -511,6 +568,22 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         }
     }
     settled
+}
+
+/// Native SuperAgent results belong to the durable Ticket evidence and audit.
+/// Do not mirror private task outputs into the bot's shared activity history.
+/// Ordinary chats, schedules and external channels retain their activity log.
+fn log_turn_result(
+    store: &Store, bot_id: &str, channel_id: &str,
+    successful: bool, text: &str, session_id: &str,
+) -> Result<()> {
+    if channel_id == crate::superagent::CHANNEL {
+        return Ok(());
+    }
+    super::log(
+        store, bot_id, if successful { "reply" } else { "error" },
+        &text.chars().take(200).collect::<String>(), json!({"sessionId": session_id}),
+    )
 }
 
 /// A SuperAgent session has exactly one native ticket assignment. Its turn
@@ -660,6 +733,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn superagent_task_turn_never_inherits_bot_model_failover() {
+        assert!(!bot_model_failover_allowed(crate::superagent::CHANNEL));
+        for channel in [super::super::DESKTOP, "schedule", "telegram", "shared-channel"] {
+            assert!(bot_model_failover_allowed(channel), "ordinary channel changed: {channel}");
+        }
+    }
+
+    #[test]
     fn native_superagent_gateway_rejects_bot_wide_commands_and_approval_escalation() {
         let channel = crate::superagent::CHANNEL;
         assert!(command_allowed_for_channel(channel, &Command::Message));
@@ -670,6 +751,30 @@ mod tests {
             assert!(command_allowed_for_channel(super::super::DESKTOP, &command));
         }
         assert!(command_allowed_for_channel("schedule", &Command::Stop));
+    }
+
+    #[test]
+    fn superagent_gateway_blocks_unscoped_media_before_resource_resolution() {
+        let image_ids = vec!["private-desktop-image".to_string()];
+        let moodboard_ids = vec!["unrelated-project-board".to_string()];
+        let internal = crate::superagent::CHANNEL;
+        for channel in [internal, super::super::DESKTOP, "schedule", "telegram", "shared-channel"] {
+            let expected = channel != internal;
+            assert_eq!(
+                task_attachments_allowed(channel, Some(&image_ids), None),
+                expected, "image isolation differs for {channel}",
+            );
+            assert_eq!(
+                task_attachments_allowed(channel, None, Some(&moodboard_ids)),
+                expected, "moodboard isolation differs for {channel}",
+            );
+            assert_eq!(
+                task_attachments_allowed(channel, Some(&image_ids), Some(&moodboard_ids)),
+                expected, "mixed media isolation differs for {channel}",
+            );
+            assert!(task_attachments_allowed(channel, None, None));
+            assert!(task_attachments_allowed(channel, Some(&[]), Some(&[])));
+        }
     }
 
     #[test]
@@ -690,6 +795,58 @@ mod tests {
             assert!(!scoped.contains(excluded), "ambient bot data leaked: {excluded}");
         }
         assert!(scoped_turn_text(&profile, "desktop", "Normal conversation").is_none());
+    }
+
+    #[test]
+    fn superagent_result_stays_in_ticket_instead_of_ambient_bot_activity() {
+        let root = std::env::temp_dir().join(format!(
+            "sa-gateway-activity-{}", crate::storage::id(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let input = super::super::BotInput {
+            name: "Activity isolation worker".into(),
+            role: "Worker".into(),
+            provider: "claude".into(),
+            model: "default".into(),
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let bot = super::super::create(&store, &input, &root).unwrap();
+        for successful in [true, false] {
+            log_turn_result(
+                &store, &bot.id, crate::superagent::CHANNEL, successful,
+                "Private task objective, result and evidence", "ticket-session",
+            ).unwrap();
+        }
+        let task_activity: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bot_activity WHERE bot_id=?1 AND kind IN ('reply','error')",
+            [&bot.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(task_activity, 0, "Ticket results must not become shared bot history");
+
+        log_turn_result(
+            &store, &bot.id, super::super::DESKTOP, true,
+            "Ordinary conversation reply", "chat-session",
+        ).unwrap();
+        log_turn_result(
+            &store, &bot.id, "schedule", false,
+            "Ordinary scheduled error", "schedule-session",
+        ).unwrap();
+        let mut statement = store.db.prepare(
+            "SELECT kind,summary FROM bot_activity
+             WHERE bot_id=?1 AND kind IN ('reply','error') ORDER BY id",
+        ).unwrap();
+        let history = statement.query_map([&bot.id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(history, vec![
+            ("reply".into(), "Ordinary conversation reply".into()),
+            ("error".into(), "Ordinary scheduled error".into()),
+        ]);
+        drop(statement);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

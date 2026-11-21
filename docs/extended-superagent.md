@@ -106,3 +106,21 @@ must be chosen explicitly, and the created preset is disabled.
 ### Explicit GitHub thread references (partial S4)
 
 The trusted local Bots → Orchestrations Ticket detail can now link an exact `issue:NUMBER` or `pull:NUMBER` to a configured Off/Observe GitHub source from the same orchestration. Native SQLite v42 stores at most 16 source-thread references per Ticket, rejects foreign tasks and conflicting owners, preserves links across restart, and does not modify task authorization or launch a provider. This is **manual context metadata only**, not authenticated GitHub event delivery, subscription notifications, Auto policy, or authorization for write tools. Those integration steps remain pending.
+
+## Checkout identity and native admission (S1)
+
+SQLite v47 refreshes the native SuperAgent assignment lease triggers. Local
+projects with the **same stored checkout path** share an exclusive running
+assignment lease even when project IDs and selected bots differ. Manual
+preflight, ordinary-session conflict checks and provider admission use
+matching exact-path protection. A rejected admission creates no tool grant.
+
+New Demands pin each configured Team member's project checkout path in the
+immutable admission profile. Reassigning that path under the same project ID
+denies provider admission and prevents late callbacks from becoming approvable
+evidence. Existing read-only task profiles without this field remain readable.
+
+This protection compares stored checkout path strings. It does **not** claim
+equivalence for symlink targets, relative aliases or case-folded paths.
+Writable tools and remote effects still require separate task-scoped native
+tool/provider grants; this change does not enable them.

@@ -5,8 +5,10 @@
 use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
+pub(crate) mod roster;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
+pub mod member_activity;
 pub mod effects;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -168,6 +170,10 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_insert
      OR previous_session.project_id=incoming.project_id
      OR previous_session.project_id=incoming_session.project_id
      OR previous_session.id IS NULL OR incoming_session.id IS NULL
+     OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+               WHERE old_checkout.id IN (previous.project_id,previous_session.project_id)
+                 AND new_checkout.id IN (incoming.project_id,incoming_session.project_id)
+                 AND old_checkout.path=new_checkout.path)
    )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
@@ -185,6 +191,10 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
      OR previous_session.project_id=incoming.project_id
      OR previous_session.project_id=incoming_session.project_id
      OR previous_session.id IS NULL OR incoming_session.id IS NULL
+     OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+               WHERE old_checkout.id IN (previous.project_id,previous_session.project_id)
+                 AND new_checkout.id IN (incoming.project_id,incoming_session.project_id)
+                 AND old_checkout.path=new_checkout.path)
    )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
@@ -265,8 +275,22 @@ pub struct OrchestrationOverview {
     pub config: Orchestration,
     pub ticket_count: i64,
     pub running_count: i64,
+    /// Durable lifecycle totals, independent of paginated UI queries.
+    pub queued_count: i64,
+    pub completed_count: i64,
     pub blocked_count: i64,
+    /// Pending human acceptance, not a successful native review.
+    pub waiting_approval_count: i64,
+    /// Pending native Council verdict, never a passing decision.
+    pub waiting_review_count: i64,
     pub last_activity_at: i64,
+    pub worker_count: i64,
+    pub reviewer_count: i64,
+    /// Read-only reason why a disabled Team cannot currently enter manual mode.
+    /// Native enabling rechecks the same guard under its revision-bound mutation.
+    pub manual_enable_blocker: Option<String>,
+    /// Read-only Team edit guard across every durable Demand and effect.
+    pub policy_edit_blocker: Option<String>,
 }
 
 /// Derive overview counts from durable tickets rather than a page of sessions.
@@ -278,7 +302,15 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
                 COUNT(t.id),
                 COALESCE(SUM(CASE WHEN t.state='running' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN t.state='blocked' THEN 1 ELSE 0 END),0),
-                COALESCE(MAX(t.updated_at),o.updated_at)
+                COALESCE(SUM(CASE WHEN t.state='waiting_approval' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='waiting_review' THEN 1 ELSE 0 END),0),
+                COALESCE(MAX(t.updated_at),o.updated_at),
+                1 + (SELECT COUNT(*) FROM sa_team_roles r
+                     WHERE r.orchestration_id=o.id AND r.role='worker'),
+                (SELECT COUNT(*) FROM sa_team_roles r
+                 WHERE r.orchestration_id=o.id AND r.role='reviewer'),
+                COALESCE(SUM(CASE WHEN t.state='queued' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN t.state='completed' THEN 1 ELSE 0 END),0)
          FROM sa_orchestrations o
          LEFT JOIN sa_tickets t ON t.orchestration_id=o.id
          GROUP BY o.id ORDER BY o.created_at,o.id",
@@ -289,10 +321,26 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             ticket_count: row.get(7)?,
             running_count: row.get(8)?,
             blocked_count: row.get(9)?,
-            last_activity_at: row.get(10)?,
+            waiting_approval_count: row.get(10)?,
+            waiting_review_count: row.get(11)?,
+            last_activity_at: row.get(12)?,
+            worker_count: row.get(13)?,
+            reviewer_count: row.get(14)?,
+            queued_count: row.get(15)?,
+            completed_count: row.get(16)?,
+            manual_enable_blocker: None,
+            policy_edit_blocker: None,
         })
     }).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let mut result = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    for item in &mut result {
+        if !item.config.enabled {
+            item.manual_enable_blocker = manual_enable_blocker(store, &item.config)?;
+        }
+        item.policy_edit_blocker = team_policy_edit_blocker(store, &item.config)?;
+    }
+    Ok(result)
 }
 
 fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
@@ -319,6 +367,13 @@ fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orches
     // to coincide or silently switch one bot\'s global project.
     if coordinator.paused || worker.paused {
         return Err("Choose active coordinator and worker bots.".into());
+    }
+    // A disabled Team is still trusted local configuration. Never save a
+    // primary role that the native admission harness cannot validate.
+    for bot in [&coordinator, &worker] {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
     }
     let id = storage::id();
     let now = storage::now();
@@ -420,6 +475,315 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Bounded cross-Team demand index for the trusted local workspace. The
+/// projection intentionally excludes worker evidence, actor, request keys,
+/// mandates and session IDs; detailed access stays within native Ticket reads.
+/// A read-only request groups native page filters without adding implicit authority.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DemandQuery {
+    limit: Option<i64>,
+    before_updated_at: Option<i64>,
+    before_id: Option<String>,
+    orchestration_id: Option<String>,
+    state_filter: Option<String>,
+    search_query: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemandIndex {
+    pub id: String,
+    pub orchestration_id: String,
+    pub objective: String,
+    pub state: String,
+    pub revision: i64,
+    pub updated_at: i64,
+    /// Immutable project chosen when this Ticket was admitted, never the Team's current project.
+    pub project_id: String,
+}
+
+/// Test-only compatibility helper for pagination oracles; production callers
+/// use the state-filtered native query directly.
+#[cfg(test)]
+fn list_all_demands_page(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_filtered(
+        store, limit, before_updated_at, before_id, orchestration_id, None,
+    )
+}
+
+/// Exact native Ticket-state filtering happens in SQLite before keyset paging.
+/// Unknown values fail closed: provider input is never SQL or execution authority.
+/// Production uses the searched query directly; this wrapper is a test oracle.
+#[cfg(test)]
+fn list_all_demands_page_filtered(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_for_project(
+        store, limit, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id, state_filter, search_query: None, project_id: None,
+        },
+    )
+}
+
+/// Search regression tests use the exact production query. This test-only
+/// adapter preserves their search/pagination assertions without leaving
+/// an unused production wrapper behind.
+#[cfg(test)]
+fn list_all_demands_page_searched(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_for_project(
+        store, limit, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id, state_filter, search_query, project_id: None,
+        },
+    )
+}
+
+/// Keep native index filters together when the read-only board gains dimensions.
+struct DemandPageFilters<'a> {
+    orchestration_id: Option<&'a str>,
+    state_filter: Option<&'a str>,
+    search_query: Option<&'a str>,
+    project_id: Option<&'a str>,
+}
+
+/// Native project scope is evaluated against each Ticket's immutable admitted
+/// project, not a Team's current configuration or the loaded page.
+fn list_all_demands_page_for_project(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    filters: DemandPageFilters<'_>,
+) -> Result<Vec<DemandIndex>> {
+    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id } = filters;
+    if let Some(id) = project_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')) {
+            return Err("Demand project filter requires a bounded native project ID.".into());
+        }
+    }
+    let search_query = search_query.map(str::trim);
+    if search_query.is_some_and(|query| query.is_empty() || query.len() > 128
+        || query.chars().any(char::is_control)) {
+        return Err("Demand search requires 1 to 128 non-control UTF-8 bytes.".into());
+    }
+    if let Some(state) = state_filter {
+        if !matches!(state, "queued" | "running" | "waiting_approval" |
+            "waiting_review" | "blocked" | "completed" | "failed" |
+            "stopped" | "interrupted" | "inconclusive") {
+            return Err("Demand state filter must be an exact native Ticket state.".into());
+        }
+    }
+    if !(1..=200).contains(&limit) {
+        return Err("Demand index page size must be between 1 and 200.".into());
+    }
+    if before_updated_at.is_some() != before_id.is_some()
+        || before_updated_at.is_some_and(|time| time <= 0)
+        || before_id.is_some_and(|id| id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')))
+    {
+        return Err("Demand cursor requires a bounded Ticket ID and positive timestamp.".into());
+    }
+    if let Some(id) = orchestration_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')) {
+            return Err("Demand Team filter requires a bounded native Team ID.".into());
+        }
+        // A deleted or unknown Team must not silently look like an empty board.
+        configuration(store, id)?;
+    }
+    // A syntactically valid timestamp/ID is not a valid pagination boundary.
+    // Require the anchor to remain visible under the exact native filters;
+    // otherwise a stale or foreign cursor could silently skip real Demands.
+    if let (Some(at), Some(id)) = (before_updated_at, before_id) {
+        let visible: i64 = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_tickets t JOIN sa_orchestrations o
+                    ON o.id=t.orchestration_id
+                WHERE t.id=?1 AND t.updated_at=?2
+                  AND (?3 IS NULL OR t.orchestration_id=?3)
+                  AND (?4 IS NULL OR t.state=?4)
+                  AND (?5 IS NULL OR instr(lower(t.objective),lower(?5)) > 0)
+                  AND (?6 IS NULL OR t.project_id=?6)
+            )",
+            params![id,at,orchestration_id,state_filter,search_query,project_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if visible != 1 {
+            return Err("Demand cursor is stale or outside the current native filters; refresh the index.".into());
+        }
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
+         FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         WHERE (?2 IS NULL OR t.updated_at < ?2
+                OR (t.updated_at=?2 AND t.id < ?3))
+           AND (?4 IS NULL OR t.orchestration_id=?4)
+           AND (?5 IS NULL OR t.state=?5)
+           AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
+           AND (?7 IS NULL OR t.project_id=?7)
+         ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
+        id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
+        state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+        project_id: row.get(6)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+// Retain the pre-pagination native oracle only for existing unit coverage.
+#[cfg(test)]
+fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page(store, limit, None, None, None)
+}
+
+/// Cross-Team native decision queue, independent of the general 200-row
+/// Demand backlog. Only native states are represented; waiting_review is NOT
+/// human-approvable until an actual task-bound Council verdict is available.
+#[cfg(test)]
+fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    list_review_inbox_page(store, limit, None, None)
+}
+
+/// Keyset pagination keeps pending reviews with equal timestamps reachable.
+fn list_review_inbox_page(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    list_review_inbox_page_scoped(store, limit, before_updated_at, before_id, None)
+}
+
+/// Apply Team scope in SQLite before LIMIT. A Team cursor is valid only while
+/// its anchor is still a pending Ticket in that exact Team and revision clock.
+fn list_review_inbox_page_scoped(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Review inbox page size must be between 1 and 200.".into());
+    }
+    if before_updated_at.is_some() != before_id.is_some()
+        || before_updated_at.is_some_and(|value| value <= 0)
+        || before_id.is_some_and(|id| id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')))
+    {
+        return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
+    }
+    if let Some(team_id) = orchestration_id {
+        configuration(store, team_id)?;
+        if let (Some(at), Some(ticket_id)) = (before_updated_at, before_id) {
+            let visible: i64 = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_tickets
+                  WHERE id=?1 AND updated_at=?2 AND orchestration_id=?3
+                    AND state IN ('waiting_approval','waiting_review'))",
+                params![ticket_id, at, team_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if visible != 1 {
+                return Err("Review cursor is stale or outside the selected Team; refresh the inbox.".into());
+            }
+        }
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
+         FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         WHERE t.state IN ('waiting_approval','waiting_review')
+           AND (?2 IS NULL OR t.updated_at < ?2 OR (t.updated_at=?2 AND t.id < ?3))
+           AND (?4 IS NULL OR t.orchestration_id=?4)
+         ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id],
+        |row| Ok(DemandIndex {
+            id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
+            state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+            project_id: row.get(6)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// Bounded observational projection. Review-pending never means passed.
+pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Result<String> {
+    list_headless_review_inbox_page(database_path, None, None)
+}
+
+pub(crate) fn list_headless_review_inbox_page(
+    database_path: &std::path::Path, before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_review_inbox_page_scoped(database_path, None, before_updated_at, before_id)
+}
+
+pub(crate) fn list_headless_team_review_inbox_page(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_review_inbox_page_scoped(
+        database_path, Some(orchestration_id), before_updated_at, before_id,
+    )
+}
+
+fn list_headless_review_inbox_page_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    // Page and lookahead share one read-only SQLite snapshot.
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let items = list_review_inbox_page_scoped(
+        &store, 200, before_updated_at, before_id, orchestration_id,
+    )?;
+    let cursor = items.last().map(|item| (item.updated_at, item.id.clone()));
+    let may_have_more = match cursor.as_ref() {
+        Some((time, id)) => !list_review_inbox_page_scoped(
+            &store, 1, Some(*time), Some(id), orchestration_id,
+        )?.is_empty(),
+        None => false,
+    };
+    snapshot.commit().map_err(|e| e.to_string())?;
+    let next_cursor = if may_have_more {
+        cursor.map(|(updated_at, ticket_id)| serde_json::json!({
+            "updatedAt": updated_at, "ticketId": ticket_id,
+        }))
+    } else { None };
+    let entries = items.into_iter().map(|item| {
+        let next_action = if item.state == "waiting_review" {
+            "await_fresh_task_bound_native_council"
+        } else {
+            "inspect_current_revision_before_human_decision"
+        };
+        serde_json::json!({
+            "ticketId": item.id,
+            "orchestrationId": item.orchestration_id,
+            "state": item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at,
+            "nextOperatorAction": next_action,
+            "nativeCouncilPassVerifiedByThisCommand": false,
+            "acceptanceAuthorizedByThisCommand": false
+        })
+    }).collect::<Vec<_>>();
+    let mut response = serde_json::json!({
+        "tickets": entries,
+        "limit": 200,
+        "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
+        "observationalOnly": true,
+        "startupRecoveryPerformed": false
+    });
+    if let Some(team_id) = orchestration_id {
+        response["orchestrationId"] = serde_json::json!(team_id);
+    }
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+}
+
 /// Immutable native assignment history, including completed and failed attempts.
 /// Never infer task success or authorization from an assignment's terminal state.
 #[derive(Debug, Clone, Serialize)]
@@ -478,16 +842,82 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPage {
+    pub ticket_id: String,
+    pub items: Vec<AuditEntry>,
+    pub has_more: bool,
+    pub next_cursor: Option<i64>,
+}
+
+/// Bounded, immutable keyset history for the authorized desktop Ticket inspector.
+/// Details stay inside the main-window boundary; the headless inspector remains redacted.
+fn activity_page(
+    store: &Store, ticket_id: &str, before_id: Option<i64>, limit: i64,
+) -> Result<ActivityPage> {
+    if !(1..=100).contains(&limit) {
+        return Err("Activity page size must be between 1 and 100.".into());
+    }
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    get_ticket(store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,detail,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT ?3",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id, limit + 1], |row| Ok(AuditEntry {
+        id: row.get(0)?, kind: row.get(1)?, detail: row.get(2)?, at: row.get(3)?,
+    })).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = if has_more { items.last().map(|entry| entry.id) } else { None };
+    Ok(ActivityPage { ticket_id: ticket_id.into(), items, has_more, next_cursor })
+}
+
 /// Consistent native read of a Ticket, its mandate, attempt history and audit.
 /// A single SQLite read transaction prevents a pre-Stop assignment being
 /// displayed alongside a post-Stop authority record.
+/// Native per-attempt insights are observed in the same transaction as
+/// Ticket, Mandate and Assignment. These are neither a tool grant nor
+/// proof of a live provider or an approved Council verdict.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentInsight {
+    pub assignment_id: String,
+    pub current_assignment: bool,
+    pub has_result: bool,
+    pub mandate_revoked: bool,
+    pub run_budget_expired: bool,
+    pub remaining_run_budget_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
     pub ticket: Ticket,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
+    pub attempt_insights: Vec<AssignmentInsight>,
     pub activity: Vec<AuditEntry>,
+    /// Historical task-effective bot profiles, not permission or execution proof.
+    /// Legacy Tickets admitted before schema v46 report None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_profile: Option<roster::AdmittedTeamProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_strategy: Option<roster::AdmittedTeamStrategy>,
+    /// Read-side policy drift only: a Team edit cannot reauthorize or rewrite a Demand.
+    pub current_team_policy_revision: i64,
+    pub team_policy_changed_since_admission: bool,
+    /// Snapshot explanation only. Provider admission and native acceptance
+    /// always recheck their own authority, revision and effect state.
+    pub finalization_gate: String,
+    pub unresolved_external_effects: i64,
     /// Advisory native Council status, never a SuperAgent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub council: Option<council_adapter::CouncilObservation>,
@@ -499,15 +929,233 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, ticket_id)?;
+    let native_mandate = mandate(store, ticket_id)?;
+    // Compare both revisions inside this same read transaction. This is not a
+    // provider/tool authorization decision and cannot advance task state.
+    let current_team_policy_revision = configuration(store, &ticket.orchestration_id)?.policy_revision;
+    let team_policy_changed_since_admission =
+        current_team_policy_revision != native_mandate.policy_revision;
+    let native_assignments = assignments(store, ticket_id, limit)?;
+    let observed_at = storage::now();
+    let attempt_insights = native_assignments.iter().map(|a| {
+        let (expired, remaining) = headless_assignment_budget(a, observed_at);
+        AssignmentInsight {
+            assignment_id: a.id.clone(),
+            current_assignment: ticket.state == "running" && a.state == "running"
+                && ticket.active_assignment_id.as_deref() == Some(a.id.as_str()),
+            has_result: a.result.as_ref().is_some_and(|text| !text.is_empty()),
+            mandate_revoked: native_mandate.revoked,
+            run_budget_expired: expired,
+            remaining_run_budget_ms: remaining,
+        }
+    }).collect();
+    let unresolved_external_effects = effects::unresolved_count(store, ticket_id)?;
+    let candidate_session = native_assignments.iter()
+        .find(|attempt| attempt.state == "finished"
+            && attempt.result == ticket.evidence)
+        .map(|attempt| attempt.session_id.as_str()).unwrap_or_default();
+    let finalization_gate = if ticket.state != "waiting_approval" {
+        "not_pending"
+    } else if council_adapter::requires_task_review(store, ticket_id, candidate_session)? {
+        "council_required"
+    } else if unresolved_external_effects > 0 {
+        "effects_unresolved"
+    } else {
+        "native_recheck_required"
+    };
     let result = TaskSnapshot {
+        current_team_policy_revision,
+        team_policy_changed_since_admission,
+        finalization_gate: finalization_gate.to_owned(),
+        unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
         ticket,
-        mandate: mandate(store, ticket_id)?,
-        assignments: assignments(store, ticket_id, limit)?,
+        mandate: native_mandate,
+        assignments: native_assignments,
+        attempt_insights,
         activity: history(store, ticket_id, limit)?,
+        admitted_profile: roster::ticket_profile(store, ticket_id)?,
+        admitted_strategy: roster::ticket_strategy(store, ticket_id)?,
     };
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
+}
+
+
+/// Native, bounded Ticket execution graph. Every edge is a durable
+/// Ticket->Assignment ownership relation, not inferred agent delegation.
+/// Review is a status node only; this does not fabricate Council approval.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraphNode {
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    pub label: String,
+    pub bot_id: Option<String>,
+    pub attempt: Option<i64>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraphEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraph {
+    pub ticket_id: String,
+    pub ticket_revision: i64,
+    pub truncated_attempts: bool,
+    pub nodes: Vec<RunGraphNode>,
+    pub edges: Vec<RunGraphEdge>,
+}
+
+fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
+    // Same native snapshot transaction as the Inspector, not a client-side
+    // graph built from unrelated Ticket and Assignment revisions.
+    // Read one extra row to distinguish exactly fifty attempts from
+    // truncated history without exposing any older attempt in the graph.
+    let snapshot = ticket_snapshot(store, ticket_id, 51)?;
+    let ticket = snapshot.ticket;
+    let root_id = format!("ticket:{}", ticket.id);
+    let mut nodes = vec![RunGraphNode {
+        id: root_id.clone(), kind: "ticket".into(),
+        state: ticket.state.clone(), label: "Demand / Ticket".into(),
+        bot_id: None, attempt: None, active: false,
+    }];
+    let mut edges = Vec::new();
+    for assignment in snapshot.assignments.iter().take(50).rev() {
+        let id = format!("assignment:{}", assignment.id);
+        nodes.push(RunGraphNode {
+            id: id.clone(), kind: "assignment".into(),
+            state: assignment.state.clone(), label: format!("Attempt {}", assignment.attempt),
+            bot_id: Some(assignment.bot_id.clone()), attempt: Some(assignment.attempt),
+            active: ticket.state == "running" && assignment.state == "running"
+                && ticket.active_assignment_id.as_deref() == Some(assignment.id.as_str()),
+        });
+        edges.push(RunGraphEdge {
+            from: root_id.clone(), to: id, relation: "owns_attempt".into(),
+        });
+    }
+    if ticket.state == "waiting_approval" || ticket.state == "waiting_review" {
+        let id = format!("decision:{}", ticket.id);
+        nodes.push(RunGraphNode {
+            id: id.clone(), kind: "pending_decision".into(),
+            state: ticket.state.clone(),
+            label: if ticket.state == "waiting_review" {
+                "Native Council verification required".into()
+            } else { "Human decision pending".into() },
+            bot_id: None, attempt: None, active: false,
+        });
+        edges.push(RunGraphEdge {
+            from: root_id, to: id, relation: "awaits_decision".into(),
+        });
+    }
+    Ok(RunGraph {
+        ticket_id: ticket.id, ticket_revision: ticket.revision,
+        truncated_attempts: snapshot.assignments.len() > 50,
+        nodes, edges,
+    })
+}
+
+/// Headless parity with the workspace's native, revisioned Ticket execution
+/// graph. This is an observation of durable attempts, NOT a record of
+/// dynamic subagents, native Council verdicts or live provider handles.
+/// Opening read-only must not run restart recovery beside an active host.
+pub(crate) fn inspect_headless_ticket_graph(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let graph = run_graph(&store, ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "graph": graph,
+        "observationalOnly": true,
+        "dynamicSubagentsRepresented": false,
+        "councilVerdictIncluded": false,
+        "providerDispatchedByCommand": false,
+        "recoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
+/// Headless Team-member activity uses the same native page handler as the
+/// desktop workspace, but only opens the persisted database read-only.
+/// It cannot trigger startup recovery, provider work or task approval.
+pub(crate) fn list_headless_team_member_activity(
+    database_path: &std::path::Path, orchestration_id: &str, bot_id: &str,
+    before_created_at: Option<i64>, before_assignment_id: Option<&str>,
+) -> Result<String> {
+    let before = match (before_created_at, before_assignment_id) {
+        (None, None) => None,
+        (Some(created_at), Some(assignment_id)) => Some(member_activity::MemberActivityCursor {
+            created_at,
+            assignment_id: assignment_id.into(),
+        }),
+        _ => return Err("An activity cursor requires both creation time and assignment ID.".into()),
+    };
+    let store = Store::open_read_only(database_path)?;
+    let page = member_activity::page(&store, orchestration_id, bot_id, before, 100)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": page.orchestration_id,
+        "botId": page.bot_id,
+        "items": page.items,
+        "hasMore": page.has_more,
+        "nextCursor": page.next_cursor,
+        "pageLimit": 100,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+        "providerDispatched": false
+    })).map_err(|e| e.to_string())
+}
+
+/// Keyset-paginated, redacted native audit metadata for one Ticket. Unlike
+/// Store::open, this inspector cannot migrate, interrupt or replay live work.
+/// Only controlled audit kinds and timestamps are exposed; details may contain
+/// private objectives, user reasons or provider output and must stay private.
+pub(crate) fn list_headless_ticket_activity(
+    database_path: &std::path::Path, ticket_id: &str, before_id: Option<i64>,
+) -> Result<String> {
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    let store = Store::open_read_only(database_path)?;
+    get_ticket(&store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT 101",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "kind": row.get::<_, String>(1)?,
+            "at": row.get::<_, i64>(2)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > 100;
+    items.truncate(100);
+    let next_cursor = if has_more {
+        items.last().and_then(|entry| entry["id"].as_i64())
+    } else {
+        None
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "pageLimit": 100,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+        "items": items,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+    })).map_err(|e| e.to_string())
 }
 
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
@@ -519,6 +1167,55 @@ pub(crate) fn inspect_headless_status(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let observed_at = storage::now();
+    // A damaged or partially migrated Ticket can lose its Mandate. The
+    // recovery inbox already exposes such Tickets, but the detailed headless
+    // inspector must not fail just because the native grant is absent.
+    // Report the grant as missing; never synthesize an authorization.
+    if let Some(ticket_id) = ticket_id {
+        let mandate_exists: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
+            [ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !mandate_exists {
+            // Keep the degraded status, assignment list, and effect count in
+            // one read-only snapshot while another host may be recovering it.
+            let read = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let ticket = get_ticket(&store, ticket_id)?;
+            let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+            let unresolved = effects::unresolved_count(&store, ticket_id)?;
+            let native_assignments = assignments(&store, ticket_id, 50)?;
+            let native_history = history(&store, ticket_id, 50)?;
+            read.commit().map_err(|e| e.to_string())?;
+            let result = serde_json::json!({
+                "ticketId": ticket.id,
+                "orchestrationId": ticket.orchestration_id,
+                "state": ticket.state,
+                "revision": ticket.revision,
+                "activeAssignmentId": ticket.active_assignment_id,
+                "hasEvidence": ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
+                "unresolvedExternalEffects": unresolved,
+                "recovery": recovery,
+                "mandate": null,
+                "mandateMissing": true,
+                "assignments": native_assignments.iter().map(|a| {
+                    let (expired, remaining) = headless_assignment_budget(a, observed_at);
+                    serde_json::json!({
+                        "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
+                        "state": &a.state, "attempt": a.attempt,
+                        "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty()),
+                        "runBudgetExpired": expired,
+                        "remainingRunBudgetMs": remaining
+                    })
+                }).collect::<Vec<_>>(),
+                "activity": native_history.iter().map(|a| serde_json::json!({
+                    "kind": &a.kind, "at": a.at
+                })).collect::<Vec<_>>(),
+                "observationalOnly": true,
+                "automaticReplayAllowed": false
+            });
+            return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
+        }
+    }
     let value = if let Some(ticket_id) = ticket_id {
         let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
         serde_json::json!({
@@ -529,6 +1226,7 @@ pub(crate) fn inspect_headless_status(
             "activeAssignmentId": &snapshot.ticket.active_assignment_id,
             "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
             "unresolvedExternalEffects": effects::unresolved_count(&store, ticket_id)?,
+            "recovery": headless_recovery_summary(&store, &snapshot.ticket, observed_at)?,
             "mandate": {
                 "revoked": snapshot.mandate.revoked,
                 "policyRevision": snapshot.mandate.policy_revision,
@@ -556,6 +1254,679 @@ pub(crate) fn inspect_headless_status(
             .map_err(|e| e.to_string())?
     };
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+/// Read-only, bounded recovery classification for a local operator. The CLI
+/// cannot observe another process's live provider handle, and these fields are
+/// never a grant to retry or to acknowledge an external effect.
+fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result<serde_json::Value> {
+    let (running, active_linked, missing_sessions): (i64, i64, i64) = store.db.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN live.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a
+         LEFT JOIN sessions live ON live.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
+        params![&ticket.id, ticket.active_assignment_id.as_deref()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    let (pending, uncertain): (i64, i64) = store.db.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END),0)
+         FROM sa_effect_receipts WHERE ticket_id=?1",
+        [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    let expired_running: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sa_assignments
+         WHERE ticket_id=?1 AND state='running'
+           AND (created_at<=0 OR created_at>?2 OR created_at<=?3)",
+        params![&ticket.id, now, now.saturating_sub(MAX_ASSIGNMENT_RUN_MS)],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    // A damaged or partially migrated Ticket can lose its Mandate. Recovery
+    // inspection must still expose the Ticket instead of hiding the entire
+    // inbox; absence never counts as an active authorization.
+    let mandate_present: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
+        [&ticket.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let mandate = if mandate_present {
+        Some(mandate(store, &ticket.id)?)
+    } else {
+        None
+    };
+    let consistent = if ticket.state == "running" {
+        // One active native assignment is the current Ticket contract. A
+        // duplicate attempt with a valid active link must still be triaged.
+        running == 1 && active_linked == 1 && missing_sessions == 0
+    } else {
+        // A completed/stopped Ticket with an orphan live assignment is not
+        // healthy, even if its own state is terminal.
+        running == 0
+    };
+    // A structurally linked Assignment may still have lost its native
+    // provider/tool authority (disabled Team, paused bot, stale role/profile,
+    // changed policy or detached task thread). Reuse admission enforcement
+    // rather than presenting an invalid provider as healthy.
+    let active_read_only_authorized = if ticket.state == "running" && consistent {
+        let session_id: Option<String> = store.db.query_row(
+            "SELECT session_id FROM sa_assignments
+             WHERE ticket_id=?1 AND id=?2 AND state='running'",
+            params![&ticket.id, ticket.active_assignment_id.as_deref()],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        session_id.as_deref().is_some_and(|id|
+            matches!(read_only_policy(store, id), Ok(Some(_))))
+    } else {
+        false
+    };
+    let terminal = matches!(ticket.state.as_str(),
+        "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
+    let next_action = if ticket.state == "running" && !consistent {
+        "investigate_native_assignment_state"
+    } else if ticket.state == "running" && expired_running > 0 {
+        "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && mandate.is_none() {
+        // The operator can quarantine the orphaned authority, but must not
+        // infer that a detached serve host has stopped the live provider.
+        "quarantine_missing_native_mandate"
+    } else if ticket.state == "running" && !active_read_only_authorized {
+        // Contain the live provider before reconciling an uncertain effect;
+        // neither action may imply that the remote operation succeeded.
+        "stop_or_quarantine_revoked_native_execution"
+    } else if !consistent {
+        // A terminal Ticket can still have a live orphan provider attempt.
+        // Contain that native execution before acting on uncertain remote
+        // effects; reconciliation cannot race an unrevoked provider.
+        "investigate_native_assignment_state"
+    } else if running > 0 {
+        // A still-running provider may be executing the reserved effect.
+        // Contain or verify that native execution before considering a remote
+        // outcome for reconciliation; never infer that it has stopped.
+        "verify_live_serve_provider_before_intervention"
+    } else if pending + uncertain > 0 {
+        "reconcile_authoritative_remote_effects"
+    } else if ticket.state == "waiting_review" {
+        "await_fresh_task_bound_native_council"
+    } else if ticket.state == "waiting_approval" {
+        "decide_with_current_ticket_revision"
+    } else if mandate.is_none() {
+        "investigate_missing_native_mandate"
+    } else if terminal {
+        "do_not_replay_terminal_ticket"
+    } else {
+        "explicit_native_admission_or_operator_review_required"
+    };
+    Ok(serde_json::json!({
+        "observedAt": now,
+        "activeNativeAssignments": running,
+        "missingNativeSessions": missing_sessions,
+        "expiredNativeAssignments": expired_running,
+        "activeAssignmentLinked": active_linked == 1,
+        "assignmentStateConsistent": consistent,
+        "activeNativeReadOnlyAdmissionValid": active_read_only_authorized,
+        "pendingExternalEffects": pending,
+        "uncertainExternalEffects": uncertain,
+        "requiresIndependentRemoteReconciliation": pending + uncertain > 0,
+        "requiresLiveHostVerification": running > 0 || pending > 0,
+        "mandateMissing": mandate.is_none(),
+        "mandateRevoked": mandate.as_ref().map(|m| m.revoked),
+        "mandateExpired": mandate.as_ref().map(|m| m.expires_at <= now),
+        "terminal": terminal,
+        "nextOperatorAction": next_action,
+        "automaticReplayAllowed": false,
+        "observationalOnly": true
+    }))
+}
+
+/// Preflight an exact headless Demand objective against the same native
+/// manual policy used by the desktop. This reads an existing database without
+/// startup recovery or provider admission; live process occupancy is unknown.
+pub(crate) fn inspect_headless_demand_preflight(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, coordinated: bool,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let status = manual_preflight(&store, orchestration_id, objective, coordinated, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": status.orchestration_id,
+        "policyRevision": status.policy_revision,
+        "projectId": status.project_id,
+        "selectedRole": status.selected_role,
+        "selectedBotId": status.selected_bot_id,
+        "eligibleAtSnapshot": status.eligible,
+        "canStageBlocked": status.can_stage_blocked,
+        "reason": status.reason,
+        "objectiveBytes": objective.trim().len(),
+        "allowedTools": status.allowed_tools,
+        "allowedSideEffects": status.allowed_side_effects,
+        "attemptBudgetMs": status.attempt_budget_ms,
+        "requiresLiveAdmissionRecheck": true,
+        "mandateIssued": false,
+        "providerDispatched": false,
+        "observationalOnly": true
+    })).map_err(|e| e.to_string())
+}
+
+/// Observe native Team readiness beside a live headless process without
+/// running migration or startup recovery. This shares the desktop's native
+/// manual role/checkout checks, but a detached CLI cannot attest live in-memory
+/// provider occupancy. Actual admission MUST independently revalidate.
+pub(crate) fn inspect_headless_team_readiness(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let worker = manual_preflight(&store, orchestration_id, "Headless readiness probe", false, false)?;
+    let coordinator = manual_preflight(&store, orchestration_id, "Headless readiness probe", true, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": orchestration_id,
+        "policyRevision": worker.policy_revision,
+        "projectId": worker.project_id,
+        "worker": {
+            "botId": worker.selected_bot_id,
+            "eligibleAtSnapshot": worker.eligible,
+            "reason": worker.reason
+        },
+        "coordinator": {
+            "botId": coordinator.selected_bot_id,
+            "eligibleAtSnapshot": coordinator.eligible,
+            "reason": coordinator.reason
+        },
+        "allowedTools": [],
+        "allowedSideEffects": false,
+        "requiresLiveAdmissionRecheck": true,
+        "admitted": false,
+        "attemptBudgetMs": worker.attempt_budget_ms
+    })).map_err(|e| e.to_string())
+}
+
+/// Redacted to native receipt metadata; no external provider call, replay,
+/// model text or recovery mutation. Inspecting a live serve database cannot
+/// open Store::open because startup recovery interrupts active assignments.
+/// Read the persisted roster and existing bot profiles without opening a
+/// provider or relying on a desktop Webview. Unlike a live capability scan,
+/// assigned Skills alone cannot prove installation, harness support or use.
+pub(crate) fn inspect_headless_team_roster(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store=Store::open_read_only(database_path)?;
+    let config=configuration(&store,orchestration_id)?;
+    let roster=roster::read(&store,orchestration_id)?;
+    let mut members=Vec::new();
+    let mut append=|role:&str,position:usize,bot_id:&str| -> Result<()> {
+        let bot=bots::get(&store,bot_id)?;
+        members.push(serde_json::json!({
+            "role":role, "position":position, "botId":bot.id,
+            "name":bot.name, "provider":bot.provider, "model":bot.model,
+            "mode":bot.mode, "paused":bot.paused,
+            "assignedSkillIds":bot.skills,
+            "harnessCapability":"not_verified",
+            "skillLibraryStatus":"not_scanned",
+            "invocationEvidence":"not_verified"
+        }));
+        Ok(())
+    };
+    append("coordinator",0,&roster.coordinator_bot_id)?;
+    for (position,id) in roster.worker_bot_ids.iter().enumerate() {
+        append("worker",position,id)?;
+    }
+    for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
+        append("reviewer",position,id)?;
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId":config.id,
+        "policyRevision":config.policy_revision,
+        "enabled":config.enabled,
+        "members":members,
+        "manualSingleWorkerTopology":roster.execution_ready,
+        "multiRoleExecutionAvailable":false,
+        "allowedTools":[],
+        "allowedSideEffects":false,
+        "authorizationIssued":false,
+        "observationalOnly":true,
+        "requiresLiveAdmissionRecheck":true
+    })).map_err(|e|e.to_string())
+}
+
+pub(crate) fn inspect_headless_effect_receipts(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    inspect_headless_effect_receipts_page(database_path, ticket_id, None, None, false)
+}
+
+/// Page native effect history without Store restart recovery or provider calls.
+pub(crate) fn inspect_headless_effect_receipts_page(
+    database_path: &std::path::Path, ticket_id: &str,
+    before_created_at: Option<i64>, before_key: Option<&str>, unresolved_only: bool,
+) -> Result<String> {
+    if before_created_at.is_some() != before_key.is_some() {
+        return Err("Effect receipt cursor requires both timestamp and key.".into());
+    }
+    let store = Store::open_read_only(database_path)?;
+    let (receipts, next_cursor) = effects::receipt_history_page(
+        &store, ticket_id, 100, before_created_at.zip(before_key), unresolved_only,
+    )?;
+    let total_unresolved = effects::unresolved_count(&store, ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "receipts": receipts,
+        "nextCursor": next_cursor.map(|(created_at, effect_key)| serde_json::json!({
+            "createdAt": created_at, "effectKey": effect_key
+        })),
+        "filter": if unresolved_only { "unresolved" } else { "all" },
+        "totalUnresolved": total_unresolved,
+        "observationalOnly": true,
+        "requiresIndependentRemoteReconciliation": total_unresolved > 0,
+        "replayed": false
+    })).map_err(|e| e.to_string())
+}
+
+
+/// Inspect every unresolved effect across Tickets, rather than relying on
+/// a bounded per-Ticket view or confusing a missing first-page item with safety.
+/// Read-only snapshots do not start recovery or contact the remote provider.
+/// The cursor's historical updatedAt field is an opaque compatibility alias for
+/// immutable createdAt; each receipt item's updatedAt remains the true update time.
+pub(crate) fn list_headless_unresolved_effects(
+    database_path: &std::path::Path,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
+    list_headless_unresolved_effects_scoped(
+        database_path,None,before_updated_at,before_ticket_id,before_effect_key,
+    )
+}
+
+/// Read the same reconciliation queue with a native Team boundary, preserving
+/// ticket revisions for subsequent CAS-guarded operator decisions.
+pub(crate) fn list_headless_team_unresolved_effects(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
+    list_headless_unresolved_effects_scoped(
+        database_path,Some(orchestration_id),before_updated_at,before_ticket_id,before_effect_key,
+    )
+}
+
+fn list_headless_unresolved_effects_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
+    let before = match (before_updated_at, before_ticket_id, before_effect_key) {
+        (None,None,None) => None,
+        (Some(at),Some(ticket),Some(effect)) => Some((at,ticket,effect)),
+        _ => return Err("Unresolved effect cursor requires timestamp, Ticket ID and effect key.".into()),
+    };
+    let store = Store::open_read_only(database_path)?;
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (items, next) = match orchestration_id {
+        Some(team) => effects::unresolved_effects_page_for_team(
+            &store, 100, before, Some(team),
+        )?,
+        None => effects::unresolved_effects_page(&store, 100, before)?,
+    };
+    let total: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sa_effect_receipts e
+         JOIN sa_tickets t ON t.id=e.ticket_id
+         WHERE e.state IN ('pending','uncertain')
+           AND (?1 IS NULL OR t.orchestration_id=?1)",
+        [orchestration_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    snapshot.commit().map_err(|e| e.to_string())?;
+    let mut result = serde_json::json!({
+        "unresolvedTotal": total,
+        "pageLimit": 100,
+        "items": items,
+        "nextCursor": next.map(|(created_at,ticket_id,effect_key)| serde_json::json!({
+            "createdAt":created_at,
+            // Retain the existing opaque cursor key for headless clients.
+            // It now carries immutable creation order, not mutable update time.
+            "updatedAt":created_at, "ticketId":ticket_id, "effectKey":effect_key
+        })),
+        "observationalOnly": true,
+        "automaticReplayAllowed": false,
+        "requiresIndependentRemoteReconciliation": total > 0
+    });
+    if let Some(id) = orchestration_id {
+        result["orchestrationId"] = serde_json::json!(id);
+    }
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+/// One-shot headless Team Demand inspection. Reuse the desktop's native
+/// state-filtered page; no migration, startup recovery, provider session,
+/// inferred task, authorization or external effect. Operational metadata
+/// excludes objectives, results, mandates and private transcripts.
+pub(crate) fn list_headless_team_demands(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_team_demands_searched(
+        database_path, orchestration_id, state, before_updated_at, before_id, None,
+    )
+}
+
+/// Search applies the same pre-pagination native filters as desktop without
+/// exposing the objective, query text, or any worker/session evidence.
+pub(crate) fn list_headless_team_demands_searched(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
+) -> Result<String> {
+    list_headless_team_demands_project_searched(
+        database_path, orchestration_id, state, before_updated_at, before_id,
+        search_query, None,
+    )
+}
+
+/// Apply an exact admitted Project filter to the native Ticket index before
+/// keyset pagination; current Team settings do not rewrite historical scope.
+pub(crate) fn list_headless_team_demands_project_searched(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+    search_query: Option<&str>, project_id: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let state_filter = if state == "all" { None } else { Some(state) };
+    let page = list_all_demands_page_for_project(
+        &store, 200, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id: Some(orchestration_id), state_filter,
+            search_query, project_id,
+        },
+    )?;
+    let may_have_more = page.len() == 200;
+    let next_cursor = if may_have_more {
+        page.last().map(|item| serde_json::json!({
+            "beforeUpdatedAt": item.updated_at, "beforeId": &item.id
+        }))
+    } else { None };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": orchestration_id,
+        "stateFilter": state,
+        "searchApplied": search_query.is_some(),
+        "projectFilterApplied": project_id.is_some(),
+        "pageLimit": 200,
+        "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
+        "observationalOnly": true,
+        "demands": page.iter().map(|item| serde_json::json!({
+            "ticketId": &item.id,
+            "state": &item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at
+        })).collect::<Vec<_>>()
+    })).map_err(|e| e.to_string())
+}
+
+/// Global headless Demand index using the desktop's native pre-pagination search.
+/// The operator gets only Ticket IDs, Team IDs, states and revisions, not
+/// objectives, actor identifiers, mandates, provider sessions or evidence.
+pub(crate) fn list_headless_all_demands_searched(
+    database_path: &std::path::Path, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
+) -> Result<String> {
+    list_headless_all_demands_project_searched(
+        database_path, state, before_updated_at, before_id, search_query, None,
+    )
+}
+
+/// Global headless index shares desktop's immutable admitted Project filter.
+/// Only redacted Ticket metadata is returned, never task/provider evidence.
+pub(crate) fn list_headless_all_demands_project_searched(
+    database_path: &std::path::Path, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+    search_query: Option<&str>, project_id: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let state_filter = if state == "all" { None } else { Some(state) };
+    let page = list_all_demands_page_for_project(
+        &store, 200, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id: None, state_filter, search_query, project_id,
+        },
+    )?;
+    let may_have_more = page.len() == 200;
+    let next_cursor = if may_have_more {
+        page.last().map(|item| serde_json::json!({
+            "beforeUpdatedAt": item.updated_at, "beforeId": &item.id
+        }))
+    } else { None };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "scope": "allTeams",
+        "stateFilter": state,
+        "searchApplied": search_query.is_some(),
+        "projectFilterApplied": project_id.is_some(),
+        "pageLimit": 200,
+        "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
+        "observationalOnly": true,
+        "demands": page.iter().map(|item| serde_json::json!({
+            "ticketId": &item.id,
+            "orchestrationId": &item.orchestration_id,
+            "state": &item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at
+        })).collect::<Vec<_>>()
+    })).map_err(|e| e.to_string())
+}
+
+/// Redacted cross-Team recovery queue for a trusted local operator. Only
+/// genuine native Ticket state and unresolved durable effect receipts qualify:
+/// a healthy running provider is deliberately omitted. This is NOT recovery
+/// admission, permission issuance, or proof that a remote effect was applied.
+/// One read transaction provides a consistent ordered operational snapshot.
+/// Retain the legacy first-page entrypoint for desktop and existing callers.
+pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> Result<String> {
+    list_headless_recovery_inbox_page(database_path,None,None,None)
+}
+
+/// Cursor pagination keeps old unresolved remote effects discoverable beyond
+/// the initial 200 results. Use the immutable Ticket creation time, not the
+/// mutable updated_at, so an unseen Ticket cannot move ahead of the cursor
+/// when its status changes between pages. The legacy `updatedAt` cursor field
+/// remains an alias for the stable `createdAt` boundary.
+/// Each call is a fresh read-only SQLite snapshot:
+/// after concurrent changes, operators must reconcile current native state
+/// again before attempting any authorized recovery.
+pub(crate) fn list_headless_recovery_inbox_page(
+    database_path: &std::path::Path, before_priority: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_recovery_inbox_page_scoped(
+        database_path, None, before_priority, before_updated_at, before_id,
+    )
+}
+
+/// A Team-scoped operational recovery view. Apply the native Team boundary
+/// before priority ordering and pagination, including cursor-anchor validation.
+/// An operator cannot use a cursor from a different Team to inspect its Tickets.
+pub(crate) fn list_headless_team_recovery_inbox_page(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_priority: Option<i64>, before_updated_at: Option<i64>,
+    before_id: Option<&str>,
+) -> Result<String> {
+    list_headless_recovery_inbox_page_scoped(
+        database_path, Some(orchestration_id), before_priority, before_updated_at, before_id,
+    )
+}
+
+fn list_headless_recovery_inbox_page_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_priority: Option<i64>, before_updated_at: Option<i64>,
+    before_id: Option<&str>,
+) -> Result<String> {
+    match (before_priority,before_updated_at,before_id) {
+        (None,None,None)=>{},
+        (Some(priority),Some(updated_at),Some(id))
+            if (0..=2).contains(&priority) && updated_at>0
+               && !id.is_empty() && id.len()<=128
+               && id.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'))=>{},
+        _=>return Err("Invalid recovery cursor: supply priority 0..2, positive timestamp and bounded Ticket ID.".into()),
+    }
+    let store = Store::open_read_only(database_path)?;
+    if let Some(id) = orchestration_id {
+        configuration(&store, id)?;
+    }
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let observed_at = storage::now();
+    let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
+    let ids: Vec<(String, i64, i64)> = {
+        let mut stmt = store.db.prepare(
+            "WITH scoped_tickets AS (
+               SELECT * FROM sa_tickets WHERE (?7 IS NULL OR orchestration_id=?7)
+             ), candidates AS (
+               SELECT t.id,t.created_at,
+                 CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
+                                  WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                      THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
+                                         WHERE a.ticket_id=t.id AND a.state='running')
+                      THEN 1 ELSE 2 END AS priority
+               FROM scoped_tickets t
+               WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
+                                 'failed','interrupted','inconclusive')
+                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                  OR (t.state<>'running' AND EXISTS(
+                      SELECT 1 FROM sa_assignments a
+                      WHERE a.ticket_id=t.id AND a.state='running'))
+                  OR (t.state='running' AND (
+                      t.active_assignment_id IS NULL
+                      -- A live assignment whose provider session vanished
+                      -- needs investigation even before the watchdog settles it.
+                      OR EXISTS(SELECT 1 FROM sa_assignments a
+                          LEFT JOIN sessions live ON live.id=a.session_id
+                          WHERE a.ticket_id=t.id AND a.state='running'
+                            AND live.id IS NULL)
+                      -- The recovery index must find an active provider whose
+                      -- task-owned channel binding was deleted or remapped.
+                      -- Native read_only_policy already refuses this session;
+                      -- otherwise the read-only inbox incorrectly appears clear.
+                      OR NOT EXISTS(
+                        SELECT 1 FROM sa_assignments a
+                        JOIN bot_threads thread ON thread.session_id=a.session_id
+                          AND thread.bot_id=a.bot_id AND thread.channel_id=?6
+                        WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                          AND a.state='running'
+                          AND (
+                            (a.attempt=1 AND thread.external_id=t.id)
+                            OR (a.attempt=1 AND thread.external_id=t.id || ':attempt:1'
+                                AND EXISTS(SELECT 1 FROM sa_audit initial
+                                  WHERE initial.ticket_id=t.id AND initial.kind='admitted'
+                                    AND initial.detail IN ('blocked: worker occupied',
+                                      'blocked: explicit headless staging'))
+                                AND EXISTS(SELECT 1 FROM sa_audit retry
+                                  WHERE retry.ticket_id=t.id AND retry.kind='manual_retry'))
+                            OR (a.attempt>1 AND
+                                thread.external_id=t.id || ':attempt:' || a.attempt)
+                            OR (a.attempt>1 AND
+                                thread.external_id=t.id || ':worker:' || a.attempt)
+                          ))
+                      OR (SELECT COUNT(*) FROM sa_assignments a
+                          WHERE a.ticket_id=t.id AND a.state='running')<>1
+                      OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                                    WHERE a.id=t.active_assignment_id
+                                      AND a.ticket_id=t.id AND a.state='running'
+                                      AND a.created_at>0 AND a.created_at<=?1
+                                      AND a.created_at>?2)
+                      -- Detect durable native authority drift even before
+                      -- a watchdog tick. The full provider/tool admission
+                      -- policy is independently rechecked in the projection.
+                      OR NOT EXISTS(SELECT 1 FROM sa_mandates m
+                                    WHERE m.ticket_id=t.id AND m.revoked=0
+                                      AND m.expires_at>?1
+                                      AND m.policy_revision=t.policy_revision
+                                      AND m.project_id=t.project_id
+                                      AND m.actor=t.actor
+                                      AND length(trim(m.authorization_id))>0
+                                      AND m.allowed_tools='[]'
+                                      AND m.allowed_side_effects=0)
+                      OR NOT EXISTS(
+                        SELECT 1 FROM sa_orchestrations o
+                        JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+                        JOIN sa_assignments active ON active.id=t.active_assignment_id
+                          AND active.ticket_id=t.id AND active.state='running'
+                        JOIN bots assignee ON assignee.id=active.bot_id
+                        JOIN sessions live ON live.id=active.session_id
+                        WHERE o.id=t.orchestration_id AND o.enabled=1
+                          AND o.policy_revision=t.policy_revision
+                          AND o.project_id=t.project_id
+                          AND coordinator.paused=0 AND assignee.paused=0
+                          AND live.project_id=assignee.project_id
+                          AND (active.bot_id=o.coordinator_bot_id OR
+                               (active.bot_id=t.worker_bot_id
+                                AND assignee.project_id=t.project_id)))))
+             ), page AS (
+               SELECT id,priority,created_at FROM candidates
+               WHERE ?3 IS NULL OR priority>?3
+                  OR (priority=?3 AND (created_at<?4
+                      OR (created_at=?4 AND id<?5)))
+               ORDER BY priority ASC,created_at DESC,id DESC
+               LIMIT 201
+             )
+             SELECT page.id,page.priority,page.created_at,
+               CASE WHEN ?3 IS NULL THEN 1 ELSE EXISTS(
+                 SELECT 1 FROM candidates anchor
+                 WHERE anchor.id=?5 AND anchor.priority=?3 AND anchor.created_at=?4
+               ) END AS cursor_valid
+             FROM (SELECT 1) singleton LEFT JOIN page ON 1=1
+             ORDER BY page.priority ASC,page.created_at DESC,page.id DESC",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL,orchestration_id],
+            |row| Ok((
+                row.get::<_,Option<String>>(0)?,
+                row.get::<_,Option<i64>>(1)?,
+                row.get::<_,Option<i64>>(2)?,
+                row.get::<_,bool>(3)?,
+            )),
+        ).map_err(|e| e.to_string())?;
+        let records = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        if records.first().is_some_and(|row| !row.3) {
+            return Err("Recovery cursor no longer belongs to a recoverable Ticket; reload inbox.".into());
+        }
+        records.into_iter().filter_map(|(id,priority,updated_at,_)| {
+            Some((id?,priority?,updated_at?))
+        }).collect()
+    };
+    let mut items = Vec::with_capacity(ids.len().min(200));
+    for (id,_,_) in ids.iter().take(200) {
+        let ticket = get_ticket(&store,id)?;
+        let recovery = headless_recovery_summary(&store,&ticket,observed_at)?;
+        items.push(serde_json::json!({
+            "ticketId": ticket.id,
+            "orchestrationId": ticket.orchestration_id,
+            "state": ticket.state,
+            "revision": ticket.revision,
+            "createdAt": ticket.created_at,
+            "updatedAt": ticket.updated_at,
+            "recovery": recovery
+        }));
+    }
+    let next_cursor=if ids.len()>200 {
+        ids.get(199).map(|(id,priority,created_at)| serde_json::json!({
+            "priority": priority,
+            "createdAt": created_at,
+            // Compatibility alias for existing --before consumers. This is a
+            // stable cursor value, not the Ticket\'s mutable updated_at.
+            "updatedAt": created_at,
+            "ticketId": id
+        }))
+    } else {None};
+    snapshot.commit().map_err(|e| e.to_string())?;
+    let mut response = serde_json::json!({
+        "observedAt": observed_at,
+        "pageLimit": 200,
+        "mayHaveMore": ids.len() > 200,
+        "nextCursor": next_cursor,
+        "items": items,
+        "observationalOnly": true,
+        "automaticRecoveryPerformed": false,
+        "requiresCurrentNativeRecheckBeforeAnyAction": true
+    });
+    if let Some(id) = orchestration_id {
+        response["orchestrationId"] = serde_json::json!(id);
+    }
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
 }
 
 /// Bounded local task index for a one-shot CLI. Keep this read-only so it can
@@ -612,6 +1983,167 @@ fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
     })).map_err(|e| e.to_string())
 }
 
+/// A detached local operator can stage one explicitly chosen Team Worker,
+/// including a secondary member. Staging never reserves a provider session;
+/// the native desktop retry must revalidate the frozen roster, worker profile,
+/// mandate and current checkout lease before dispatch.
+fn headless_queue_demand_member(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, request_key: &str, selected_worker_id: Option<&str>,
+) -> Result<String> {
+    let mut store = open_headless_transition_store(database_path)?;
+    let (ticket, launched) = admit_role_with_staging_member(
+        &mut store, orchestration_id, objective, request_key, true,
+        ManualAdmissionOptions {
+            coordinate: false, headless_staging: true, selected_worker_id,
+        },
+    )?;
+    debug_assert!(!launched);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "providerDispatchedByCommand": false,
+        "requiresExplicitNativeDispatch": ticket.state == "blocked",
+        "allowedTools": [],
+        "allowedSideEffects": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Preserve the original single-Worker CLI admission contract.
+pub(crate) fn headless_queue_demand(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    headless_queue_demand_member(database_path, orchestration_id, objective, request_key, None)
+}
+
+/// Stage a named configured Worker without assuming that the first Team member
+/// owns the Demand. The stable request key also binds the selected Worker.
+pub(crate) fn headless_queue_selected_worker_demand(
+    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    headless_queue_demand_member(
+        database_path, orchestration_id, objective, request_key, Some(worker_bot_id),
+    )
+}
+
+/// Create a reusable, disabled Team through the same atomic role and future-task
+/// policy boundary as desktop. A detached operator cannot turn a creation
+/// document into a live grant, Assignment, Council verdict or provider launch.
+/// Existing bot identities are checked natively before the transaction commits.
+pub(crate) fn headless_create_orchestration(
+    database_path: &std::path::Path, input: NewOrchestration,
+    members: roster::RosterInput, max_worker_attempts: i64,
+    purpose: &str, strategy: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let created = roster::create_with_attempt_policy_and_strategy(
+        &store, input, Some(members), max_worker_attempts, purpose, strategy,
+    )?;
+    let saved = roster::read(&store, &created.id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": created.id,
+        "enabled": created.enabled,
+        "policyRevision": created.policy_revision,
+        "workerCount": saved.worker_bot_ids.len(),
+        "reviewerCount": saved.reviewer_bot_ids.len(),
+        "maxWorkerAttempts": saved.max_worker_attempts,
+        "strategy": saved.strategy,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Explicit local headless Team rename uses the same desktop CAS and guard
+/// without startup recovery. This never changes bot identities, roles, grants
+/// or the historical Ticket snapshot; an active Team is always rejected.
+pub(crate) fn headless_rename_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, name: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let existing = configuration(&store, orchestration_id)?;
+    let updated = update_configuration(&store, orchestration_id, expected_revision,
+        &NewOrchestration {
+            name: name.to_owned(),
+            coordinator_bot_id: existing.coordinator_bot_id,
+            worker_bot_id: existing.worker_bot_id,
+        })?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "name": updated.name,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+        "grantIssued": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// A local headless operator edits the exact existing Team roster, using the
+/// same revision-guarded, disabled-only transaction as the desktop. Adding a
+/// member never issues a task grant or admits a provider; the current
+/// multi-member execution limitation remains visible to the operator.
+pub(crate) fn headless_set_team_roster(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, input: &roster::RosterInput,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set(&store, orchestration_id, expected_revision, input)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        "workerCount": updated.worker_bot_ids.len(),
+        "reviewerCount": updated.reviewer_bot_ids.len(),
+        "executionReady": updated.execution_ready,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// A local headless operator may choose a finite Worker retry budget for
+/// future Demands. The native policy CAS rejects unsettled Tickets and
+/// uncertain external effects; this operation does not retry existing work.
+pub(crate) fn headless_set_team_attempt_limit(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, limit: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set_worker_attempt_limit(
+        &store, orchestration_id, expected_revision, limit,
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        "maxWorkerAttempts": updated.max_worker_attempts,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Local headless strategy changes reuse the desktop's native Team policy
+/// transaction. A purpose file is read by the CLI, never echoed as a command
+/// argument or treated as authority. Only future Demand snapshots change.
+pub(crate) fn headless_set_team_strategy(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, purpose: &str, strategy: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set_team_strategy(
+        &store, orchestration_id, expected_revision, purpose, strategy,
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        // The purpose was read from a private local file; do not reflect it
+        // into terminal logs or captured automation output.
+        "purposeConfigured": !updated.purpose.is_empty(),
+        "strategy": updated.strategy,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI acceptance; the native revision guard and audit remain
 /// the same as the desktop action.
 pub(crate) fn headless_accept_ticket(
@@ -630,6 +2162,38 @@ pub(crate) fn headless_reject_ticket(
     headless_ticket_status(&reject(&store, ticket_id, expected_revision, reason)?)
 }
 
+/// Explicit local operator enable uses the same native policy CAS and
+/// harness/profile admission checks as desktop. Enabled means available for
+/// future manual Demands, never an inferred Ticket, grant or provider launch.
+pub(crate) fn headless_enable_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = change_enabled(&store, orchestration_id, expected_revision, true)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Local operator emergency disable. Reuse the desktop's native CAS,
+/// audit, lease settlement and revocation without invoking restart recovery
+/// against a live host. Never dispatch work or implicitly re-enable a Team.
+pub(crate) fn headless_disable_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = change_enabled(&store, orchestration_id, expected_revision, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI Stop revokes the mandate in the shared database. A
 /// running serve process may still have a provider call in memory; its late
 /// callback is denied by the existing state/mandate checks in on_run_finished.
@@ -639,28 +2203,568 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+/// Revision-bound headless Stop prevents a stale observation from revoking
+/// a Ticket changed by another operator. Emergency Stop remains unconditional.
+pub(crate) fn headless_stop_ticket_at_revision(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let (ticket, _session) =
+        stop_with_expected_revision(&store, ticket_id, Some(expected_revision))?;
+    headless_ticket_status(&ticket)
+}
+
+/// Explicit local-operator quarantine for one exact pending effect receipt.
+/// An unknown provider outcome is never interpreted as failure or success.
+/// CAS on Ticket revision and the stored payload digest prevents a stale
+/// operator view from changing a different receipt. The audit and transition
+/// are atomic; a repeated request for an already uncertain receipt is a no-op.
+pub(crate) fn headless_quarantine_pending_effect(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+    effect_key: &str, payload_sha256: &str,
+) -> Result<String> {
+    if expected_revision < 0
+        || effect_key.is_empty() || effect_key.len() > 128
+        || !effect_key.bytes().all(|b| b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b':'))
+        || payload_sha256.len() != 64
+        || !payload_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("Invalid pending effect quarantine identity.".into());
+    }
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let revision: i64 = tx.query_row(
+        "SELECT revision FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before effect quarantine.".into());
+    }
+    let (state, original_digest): (String, String) = tx.query_row(
+        "SELECT state,payload_sha256 FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2",
+        params![ticket_id,effect_key],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("External effect receipt not found.")?;
+    if original_digest != payload_sha256 {
+        return Err("External effect payload identity changed.".into());
+    }
+    let changed = match state.as_str() {
+        "pending" => {
+            let now = storage::now();
+            if tx.execute(
+                "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?4
+                 WHERE ticket_id=?1 AND effect_key=?2
+                   AND payload_sha256=?3 AND state='pending'",
+                params![ticket_id,effect_key,payload_sha256,now],
+            ).map_err(|e| e.to_string())? != 1 {
+                return Err("External effect changed during quarantine.".into());
+            }
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'headless_effect_quarantined',?2,?3)",
+                params![ticket_id,
+                    format!("Receipt {effect_key} quarantined; independently verify provider outcome before retry"),
+                    now],
+            ).map_err(|e| e.to_string())?;
+            true
+        }
+        "uncertain" => false,
+        _ => return Err("Only pending or already uncertain effects may be quarantined.".into()),
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "effectKey": effect_key,
+        "state": "uncertain",
+        "changed": changed,
+        "remoteResultVerified": false,
+        "providerDispatchedByCommand": false,
+        "externalEffectReplayAllowed": false,
+    })).map_err(|e| e.to_string())
+}
+
+
+/** Locally quarantine a running Ticket that lost its Team or unique active
+ * native Assignment. A detached CLI never stops a provider or replays effects.
+ */
+pub(crate) fn headless_quarantine_orphan_running_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    if expected_revision < 0 {
+        return Err("Expected a nonnegative Ticket revision.".into());
+    }
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    // Match the owning watchdog's structural/authority fault predicate.
+    // A running Assignment without its native Mandate is not healthy and
+    // must be revocable without fabricating a replacement authorization.
+    let fault_revision: Option<i64> = tx.query_row(
+        "SELECT t.revision FROM sa_tickets t
+         WHERE t.id=?1 AND t.state='running' AND (
+           t.active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_mandates m WHERE m.ticket_id=t.id)
+           OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o WHERE o.id=t.orchestration_id)
+           OR (SELECT COUNT(*) FROM sa_assignments a
+               WHERE a.ticket_id=t.id AND a.state='running')<>1
+           OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+               WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                 AND a.state='running')
+         )", [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if fault_revision != Some(expected_revision) {
+        return Err("Ticket revision changed or running Assignment is structurally healthy.".into());
+    }
+    let now = storage::now();
+    // Repeat the guard in the CAS update: a competing repair/stop cannot be
+    // transformed into a new interruption by this stale operator command.
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+                revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND (
+           active_assignment_id IS NULL
+           OR NOT EXISTS(SELECT 1 FROM sa_mandates m
+                         WHERE m.ticket_id=sa_tickets.id)
+           OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                         WHERE o.id=sa_tickets.orchestration_id)
+           OR (SELECT COUNT(*) FROM sa_assignments a
+               WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
+           OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+               WHERE a.id=sa_tickets.active_assignment_id
+                 AND a.ticket_id=sa_tickets.id AND a.state='running')
+         )", params![ticket_id,expected_revision,now],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Running Assignment structure changed before quarantine.".into());
+    }
+    // An already missing Mandate is a possible legacy corruption, not a
+    // reason to leave a running Ticket; revoke every remaining grant.
+    tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [ticket_id])
+        .map_err(|e| e.to_string())?;
+    let quarantined = tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_orphan_running_quarantined',
+           'Running Ticket lost its Team, Mandate or unique active Assignment; revoked without provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id,"state":"interrupted","revision":expected_revision+1,
+        "quarantinedAssignments":quarantined,
+        "pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false,"liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Quarantine an explicit, revisioned running Ticket whose single active native
+/// Assignment has no SQLite provider session. The detached process never
+/// claims a provider was stopped, replays a remote effect or grants a retry.
+pub(crate) fn headless_quarantine_detached_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before quarantine.".into());
+    }
+    if state != "running" {
+        return Err("Only a running Ticket with a detached session may be quarantined.".into());
+    }
+    let active = active.ok_or("Missing active Assignment; inspect recovery state first.")?;
+    let (running, linked, missing): (i64,i64,i64) = tx.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN a.id=?2 AND s.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a LEFT JOIN sessions s ON s.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
+        params![ticket_id,&active],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    if running != 1 || linked != 1 || missing != 1 {
+        return Err("Expected exactly one linked running Assignment with a missing native session.".into());
+    }
+    let now=storage::now();
+    if tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
+        .map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Mandate missing; quarantine aborted.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND active_assignment_id=?4",
+        params![ticket_id,expected_revision,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Ticket changed before detached quarantine.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND id=?3 AND state='running'",
+        params![ticket_id,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Assignment changed before detached quarantine.".into());
+    }
+    let uncertain=tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_detached_quarantined',
+           'Missing native session; revoked without provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id,"state":"interrupted","revision":revision+1,
+        "quarantinedAssignments":1,"pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false,"liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false
+    })).map_err(|e| e.to_string())
+}
+
+/// A trusted local operator can quarantine an expired or invalid-clock native
+/// Assignment without opening startup recovery beside a live serve process.
+/// This is not a provider stop or permission to retry: the owning serve host
+/// observes the durable revocation and cancels its task-owned handle.
+pub(crate) fn headless_quarantine_expired_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before expiry quarantine.".into());
+    }
+    if state != "running" {
+        return Err("Only a running Ticket can have an expired Assignment quarantined.".into());
+    }
+    let active = active.ok_or("Running Ticket has no active Assignment; inspect recovery state.")?;
+    let running: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if running != 1 {
+        return Err("Expiry quarantine requires exactly one running native Assignment.".into());
+    }
+    let started_at: i64 = tx.query_row(
+        "SELECT created_at FROM sa_assignments
+         WHERE id=?1 AND ticket_id=?2 AND state='running'",
+        params![&active,ticket_id], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("Active native Assignment does not match the running Ticket.")?;
+    let now = storage::now();
+    if assignment_within_budget(started_at, now) {
+        return Err("Assignment is within its native run budget; expiry quarantine denied.".into());
+    }
+    if tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+        [ticket_id]).map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Mandate missing; expiry quarantine aborted.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND active_assignment_id=?4",
+        params![ticket_id,expected_revision,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Ticket changed before expiry quarantine.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE id=?1 AND ticket_id=?3 AND state='running'",
+        params![&active,now,ticket_id],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Assignment changed before expiry quarantine.".into());
+    }
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_expired_quarantined',
+           'Expired or invalid-clock native assignment revoked; verify live provider and external effects before retry',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id, "state":"interrupted", "revision":revision+1,
+        "quarantinedAssignments":1, "pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false, "liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false
+    })).map_err(|e| e.to_string())
+}
+
+/// Explicitly quarantine an orphaned provider attempt on a terminal Ticket.
+/// A detached headless process never replays effects or claims to stop the provider.
+pub(crate) fn headless_quarantine_terminal_orphan(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision): (String, i64) = tx.query_row(
+        "SELECT state,revision FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before quarantine.".into());
+    }
+    if !matches!(state.as_str(), "completed" | "failed" | "stopped"
+        | "interrupted" | "inconclusive")
+    {
+        return Err("Only a terminal Ticket with an orphaned attempt can be quarantined.".into());
+    }
+    let running: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if running == 0 {
+        return Err("No orphaned running native assignment to quarantine.".into());
+    }
+    let now = storage::now();
+    if tx.execute(
+        "UPDATE sa_tickets SET active_assignment_id=NULL,revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2
+         AND state IN ('completed','failed','stopped','interrupted','inconclusive')",
+        params![ticket_id,expected_revision,now],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Ticket changed before quarantine.".into());
+    }
+    tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+        [ticket_id]).map_err(|e| e.to_string())?;
+    let quarantined = tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_orphan_quarantined',
+           'Terminal native assignment quarantined; no provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id, "state": state, "revision": revision + 1,
+        "quarantinedAssignments": quarantined, "pendingEffectsMarkedUncertain": uncertain,
+        "providerStoppedByCommand": false, "liveProviderState": "unknown",
+        "externalEffectReplayAllowed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Revoke and interrupt assignments that exceeded the same native attempt
 /// budget used by tool admission. This is called only by the owning serve
 /// process; callers must stop the returned sessions after the transaction.
 /// No attempt is replayed and unresolved effect receipts stay unresolved.
+/// Return task-owned provider sessions that a separate local headless
+/// control command has already stopped or interrupted in SQLite. A live serve
+/// process can observe those revocations without taking a second writer lease,
+/// attempting a restart recovery, or stopping an unrelated ordinary bot session.
+/// This read never treats a stopped Ticket as a new dispatch/retry permission.
+/// A native SuperAgent session is never eligible for unattended queue replay or
+/// usage-limit resume, even after Stop, settlement, or process restart. Query
+/// assignment history rather than a live-only policy or a bot-thread record:
+/// those can disappear or become invalid after revocation. Ordinary sessions
+/// retain their existing automatic-resume behavior.
+/// A task-owned internal bot thread remains a SuperAgent session even if a
+/// damaged or legacy store has lost its Assignment row. Never let headless
+/// queue/usage-limit recovery or the live-provider cancellation poll fall back
+/// to ordinary session privileges after that authority record disappears.
+pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)
+             OR EXISTS(SELECT 1 FROM bot_threads
+                       WHERE session_id=?1 AND channel_id=?2)",
+        params![session_id, CHANNEL], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
+/// A live server may still own a provider handle after a local operator
+/// revokes a Mandate or after expiry, pause, policy/profile drift, or recovery
+/// detaches an Assignment. Poll native authority directly so cancellation need
+/// not wait for a state-writing watchdog tick. Stop only task-owned sessions;
+/// this query never settles the Ticket, grants a retry, or replays effects.
+pub(crate) fn headless_cancelled_assignments(
+    store: &Store, active_sessions: &[String],
+) -> Result<Vec<String>> {
+    headless_cancelled_assignments_with_pause(
+        store, active_sessions, crate::feature_controls::get().bots_paused,
+    )
+}
+
+// Inject the pause state to test native cancellation without changing global settings.
+fn headless_cancelled_assignments_with_pause(
+    store: &Store, active_sessions: &[String], bots_paused: bool,
+) -> Result<Vec<String>> {
+    if active_sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_assignments a
+            JOIN sa_tickets t ON t.id=a.ticket_id
+            LEFT JOIN sa_mandates m ON m.ticket_id=t.id
+            LEFT JOIN sa_orchestrations o ON o.id=t.orchestration_id
+            LEFT JOIN bots b ON b.id=a.bot_id
+            LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+            LEFT JOIN sessions s ON s.id=a.session_id
+            WHERE a.session_id=?1
+              AND (a.state!='running'
+                   OR t.state IN ('stopped','interrupted')
+                   OR (a.state='running' AND (
+                       ?4=1
+                       OR t.state!='running'
+                       OR t.active_assignment_id IS NULL
+                       OR t.active_assignment_id!=a.id
+                       OR m.ticket_id IS NULL
+                       OR m.revoked!=0
+                       OR m.expires_at<=?2
+                       OR length(trim(m.authorization_id))=0
+                       OR m.actor!=t.actor
+                       OR m.project_id!=t.project_id
+                       OR m.allowed_tools!='[]'
+                       OR m.allowed_side_effects!=0
+                       OR m.policy_revision!=t.policy_revision
+                       OR o.id IS NULL OR o.enabled=0
+                       OR o.project_id!=t.project_id
+                       OR o.policy_revision!=t.policy_revision
+                       OR coordinator.id IS NULL OR coordinator.paused!=0
+                       OR b.id IS NULL OR b.paused!=0
+                       OR (a.bot_id!=o.coordinator_bot_id AND
+                           (a.bot_id!=t.worker_bot_id OR b.project_id!=t.project_id))
+                       OR s.id IS NULL OR s.project_id!=b.project_id
+                       OR a.created_at<=0 OR a.created_at>?2
+                       OR (?2-a.created_at)>=?3
+                   )))
+        )",
+    ).map_err(|e| e.to_string())?;
+    let mut cancelled = Vec::new();
+    let now = storage::now();
+    for session_id in active_sessions {
+        let cancelled_native: bool = stmt.query_row(
+            params![session_id, now, MAX_ASSIGNMENT_RUN_MS, i64::from(bots_paused)], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        // The SQL fast path detects durable revocation and role drift. It does
+        // not encode the entire admission-time profile and task-thread proof.
+        // Recheck those exact native invariants before retaining a live task
+        // handle; a model, harness, checkout or thread change must cancel it
+        // without waiting for the watchdog to settle the Ticket.
+        let task_policy_invalid = !cancelled_native
+            && has_task_assignment_history(store, session_id)?
+            && !matches!(read_only_policy(store, session_id), Ok(Some(_)));
+        if (cancelled_native || task_policy_invalid) && !cancelled.contains(session_id) {
+            cancelled.push(session_id.clone());
+        }
+    }
+    Ok(cancelled)
+}
+
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
-    let expired = {
+    // Only the owning serve process calls this. Inspect every live assignment:
+    // limiting the SQL page before filtering healthy entries could starve a
+    // later revoked assignment forever. No automatic retry is permitted; the
+    // same ticket revision guard is used at settlement.
+    let stopped = {
         let mut stmt = store.db.prepare(
-            "SELECT a.id,a.ticket_id,a.session_id,t.revision
-             FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
+            "SELECT a.id,a.ticket_id,a.session_id,t.revision,
+                    CASE
+                      WHEN a.created_at<=0 OR a.created_at>?1
+                        THEN 'Invalid assignment clock; no replay'
+                      WHEN (?1-a.created_at)>=?2
+                        THEN 'Assignment exceeded its bounded run time; no replay'
+                      WHEN ?3=1
+                        THEN 'Bots paused; native execution authority revoked'
+                      WHEN o.enabled=0
+                        THEN 'Team disabled; no replay'
+                      WHEN m.ticket_id IS NULL OR m.revoked!=0 OR m.expires_at<=?1
+                           OR trim(m.authorization_id)='' OR m.actor!=t.actor
+                           OR m.policy_revision!=o.policy_revision
+                           OR t.policy_revision!=o.policy_revision
+                           OR m.allowed_side_effects!=0 OR m.allowed_tools!='[]'
+                           OR m.project_id!=t.project_id OR o.project_id!=t.project_id
+                        THEN 'Mandate expired, revoked or stale; no replay'
+                      WHEN coordinator.id IS NULL OR coordinator.paused!=0
+                        THEN 'Coordinator unavailable; no replay'
+                      -- The first coordinator attempt may be in its own
+                      -- checkout, distinct from the Ticket's worker project.
+                      -- Do not treat a different, unadmitted bot as that role.
+                      WHEN worker.id IS NULL OR worker.paused!=0
+                           OR (a.bot_id=o.coordinator_bot_id AND
+                               (a.attempt!=1 OR NOT EXISTS(
+                                  SELECT 1 FROM sa_audit admission
+                                  WHERE admission.ticket_id=t.id
+                                    AND admission.kind='admitted'
+                                    AND admission.detail='manual readonly coordinator reserved'
+                               )))
+                           OR (a.bot_id!=o.coordinator_bot_id AND
+                               (a.bot_id!=t.worker_bot_id OR worker.project_id!=t.project_id))
+                        THEN 'Assigned bot unavailable or out of scope; no replay'
+                      WHEN active_session.id IS NULL
+                           OR active_session.project_id!=worker.project_id
+                        THEN 'Assignment session missing or out of scope; no replay'
+                      ELSE NULL
+                    END
+             FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id
+             JOIN sa_orchestrations o ON o.id=t.orchestration_id
+             LEFT JOIN sa_mandates m ON m.ticket_id=t.id
+             LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+             LEFT JOIN bots worker ON worker.id=a.bot_id
+             LEFT JOIN sessions active_session ON active_session.id=a.session_id
              WHERE a.state='running' AND t.state='running'
-               AND t.active_assignment_id=a.id AND a.created_at>0 AND ?1>=a.created_at
-               AND (?1-a.created_at)>=?2
+               AND t.active_assignment_id=a.id
              ORDER BY a.created_at,a.id",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![now,MAX_ASSIGNMENT_RUN_MS], |r| Ok((
-            r.get::<_, String>(0)?, r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
-        ))).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            params![now,MAX_ASSIGNMENT_RUN_MS,i64::from(crate::feature_controls::get().bots_paused)],
+            |r| Ok((
+                r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            )),
+        ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let mut sessions = Vec::new();
-    for (assignment_id,ticket_id,session_id,revision) in expired {
+    for (assignment_id,ticket_id,session_id,revision,reason) in stopped {
+        // The SQL fast path does not capture task thread, frozen bot prompt,
+        // provider profile or resolved checkout identity. The owner watchdog
+        // must settle these failures, not merely request provider cancellation.
+        let reason = match reason {
+            Some(reason) => reason,
+            None if !matches!(read_only_policy(store, &session_id), Ok(Some(_))) =>
+                "Native task admission or session identity changed; no replay".to_owned(),
+            None => continue,
+        };
         let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute(
             "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
@@ -680,12 +2784,168 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             params![assignment_id,now],
         ).map_err(|e| e.to_string())?;
         tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'watchdog_interrupted','Assignment exceeded its bounded run time; no replay',?2)",
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
             params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'watchdog_interrupted',?2,?3)",
+            params![ticket_id,reason,now],
         ).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         sessions.push(session_id);
+    }
+    // A damaged or legacy writer can lose the active Assignment link while
+    // leaving a Ticket running. The ordinary watchdog join only visits linked
+    // assignments; without this separate pass those Tickets stay executable
+    // in storage indefinitely. Never infer that a detached provider stopped.
+    let unlinked: Vec<(String, i64)> = {
+        let mut stmt = store.db.prepare(
+            "SELECT t.id,t.revision FROM sa_tickets t
+             WHERE t.state='running' AND (
+               t.active_assignment_id IS NULL
+               -- A lost Team cannot be authorized by the normal watchdog
+               -- INNER JOIN; quarantine its still-running Ticket as well.
+               OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                             WHERE o.id=t.orchestration_id)
+               OR (SELECT COUNT(*) FROM sa_assignments a
+                   WHERE a.ticket_id=t.id AND a.state='running')<>1
+               OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                   WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                     AND a.state='running')
+             )
+             ORDER BY t.updated_at,t.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for (ticket_id, revision) in unlinked {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let provider_sessions: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT session_id FROM sa_assignments
+                 WHERE ticket_id=?1 AND state='running'",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&ticket_id], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+        };
+        // Recheck the structural fault with the current Ticket revision
+        // inside the same transaction. A repaired running Ticket is untouched.
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='interrupted',
+               active_assignment_id=NULL,revision=revision+1,updated_at=?3
+             WHERE id=?1 AND revision=?2 AND state='running' AND (
+               active_assignment_id IS NULL
+               OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                             WHERE o.id=sa_tickets.orchestration_id)
+               OR (SELECT COUNT(*) FROM sa_assignments a
+                   WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
+               OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                   WHERE a.id=sa_tickets.active_assignment_id
+                     AND a.ticket_id=sa_tickets.id AND a.state='running')
+             )",
+            params![&ticket_id,revision,now],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            tx.rollback().map_err(|e| e.to_string())?;
+            continue;
+        }
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket_id]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE ticket_id=?1 AND state='running'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'watchdog_orphan_interrupted',
+               'Running Ticket lost its Team or unique active Assignment; all task authority revoked without replay',?2)",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        for session_id in provider_sessions {
+            if !sessions.contains(&session_id) {
+                sessions.push(session_id);
+            }
+        }
+    }
+    // Legacy or partially persisted terminal settlements can leave an
+    // Assignment in 'running' even though the Ticket cannot run again.
+    // That orphan still occupies native leases and may have a live provider.
+    // Only the owning server performs this cleanup: return provider sessions
+    // for native cancellation, preserve the terminal outcome, and never replay
+    // an external effect whose remote outcome may be unknown.
+    let terminal_orphans: Vec<(String, i64)> = {
+        let mut stmt = store.db.prepare(
+            "SELECT t.id,t.revision FROM sa_tickets t
+             WHERE t.state IN ('completed','failed','stopped','interrupted','inconclusive')
+               AND EXISTS(SELECT 1 FROM sa_assignments a
+                          WHERE a.ticket_id=t.id AND a.state='running')
+             ORDER BY t.updated_at,t.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for (ticket_id, revision) in terminal_orphans {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let provider_sessions: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT session_id FROM sa_assignments
+                 WHERE ticket_id=?1 AND state='running'",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&ticket_id], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+        };
+        // The revision and structural fault must still match at mutation time.
+        // Never change a terminal verdict into a running or retryable Ticket.
+        let changed = tx.execute(
+            "UPDATE sa_tickets
+             SET active_assignment_id=NULL,revision=revision+1,updated_at=?3
+             WHERE id=?1 AND revision=?2
+               AND state IN ('completed','failed','stopped','interrupted','inconclusive')
+               AND EXISTS(SELECT 1 FROM sa_assignments a
+                          WHERE a.ticket_id=sa_tickets.id AND a.state='running')",
+            params![&ticket_id,revision,now],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            tx.rollback().map_err(|e| e.to_string())?;
+            continue;
+        }
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket_id]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+             WHERE ticket_id=?1 AND state='running'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'watchdog_terminal_orphan_quarantined',
+               'Terminal Ticket retained a running native Assignment; revoke, cancel provider and reconcile effects before any new action',?2)",
+            params![&ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        for session_id in provider_sessions {
+            if !sessions.contains(&session_id) {
+                sessions.push(session_id);
+            }
+        }
     }
     Ok(sessions)
 }
@@ -696,6 +2956,263 @@ fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
         params![id,kind,detail,storage::now()],
     ).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// One native read of checkout/bot contention used both by the real admit
+/// transition and the non-authoritative preview. Admission always repeats it.
+fn checkout_path(store:&Store,project_id:&str)->Result<String> {
+    let path:String=store.db.query_row(
+        "SELECT path FROM projects WHERE id=?1",[project_id],|row|row.get(0),
+    ).map_err(|e|e.to_string())?;
+    if path.trim().is_empty() {return Err("Project checkout path is unavailable.".into());}
+    Ok(path)
+}
+
+/// Two distinct stored project paths may resolve to the same physical checkout.
+/// Compare harmless dot components even before a checkout exists, then resolve
+/// physical aliases (including symlinks) whenever both paths are available.
+/// Keep parent components intact: collapsing `..` through a symlink is unsafe.
+/// This is an admission fence, not permission to write to a checkout.
+fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
+    if left == right { return true; }
+    if std::path::Path::new(left)
+        .components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .eq(std::path::Path::new(right)
+            .components()
+            .filter(|component| *component != std::path::Component::CurDir))
+    {
+        return true;
+    }
+    match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// A project rooted inside another project's checkout can edit the same
+/// files even though its canonical path is not equal. Serialize native work
+/// across ancestor/descendant roots, including as-yet-uncreated children,
+/// without treating prefix-shaped siblings as the same checkout.
+fn checkout_paths_overlap(left: &str, right: &str) -> bool {
+    if checkout_paths_equivalent(left, right) {
+        return true;
+    }
+    match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
+        (Some(left), Some(right)) => left.starts_with(&right) || right.starts_with(&left),
+        // Unknown filesystem identity is not proof of disjoint write scopes.
+        // An invalid path, dangling symlink or denied ancestor must never
+        // let a second provider bypass the native checkout lease.
+        _ => true,
+    }
+}
+
+/// Resolve the existing checkout ancestor without creating the requested
+/// directory. A missing leaf beneath a symlinked parent must still share the
+/// same native resource lease as the corresponding physical checkout path.
+/// A permission error, dangling symlink or unresolved parent component does
+/// not prove that the paths are equivalent.
+fn canonical_checkout_intent(path: &str) -> Option<std::path::PathBuf> {
+    let source = std::path::Path::new(path);
+    let absolute = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(source)
+    };
+    let mut cursor = absolute.as_path();
+    let mut unresolved = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for segment in unresolved.into_iter().rev() {
+                    resolved.push(segment);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is not a safe ordinary missing directory.
+                if std::fs::symlink_metadata(cursor).is_ok() {
+                    return None;
+                }
+                unresolved.push(cursor.file_name()?.to_os_string());
+                cursor = cursor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Native admission must account for ordinary running chats/direct tasks,
+/// not just persisted SuperAgent leases. Unknown live sessions fail closed.
+fn active_manual_conflict(
+    store: &Store, active: &[String], candidate_id: &str, project_id: &str,
+) -> Result<bool> {
+    let requested_path=checkout_path(store,project_id)?;
+    for session_id in active {
+        let session = store.session(session_id)
+            .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
+        if session.project_id == project_id
+            || checkout_paths_overlap(
+                &checkout_path(store,&session.project_id)?, &requested_path,
+            ) {
+            return Ok(true);
+        }
+        if bots::owner_of(store, session_id)?
+            .is_some_and(|(bot, _)| bot.id == candidate_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn manual_candidate_occupied(
+    store: &Store, candidate_id: &str, team_project: &str, candidate_project: &str,
+) -> Result<bool> {
+    let team_path=checkout_path(store,team_project)?;
+    let candidate_path=checkout_path(store,candidate_project)?;
+    let exact:bool=store.db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_assignments a
+           JOIN sa_tickets previous ON previous.id=a.ticket_id
+           LEFT JOIN sessions active_session ON active_session.id=a.session_id
+           WHERE a.state='running'
+             AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
+                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL
+                   OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+                             WHERE old_checkout.id IN (previous.project_id,active_session.project_id)
+                               AND new_checkout.id IN (?2,?3)
+                               AND old_checkout.path=new_checkout.path))
+         )",
+        params![candidate_id,team_project,candidate_project], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if exact { return Ok(true); }
+    // SQL equality cannot detect different stored paths for one real checkout.
+    // Resolve only live native assignments; a missing origin fails closed.
+    let mut statement=store.db.prepare(
+        "SELECT previous.project_id, active_session.project_id
+         FROM sa_assignments a
+         JOIN sa_tickets previous ON previous.id=a.ticket_id
+         LEFT JOIN sessions active_session ON active_session.id=a.session_id
+         WHERE a.state='running'",
+    ).map_err(|e|e.to_string())?;
+    let active=statement.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
+    ))).map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    for (original,session_project) in active {
+        for id in std::iter::once(original.as_str()).chain(session_project.as_deref()) {
+            let path=checkout_path(store,id)?;
+            if checkout_paths_overlap(&path,&team_path)
+                || checkout_paths_overlap(&path,&candidate_path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Read-only, time-sensitive advisory from the same native source data as
+/// admission. It issues no Ticket, grant, session, lease or provider request.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualPreflight {
+    pub orchestration_id: String,
+    pub policy_revision: i64,
+    pub project_id: String,
+    pub selected_bot_id: String,
+    pub selected_role: String,
+    pub eligible: bool,
+    pub reason: Option<String>,
+    /// Only an occupied direct Worker can safely stage a blocked Ticket.
+    /// This is a read-only observation, not an admission or grant.
+    pub can_stage_blocked: bool,
+    pub allowed_tools: Vec<String>,
+    pub allowed_side_effects: bool,
+    pub attempt_budget_ms: i64,
+}
+
+fn manual_preflight(
+    store: &Store, config_id: &str, objective: &str, coordinate: bool, busy: bool,
+) -> Result<ManualPreflight> {
+    let trimmed = objective.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_OBJECTIVE_BYTES || trimmed.contains('\0') {
+        return Err("A nonempty, bounded objective is required.".into());
+    }
+    let cfg = configuration(store, config_id)?;
+    let coordinator = bots::get(store, &cfg.coordinator_bot_id)?;
+    let worker = bots::get(store, &cfg.worker_bot_id)?;
+    let candidate = if coordinate { &coordinator } else { &worker };
+    let (reason, can_stage_blocked) =
+        if !execution_permitted(cfg.enabled, crate::feature_controls::get().bots_paused) {
+            (Some("Team is disabled or bots are globally paused.".to_owned()), false)
+        } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
+            (Some("Selected bot is paused or outside the Team project.".to_owned()), false)
+        } else if let Some(issue)=roster::member_execution_issue(&coordinator)
+            .or_else(||roster::member_execution_issue(&worker)) {
+            (Some(issue.to_owned()), false)
+        } else if roster::has_additional_members(store, config_id)? {
+            (Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned()), false)
+        } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
+            (Some(if coordinate {
+                "Coordinator is occupied; this request cannot be admitted yet.".to_owned()
+            } else {
+                "Worker or checkout is occupied; manual admission may create a blocked Ticket.".to_owned()
+            }), !coordinate)
+        } else { (None, false) };
+    Ok(ManualPreflight {
+        orchestration_id: cfg.id, policy_revision: cfg.policy_revision,
+        project_id: cfg.project_id, selected_bot_id: candidate.id.clone(),
+        selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
+        eligible: reason.is_none(), reason, can_stage_blocked,
+        allowed_tools: Vec::new(), allowed_side_effects: false,
+        attempt_budget_ms: MAX_ASSIGNMENT_RUN_MS,
+    })
+}
+
+// Native roster membership is not a grant. Explicit direct Worker admission
+// rechecks current identity, local harness eligibility and checkout scope.
+fn direct_team_member(store:&Store,config:&Orchestration,id:&str)->Result<bots::Bot> {
+    let members=roster::read(store,&config.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
+        return Err("Configured Council reviewers need native task-bound review.".into());
+    }
+    if !members.worker_bot_ids.iter().any(|worker|worker==id) {
+        return Err("Selected Worker is not a configured Team member.".into());
+    }
+    let worker=bots::get(store,id)?;
+    if worker.paused || worker.project_id!=config.project_id {
+        return Err("Selected Worker is paused or outside the Team project.".into());
+    }
+    if let Some(issue)=roster::member_execution_issue(&worker) {
+        return Err(issue.into());
+    }
+    Ok(worker)
+}
+
+fn manual_preflight_worker(
+    store:&Store,config_id:&str,objective:&str,worker_id:&str,busy:bool,
+)->Result<ManualPreflight> {
+    let objective=objective.trim();
+    if objective.is_empty() || objective.len()>MAX_OBJECTIVE_BYTES || objective.contains('\0') {
+        return Err("A nonempty, bounded objective is required.".into());
+    }
+    let config=configuration(store,config_id)?;
+    let worker=direct_team_member(store,&config,worker_id)?;
+    let reason=if !execution_permitted(config.enabled,crate::feature_controls::get().bots_paused) {
+        Some("Team is disabled or bots are globally paused.".to_owned())
+    } else if let Some(reason)=manual_enable_blocker(store,&config)? {
+        Some(reason)
+    } else if busy || manual_candidate_occupied(store,&worker.id,&config.project_id,&worker.project_id)? {
+        Some("Selected Worker or checkout is occupied; no implicit queue is created.".into())
+    } else {None};
+    Ok(ManualPreflight {
+        orchestration_id:config.id,policy_revision:config.policy_revision,
+        project_id:config.project_id,selected_bot_id:worker.id,
+        selected_role:"worker".into(),eligible:reason.is_none(),
+        reason,can_stage_blocked:false,allowed_tools:Vec::new(),
+        allowed_side_effects:false,attempt_budget_ms:MAX_ASSIGNMENT_RUN_MS,
+    })
 }
 
 /// Native manual request with a stable dedup key. A blocked request remains
@@ -711,6 +3228,37 @@ fn admit_role(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_staging(store, config_id, objective, request_key, busy, coordinate, false)
+}
+
+// A detached operator can stage a blocked Ticket but cannot reserve a provider
+// session. This preserves the existing manual admission API and its tests.
+fn admit_role_with_staging(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+) -> Result<(Ticket, bool)> {
+    admit_role_with_staging_member(
+        store,config_id,objective,request_key,busy,
+        ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id:None },
+    )
+}
+
+/// Bundle manual admission policy dimensions rather than expanding the
+/// provider entrypoint with separately positioned authority flags.
+struct ManualAdmissionOptions<'a> {
+    coordinate: bool,
+    headless_staging: bool,
+    selected_worker_id: Option<&'a str>,
+}
+
+fn admit_role_with_staging_member(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, options: ManualAdmissionOptions<'_>,
+) -> Result<(Ticket, bool)> {
+    let ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id } = options;
+    if selected_worker_id.is_some() && coordinate {
+        return Err("Explicit Worker selection cannot impersonate a Coordinator.".into());
+    }
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -728,6 +3276,24 @@ fn admit_role(
         if ticket.objective != objective {
             return Err("The manual-request key is already bound to another objective.".into());
         }
+        if let Some(worker_id)=selected_worker_id {
+            // A duplicate staging request must not depend on current bot
+            // availability; its immutable Ticket already pins the Worker.
+            if ticket_worker(store,&ticket.id)?!=worker_id {
+                return Err("Manual request key already belongs to another selected Worker.".into());
+            }
+            if !headless_staging {
+                let config=configuration(store,config_id)?;
+                direct_team_member(store,&config,worker_id)?;
+            }
+        } else if headless_staging {
+            // Never replay a selected secondary-Worker key through the
+            // legacy primary-Worker CLI and misrepresent its original scope.
+            let config=configuration(store,config_id)?;
+            if ticket_worker(store,&ticket.id)?!=config.worker_bot_id {
+                return Err("Manual request key already belongs to a selected Worker.".into());
+            }
+        }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
         // (or vice versa) must never silently return the other execution mode.
@@ -739,9 +3305,13 @@ fn admit_role(
             .ok_or("Manual request admission audit missing.")?;
         let originally_coordinated = match admission.as_str() {
             "manual readonly coordinator reserved" => true,
-            "manual readonly worker reserved" | "blocked: worker occupied" => false,
+            "manual readonly worker reserved" | "blocked: worker occupied"
+            | "blocked: explicit headless staging" => false,
             _ => return Err("Manual request admission mode is unknown.".into()),
         };
+        if headless_staging && admission != "blocked: explicit headless staging" {
+            return Err("Request key already belongs to a different manual dispatch mode.".into());
+        }
         if originally_coordinated != coordinate {
             return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
         }
@@ -751,29 +3321,40 @@ fn admit_role(
     if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
         return Err("Orchestration is disabled or bots are globally paused.".into());
     }
+    // No legacy caller may silently select the first Worker of a multi-member Team.
+    // Reviewer-backed Teams remain unsupported until real task-scoped Council exists.
+    let members=roster::read(store,config_id)?;
+    if !members.reviewer_bot_ids.is_empty()
+        || (selected_worker_id.is_none() && members.worker_bot_ids.len()>1) {
+        return Err("Multi-member Team requires explicit supported Worker selection or native Council.".into());
+    }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = bots::get(store, &config.worker_bot_id)?;
+    let worker = match selected_worker_id {
+        Some(id)=>direct_team_member(store,&config,id)?,
+        None=>bots::get(store,&config.worker_bot_id)?,
+    };
     if coordinator.paused || worker.paused || worker.project_id != config.project_id {
         return Err("A selected bot is paused, missing or outside the worker project scope.".into());
     }
+    // Preflight stored execution profiles BEFORE creating a native provider
+    // session. The session layer also validates its inputs, but it cannot
+    // report the Team policy blocker or authorize a Demand snapshot.
+    for member in [&coordinator,&worker] {
+        if let Some(issue)=roster::member_execution_issue(member) {
+            return Err(issue.into());
+        }
+    }
     let candidate = if coordinate { &coordinator } else { &worker };
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           LEFT JOIN sessions active_session ON active_session.id=a.session_id
-           WHERE a.state='running'
-             AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
-                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL)
-         )",
-        params![candidate.id,config.project_id,candidate.project_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+    let occupied = manual_candidate_occupied(store, &candidate.id, &config.project_id, &candidate.project_id)?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
     if coordinate && (busy || occupied) {
         return Err("Coordinator is busy; retry this explicit manual request later.".into());
     }
-    let blocked = busy || occupied;
+    if selected_worker_id.is_some() && !headless_staging && (busy || occupied) {
+        return Err("Selected Worker or checkout is occupied; no Demand was admitted.".into());
+    }
+    let blocked = busy || occupied || headless_staging;
     let ticket_id = storage::id();
     let assignment_id = (!blocked).then(storage::id);
     // Reserve the internal conversation in the SAME SQLite transaction as the
@@ -793,6 +3374,7 @@ fn admit_role(
         params![ticket_id,config.id,request_key,objective,config.project_id,worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
+    roster::capture_ticket_profile(store,&ticket_id,&config,now)?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
          VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
@@ -807,7 +3389,8 @@ fn admit_role(
     }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'admitted',?2,?3)",
-        params![ticket_id, if blocked { "blocked: worker occupied" }
+        params![ticket_id, if headless_staging { "blocked: explicit headless staging" }
+             else if blocked { "blocked: worker occupied" }
              else if coordinate { "manual readonly coordinator reserved" }
              else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
@@ -849,7 +3432,8 @@ fn coordinator_plan_current(
             ).map_err(|e| e.to_string())?;
             if !proven { return Ok(false); }
         }
-        Some("manual readonly worker reserved" | "blocked: worker occupied") => {}
+        Some("manual readonly worker reserved" | "blocked: worker occupied"
+            | "blocked: explicit headless staging") => {}
         _ => return Ok(false),
     }
     let invalid: bool = store.db.query_row(
@@ -904,7 +3488,8 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
                     AND EXISTS (SELECT 1 FROM sa_audit initial
                       WHERE initial.ticket_id=assignment.ticket_id
                         AND initial.kind='admitted'
-                        AND initial.detail='blocked: worker occupied')
+                        AND initial.detail IN ('blocked: worker occupied',
+                           'blocked: explicit headless staging'))
                     AND EXISTS (SELECT 1 FROM sa_audit retry
                       WHERE retry.ticket_id=assignment.ticket_id
                         AND retry.kind='manual_retry'))
@@ -931,10 +3516,47 @@ fn assignment_role_authorized(
     ).optional().map_err(|e| e.to_string())?;
     Ok(match admission.as_deref() {
         Some("manual readonly coordinator reserved") if attempt == 1 => bot_id == coordinator_id,
-        Some("manual readonly coordinator reserved" | "manual readonly worker reserved" | "blocked: worker occupied")
+        Some("manual readonly coordinator reserved" | "manual readonly worker reserved"
+            | "blocked: worker occupied" | "blocked: explicit headless staging")
             if attempt > 0 => bot_id == worker_id,
         _ => false,
     })
+}
+
+/// Fence the actual provider session to its admission-time native Team
+/// profile. Mutating a session cannot elevate its model, mode or harness, while
+/// changes to a reusable bot must not rewrite an already admitted session.
+/// Pre-v46 legacy tasks remain read-only under their original no-tools Mandate.
+fn admitted_session_matches_profile(
+    store: &Store, ticket_id: &str, bot_id: &str, role: &str,
+    session: &storage::Session,
+) -> Result<bool> {
+    let Some(profile) = roster::ticket_profile(store, ticket_id)? else {
+        return Ok(true);
+    };
+    if !roster::checkout_paths_current(store,ticket_id)? {return Ok(false);}
+    let Some(member) = profile.members.iter()
+        .find(|member| member.role == role && member.bot_id == bot_id)
+    else {
+        return Ok(false);
+    };
+    // The provider session pins model/mode, while the bot brief is composed
+    // from the live bot. A changed role or instruction must not rewrite this
+    // admitted Demand's effective prompt during gateway/tool admission or callback.
+    let live_bot = bots::get(store, bot_id)?;
+    let prompt_current=match &member.prompt_identity_sha256 {
+        Some(expected)=>roster::prompt_identity(&live_bot)==*expected,
+        None=>true, // Historical read-only snapshots predate prompt fingerprinting.
+    };
+    // Gateway skills are composed from the current bot at each turn. A newly
+    // assigned Skill must not enter an already admitted Demand through an
+    // unchanged provider session, even when the role and instructions match.
+    let skills_current = live_bot.skills == member.assigned_skill_ids;
+    Ok(prompt_current && skills_current && session.project_id == member.project_id
+        && session.provider == member.provider
+        && session.model == member.model
+        && session.mode == member.mode
+        && session.reasoning_effort.as_deref().unwrap_or("") == member.reasoning_effort)
 }
 
 /// Only the active, user-admitted read-only assignment is allowed to run.
@@ -949,7 +3571,9 @@ pub(crate) fn read_only_policy(
         expiry: i64,
         revoked: bool,
         mandate_version: i64,
+        ticket_version: i64,
         config_version: i64,
+        configuration_project: String,
         enabled: bool,
         bot_id: String,
         coordinator_id: String,
@@ -962,12 +3586,14 @@ pub(crate) fn read_only_policy(
         mandate_project: String,
         mandate_actor: String,
         ticket_actor: String,
+        authorization_id: String,
         attempt: i64,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
                 a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at,
-                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt
+                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt,
+                t.policy_revision,o.project_id,m.authorization_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -983,13 +3609,16 @@ pub(crate) fn read_only_policy(
             ticket_id: r.get(11)?, started_at: r.get(12)?,
             side_effects: r.get::<_, i64>(13)? != 0, tools_json: r.get(14)?,
             mandate_project: r.get(15)?, mandate_actor: r.get(16)?, ticket_actor: r.get(17)?,
-            attempt: r.get(18)?,
+            attempt: r.get(18)?, ticket_version: r.get(19)?,
+            configuration_project: r.get(20)?, authorization_id: r.get(21)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
             || scope.mandate_version != scope.config_version
+            || scope.ticket_version != scope.config_version
+            || scope.configuration_project != scope.project_id
             || !assignment_within_budget(scope.started_at, storage::now())
             // The current task channel has only native read-only enforcement.
             // A persisted write/tool grant must not be silently treated as a
@@ -998,6 +3627,7 @@ pub(crate) fn read_only_policy(
             || scope.side_effects || scope.tools_json != "[]"
             || scope.mandate_project != scope.project_id
             || scope.mandate_actor != scope.ticket_actor
+            || scope.authorization_id.trim().is_empty()
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
@@ -1019,6 +3649,16 @@ pub(crate) fn read_only_policy(
         let active_bot = bots::get(store, &scope.bot_id)?;
         let coordinator = bots::get(store, &scope.coordinator_id)?;
         let assigned_session = store.session(session_id)?;
+        let assigned_role = if scope.bot_id == scope.coordinator_id {
+            "coordinator"
+        } else {
+            "worker"
+        };
+        if !admitted_session_matches_profile(
+            store, &scope.ticket_id, &scope.bot_id, assigned_role, &assigned_session,
+        )? {
+            return Err("policy_unsupported: native SuperAgent session profile differs from admitted Demand.".into());
+        }
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
             || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
             || (scope.bot_id == scope.worker_id && !coordinator_plan_current(
@@ -1049,6 +3689,18 @@ pub(crate) fn read_only_policy(
     Ok(None)
 }
 
+/// Cloud reattachment skips the normal native provider policy preparation.
+/// Even a currently valid read-only assignment must fail closed here until a
+/// cloud adapter can enforce its mandate at every provider/tool admission.
+/// A settled, revoked or detached task also fails; ordinary cloud sessions
+/// retain the original attach behavior.
+pub(crate) fn guard_cloud_attach(store: &Store, session_id: &str) -> Result<()> {
+    if read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent task cannot attach through an unrestricted cloud provider.".into());
+    }
+    Ok(())
+}
+
 /// Require a pre-existing, active native assignment before a message may enter
 /// the internal SuperAgent gateway channel. This check runs before the gateway
 /// creates a bot thread or parses commands, so an external sender or a stale
@@ -1074,7 +3726,8 @@ pub(crate) fn guard_gateway_inbound(
                   AND EXISTS (SELECT 1 FROM sa_audit initial
                     WHERE initial.ticket_id=assignment.ticket_id
                       AND initial.kind='admitted'
-                      AND initial.detail='blocked: worker occupied')
+                      AND initial.detail IN ('blocked: worker occupied',
+                           'blocked: explicit headless staging'))
                   AND EXISTS (SELECT 1 FROM sa_audit retry
                     WHERE retry.ticket_id=assignment.ticket_id
                       AND retry.kind='manual_retry'))
@@ -1104,27 +3757,89 @@ pub(crate) fn guard_run_admission(
 ) -> Result<()> {
     let session = store.session(session_id)?;
     let superagent_run = read_only_policy(store, session_id)?.is_some();
+    // A bot lease protects its native identity across all provider sessions,
+    // even when an older conversation still points at a different project.
+    let session_bot_id = bots::owner_of(store, session_id)?.map(|(bot, _)| bot.id);
     let leased_by_other: bool = store.db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
             LEFT JOIN sessions assigned ON assigned.id=a.session_id
             WHERE a.state='running' AND t.state='running'
-              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL)
+              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL
+                    OR (?3 IS NOT NULL AND a.bot_id=?3)
+                    OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+                              WHERE old_checkout.id IN (t.project_id,assigned.project_id)
+                                AND new_checkout.id=?1
+                                AND old_checkout.path=new_checkout.path))
               AND a.session_id<>?2
          )",
-        params![session.project_id, session_id],
+        params![session.project_id, session_id, session_bot_id.as_deref()],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     if leased_by_other {
         return Err("Project is reserved by another native SuperAgent assignment.".into());
     }
+    // Keep ordinary chats unchanged when there is no competing native lease.
+    // With a lease, compare physical checkouts as well as persisted path text.
+    let mut statement=store.db.prepare(
+        "SELECT t.project_id, assigned.project_id
+         FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+         LEFT JOIN sessions assigned ON assigned.id=a.session_id
+         WHERE a.state='running' AND t.state='running' AND a.session_id<>?1",
+    ).map_err(|e|e.to_string())?;
+    let leased=statement.query_map([session_id],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
+    ))).map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    if !leased.is_empty() {
+        let session_path=checkout_path(store,&session.project_id)?;
+        for (ticket_project,assigned_project) in leased {
+            for id in std::iter::once(ticket_project.as_str()).chain(assigned_project.as_deref()) {
+                if checkout_paths_overlap(&session_path,&checkout_path(store,id)?) {
+                    return Err("Physical checkout is reserved by another native SuperAgent assignment.".into());
+                }
+            }
+        }
+    }
+    // A stopped or revoked Ticket releases its durable lease immediately,
+    // but the underlying provider may still be running until cancellation
+    // finishes. Keep ordinary sessions off the same checkout or bot until
+    // the native session actually leaves the live agent registry.
+    if !superagent_run && !running_sessions.is_empty() {
+        let session_path=checkout_path(store,&session.project_id)?;
+        for other_id in running_sessions {
+            if other_id == session_id { continue; }
+            let task_owned: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
+                [other_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if !task_owned { continue; }
+            let native_session=store.session(other_id)?;
+            let same_bot = if let Some(bot_id)=session_bot_id.as_ref() {
+                bots::owner_of(store,other_id)?
+                    .is_some_and(|(owner,_)| owner.id.as_str()==bot_id.as_str())
+            } else { false };
+            if same_bot || checkout_paths_overlap(
+                &session_path,&checkout_path(store,&native_session.project_id)?,
+            ) {
+                return Err("Native SuperAgent provider is still running on this bot or checkout.".into());
+            }
+        }
+    }
     if superagent_run {
+        let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
-            if other.project_id == session.project_id {
+            let other_bot_id = bots::owner_of(store, other_id)?.map(|(bot, _)| bot.id);
+            if (session_bot_id.is_some() && session_bot_id == other_bot_id)
+                || other.project_id == session.project_id
+                || checkout_paths_overlap(
+                    &checkout_path(store,&other.project_id)?, &session_path,
+                ) {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }
@@ -1181,14 +3896,20 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((task_id, assignment_id, bot_id, coordinator, started_at, attempt)) = assignment else { return Ok(false) };
-    let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
+    let ticket = get_ticket(store, &task_id)?;
+    let cfg = configuration(store, &ticket.orchestration_id)?;
+    // The immutable Ticket selects the executing Worker; the Team's legacy
+    // first-member projection is not the authority for callback settlement.
+    let selected_worker_id = ticket_worker(store, &task_id)?;
     let role_current = assignment_role_authorized(
-        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &cfg.worker_bot_id,
+        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &selected_worker_id,
     )?;
     let authorized: bool = tx.query_row(
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
          AND m.project_id=t.project_id AND m.actor=t.actor
+         AND trim(m.authorization_id)<>''
+         AND t.policy_revision=o.policy_revision AND o.project_id=t.project_id
          AND EXISTS (
            SELECT 1 FROM bots coordinator
            WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0
@@ -1216,8 +3937,17 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // callback. A stale success must not become approvable after global pause.
     let within_budget = assignment_within_budget(started_at, storage::now());
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
+    // A provider callback cannot authorize a changed runtime profile, even
+    // when the original bot and native Ticket still exist.
+    let session_profile_current = store.session(session_id).ok()
+        .and_then(|session| admitted_session_matches_profile(
+            store, &task_id, &bot_id,
+            if coordinator { "coordinator" } else { "worker" }, &session,
+        ).ok())
+        .unwrap_or(false);
     let authorized = execution_permitted(
-        authorized && role_current && provenance_ok && within_budget && thread_current,
+        authorized && role_current && provenance_ok && within_budget && thread_current
+            && session_profile_current,
         crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
@@ -1226,20 +3956,24 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if coordinator { "queued" }
         else { "waiting_approval" };
     let now = storage::now();
+    // A stale, revoked or remapped task may transition to blocked, but its
+    // provider output must not survive as trusted worker evidence or an
+    // assignment result consumed by later review/recovery paths.
+    let trusted_result = authorized.then_some(trimmed.as_str());
     let moved = tx.execute(
         "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4
          WHERE id=?1 AND state='running'",
         // Rejected callbacks are not successful coordinator plans, even if
         // the provider returned text. Otherwise a later manual retry after
         // pause/revocation could promote that unauthorized plan to authority.
-        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trimmed,now],
+        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trusted_result,now],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("SuperAgent assignment changed before settlement.".into()); }
     let updated = tx.execute(
         "UPDATE sa_tickets SET state=?2,evidence=?3,active_assignment_id=NULL,
          revision=revision+1,updated_at=?4
          WHERE id=?1 AND state='running' AND active_assignment_id=?5",
-        params![task_id,next,trimmed,now,assignment_id],
+        params![task_id,next,trusted_result,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
     // Atomically pin the native Council cycle and exact finished artifact,
@@ -1281,6 +4015,18 @@ fn accept_with_pause(
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
+    // A provider timeout or restart can leave a remote change uncertain
+    // even after the worker produced text evidence. Human acceptance must
+    // never turn that uncertainty into a completed Ticket or final reply.
+    // Check inside the same SQLite transaction as the terminal transition.
+    let unresolved: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND state IN ('pending','uncertain'))",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Err("SuperAgent has unresolved external effects; reconcile authoritative provider state before accepting.".into());
+    }
     let coordinator = configuration(store, &ticket.orchestration_id)?;
     let coordinator = bots::get(store, &coordinator.coordinator_bot_id)?;
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
@@ -1312,6 +4058,17 @@ fn accept_with_pause(
     if !worker_evidence_current {
         return Err("Original worker evidence session is missing or outside its mandate.".into());
     }
+    // A human pressing the legacy Council-Off approval button is NOT an
+    // attributed Council exception. If a worker has any native Council
+    // requirement or previously frozen Council target, do not finalize on
+    // text evidence, a cached passing status, or a missing/removed team.
+    // The #126 task-bound request and verified exception workflow must
+    // explicitly implement their own authorization and terminal gate.
+    if council_adapter::requires_task_review(
+        store, ticket_id, worker_evidence_session.as_deref().unwrap_or_default(),
+    )? {
+        return Err("Native Council review is required; task-bound verified verdict and attributed exception are not available.".into());
+    }
     let now = storage::now();
     let changed = tx.execute(
         "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3
@@ -1322,6 +4079,7 @@ fn accept_with_pause(
             WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
               AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
               AND m.project_id=sa_tickets.project_id AND m.actor=sa_tickets.actor
+              AND trim(m.authorization_id)<>''
               AND m.policy_revision=o.policy_revision AND o.enabled=1
               AND EXISTS (
                 SELECT 1 FROM bots worker JOIN bots coordinator
@@ -1373,8 +4131,17 @@ fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) 
 }
 
 fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
+    stop_with_expected_revision(store, ticket_id, None)
+}
+
+fn stop_with_expected_revision(
+    store: &Store, ticket_id: &str, expected_revision: Option<i64>,
+) -> Result<(Ticket,Option<String>)> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
+    if expected_revision.is_some_and(|revision| revision != ticket.revision) {
+        return Err("SuperAgent Ticket revision changed before Stop; inspect the current Ticket.".into());
+    }
     if matches!(ticket.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
         return Err("Task is already terminal.".into());
     }
@@ -1389,10 +4156,20 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
         params![ticket_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before Stop.".into()); }
+    // Stop every still-running task-owned attempt, including a detached
+    // legacy/orphan assignment. The live host observes these stopped rows and
+    // cancels the corresponding provider sessions; no callback may revive them.
     tx.execute(
         "UPDATE sa_assignments SET state='stopped',updated_at=?2
-         WHERE id=?1 AND state='running'",
-        params![ticket.active_assignment_id,now],
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    // Revoking a Ticket cannot prove an in-flight provider effect failed.
+    // Preserve its identity and require explicit remote reconciliation.
+    tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
@@ -1407,12 +4184,29 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
 /// its Ticket/Mandate/Assignment evidence remains independent of bot history.
 /// Called inside the bot reset's existing transaction; never makes a new runner.
 pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Result<()> {
+    // Existing Team-role references use ON DELETE RESTRICT. Reject a Bot
+    // deletion *before* revoking Ticket mandates or clearing Bot sessions;
+    // otherwise the eventual FK failure leaves a live Bot with lost work.
+    // A reset is different: its identity remains and its task grants are revoked.
+    if removed {
+        let referenced: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_team_roles WHERE bot_id=?1)",
+            [bot_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if referenced {
+            return Err("Remove this bot from disabled SuperAgent Team roles before deleting it.".into());
+        }
+    }
     // Resetting either selected bot invalidates every nonterminal mandate:
     // coordinator sessions are just as ephemeral as worker sessions, and a
     // previously finished plan must not authorize a worker after reset.
     let sql =
         "SELECT t.id,t.state FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
-         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1)
+         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1
+            OR EXISTS (SELECT 1 FROM sa_team_roles r
+                       WHERE r.orchestration_id=t.orchestration_id AND r.bot_id=?1)
+            OR EXISTS (SELECT 1 FROM sa_ticket_profiles p, json_each(p.profiles_json) m
+                       WHERE p.ticket_id=t.id AND json_extract(m.value,'$.botId')=?1))
          AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')";
     let affected = {
         let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
@@ -1437,6 +4231,11 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
              WHERE ticket_id=?1 AND state='running'",
             params![ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
         record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
             "Native bot session unavailable; mandate revoked without replay")?;
     }
@@ -1445,7 +4244,8 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
         // original names/IDs remain in history for audit, never cascaded away.
         store.db.execute(
             "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1,
-             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1) AND enabled=1",
+             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1
+               OR id IN (SELECT orchestration_id FROM sa_team_roles WHERE bot_id=?1)) AND enabled=1",
             params![bot_id,now],
         ).map_err(|e| e.to_string())?;
     }
@@ -1454,10 +4254,41 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
 
 
 #[tauri::command]
-pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
+pub async fn superagent_create(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    input: NewOrchestration, roster: Option<roster::RosterInput>,
+    max_worker_attempts: Option<i64>, purpose: Option<String>, strategy: Option<String>,
+) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    create_configuration(&store,input)
+    if purpose.is_some() || strategy.is_some() {
+        return roster::create_with_attempt_policy_and_strategy(
+            &store,input,roster,max_worker_attempts.unwrap_or(2),
+            purpose.as_deref().unwrap_or(""),
+            strategy.as_deref().unwrap_or("balanced"),
+        );
+    }
+    match max_worker_attempts {
+        Some(limit) => roster::create_with_attempt_policy(&store,input,roster,limit),
+        None => match roster {
+            Some(members) => roster::create_with_roster(&store,input,members),
+            None => create_configuration(&store,input),
+        },
+    }
+}
+
+/// A single native, revision-checked Team duplication boundary. Do not
+/// reconstruct a roster from separate renderer reads: it can change between
+/// inspection and creation, and an enabled source never grants the new Team
+/// any execution authority.
+#[tauri::command]
+pub async fn superagent_duplicate(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    source_id: String, expected_revision: i64, name: String,
+) -> Result<Orchestration> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    roster::duplicate_with_roster(&store,&source_id,expected_revision,name)
 }
 
 #[tauri::command]
@@ -1508,6 +4339,97 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
 
 /// A policy edit must not silently overwrite an authorization change from
 /// another window. Even enabling is Off-mode only; it does not infer work.
+/// This is an explanation of current local eligibility, never a grant or
+/// reservation. The same native checks are repeated when enabling with CAS.
+fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
+    // A disabled Team may be left with an unfinished Ticket or a running
+    // orphan Assignment after a legacy or interrupted policy write. Enabling
+    // it must not admit fresh work beside the unreconciled provider/lease.
+    // Block only this Team; normal terminal history and uncertain receipts
+    // without live Assignments remain available for independent work.
+    if !current.enabled {
+        let unsettled: bool = store.db.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+                   AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                     OR EXISTS(SELECT 1 FROM sa_assignments a
+                               WHERE a.ticket_id=t.id AND a.state='running'))
+             )",
+            [&current.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if unsettled {
+            return Ok(Some(
+                "Disabled Team retains unfinished or orphaned native work; repeat Off or quarantine the affected Ticket before enabling.".into(),
+            ));
+        }
+    }
+    let members=roster::read(store,&current.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
+        return Ok(Some(
+            "Configured multi-member Teams cannot run without native scoped admission.".into(),
+        ));
+    }
+    // Historic/disabled Teams must remain visible even after their bots are
+    // removed. Do not let a missing identity break the entire Team directory.
+    let coordinator = match bots::get(store, &current.coordinator_bot_id) {
+        Ok(bot) => bot,
+        Err(_) => return Ok(Some("Configured Coordinator bot is unavailable.".into())),
+    };
+    let worker = match bots::get(store, &current.worker_bot_id) {
+        Ok(bot) => bot,
+        Err(_) => return Ok(Some("Configured Worker bot is unavailable.".into())),
+    };
+    if coordinator.paused || worker.paused
+        || worker.project_id != current.project_id
+        || crate::feature_controls::get().bots_paused
+    {
+        return Ok(Some("Selected bots are paused or their worker scope has changed.".into()));
+    }
+    for bot in [&coordinator, &worker] {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Ok(Some(issue.into()));
+        }
+    }
+    for id in members.worker_bot_ids.iter().skip(1) {
+        let candidate=match bots::get(store,id) {
+            Ok(bot)=>bot,
+            Err(_)=>return Ok(Some("Configured Team Worker bot is unavailable.".into())),
+        };
+        if candidate.paused || candidate.project_id!=current.project_id {
+            return Ok(Some("Configured Team Worker is paused or outside its project scope.".into()));
+        }
+        if let Some(issue)=roster::member_execution_issue(&candidate) {
+            return Ok(Some(issue.into()));
+        }
+    }
+    Ok(None)
+}
+
+/// Display-only native state; writes retain independent revision and SQL guards.
+fn team_policy_edit_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
+    if current.enabled {
+        return Ok(Some("Disable the Team before changing its policy.".into()));
+    }
+    let unsettled: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+          AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+            OR EXISTS(SELECT 1 FROM sa_assignments a WHERE a.ticket_id=t.id AND a.state='running')))",
+        [&current.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unsettled {
+        return Ok(Some("Active or reviewable Demands prevent Team policy edits.".into()));
+    }
+    let unresolved: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts e JOIN sa_tickets t ON t.id=e.ticket_id
+          WHERE t.orchestration_id=?1 AND e.state IN ('pending','uncertain'))",
+        [&current.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Ok(Some("Unresolved external effects prevent Team policy edits.".into()));
+    }
+    Ok(None)
+}
+
 fn change_enabled(
     store: &Store, orchestration_id: &str,
     expected_revision: i64, enabled: bool,
@@ -1517,13 +4439,10 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
-        let coordinator=bots::get(store,&current.coordinator_bot_id)?;
-        let worker=bots::get(store,&current.worker_bot_id)?;
-        if coordinator.paused || worker.paused
-            || worker.project_id != current.project_id
-            || crate::feature_controls::get().bots_paused
-        {
-            return Err("Selected bots are paused or their worker scope has changed.".into());
+        // This is the authoritative mutation boundary. A prior directory
+        // projection may have become stale and can never authorize enabling.
+        if let Some(reason) = manual_enable_blocker(store, &current)? {
+            return Err(reason);
         }
     }
     if current.enabled == enabled {
@@ -1544,17 +4463,34 @@ fn change_enabled(
              )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if !unsettled { return Ok(current); }
+        // Legacy or interrupted state writers can leave a pending remote
+        // effect on an already terminal Ticket. A repeated Off must quarantine
+        // that effect too, even when no active Mandate remains to revoke.
+        let pending_effects: bool = store.db.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sa_effect_receipts e
+                 JOIN sa_tickets t ON t.id=e.ticket_id
+                 WHERE t.orchestration_id=?1 AND e.state='pending'
+             )",
+            [orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !unsettled && !pending_effects { return Ok(current); }
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
     let updated = tx.execute(
         "UPDATE sa_orchestrations SET enabled=?2,policy_revision=policy_revision+1,
-         updated_at=?3 WHERE id=?1 AND policy_revision=?4",
+         updated_at=?3 WHERE id=?1 AND policy_revision=?4
+           AND (?2=0 OR NOT EXISTS(
+             SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+               AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running'))
+           ))",
         params![orchestration_id,enabled,now,expected_revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 {
-        return Err("Concurrent orchestration policy change; update rejected.".into());
+        return Err("Concurrent orchestration policy change or unreconciled native work; enable rejected.".into());
     }
     if !enabled {
         // Off is a native revocation, not just a UI preference. Record the
@@ -1567,6 +4503,29 @@ fn change_enabled(
              FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        // Legacy terminal Tickets can still carry pending external effects
+        // after a partially interrupted state writer. Record their recovery
+        // obligation before changing the receipts; terminal Ticket state and
+        // original payload identity must remain untouched.
+        let terminal_effect_audit = format!(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT t.id,'orchestration_disabled_effect_uncertain',
+               'Pending remote effect quarantined; independent reconciliation required',?2
+             FROM sa_tickets t
+             WHERE t.orchestration_id=?1 AND t.state NOT IN {PENDING}
+               AND EXISTS(SELECT 1 FROM sa_effect_receipts e
+                          WHERE e.ticket_id=t.id AND e.state='pending')"
+        );
+        tx.execute(&terminal_effect_audit,params![orchestration_id,now])
+            .map_err(|e| e.to_string())?;
+        // Quarantine every pending effect of this Team, including legacy
+        // terminal receipts. Never infer failure, mark applied, or resend.
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+             WHERE state='pending' AND ticket_id IN (
+                SELECT id FROM sa_tickets WHERE orchestration_id=?1)",
+            params![orchestration_id,now],
+        ).map_err(|e| e.to_string())?;
         let grants = format!(
             "UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN (
                SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING})"
@@ -1598,11 +4557,6 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
     if current.policy_revision != expected_revision || current.enabled {
         return Err("Disable the orchestration and reload its policy revision before editing.".into());
     }
-    let used: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        [id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    if used { return Err("A preset with ticket history cannot be reconfigured; create a new preset.".into()); }
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control)
         || input.coordinator_bot_id == input.worker_bot_id
@@ -1611,20 +4565,79 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
     }
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let worker = bots::get(store, &input.worker_bot_id)?;
-    if coordinator.paused || worker.paused {
-        return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+    let identity_changed = current.coordinator_bot_id != coordinator.id
+        || current.worker_bot_id != worker.id || current.project_id != worker.project_id;
+    if identity_changed {
+        if coordinator.paused || worker.paused {
+            return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+        }
+        for bot in [&coordinator, &worker] {
+            if let Some(issue) = roster::member_execution_issue(bot) {
+                return Err(issue.into());
+            }
+        }
+        if roster::has_additional_members(store,id)? {
+            return Err("Clear additional Team roles before changing primary bot identities.".into());
+        }
+        // Existing Demands must keep their admitted roles after the reusable
+        // Team changes. Legacy history without immutable v46 profiles cannot
+        // safely recover the original Coordinator; clone that Team instead.
+        let historical_ids: Vec<String> = {
+            let mut stmt = store.db.prepare(
+                "SELECT id FROM sa_tickets WHERE orchestration_id=?1 ORDER BY id",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        for ticket_id in &historical_ids {
+            if roster::ticket_profile(store, ticket_id)?.is_none() {
+                return Err("Legacy Ticket history has no immutable Team profile; duplicate the Team to change primary roles.".into());
+            }
+        }
+        // Source configuration is Team-scoped rather than Ticket-snapshotted.
+        // Do not silently change its effective project/actor authority when
+        // rotating primary roles, even while sources are Off or Observe-only.
+        let has_sources: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)",
+            [id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if has_sources {
+            return Err("Team has GitHub sources; duplicate the Team to change primary roles or project.".into());
+        }
     }
-    if current.name==name && current.coordinator_bot_id==coordinator.id
-        && current.worker_bot_id==worker.id && current.project_id==worker.project_id
-    { return Ok(current); }
+    if current.name==name && !identity_changed { return Ok(current); }
+
+    // A Team is reusable: after every Ticket has settled, changing its display
+    // name is safe without rebinding old Tickets, roles, Mandates or approvals.
+    // Never rename a Team with active/reviewable work or uncertain effects.
+    // The SQL predicate repeats the checks atomically with the revision CAS.
     let changed = store.db.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
             project_id=?5,policy_revision=policy_revision+1,updated_at=?6
          WHERE id=?1 AND policy_revision=?7 AND enabled=0
-           AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        params![id,name,coordinator.id,worker.id,worker.project_id,storage::now(),expected_revision],
+           AND NOT EXISTS(
+             SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+               AND ((?8=1 AND NOT EXISTS(
+                     SELECT 1 FROM sa_ticket_profiles p
+                     WHERE p.ticket_id=t.id AND p.policy_revision=t.policy_revision))
+                 OR t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running')
+                 OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                           WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+           )
+           AND (?8=0 OR (
+             NOT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM sa_team_roles WHERE orchestration_id=?1)
+           ))",
+        params![id,name,coordinator.id,worker.id,worker.project_id,
+                storage::now(),expected_revision,identity_changed],
     ).map_err(|e| e.to_string())?;
-    if changed!=1 { return Err("Orchestration changed before its policy edit.".into()); }
+    if changed!=1 {
+        return Err("Team policy or unsettled work changed before the edit; reload required.".into());
+    }
     configuration(store,id)
 }
 
@@ -1688,6 +4701,48 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
+pub async fn superagent_all_demands(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, query: DemandQuery,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_all_demands_page_for_project(
+        &store, query.limit.unwrap_or(200), query.before_updated_at,
+        query.before_id.as_deref(), DemandPageFilters {
+            orchestration_id: query.orchestration_id.as_deref(),
+            state_filter: query.state_filter.as_deref(),
+            search_query: query.search_query.as_deref(),
+            project_id: query.project_id.as_deref(),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn superagent_review_inbox(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<String>,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_review_inbox_page(&store, limit.unwrap_or(200), before_updated_at, before_id.as_deref())
+}
+
+/// Native Team review projection; scope and cursor are checked inside SQLite.
+#[tauri::command]
+pub async fn superagent_team_review_inbox(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    orchestration_id: String, limit: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<String>,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_review_inbox_page_scoped(
+        &store, limit.unwrap_or(200), before_updated_at,
+        before_id.as_deref(), Some(&orchestration_id),
+    )
+}
+
+#[tauri::command]
 pub async fn superagent_assignments(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
 ) -> Result<Vec<Assignment>> {
@@ -1705,6 +4760,36 @@ pub async fn superagent_activity(window: tauri::WebviewWindow,
     history(&store, &ticket_id, limit.unwrap_or(100))
 }
 
+
+#[tauri::command]
+pub async fn superagent_activity_page(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, before_id: Option<i64>, limit: Option<i64>,
+) -> Result<ActivityPage> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    activity_page(&store, &ticket_id, before_id, limit.unwrap_or(50))
+}
+
+#[tauri::command]
+pub async fn superagent_effect_receipts(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, limit: Option<i64>,
+) -> Result<Vec<effects::EffectReceiptView>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    effects::receipt_history(&store, &ticket_id, limit.unwrap_or(50))
+}
+
+#[tauri::command]
+pub async fn superagent_graph(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+) -> Result<RunGraph> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    run_graph(&store, &ticket_id)
+}
+
 #[tauri::command]
 pub async fn superagent_snapshot(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -1713,6 +4798,24 @@ pub async fn superagent_snapshot(
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     ticket_snapshot(&store, &ticket_id, limit.unwrap_or(50))
+}
+
+/// The UI can preview the current native manual admission boundary without
+/// acquiring a Ticket or issuing a permission. This is NOT authorization:
+/// superagent_submit/submit_coordinated must recheck on their own path.
+#[tauri::command]
+pub async fn superagent_preflight(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    orchestration_id: String, objective: String, coordinated: bool,
+) -> Result<ManualPreflight> {
+    require_main_window(&window)?;
+    let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
+        .keys().cloned().collect();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let config = configuration(&store, &orchestration_id)?;
+    let bot_id = if coordinated { &config.coordinator_bot_id } else { &config.worker_bot_id };
+    let busy = active_manual_conflict(&store, &active, bot_id, &config.project_id)?;
+    manual_preflight(&store, &orchestration_id, &objective, coordinated, busy)
 }
 
 /// Deliver the exact objective admitted and persisted by native authorization.
@@ -1725,6 +4828,63 @@ fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
         "Read-only assignment. Report evidence and remaining gaps; do not claim task approval."
     };
     format!("SuperAgent ticket {}\n\n{}\n\n{}", ticket.id, ticket.objective, instructions)
+}
+
+#[tauri::command]
+pub async fn superagent_preflight_worker(
+    window:tauri::WebviewWindow,state:State<'_,AppState>,
+    orchestration_id:String,objective:String,worker_bot_id:String,
+)->Result<ManualPreflight> {
+    require_main_window(&window)?;
+    let active:Vec<String>=state.agents.lock().map_err(|e|e.to_string())?
+        .keys().cloned().collect();
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    let config=configuration(&store,&orchestration_id)?;
+    let worker=direct_team_member(&store,&config,&worker_bot_id)?;
+    let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
+    manual_preflight_worker(&store,&orchestration_id,&objective,&worker.id,busy)
+}
+
+#[tauri::command]
+pub async fn superagent_submit_to_worker(
+    window:tauri::WebviewWindow,app:tauri::AppHandle,
+    state:State<'_,AppState>,orchestration_id:String,
+    objective:String,request_key:String,worker_bot_id:String,
+)->Result<Ticket> {
+    require_main_window(&window)?;
+    if crate::feature_controls::get().bots_paused {
+        return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
+    }
+    let (ticket,launch,selected)={
+        let active:Vec<String>=state.agents.lock().map_err(|e|e.to_string())?
+            .keys().cloned().collect();
+        let mut store=state.store.lock().map_err(|e|e.to_string())?;
+        let config=configuration(&store,&orchestration_id)?;
+        let worker=direct_team_member(&store,&config,&worker_bot_id)?;
+        let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
+        // Deduplication must run before occupied-worker rejection. The native
+        // admission boundary rechecks role, policy, lease and authorization for
+        // new Tickets; a repeated request key returns its existing Ticket
+        // without ever delivering a second provider packet.
+        let (ticket,launch)=admit_role_with_staging_member(
+            &mut store,&orchestration_id,&objective,&request_key,busy,
+            ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker.id) },
+        )?;
+        (ticket,launch,worker.id)
+    };
+    if !launch {return Ok(ticket);}
+    let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
+        bot_id:selected,channel_id:CHANNEL.into(),thread:ticket.id.clone(),
+        sender_id:"local-user".into(),sender_name:"Manual task".into(),
+        text:initial_manual_packet(&ticket,false),trusted:true,
+        image_ids:None,moodboard_ids:None,
+    }).await;
+    if let Err(error)=delivered {
+        if let Ok(store)=state.store.lock() {let _=fail_launch(&store,&ticket.id,&error);}
+        return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
+    }
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    get_ticket(&store,&ticket.id)
 }
 
 #[tauri::command]
@@ -1741,8 +4901,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let cfg=configuration(&store,&orchestration_id)?;
-        let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==cfg.worker_bot_id));
+        let busy=active_manual_conflict(&store,&active,&cfg.worker_bot_id,&cfg.project_id)?;
         let (ticket,launch)=admit(&mut store,&orchestration_id,&objective,&request_key,busy)?;
         (ticket,launch,cfg.worker_bot_id)
     };
@@ -1784,11 +4943,30 @@ fn retry_blocked(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("SuperAgent remains disabled or globally paused.".into());
     }
+    let members = roster::read(store, &config.id)?;
+    if !members.reviewer_bot_ids.is_empty() {
+        return Err("Configured Council reviewers require a native task-bound review.".into());
+    }
+    let selected_worker_id = ticket_worker(store, ticket_id)?;
+    if members.worker_bot_ids.len() > 1 {
+        // A legacy blocked Ticket must not acquire a new multi-member roster
+        // merely because the Team changed while it was waiting. Compare the
+        // entire ordered admitted Worker set, not only the chosen bot.
+        let pinned = roster::ticket_profile(store, ticket_id)?
+            .ok_or("Multi-member Ticket has no admitted Team profile.")?;
+        let original_workers = pinned.members.iter()
+            .filter(|member| member.role == "worker")
+            .map(|member| member.bot_id.clone())
+            .collect::<Vec<_>>();
+        if pinned.policy_revision != config.policy_revision
+            || original_workers != members.worker_bot_ids
+        {
+            return Err("Multi-member Team roster changed since Demand admission; retry denied.".into());
+        }
+    }
     let coordinator=bots::get(store,&config.coordinator_bot_id)?;
-    let worker=bots::get(store,&config.worker_bot_id)?;
-    if coordinator.paused || worker.paused || worker.id != ticket_worker(store,ticket_id)?
-        || worker.project_id != config.project_id
-    {
+    let worker=direct_team_member(store, &config, &selected_worker_id)?;
+    if coordinator.paused || worker.project_id != config.project_id {
         return Err("Original worker or coordinator is unavailable or out of scope.".into());
     }
     let mandate_ok: bool = store.db.query_row(
@@ -1805,23 +4983,23 @@ fn retry_blocked(
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator evidence is stale; a worker retry cannot bypass coordination.".into());
     }
+    roster::require_current_profile(store,ticket_id,"worker",&worker.id)?;
     let (attempts, worker_attempts): (i64,i64) = store.db.query_row(
         "SELECT COALESCE(MAX(attempt),0),COUNT(*) FILTER (WHERE bot_id=?2)
          FROM sa_assignments WHERE ticket_id=?1",
         params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
-    if worker_attempts >= 2 {
+    // This is an immutable, admission-time ceiling, not the Team's editable
+    // current preference. Missing snapshots deny retries rather than widening.
+    if worker_attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
         return Err("Manual worker retry limit reached; create a new authorized ticket.".into());
     }
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           WHERE a.state='running' AND
-                 (a.bot_id=?1 OR previous.project_id=?2)
-         )",
-        params![worker.id,config.project_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
+    // Reuse the same native lease probe as initial admission: a concurrent
+    // coordinator can hold a *different* project than its Ticket's worker,
+    // and a missing session must retain its reservation until recovery.
+    let occupied = manual_candidate_occupied(
+        store, &worker.id, &config.project_id, &worker.project_id,
+    )?;
     if busy || occupied {
         return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
     }
@@ -1871,6 +5049,9 @@ fn prepare_coordinated_worker(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("Orchestration or bots are paused; coordinated dispatch denied.".into());
     }
+    if roster::has_additional_members(store, &config.id)? {
+        return Err("Multi-member Team requires native scoped role admission; coordinated dispatch denied.".into());
+    }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
     if coordinator.paused || worker.paused || worker.project_id != config.project_id
@@ -1884,6 +5065,7 @@ fn prepare_coordinated_worker(
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator plan or original workspace is no longer current.".into());
     }
+    roster::require_current_profile(store,ticket_id,"worker",&worker.id)?;
     let plan: Option<String> = store.db.query_row(
         "SELECT a.result FROM sa_assignments a
          JOIN sessions coordinator_session ON coordinator_session.id=a.session_id
@@ -1906,15 +5088,12 @@ fn prepare_coordinated_worker(
     if !mandate_ok {
         return Err("Coordinator plan cannot extend an expired or revised mandate.".into());
     }
-    let occupied: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           JOIN sa_tickets previous ON previous.id=a.ticket_id
-           WHERE a.state='running' AND
-                 (a.bot_id=?1 OR previous.project_id=?2)
-         )",
-        params![worker.id,config.project_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
+    // A running coordinator may own a different checkout from the project
+    // stored on its Ticket. Use the same native lease probe as manual admission
+    // and retry, including missing sessions (which must fail closed).
+    let occupied = manual_candidate_occupied(
+        store, &worker.id, &config.project_id, &worker.project_id,
+    )?;
     if busy || occupied {
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
     }
@@ -1962,8 +5141,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let cfg = configuration(&store, &orchestration_id)?;
-        let busy = active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==cfg.coordinator_bot_id));
+        let busy = active_manual_conflict(&store,&active,&cfg.coordinator_bot_id,&cfg.project_id)?;
         let (ticket,launch) = admit_role(&mut store,&orchestration_id,&objective,&request_key,busy,true)?;
         (ticket,launch,cfg.coordinator_bot_id)
     };
@@ -1995,8 +5173,9 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e|e.to_string())?;
         let worker = ticket_worker(&store,&ticket_id)?;
-        let busy = active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==worker));
+        let ticket = get_ticket(&store, &ticket_id)?;
+        let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
         prepare_coordinated_worker(&mut store,&ticket_id,busy)?
     };
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -2026,8 +5205,9 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let bot_id=ticket_worker(&store,&ticket_id)?;
-        let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
-            .is_some_and(|(bot,_)|bot.id==bot_id));
+        let ticket = get_ticket(&store, &ticket_id)?;
+        let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
         retry_blocked(&mut store,&ticket_id,busy)?
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -2067,11 +5247,14 @@ pub async fn superagent_reject(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
-pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+pub async fn superagent_stop(
+    window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: Option<i64>,
+) -> Result<Ticket> {
     require_main_window(&window)?;
     let (ticket,session)={
         let store=state.store.lock().map_err(|e|e.to_string())?;
-        stop(&store,&ticket_id)?
+        stop_with_expected_revision(&store, &ticket_id, expected_revision)?
     };
     if let Some(session)=session {
         let _=crate::stop_session(app.clone(),app.state::<AppState>(),session).await;
@@ -2082,6 +5265,2974 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_team_member_activity_is_scoped_keyset_paginated_and_restart_safe() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (live, launched) = admit(
+            &mut store, &team.id, "Native member activity", "activity-live", false,
+        ).unwrap();
+        assert!(launched);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Unrelated Team Activity".into(),
+            coordinator_bot_id: team.coordinator_bot_id.clone(),
+            worker_bot_id: team.worker_bot_id.clone(),
+        }).unwrap();
+        let now = storage::now();
+        for i in 0..5 {
+            let owner = if i == 4 { &second } else { &team };
+            let ticket_id = format!("activity-ticket-{i}");
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                 source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Old activity','local-user','manual',
+                 ?4,?5,?6,'completed',?7,?7)",
+                params![ticket_id,owner.id,format!("activity-key-{i}"),owner.project_id,
+                    owner.worker_bot_id,owner.policy_revision,now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                 result,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'finished',1,'Evidence recorded',?5,?5)",
+                params![format!("activity-assignment-{i}"),ticket_id,owner.worker_bot_id,
+                    format!("old-session-{i}"),now],
+            ).unwrap();
+        }
+
+        let mut cursor = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let result = member_activity::page(
+                &store, &team.id, &team.worker_bot_id, cursor.clone(), 2,
+            ).unwrap();
+            assert_eq!(result.orchestration_id, team.id);
+            assert_eq!(result.bot_id, team.worker_bot_id);
+            for item in &result.items {
+                assert_eq!(item.orchestration_id, team.id);
+                assert_eq!(item.bot_id, team.worker_bot_id);
+                assert!(seen.insert(item.assignment_id.clone()), "duplicate assignment");
+                if item.assignment_id.starts_with("activity-assignment-") {
+                    assert!(!item.chat_available, "missing legacy chat is not navigable");
+                    assert!(item.has_result);
+                }
+            }
+            if !result.has_more {
+                assert!(result.next_cursor.is_none());
+                break;
+            }
+            cursor = result.next_cursor;
+            assert!(cursor.is_some());
+        }
+        assert_eq!(seen.len(), 5, "all four historical attempts and one live attempt");
+        assert!(!seen.contains("activity-assignment-4"), "foreign Team must never leak");
+        let foreign = member_activity::page(
+            &store, &second.id, &team.worker_bot_id, None, 25,
+        ).unwrap();
+        assert_eq!(foreign.items.len(), 1);
+        assert_eq!(foreign.items[0].ticket_id, "activity-ticket-4");
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id, None, 0,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id, None, 101,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, &team.id, &team.worker_bot_id,
+            Some(member_activity::MemberActivityCursor {
+                created_at: now, assignment_id: "../escape".into(),
+            }), 25,
+        ).is_err());
+        assert!(member_activity::page(
+            &store, "unknown-team", &team.worker_bot_id, None, 25,
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let reread = member_activity::page(
+            &reopened, &team.id, &team.worker_bot_id, None, 25,
+        ).unwrap();
+        assert_eq!(reread.items.len(), 5);
+        assert!(reread.items.iter().any(|item| item.ticket_id == live.id));
+    }
+
+    #[test]
+    fn team_policy_projection_sees_unpaged_review_and_restart_uncertain_effect() {
+        let store=fixture();
+        let active=enabled(&store);
+        assert!(team_policy_edit_blocker(&store,&active).unwrap().is_some());
+        let team=change_enabled(&store,&active.id,active.policy_revision,false).unwrap();
+        assert!(team_policy_edit_blocker(&store,&team).unwrap().is_none());
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+             project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('old-review',?1,'old-review-key','Objective','local-user','manual',?2,?3,
+             ?4,'waiting_review',?5,?5)",
+            params![team.id,team.project_id,team.worker_bot_id,team.policy_revision,now-1],
+        ).unwrap();
+        for i in 0..55 {
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                 project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Closed','local-user','manual',?4,?5,?6,'completed',?7,?7)",
+                params![format!("old-{i}"),team.id,format!("key-{i}"),team.project_id,
+                    team.worker_bot_id,team.policy_revision,now+i+1],
+            ).unwrap();
+        }
+        let reason=team_policy_edit_blocker(&store,&team).unwrap().unwrap();
+        assert!(reason.contains("Active or reviewable"));
+        assert_eq!(orchestration_overview(&store).unwrap().iter()
+            .find(|entry|entry.config.id==team.id).unwrap().policy_edit_blocker.as_deref(),Some(reason.as_str()));
+        assert!(roster::set_worker_attempt_limit(&store,&team.id,team.policy_revision,3).is_err());
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='old-review'",[]).unwrap();
+        assert!(team_policy_edit_blocker(&store,&team).unwrap().is_none());
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES('old-review','remote','digest','uncertain',?1,?1)",[now],
+        ).unwrap();
+        let path=store.path.clone(); drop(store);
+        let opened=Store::open_read_only(&path).unwrap();
+        assert_eq!(team_policy_edit_blocker(&opened,&team).unwrap().as_deref(),
+            Some("Unresolved external effects prevent Team policy edits."));
+    }
+
+    #[test]
+    fn desktop_stop_requires_fresh_ticket_revision_and_preserves_late_callback_denial() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Revision-scoped Demand stop",
+            "desktop-stop-revision-native", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let audit_before = history(&store, &ticket.id, 20).unwrap().len();
+
+        assert!(stop_with_expected_revision(
+            &store, &ticket.id, Some(ticket.revision + 1),
+        ).is_err(), "a stale global Demand card must never revoke authority");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before);
+
+        let (stopped, provider_session) = stop_with_expected_revision(
+            &store, &ticket.id, Some(ticket.revision),
+        ).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.revision, ticket.revision + 1);
+        assert_eq!(provider_session.as_deref(), Some(session.as_str()));
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before + 1);
+        assert!(stop_with_expected_revision(
+            &store, &ticket.id, Some(ticket.revision),
+        ).is_err(), "a repeated stop must not duplicate the audit");
+        assert!(!on_run_finished(&store, &session, true, "Late result").unwrap());
+    }
+
+    #[test]
+    fn configured_worker_budget_is_immutable_for_a_demand_and_denies_extra_retry() {
+        let mut store=fixture();
+        let enabled_config=enabled(&store);
+        let disabled=change_enabled(&store,&enabled_config.id,enabled_config.policy_revision,false).unwrap();
+        let first=roster::read(&store,&disabled.id).unwrap();
+        assert_eq!(first.max_worker_attempts,2);
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,0).is_err());
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,5).is_err());
+        let configured=roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,1).unwrap();
+        assert_eq!(configured.max_worker_attempts,1);
+        assert_eq!(configured.policy_revision,disabled.policy_revision+1);
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,3).is_err());
+        let reenabled=change_enabled(&store,&disabled.id,configured.policy_revision,true).unwrap();
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,reenabled.policy_revision,4).is_err());
+        let (ticket,started)=admit(&mut store,&disabled.id,"Budgeted Worker","worker-attempt-budget-one",false).unwrap();
+        assert!(started);
+        assert_eq!(roster::ticket_worker_attempt_limit(&store,&ticket.id).unwrap(),1);
+        fail_launch(&store,&ticket.id,"test provider unavailable").unwrap();
+        let sessions_before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sessions",[],|r|r.get(0),
+        ).unwrap();
+        assert!(retry_blocked(&mut store,&ticket.id,false).unwrap_err().contains("limit reached"));
+        let sessions_after:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sessions",[],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(sessions_before,sessions_after);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(roster::ticket_worker_attempt_limit(&reopened,&ticket.id).unwrap(),1);
+        assert_eq!(roster::read(&reopened,&disabled.id).unwrap().max_worker_attempts,1);
+    }
+
+    #[test]
+    fn new_team_budget_copy_is_disabled_and_never_copies_task_authority() {
+        let store=fixture();
+        let original=enabled(&store);
+        let disabled=change_enabled(&store,&original.id,original.policy_revision,false).unwrap();
+        let cap=roster::set_worker_attempt_limit(&store,&original.id,disabled.policy_revision,3).unwrap();
+        let copy=roster::duplicate_with_roster(&store,&original.id,cap.policy_revision,
+            "Bounded copy".into()).unwrap();
+        assert!(!copy.enabled);
+        assert_eq!(roster::read(&store,&copy.id).unwrap().max_worker_attempts,3);
+        assert_eq!(roster::read(&store,&original.id).unwrap().max_worker_attempts,3);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",[copy.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),0);
+    }
+
+    #[test]
+    fn native_demand_query_accepts_camel_case_and_rejects_execution_fields() {
+        let query: DemandQuery = serde_json::from_value(serde_json::json!({
+            "limit": 25, "beforeUpdatedAt": 2000, "beforeId": "ticket-5",
+            "orchestrationId": "team-1", "stateFilter": "blocked",
+            "searchQuery": "literal %_needle", "projectId": "project-a",
+        })).unwrap();
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.before_updated_at, Some(2000));
+        assert_eq!(query.before_id.as_deref(), Some("ticket-5"));
+        assert_eq!(query.orchestration_id.as_deref(), Some("team-1"));
+        assert_eq!(query.state_filter.as_deref(), Some("blocked"));
+        assert_eq!(query.search_query.as_deref(), Some("literal %_needle"));
+        assert_eq!(query.project_id.as_deref(), Some("project-a"));
+        let empty: DemandQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.limit, None);
+        assert_eq!(empty.search_query, None);
+        assert!(serde_json::from_value::<DemandQuery>(serde_json::json!({
+            "limit": 200, "allowedTools": ["write_file"]
+        })).is_err());
+    }
+
+    #[test]
+    fn native_demand_project_filter_precedes_paging_and_survives_restart() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let project = if index == 204 {
+                "other-native-project"
+            } else {
+                team.project_id.as_str()
+            };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                        source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',?5,'worker',?6,'blocked',?7,?7)",
+                params![
+                    format!("native-project-{index:03}"), team.id,
+                    format!("native-project-request-{index:03}"),
+                    format!("Native project demand {index}"), project,
+                    team.policy_revision, 1_000 + index,
+                ],
+            ).unwrap();
+        }
+        let page = |store: &Store, before_at: Option<i64>, before_id: Option<&str>,
+                    project: Option<&str>| {
+            list_all_demands_page_for_project(
+                store, 200, before_at, before_id, DemandPageFilters {
+                    orchestration_id: Some(&team.id), state_filter: Some("blocked"),
+                    search_query: None, project_id: project,
+                },
+            )
+        };
+        let first = page(&store, None, None, Some(&team.project_id)).unwrap();
+        assert_eq!(first.len(), 200);
+        assert!(!first.iter().any(|entry| entry.id == "native-project-204"));
+        let last = first.last().unwrap();
+        let second = page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap();
+        assert_eq!(second.len(), 4);
+        // S2 Demand history must reject forged, stale and cross-project
+        // cursors before they can silently conceal earlier native Tickets.
+        assert!(page(&store, Some(last.updated_at), Some("missing-ticket"),
+            Some(&team.project_id)).is_err());
+        assert!(page(&store, Some(last.updated_at + 1), Some(&last.id),
+            Some(&team.project_id)).is_err());
+        assert!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some("other-native-project")).is_err());
+        store.db.execute(
+            "UPDATE sa_tickets SET state='running' WHERE id=?1", [&last.id],
+        ).unwrap();
+        assert!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).is_err());
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked' WHERE id=?1", [&last.id],
+        ).unwrap();
+        assert_eq!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap().len(), 4);
+        let ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
+            .map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids.len(), 204, "Filtering before paging must not lose Tickets");
+        let foreign = page(&store, None, None, Some("other-native-project")).unwrap();
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].id, "native-project-204");
+        assert_eq!(foreign[0].project_id, "other-native-project");
+        assert!(first.iter().all(|entry| entry.project_id == team.project_id));
+        for invalid in ["", "../escape", "project%secret", " spaces "] {
+            assert!(page(&store, None, None, Some(invalid)).is_err());
+        }
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(page(&reopened, None, None, Some(&team.project_id)).unwrap().len(), 200);
+        assert_eq!(page(&reopened, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap().len(), 4);
+        assert!(page(&reopened, Some(last.updated_at), Some("missing-ticket"),
+            Some(&team.project_id)).is_err());
+        assert_eq!(page(&reopened, None, None, Some("other-native-project")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn demand_review_inbox_keeps_admitted_project_when_team_config_changes() {
+        let store = fixture();
+        let team = enabled(&store);
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                    source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('historical-review',?1,'historical-review-request','Historical project',
+                    'local-user','manual','archived-project','worker',?2,'waiting_review',1000,1000)",
+            params![team.id, team.policy_revision],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='new-team-project' WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let review = list_review_inbox(&store, 200).unwrap();
+        let historical = review.iter().find(|item| item.id == "historical-review").unwrap();
+        assert_eq!(historical.project_id, "archived-project");
+        let page = list_all_demands_page_for_project(
+            &store, 200, None, None, DemandPageFilters {
+                orchestration_id: Some(&team.id), state_filter: Some("waiting_review"),
+                search_query: None, project_id: Some("archived-project"),
+            },
+        ).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].project_id, "archived-project");
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_review_inbox(&reopened, 200).unwrap()
+            .into_iter().find(|item| item.id == "historical-review").unwrap().project_id,
+            "archived-project");
+    }
+
+
+    #[test]
+    fn headless_team_creation_is_atomic_disabled_role_scoped_and_restart_durable() {
+        let store = fixture();
+        for id in ["worker-two", "reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id, storage::now()],
+            ).unwrap();
+        }
+        let members = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker-two".into()],
+            reviewer_bot_ids: vec!["reviewer".into()],
+        };
+        let output = headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Headless Team".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, members.clone(), 3, "Native delivery", "performance",
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["enabled"], false);
+        assert_eq!(result["workerCount"], 2);
+        assert_eq!(result["reviewerCount"], 1);
+        assert_eq!(result["maxWorkerAttempts"], 3);
+        assert_eq!(result["strategy"], "performance");
+        assert_eq!(result["grantIssued"], false);
+        assert_eq!(result["providerDispatched"], false);
+        assert!(!output.contains("Native delivery"));
+        let team_id = result["orchestrationId"].as_str().unwrap();
+        let saved = roster::read(&store, team_id).unwrap();
+        assert_eq!(saved.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(saved.reviewer_bot_ids, members.reviewer_bot_ids);
+        assert_eq!(saved.purpose, "Native delivery");
+        assert!(!configuration(&store, team_id).unwrap().enabled);
+        for table in ["sa_tickets", "sa_mandates", "sa_assignments", "sa_effect_receipts"] {
+            let count: i64 = store.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "{table} must not receive runtime authority");
+        }
+        let team_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        let invalid = headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Rejected Team".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, roster::RosterInput {
+                worker_bot_ids: vec!["worker".into(), "worker".into()],
+                reviewer_bot_ids: vec![],
+            }, 3, "", "balanced",
+        );
+        assert!(invalid.is_err(), "duplicate Worker must roll back Team creation");
+        assert!(headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Invalid Budget".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+            }, members.clone(), 0, "", "balanced",
+        ).is_err());
+        assert!(headless_create_orchestration(
+            &store.path, NewOrchestration {
+                name: "Missing Bot".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "unknown".into(),
+            }, members.clone(), 3, "", "balanced",
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), team_count, "failed creation must never leave an orphan Team");
+        let path = store.path.clone();
+        let id = team_id.to_owned();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let durable = roster::read(&reopened, &id).unwrap();
+        assert_eq!(durable.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(durable.reviewer_bot_ids, members.reviewer_bot_ids);
+        assert_eq!(durable.max_worker_attempts, 3);
+        assert!(!configuration(&reopened, &id).unwrap().enabled);
+    }
+
+    #[test]
+    fn headless_roster_and_attempt_budget_are_native_revisioned_and_restart_durable() {
+        let store = fixture();
+        let config = create_configuration(&store, NewOrchestration {
+            name: "Operator Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('worker-two','Another worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let members = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker-two".into()],
+            reviewer_bot_ids: Vec::new(),
+        };
+        let raw = headless_set_team_roster(
+            &store.path, &config.id, config.policy_revision, &members,
+        ).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(response["workerCount"], 2);
+        assert_eq!(response["reviewerCount"], 0);
+        assert_eq!(response["executionReady"], false);
+        assert_eq!(response["grantIssued"], false);
+        assert_eq!(response["providerDispatched"], false);
+        assert!(!raw.contains("Another worker"));
+        let revised = response["policyRevision"].as_i64().unwrap();
+        assert_eq!(revised, config.policy_revision + 1);
+        assert!(headless_set_team_roster(
+            &store.path, &config.id, config.policy_revision, &members,
+        ).is_err(), "A stale operator cannot replace the roster");
+        let same = headless_set_team_roster(
+            &store.path, &config.id, revised, &members,
+        ).unwrap();
+        let same: serde_json::Value = serde_json::from_str(&same).unwrap();
+        assert_eq!(same["policyRevision"], revised, "No-op edits must not increment policy");
+
+        let invalid = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker".into()],
+            reviewer_bot_ids: Vec::new(),
+        };
+        assert!(headless_set_team_roster(&store.path, &config.id, revised, &invalid).is_err());
+        assert_eq!(roster::read(&store, &config.id).unwrap().policy_revision, revised);
+
+        let budget = headless_set_team_attempt_limit(
+            &store.path, &config.id, revised, 3,
+        ).unwrap();
+        let budget: serde_json::Value = serde_json::from_str(&budget).unwrap();
+        assert_eq!(budget["maxWorkerAttempts"], 3);
+        assert_eq!(budget["grantIssued"], false);
+        assert_eq!(budget["providerDispatched"], false);
+        let latest = budget["policyRevision"].as_i64().unwrap();
+        assert_eq!(latest, revised + 1);
+        assert!(headless_set_team_attempt_limit(
+            &store.path, &config.id, revised, 4,
+        ).is_err(), "Stale budget edits are rejected");
+        assert!(headless_set_team_attempt_limit(
+            &store.path, &config.id, latest, 0,
+        ).is_err(), "Invalid budgets are rejected");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let persisted = roster::read(&reopened, &config.id).unwrap();
+        assert_eq!(persisted.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(persisted.max_worker_attempts, 3);
+        assert_eq!(persisted.policy_revision, latest);
+        assert!(!configuration(&reopened, &config.id).unwrap().enabled);
+    }
+
+    #[test]
+    fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {
+        let store = fixture();
+        let cfg = enabled(&store);
+        let objective = "Private headless objective";
+        let raw = headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        assert_eq!(view["state"], "blocked");
+        assert_eq!(view["providerDispatchedByCommand"], false);
+        assert_eq!(view["requiresExplicitNativeDispatch"], true);
+        assert_eq!(view["allowedTools"], serde_json::json!([]));
+        assert!(!raw.contains(objective));
+        assert!(!raw.contains("operator-key-1"));
+        assert!(get_ticket(&store, id).unwrap().active_assignment_id.is_none());
+        assert!(!mandate(&store, id).unwrap().revoked);
+        assert!(coordinator_plan_current(
+            &store, id, "router", &cfg.project_id,
+        ).unwrap());
+        let assignment_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(assignment_count, 0);
+        assert_eq!(raw, headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap());
+        assert!(headless_queue_demand(
+            &store.path, &cfg.id, "Changed objective", "operator-key-1",
+        ).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&cfg.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        assert!(headless_stop_ticket(&store.path, id).unwrap().contains("stopped"));
+        let after: serde_json::Value = serde_json::from_str(&headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap()).unwrap();
+        assert_eq!(after["state"], "stopped");
+        assert_eq!(after["requiresExplicitNativeDispatch"], false);
+        assert!(headless_queue_demand(
+            &store.path, "missing-team", objective, "new-key",
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
+    }
+
+
+
+    #[test]
+    fn headless_secondary_worker_demand_is_staged_and_retried_only_with_native_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('secondary-headless','Secondary Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'secondary-headless')",
+            [&cfg.id],
+        ).unwrap();
+        let objective = "Private headless secondary work";
+        let raw = headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", objective, "staged-secondary-1",
+        ).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = status["ticketId"].as_str().unwrap().to_string();
+        assert_eq!(status["state"], "blocked");
+        assert_eq!(status["providerDispatchedByCommand"], false);
+        assert_eq!(status["allowedTools"], serde_json::json!([]));
+        assert_eq!(status["allowedSideEffects"], false);
+        assert!(!raw.contains(objective));
+        assert_eq!(ticket_worker(&store, &ticket_id).unwrap(), "secondary-headless");
+        assert!(assignment_session(&store, &ticket_id).unwrap().is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket_id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(raw, headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", objective, "staged-secondary-1",
+        ).unwrap());
+        assert!(headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "worker", objective, "staged-secondary-1",
+        ).is_err());
+        assert!(headless_queue_demand(
+            &store.path, &cfg.id, objective, "staged-secondary-1",
+        ).is_err());
+        let thread = format!("{ticket_id}:attempt:1");
+        assert!(guard_gateway_inbound(
+            &store, "secondary-headless", &thread, "local-user", true,
+        ).is_err(), "staging is not provider admission");
+        assert!(retry_blocked(&mut store, &ticket_id, true).is_err());
+        let (running, admitted_thread, worker) =
+            retry_blocked(&mut store, &ticket_id, false).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(worker, "secondary-headless");
+        assert_eq!(admitted_thread, thread);
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_ok());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "external-actor", true,
+        ).is_err());
+        let session = assignment_session(&store, &ticket_id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(on_run_finished(&store, &session, true, "Independent evidence").unwrap());
+        assert!(accept(&store, &ticket_id, running.revision).is_err());
+        let waiting = get_ticket(&store, &ticket_id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        assert_eq!(waiting.evidence.as_deref(), Some("Independent evidence"));
+        let rejected: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='callback_rejected'",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(rejected, 0, "A valid secondary Worker callback must not be rejected as the legacy first Worker");
+        assert_eq!(accept(&store, &ticket_id, waiting.revision).unwrap().state, "completed");
+        assert!(!on_run_finished(&store, &session, true, "Late callback").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(ticket_worker(&reopened, &ticket_id).unwrap(), "secondary-headless");
+        assert_eq!(get_ticket(&reopened, &ticket_id).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn headless_secondary_worker_retry_denies_roster_drift_without_new_session() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        for id in ["secondary-headless", "replacement-headless"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id, storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'secondary-headless')",
+            [&cfg.id],
+        ).unwrap();
+        let raw = headless_queue_selected_worker_demand(
+            &store.path, &cfg.id, "secondary-headless", "Private scope", "roster-drift-1",
+        ).unwrap();
+        let ticket_id = serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+            ["ticketId"].as_str().unwrap().to_string();
+        let before_sessions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        // A corrupted or external roster writer changed membership without
+        // changing the Team revision. The immutable Ticket must still win.
+        store.db.execute(
+            "UPDATE sa_team_roles SET bot_id='replacement-headless'
+             WHERE orchestration_id=?1 AND role='worker' AND position=1",
+            [&cfg.id],
+        ).unwrap();
+        let denied = retry_blocked(&mut store, &ticket_id, false).unwrap_err();
+        assert!(denied.contains("Multi-member Team roster"));
+        assert_eq!(get_ticket(&store, &ticket_id).unwrap().state, "blocked");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_sessions);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket_id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert!(!mandate(&store, &ticket_id).unwrap().revoked);
+    }
+
+    #[test]
+    fn headless_staged_demand_can_run_only_after_explicit_native_retry() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let raw = headless_queue_demand(
+            &store.path, &config.id, "Staged readonly work", "headless-retry-a",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = view["ticketId"].as_str().unwrap();
+        let native_thread = format!("{ticket_id}:attempt:1");
+
+        // Staging is not dispatch. A forged inbound message has no assignment
+        // and must be denied before the gateway can create a conversation.
+        assert!(assignment_session(&store, ticket_id).unwrap().is_none());
+        assert!(guard_gateway_inbound(
+            &store, "worker", &native_thread, "local-user", true,
+        ).is_err());
+
+        let (running, thread, worker) = retry_blocked(
+            &mut store, ticket_id, false,
+        ).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(thread, native_thread);
+        assert_eq!(worker, "worker");
+        let session = assignment_session(&store, ticket_id).unwrap().unwrap();
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_ok());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "untrusted", true,
+        ).is_err());
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(on_run_finished(&store, &session, true, "Verified worker evidence").unwrap());
+        let awaiting = get_ticket(&store, ticket_id).unwrap();
+        assert_eq!(awaiting.state, "waiting_approval");
+        assert_eq!(accept(&store, ticket_id, awaiting.revision).unwrap().state, "completed");
+        assert!(!on_run_finished(&store, &session, true, "Stale callback").unwrap());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_err());
+    }
+
+    #[test]
+    fn headless_staged_retry_without_original_audit_cannot_enter_gateway() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let raw = headless_queue_demand(
+            &store.path, &config.id, "Staged scope", "headless-retry-b",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = view["ticketId"].as_str().unwrap();
+        let (_, thread, worker) = retry_blocked(
+            &mut store, ticket_id, false,
+        ).unwrap();
+        let session = assignment_session(&store, ticket_id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_audit SET kind='invalidated_retry'
+             WHERE ticket_id=?1 AND kind='manual_retry'",
+            [ticket_id],
+        ).unwrap();
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_err());
+        assert!(read_only_policy(&store, &session).is_err());
+        assert_eq!(get_ticket(&store, ticket_id).unwrap().state, "running");
+    }
+
+    #[test]
+    fn headless_activity_is_paginated_private_and_read_only_across_reopen() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private activity objective",
+            "activity-page-main", false,
+        ).unwrap();
+        assert!(launched);
+        for index in 0..205 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id, format!("private-marker-{index}"), storage::now()],
+            ).unwrap();
+        }
+        let (other, _) = admit(
+            &mut store, &cfg.id, "Other private objective",
+            "activity-page-other", true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unrelated', 'cross-ticket-marker',?2)",
+            params![&other.id, storage::now()],
+        ).unwrap();
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut previous = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let raw = list_headless_ticket_activity(&store.path, &ticket.id, cursor).unwrap();
+            assert!(!raw.contains("private-marker"));
+            assert!(!raw.contains("Private activity objective"));
+            assert!(!raw.contains("cross-ticket-marker"));
+            let page: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(page["ticketId"], ticket.id);
+            assert_eq!(page["pageLimit"], 100);
+            assert_eq!(page["redacted"], true);
+            assert_eq!(page["observationalOnly"], true);
+            assert_eq!(page["recoveryPerformed"], false);
+            let entries = page["items"].as_array().unwrap();
+            assert!(entries.len() <= 100);
+            for entry in entries {
+                let id = entry["id"].as_i64().unwrap();
+                assert!(previous.is_none_or(|last| id < last));
+                assert!(seen.insert(id), "audit row replayed across pages");
+                assert!(entry.get("detail").is_none());
+                previous = Some(id);
+            }
+            if page["hasMore"] == false {
+                assert!(page["nextCursor"].is_null());
+                break;
+            }
+            cursor = Some(page["nextCursor"].as_i64().unwrap());
+        }
+        assert_eq!(seen.len() as i64, audit_count);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audit_count);
+        assert!(list_headless_ticket_activity(&store.path, &ticket.id, Some(0)).is_err());
+        assert!(list_headless_ticket_activity(&store.path, "missing-ticket", None).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let restarted: serde_json::Value = serde_json::from_str(
+            &list_headless_ticket_activity(&path, &ticket.id, None).unwrap(),
+        ).unwrap();
+        assert_eq!(restarted["items"].as_array().unwrap().len(), 100);
+    }
+
+
+    #[test]
+    fn native_desktop_activity_pages_are_ticket_scoped_strict_and_restart_durable() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Sensitive desktop activity",
+            "desktop-activity-main", false,
+        ).unwrap();
+        assert!(launched);
+        for index in 0..125 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id, format!("private-{index}"), storage::now()],
+            ).unwrap();
+        }
+        let (other, _) = admit(
+            &mut store, &cfg.id, "Other activity", "desktop-activity-other", true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unrelated','foreign-detail',?2)",
+            params![&other.id, storage::now()],
+        ).unwrap();
+        let expected: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut visited = std::collections::HashSet::new();
+        let mut previous = i64::MAX;
+        loop {
+            let page = activity_page(&store, &ticket.id, cursor, 50).unwrap();
+            assert_eq!(page.ticket_id, ticket.id);
+            assert!(page.items.len() <= 50);
+            for item in &page.items {
+                assert!(item.id < previous);
+                assert!(visited.insert(item.id), "activity row was replayed");
+                assert_ne!(item.detail, "foreign-detail");
+                previous = item.id;
+            }
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                break;
+            }
+            assert_eq!(page.next_cursor, page.items.last().map(|item| item.id));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(visited.len() as i64, expected);
+        assert!(activity_page(&store, &ticket.id, Some(0), 50).is_err());
+        assert!(activity_page(&store, &ticket.id, None, 0).is_err());
+        assert!(activity_page(&store, &ticket.id, None, 101).is_err());
+        assert!(activity_page(&store, "missing-ticket", None, 50).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let db_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(activity_page(&reopened, &ticket.id, None, 50).unwrap().items.len(), 50);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+    }
+
+    #[test]
+    fn headless_roster_inspection_preserves_multi_role_profiles_without_admission() {
+        let store=fixture();
+        for id in ["additional-worker","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE bots SET skills='[\"scope-skill\"]' WHERE id='additional-worker'",[],
+        ).unwrap();
+        let config=create_configuration(&store,NewOrchestration {
+            name:"Headless roster".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'additional-worker')",[&config.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')",[&config.id],
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        let output=inspect_headless_team_roster(&path,&config.id).unwrap();
+        let view:serde_json::Value=serde_json::from_str(&output).unwrap();
+        assert_eq!(view["policyRevision"],config.policy_revision);
+        assert_eq!(view["members"].as_array().unwrap().len(),4);
+        assert_eq!(view["members"][0]["role"],"coordinator");
+        assert_eq!(view["members"][1]["role"],"worker");
+        assert_eq!(view["members"][2]["botId"],"additional-worker");
+        assert_eq!(view["members"][2]["assignedSkillIds"],serde_json::json!(["scope-skill"]));
+        assert_eq!(view["members"][2]["skillLibraryStatus"],"not_scanned");
+        assert_eq!(view["members"][3]["role"],"reviewer");
+        assert_eq!(view["manualSingleWorkerTopology"],false);
+        assert_eq!(view["multiRoleExecutionAvailable"],false);
+        assert_eq!(view["authorizationIssued"],false);
+        assert_eq!(view["allowedTools"],serde_json::json!([]));
+        for sensitive in ["authorizationId","sessionId","PRIVATE OBJECTIVE","worktreePath"] {
+            assert!(!output.contains(sensitive),"Unexpected private field: {sensitive}");
+        }
+        let verified=Store::open_read_only(&path).unwrap();
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(inspect_headless_team_roster(&path,"not-a-team").is_err());
+    }
+    #[test]
+    fn headless_exact_demand_preflight_is_read_only_and_revision_bound() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Scoped headless preflight".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let objective = "Private scope: inspect only repository paths";
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(disabled["eligibleAtSnapshot"], false);
+        assert_eq!(disabled["mandateIssued"], false);
+        assert_eq!(disabled["providerDispatched"], false);
+        assert_eq!(disabled["allowedTools"], serde_json::json!([]));
+        assert!(!disabled.to_string().contains(objective));
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let direct: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        let coordinated: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, true).unwrap()
+        ).unwrap();
+        assert_eq!(direct["selectedRole"], "worker");
+        assert_eq!(direct["selectedBotId"], "worker");
+        assert_eq!(coordinated["selectedRole"], "coordinator");
+        assert_eq!(coordinated["selectedBotId"], "router");
+        assert_eq!(direct["policyRevision"], enabled.policy_revision);
+        assert_eq!(direct["eligibleAtSnapshot"], true);
+        assert_eq!(coordinated["eligibleAtSnapshot"], true);
+        assert_eq!(direct["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(direct["objectiveBytes"], objective.len());
+        assert!(inspect_headless_demand_preflight(&store.path, &cfg.id, "  ", false).is_err());
+        assert!(inspect_headless_demand_preflight(&store.path, "missing", objective, true).is_err());
+        assert!(inspect_headless_demand_preflight(
+            &store.path, &cfg.id, &"x".repeat(MAX_OBJECTIVE_BYTES + 1), false
+        ).is_err());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(paused["eligibleAtSnapshot"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Headless readiness".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(disabled["worker"]["eligibleAtSnapshot"], false);
+        assert_eq!(disabled["admitted"], false);
+        assert_eq!(disabled["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(disabled["allowedSideEffects"], false);
+        assert_eq!(disabled["policyRevision"], cfg.policy_revision);
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let ready: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(ready["policyRevision"], enabled.policy_revision);
+        assert_eq!(ready["worker"]["botId"], "worker");
+        assert_eq!(ready["coordinator"]["botId"], "router");
+        assert_eq!(ready["worker"]["eligibleAtSnapshot"], true);
+        assert_eq!(ready["admitted"], false);
+        assert_eq!(ready["allowedTools"], serde_json::json!([]));
+        let tickets: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        let mandates: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [], |r| r.get(0)).unwrap();
+        assert_eq!((tickets, mandates), (0, 0));
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused: serde_json::Value = serde_json::from_str(
+            &inspect_headless_team_readiness(&store.path, &cfg.id).unwrap()
+        ).unwrap();
+        assert_eq!(paused["worker"]["eligibleAtSnapshot"], false);
+        assert_eq!(paused["coordinator"]["eligibleAtSnapshot"], false);
+    }
+
+    #[test]
+    fn headless_recovery_inbox_prioritizes_uncertain_effects_and_preserves_history() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (running, launched) = admit(&mut store, &cfg.id,
+            "Private remote delivery", "recovery-inbox-effect", false).unwrap();
+        assert!(launched);
+        let (blocked, dispatched) = admit(&mut store, &cfg.id,
+            "Private next demand", "recovery-inbox-blocked", true).unwrap();
+        assert!(!dispatched);
+        let (settled, dispatched) = admit(&mut store, &cfg.id,
+            "Private stopped demand", "recovery-inbox-settled", true).unwrap();
+        assert!(!dispatched);
+        stop(&store, &settled.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'original-remote-write',
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                    'pending',?2,?2)",
+            params![&running.id,storage::now()],
+        ).unwrap();
+        stop(&store, &running.id).unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0)
+        ).unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        let items = inbox["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["ticketId"], running.id);
+        assert_eq!(items[0]["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(items[0]["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(items[1]["ticketId"], blocked.id);
+        assert_eq!(items[1]["state"], "blocked");
+        let cursor_at = items[0]["createdAt"].as_i64().unwrap();
+        let cursor_id = items[0]["ticketId"].as_str().unwrap();
+        let continuation: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path, Some(0), Some(cursor_at), Some(cursor_id),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(continuation["items"].as_array().unwrap().len(), 1);
+        assert_eq!(continuation["items"][0]["ticketId"], blocked.id);
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(0), Some(cursor_at), Some("forged-ticket"),
+        ).is_err());
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(1), Some(cursor_at), Some(cursor_id),
+        ).is_err());
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(0), Some(cursor_at + 1), Some(cursor_id),
+        ).is_err());
+        assert!(!items.iter().any(|item| item["ticketId"] == settled.id));
+        assert_eq!(inbox["observationalOnly"], true);
+        assert_eq!(inbox["automaticRecoveryPerformed"], false);
+        assert_eq!(inbox["requiresCurrentNativeRecheckBeforeAnyAction"], true);
+        assert!(!inbox["mayHaveMore"].as_bool().unwrap());
+        let encoded = serde_json::to_string(&inbox).unwrap();
+        for secret in ["Private remote delivery", "Private next demand",
+            "Private stopped demand", "original-remote-write"] {
+            assert!(!encoded.contains(secret), "Recovery inbox leaked protected content");
+        }
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), before);
+        assert_eq!(get_ticket(&store, &running.id).unwrap().state, "stopped");
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&running.id], |row| row.get::<_, String>(0)
+        ).unwrap(), "uncertain");
+        let path = store.path.clone();
+        drop(store);
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap()
+        ).unwrap();
+        assert_eq!(again["items"].as_array().unwrap().len(), 2);
+        assert_eq!(again["items"][0]["ticketId"], running.id);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id=?1",
+            [&running.id]).unwrap();
+        drop(db);
+        // A stale cursor cannot silently skip a Ticket that stopped qualifying.
+        assert!(list_headless_recovery_inbox_page(
+            &path, Some(0), Some(cursor_at), Some(cursor_id),
+        ).is_err());
+    }
+
+    #[test]
+    fn headless_pending_effect_quarantine_is_exact_atomic_idempotent_and_restart_safe() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Inspect unknown remote effect",
+            "headless-pending-effect-quarantine", false,
+        ).unwrap();
+        assert!(launched);
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let digest = "a".repeat(64);
+        let at = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:comment:pending',?2,'pending',?3,?3)",
+            params![&ticket.id,&digest,at],
+        ).unwrap();
+        let path = store.path.clone();
+        let quarantine = |revision, digest: &str| headless_quarantine_pending_effect(
+            &path, &ticket.id, revision, "github:comment:pending", digest,
+        );
+        assert!(quarantine(revision+1, &digest).is_err());
+        assert!(quarantine(revision, &"b".repeat(64)).is_err());
+        assert!(headless_quarantine_pending_effect(
+            &path, &ticket.id, revision, "../other", &digest,
+        ).is_err());
+        assert_eq!(effects::receipt_history(&store,&ticket.id,5).unwrap()[0].state,"pending");
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_effect_quarantine_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_effect_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(quarantine(revision, &digest).is_err());
+        assert_eq!(effects::receipt_history(&store,&ticket.id,5).unwrap()[0].state,"pending");
+        store.db.execute_batch("DROP TRIGGER deny_effect_quarantine_audit").unwrap();
+
+        let first: serde_json::Value = serde_json::from_str(
+            &quarantine(revision, &digest).unwrap(),
+        ).unwrap();
+        assert_eq!(first["state"],"uncertain");
+        assert_eq!(first["changed"],true);
+        assert_eq!(first["remoteResultVerified"],false);
+        assert_eq!(first["externalEffectReplayAllowed"],false);
+        let repeat: serde_json::Value = serde_json::from_str(
+            &quarantine(revision, &digest).unwrap(),
+        ).unwrap();
+        assert_eq!(repeat["changed"],false);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision, revision);
+        assert_eq!(history(&store,&ticket.id,30).unwrap().iter()
+            .filter(|audit|audit.kind=="headless_effect_quarantined").count(),1);
+        assert_eq!(effects::receipt_history(&store,&ticket.id,5).unwrap()[0].state,"uncertain");
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='github:comment:pending'",
+            [&ticket.id],
+        ).unwrap();
+        assert!(quarantine(revision, &digest).is_err(),
+            "a terminal applied receipt must not be demoted");
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(effects::receipt_history(&reopened,&ticket.id,5).unwrap()[0].state,"applied");
+        assert_eq!(history(&reopened,&ticket.id,30).unwrap().iter()
+            .filter(|audit|audit.kind=="headless_effect_quarantined").count(),1);
+    }
+
+
+    #[test]
+    fn headless_orphan_running_quarantine_requires_fault_cas_and_survives_restart() {
+        for fault in ["missing-link","wrong-link","assignment-not-running","team-missing"] {
+            let mut store=fixture();
+            let cfg=enabled(&store);
+            let (ticket,started)=admit(&mut store,&cfg.id,"Private work",
+                "headless-running-orphan",false).unwrap();
+            assert!(started);
+            let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+            let path=store.path.clone();
+            let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision).is_err(),"Healthy Ticket cannot be quarantined");
+            match fault {
+                "missing-link" => { store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                    [&ticket.id]).unwrap(); }
+                "wrong-link" => { store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id='missing-id' WHERE id=?1",
+                    [&ticket.id]).unwrap(); }
+                "assignment-not-running" => { store.db.execute(
+                    "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+                    [&ticket.id]).unwrap(); }
+                "team-missing" => {
+                    store.db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+                    store.db.execute("DELETE FROM sa_orchestrations WHERE id=?1",
+                        [&cfg.id]).unwrap();
+                    store.db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let now=storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'orphan-effect',?2,'pending',?3,?3)",
+                params![&ticket.id,"a".repeat(64),now]).unwrap();
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision+1).is_err());
+            let output: serde_json::Value=serde_json::from_str(
+                &headless_quarantine_orphan_running_ticket(
+                    &path,&ticket.id,revision).unwrap()).unwrap();
+            assert_eq!(output["state"],"interrupted","{fault}");
+            assert_eq!(output["revision"],revision+1);
+            assert_eq!(output["providerStoppedByCommand"],false);
+            assert_eq!(output["externalEffectReplayAllowed"],false);
+            assert_eq!(output["pendingEffectsMarkedUncertain"],1);
+            assert!(headless_quarantine_orphan_running_ticket(
+                &path,&ticket.id,revision+1).is_err());
+            assert!(mandate(&store,&ticket.id).unwrap().revoked);
+            assert!(assignments(&store,&ticket.id,10).unwrap().iter()
+                .all(|a|a.state!="running"));
+            assert_eq!(effects::receipt_history(&store,&ticket.id,5)
+                .unwrap()[0].state,"uncertain");
+            assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+                .filter(|entry|entry.kind=="headless_orphan_running_quarantined").count(),1);
+            assert!(!on_run_finished(&store,&session,true,"Late result").unwrap());
+            drop(store);
+            let reopened=Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+            assert_eq!(effects::unresolved_count(&reopened,&ticket.id).unwrap(),1);
+        }
+    }
+
+    #[test]
+    fn headless_missing_mandate_remains_discoverable_and_quarantines_without_replay() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id,
+            "Private missing mandate work", "headless-missing-mandate", false).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let path = store.path.clone();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision,
+        ).is_err(), "Healthy native execution is not an orphan");
+
+        // Simulate legacy/partial database damage, without manufacturing a
+        // replacement grant or modifying the linked native provider session.
+        store.db.execute("DELETE FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket.id]).unwrap();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'missing-mandate-effect',?2,'pending',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let audits_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        let item = inbox["items"].as_array().unwrap().iter()
+            .find(|entry| entry["ticketId"] == ticket.id).unwrap();
+        assert_eq!(item["recovery"]["mandateMissing"], true);
+        assert!(item["recovery"]["mandateRevoked"].is_null());
+        assert!(item["recovery"]["mandateExpired"].is_null());
+        assert_eq!(item["recovery"]["nextOperatorAction"],
+            "quarantine_missing_native_mandate");
+        assert_eq!(item["recovery"]["pendingExternalEffects"], 1);
+        assert_eq!(inbox["observationalOnly"], true);
+        assert!(!inbox.to_string().contains("Private missing mandate work"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audits_before);
+
+        // The detailed CLI inspector must remain usable when a Mandate is
+        // missing. It returns no invented grant or raw objective and cannot
+        // mutate the running provider or resolve the pending external effect.
+        let damaged_status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert!(damaged_status["mandate"].is_null());
+        assert_eq!(damaged_status["mandateMissing"], true);
+        assert_eq!(damaged_status["state"], "running");
+        assert_eq!(damaged_status["recovery"]["mandateMissing"], true);
+        assert_eq!(damaged_status["recovery"]["nextOperatorAction"],
+            "quarantine_missing_native_mandate");
+        assert_eq!(damaged_status["unresolvedExternalEffects"], 1);
+        assert_eq!(damaged_status["assignments"][0]["sessionId"], session);
+        assert_eq!(damaged_status["observationalOnly"], true);
+        assert_eq!(damaged_status["automaticReplayAllowed"], false);
+        assert!(!damaged_status.to_string().contains("Private missing mandate work"));
+        assert!(inspect_headless_status(&path, Some("not-a-ticket")).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audits_before);
+
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision + 1,
+        ).is_err(), "A stale operator revision cannot settle this Ticket");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let settled: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_orphan_running_ticket(
+                &path, &ticket.id, revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(settled["state"], "interrupted");
+        assert_eq!(settled["revision"], revision + 1);
+        assert_eq!(settled["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(settled["providerStoppedByCommand"], false);
+        assert_eq!(settled["externalEffectReplayAllowed"], false);
+        let after_quarantine: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(after_quarantine["state"], "interrupted");
+        assert_eq!(after_quarantine["revision"], revision + 1);
+        assert!(after_quarantine["mandate"].is_null());
+        assert_eq!(after_quarantine["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(after_quarantine["recovery"]["automaticReplayAllowed"], false);
+        assert!(headless_quarantine_orphan_running_ticket(
+            &path, &ticket.id, revision,
+        ).is_err(), "Duplicate quarantine must not repeat audit or effects");
+        assert!(!on_run_finished(&store, &session, true, "Late output").unwrap());
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|entry| entry.kind == "headless_orphan_running_quarantined").count(), 1);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state,
+            "uncertain");
+        drop(store);
+
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state,
+            "interrupted");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn headless_orphan_running_quarantine_is_atomic_on_audit_failure() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(&mut store,&cfg.id,"Private rollback",
+            "headless-orphan-rollback",false).unwrap();
+        assert!(started);
+        let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+        store.db.execute("UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id]).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'orphan-rollback-effect',?2,'pending',?3,?3)",
+            params![&ticket.id,"b".repeat(64),now]).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_orphan_headless_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_orphan_running_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;").unwrap();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &store.path,&ticket.id,revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,revision);
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+        assert_eq!(effects::receipt_history(&store,&ticket.id,5).unwrap()[0].state,"pending");
+        store.db.execute_batch("DROP TRIGGER deny_orphan_headless_audit").unwrap();
+        assert!(headless_quarantine_orphan_running_ticket(
+            &store.path,&ticket.id,revision).is_ok());
+    }
+
+    #[test]
+    fn headless_detached_quarantine_is_revisioned_atomic_and_restart_safe() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&cfg.id,"Private detached objective",
+            "headless-detached-quarantine",false).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",[&ticket.id],
+        ).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'detached-write','private-digest','pending',?2,?2)",
+            params![&ticket.id,now],
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision+1).is_err());
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_detached_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_detached_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+        store.db.execute_batch("DROP TRIGGER deny_detached_audit").unwrap();
+        let output:serde_json::Value=serde_json::from_str(
+            &headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).unwrap(),
+        ).unwrap();
+        assert_eq!(output["state"],"interrupted");
+        assert_eq!(output["pendingEffectsMarkedUncertain"],1);
+        assert_eq!(output["providerStoppedByCommand"],false);
+        assert_eq!(output["externalEffectReplayAllowed"],false);
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert!(!on_run_finished(&store,&session,true,"Late evidence").unwrap());
+        assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+            .filter(|a|a.kind=="headless_detached_quarantined").count(),1);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let state=get_ticket(&reopened,&ticket.id).unwrap();
+        assert_eq!(state.state,"interrupted");
+        assert!(state.active_assignment_id.is_none());
+        assert!(mandate(&reopened,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened,&ticket.id,10).unwrap()[0].state,"interrupted");
+        assert_eq!(reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id],|r|r.get::<_,String>(0),
+        ).unwrap(),"uncertain");
+        assert!(!list_headless_recovery_inbox(&path).unwrap().contains("Private detached objective"));
+    }
+
+    #[test]
+    fn headless_terminal_orphan_quarantine_is_atomic_revisioned_and_restart_safe() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private objective", "headless-orphan-quarantine", false).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original = get_ticket(&store, &ticket.id).unwrap().revision;
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, original,
+        ).is_err(), "Running Ticket cannot be quarantined");
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unverified-effect','private-digest','pending',?2,?2)",
+            params![&ticket.id,now],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1,
+             evidence='Original evidence' WHERE id=?1", [&ticket.id],
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision - 1,
+        ).is_err(), "Stale revision must deny repair");
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_quarantine_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_orphan_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit error'); END;",
+        ).unwrap();
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision,
+        ).is_err(), "Audit failure must roll back the quarantine");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        store.db.execute_batch("DROP TRIGGER deny_quarantine_audit").unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(
+                &store.path, &ticket.id, revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(json["state"], "completed");
+        assert_eq!(json["quarantinedAssignments"], 1);
+        assert_eq!(json["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(json["externalEffectReplayAllowed"], false);
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision,
+        ).is_err());
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision + 1,
+        ).is_err());
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|e| e.kind == "headless_orphan_quarantined").count(), 1);
+        assert!(!on_run_finished(&store, &session, true, "Late provider result").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let terminal = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(terminal.state, "completed");
+        assert_eq!(terminal.evidence.as_deref(), Some("Original evidence"));
+        assert!(terminal.active_assignment_id.is_none());
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert_eq!(reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, String>(0),
+        ).unwrap(), "uncertain");
+    }
+
+    #[test]
+    fn headless_expired_quarantine_is_revisioned_denies_healthy_and_never_replays() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private expired work", "headless-expired-native", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id, ticket.revision).is_err(),
+            "A healthy running provider must not be quarantined");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let expired_at = storage::now() - MAX_ASSIGNMENT_RUN_MS - 1;
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![&ticket.id,expired_at],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'external-expired',?2,'pending',?3,?3)",
+            params![&ticket.id,"a".repeat(64),storage::now()],
+        ).unwrap();
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id,
+            ticket.revision + 1).is_err(), "Stale or forged revision must not mutate state");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let raw = headless_quarantine_expired_ticket(
+            &path, &ticket.id, ticket.revision,
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(result["revision"], ticket.revision + 1);
+        assert_eq!(result["state"], "interrupted");
+        assert_eq!(result["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(result["providerStoppedByCommand"], false);
+        assert_eq!(result["externalEffectReplayAllowed"], false);
+        assert!(!raw.contains("Private expired work"));
+        assert!(!raw.contains(&session));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(!on_run_finished(&store, &session, true, "Late provider success").unwrap());
+        assert!(headless_quarantine_expired_ticket(&path, &ticket.id,
+            ticket.revision).is_err(), "Duplicate quarantine must not add another audit entry");
+        assert_eq!(history(&store, &ticket.id, 20).unwrap()
+            .iter().filter(|a| a.kind == "headless_expired_quarantined").count(), 1);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 10).unwrap()[0].state,
+            "uncertain");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_flags_terminal_ticket_with_orphan_running_assignment() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private output", "recovery-orphan-terminal", false).unwrap();
+        assert!(launched);
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        // Simulate a partial/legacy state transition. Normal native stop
+        // would settle the assignment in the same transaction.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["ticketId"], ticket.id);
+        let recovery = &result["items"][0]["recovery"];
+        assert_eq!(recovery["terminal"], true);
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(result["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        let path = store.path.clone();
+        drop(store);
+        // Read-only restart must preserve the anomaly for investigation,
+        // not run Store::open recovery and erase evidence prematurely.
+        let opened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&opened, &ticket.id).unwrap().state, "completed");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap()
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["assignmentStateConsistent"], false);
+        assert_eq!(again["items"][0]["recovery"]["nextOperatorAction"],
+            "investigate_native_assignment_state");
+    }
+
+
+    #[test]
+    fn headless_recovery_contains_terminal_orphans_before_reconciling_remote_effects() {
+        for initial_state in ["pending", "uncertain"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private remote operation",
+                "terminal-orphan-and-effect", false,
+            ).unwrap();
+            assert!(launched);
+            // Simulate an interrupted legacy settlement: the Ticket became
+            // terminal, but an Assignment/provider attempt was left running.
+            store.db.execute(
+                "UPDATE sa_tickets SET state='completed',revision=revision+1
+                 WHERE id=?1", [&ticket.id],
+            ).unwrap();
+            let now = storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'remote-effect',?2,?3,?4,?4)",
+                params![&ticket.id, "a".repeat(64), initial_state, now],
+            ).unwrap();
+            let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+            let audit_before = history(&store, &ticket.id, 30).unwrap().len();
+            let path = store.path.clone();
+
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            let recovery = &before["items"][0]["recovery"];
+            assert_eq!(before["items"].as_array().unwrap().len(), 1);
+            assert_eq!(before["items"][0]["ticketId"], ticket.id);
+            assert_eq!(recovery["activeNativeAssignments"], 1);
+            assert_eq!(recovery["assignmentStateConsistent"], false);
+            assert_eq!(recovery["requiresLiveHostVerification"], true);
+            assert_eq!(recovery["requiresIndependentRemoteReconciliation"], true);
+            assert_eq!(recovery["nextOperatorAction"],
+                "investigate_native_assignment_state",
+                "Do not reconcile while a terminal Ticket has an orphan provider: {initial_state}");
+            assert_eq!(before["automaticRecoveryPerformed"], false);
+            assert_eq!(history(&store, &ticket.id, 30).unwrap().len(), audit_before);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+
+            // The existing local-operator quarantine is a separately
+            // revision-checked action, not a side effect of listing.
+            let quarantined: serde_json::Value = serde_json::from_str(
+                &headless_quarantine_terminal_orphan(
+                    &path, &ticket.id, revision,
+                ).unwrap(),
+            ).unwrap();
+            assert_eq!(quarantined["quarantinedAssignments"], 1);
+            assert_eq!(quarantined["providerStoppedByCommand"], false);
+            assert_eq!(quarantined["externalEffectReplayAllowed"], false);
+            let after: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(after["items"][0]["recovery"]["activeNativeAssignments"], 0);
+            assert_eq!(after["items"][0]["recovery"]["uncertainExternalEffects"], 1);
+            assert_eq!(after["items"][0]["recovery"]["nextOperatorAction"],
+                "reconcile_authoritative_remote_effects");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(effects::receipt_history(&reopened, &ticket.id, 1)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "completed");
+        }
+    }
+
+    #[test]
+    fn headless_recovery_inbox_finds_detached_live_provider_session_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private detached session objective",
+            "recovery-missing-provider-session", false,
+        ).unwrap();
+        assert!(launched);
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+
+        // Simulate a damaged/legacy assignment referring to a provider
+        // session that is absent. Normal native admission never does this.
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",
+            [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &original_session).is_err(),
+            "detached task threads cannot fall back to ambient bot authority");
+        let found: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(found["items"].as_array().unwrap().len(), 1);
+        assert_eq!(found["items"][0]["ticketId"], ticket.id);
+        let recovery = &found["items"][0]["recovery"];
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["missingNativeSessions"], 1);
+        assert_eq!(recovery["activeAssignmentLinked"], true);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(recovery["automaticReplayAllowed"], false);
+        assert_eq!(found["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), audit_before);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["missingNativeSessions"], 1);
+        assert!(!again.to_string().contains("Private detached session objective"));
+    }
+
+    #[test]
+    fn headless_recovery_inbox_detects_expired_live_attempt_without_interrupting_it() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private running objective", "recovery-inbox-budget", false).unwrap();
+        assert!(launched);
+        let initial: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert!(initial["items"].as_array().unwrap().is_empty(),
+            "A healthy active provider is not an abandoned recovery item");
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let overdue: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(overdue["items"][0]["ticketId"], ticket.id);
+        assert_eq!(overdue["items"][0]["state"], "running");
+        assert_eq!(overdue["items"][0]["recovery"]["expiredNativeAssignments"], 1);
+        assert_eq!(overdue["items"][0]["recovery"]["nextOperatorAction"],
+            "investigate_expired_native_assignment_before_retry");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0)
+        ).unwrap(), "running");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_detects_detached_task_thread_before_watchdog() {
+        for fault in ["missing_thread", "remapped_identity"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private detached task thread objective",
+                "recovery-task-thread", false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+            let path = store.path.clone();
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert!(before["items"].as_array().unwrap().is_empty(), "{fault}");
+            let audit_count = history(&store, &ticket.id, 100).unwrap().len();
+
+            let changed = match fault {
+                "missing_thread" => store.db.execute(
+                    "DELETE FROM bot_threads WHERE session_id=?1 AND channel_id=?2",
+                    params![&session, CHANNEL],
+                ).unwrap(),
+                "remapped_identity" => store.db.execute(
+                    "UPDATE bot_threads SET external_id='unrelated-task'
+                     WHERE session_id=?1 AND channel_id=?2",
+                    params![&session, CHANNEL],
+                ).unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq!(changed, 1, "{fault}");
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["assignmentStateConsistent"], true);
+            assert_eq!(found["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["automaticRecoveryPerformed"], false);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_count);
+            drop(store);
+
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+            let again: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(again["items"][0]["ticketId"], ticket.id);
+            assert!(!again.to_string().contains("Private detached task thread objective"));
+        }
+    }
+
+    #[test]
+    fn headless_recovery_inbox_surfaces_native_admission_drift_without_replay() {
+        for fault in ["team_disabled", "coordinator_paused", "worker_paused",
+                      "policy_revision", "unsupported_tools"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(&mut store, &cfg.id,
+                "Private drift recovery objective", "drift-recovery", false).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+            let path = store.path.clone();
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert!(before["items"].as_array().unwrap().is_empty(), "{fault}");
+            let audit_before = history(&store, &ticket.id, 100).unwrap().len();
+
+            match fault {
+                "team_disabled" => {
+                    store.db.execute("UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                        [&cfg.id]).unwrap();
+                }
+                "coordinator_paused" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id=?1",
+                        [&cfg.coordinator_bot_id]).unwrap();
+                }
+                "worker_paused" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id=?1",
+                        [&cfg.worker_bot_id]).unwrap();
+                }
+                "policy_revision" => {
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&cfg.id],
+                    ).unwrap();
+                }
+                "unsupported_tools" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_tools='[\"shell\"]' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+
+            // An uncertain remote operation must not outrank containment of
+            // a now-unauthorized running native provider.
+            if fault == "coordinator_paused" {
+                store.db.execute(
+                    "INSERT INTO sa_effect_receipts
+                     (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                     VALUES(?1,'github:comment:pending',?2,'uncertain',?3,?3)",
+                    params![&ticket.id, "a".repeat(64), storage::now()],
+                ).unwrap();
+            }
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["assignmentStateConsistent"], true, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["automaticRecoveryPerformed"], false);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_before);
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+            let again: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(again["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+            assert!(!again.to_string().contains("Private drift recovery objective"));
+        }
+    }
+
+    #[test]
+    fn headless_recovery_inbox_finds_revoked_and_expired_live_mandates_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private native mandate recovery",
+            "mandate-recovery-inbox", false,
+        ).unwrap();
+        assert!(launched);
+        let path = store.path.clone();
+        let initial: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(initial["items"].as_array().unwrap().is_empty());
+
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        for fault in ["revoked", "expired"] {
+            store.db.execute(
+                "UPDATE sa_mandates SET revoked=?2,expires_at=?3 WHERE ticket_id=?1",
+                params![ticket.id, i64::from(fault == "revoked"),
+                    if fault == "expired" { storage::now() - 1 }
+                    else { storage::now() + 120_000 }],
+            ).unwrap();
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["state"], "running", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["items"][0]["recovery"]["mandateRevoked"],
+                fault == "revoked");
+            assert_eq!(found["items"][0]["recovery"]["mandateExpired"],
+                fault == "expired");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get::<_, i64>(0),
+            ).unwrap(), audit_before);
+        }
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let after_restart: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(after_restart["items"][0]["ticketId"], ticket.id);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        assert!(!serde_json::to_string(&after_restart).unwrap()
+            .contains("Private native mandate recovery"));
+    }
+
+    #[test]
+    fn headless_team_recovery_inbox_filters_before_pagination_and_rejects_foreign_cursors() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Other recovery Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let second = configuration(&store, &second.id).unwrap();
+        let (private, launched) = admit(
+            &mut store, &first.id, "Private first-Team recovery objective",
+            "first-team-recovery", true,
+        ).unwrap();
+        assert!(!launched);
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=updated_at-30000 WHERE id=?1",
+            [&private.id],
+        ).unwrap();
+        for index in 0..201 {
+            let (ticket, launched) = admit(
+                &mut store, &second.id, "Private second-Team recovery objective",
+                &format!("second-team-recovery-{index}"), true,
+            ).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+        }
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        let first_page: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &first.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(first_page["orchestrationId"], first.id);
+        assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["items"][0]["ticketId"], private.id);
+        assert_eq!(first_page["mayHaveMore"], false);
+        let second_page: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &second.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second_page["items"].as_array().unwrap().len(), 200);
+        assert_eq!(second_page["mayHaveMore"], true);
+        let cursor = &second_page["nextCursor"];
+        let older: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &store.path, &second.id, cursor["priority"].as_i64(),
+                cursor["updatedAt"].as_i64(), cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(older["items"].as_array().unwrap().len(), 1);
+        assert_eq!(older["mayHaveMore"], false);
+        assert!(list_headless_team_recovery_inbox_page(
+            &store.path, &first.id, cursor["priority"].as_i64(),
+            cursor["updatedAt"].as_i64(), cursor["ticketId"].as_str(),
+        ).is_err(), "A cursor from another Team must not authorize cross-Team pages");
+        assert!(list_headless_team_recovery_inbox_page(
+            &store.path, "unknown-team", None, None, None,
+        ).is_err());
+        let encoded = format!("{first_page}{second_page}{older}");
+        assert!(!encoded.contains("Private first-Team"));
+        assert!(!encoded.contains("Private second-Team"));
+        assert_eq!(first_page["observationalOnly"], true);
+        assert_eq!(second_page["automaticRecoveryPerformed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        let database = store.path.clone();
+        drop(store);
+        let after_restart: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &database, &first.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(after_restart["items"][0]["ticketId"], private.id);
+    }
+
+    #[test]
+    fn headless_recovery_inbox_is_bounded_across_many_unsettled_demands() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        for n in 0..201 {
+            let (ticket, launched) = admit(&mut store, &cfg.id,
+                "Private batch objective", &format!("recovery-page-{n}"), true).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+        }
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(inbox["items"].as_array().unwrap().len(), 200);
+        assert_eq!(inbox["mayHaveMore"], true);
+        assert_eq!(inbox["pageLimit"], 200);
+        let cursor=&inbox["nextCursor"];
+        assert_eq!(cursor["priority"],2);
+        let second:serde_json::Value=serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path,cursor["priority"].as_i64(),
+                cursor["updatedAt"].as_i64(),cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(),1);
+        assert_eq!(second["mayHaveMore"],false);
+        assert!(second["nextCursor"].is_null());
+        let first_ids:std::collections::HashSet<&str>=inbox["items"].as_array().unwrap()
+            .iter().map(|item|item["ticketId"].as_str().unwrap()).collect();
+        assert!(!first_ids.contains(second["items"][0]["ticketId"].as_str().unwrap()));
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(3),Some(1),Some("valid-id")).is_err());
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(2),Some(1),Some("../escape")).is_err());
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(2),None,Some("valid-id")).is_err());
+        assert!(!serde_json::to_string(&inbox).unwrap()
+            .contains("Private batch objective"));
+        assert!(!serde_json::to_string(&second).unwrap()
+            .contains("Private batch objective"));
+    }
+
+    #[test]
+    fn headless_recovery_cursor_survives_ticket_updates_between_pages() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let mut created_ids = Vec::new();
+        for index in 0..202 {
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Private recovery pagination objective",
+                &format!("stable-recovery-page-{index}"), true,
+            ).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+            created_ids.push(ticket.id);
+        }
+        let initial_audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get(0),
+        ).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(&store.path, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 200);
+        assert_eq!(first["mayHaveMore"], true);
+        let cursor = &first["nextCursor"];
+        assert_eq!(cursor["createdAt"], cursor["updatedAt"]);
+        let observed: std::collections::HashSet<String> = first["items"]
+            .as_array().unwrap().iter()
+            .map(|item| item["ticketId"].as_str().unwrap().to_owned())
+            .collect();
+        let unseen = created_ids.iter()
+            .find(|id| !observed.contains(id.as_str())).unwrap();
+        // Updating an unseen Ticket and the cursor's own Ticket used to
+        // reorder the first one ahead of the boundary or invalidate it.
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=updated_at+100000
+             WHERE id=?1 OR id=?2",
+            params![unseen.as_str(), cursor["ticketId"].as_str().unwrap()],
+        ).unwrap();
+        let second: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path, cursor["priority"].as_i64(),
+                cursor["createdAt"].as_i64(), cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+        assert_eq!(second["mayHaveMore"], false);
+        let mut all = observed;
+        for item in second["items"].as_array().unwrap() {
+            assert!(all.insert(item["ticketId"].as_str().unwrap().to_owned()),
+                "Recovery pagination must not repeat Tickets");
+        }
+        assert_eq!(all.len(), 202, "Status updates must not hide unresolved Tickets");
+        assert!(all.contains(unseen.as_str()));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), initial_audit_count, "Read-only pages must not mutate audit");
+        assert!(!second.to_string().contains("Private recovery pagination objective"));
+    }
+
+    #[test]
+    fn headless_recovery_inspection_is_read_only_and_never_replays_uncertain_effects() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private recovery objective",
+            "headless-recovery-inspection", false,
+        ).unwrap();
+        assert!(launched);
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let running: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(running["state"], "running");
+        assert_eq!(running["recovery"]["activeNativeAssignments"], 1);
+        assert_eq!(running["recovery"]["assignmentStateConsistent"], true);
+        assert_eq!(running["recovery"]["nextOperatorAction"],
+            "verify_live_serve_provider_before_intervention");
+        assert_eq!(running["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(running["recovery"]["observationalOnly"], true);
+        assert!(!serde_json::to_string(&running).unwrap().contains("Private recovery objective"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running",
+            "A parallel read-only inspector must not invoke startup recovery");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before);
+
+        // Simulate a durable external request whose provider outcome is unknown.
+        // Inspection may report it, but may not acknowledge, resend or drop it.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'remote-effect','0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                    'pending',?2,?2)",
+            params![&ticket.id, storage::now()],
+        ).unwrap();
+        let pending: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(pending["recovery"]["pendingExternalEffects"], 1);
+        assert_eq!(pending["recovery"]["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(pending["recovery"]["requiresLiveHostVerification"], true);
+        assert_eq!(pending["recovery"]["nextOperatorAction"],
+            "verify_live_serve_provider_before_intervention",
+            "A live provider must be verified before reconciling its pending effect");
+        assert_eq!(pending["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0),
+        ).unwrap(), "pending");
+
+        stop(&store, &ticket.id).unwrap();
+        let stopped: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(stopped["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(stopped["recovery"]["mandateRevoked"], true);
+        assert_eq!(stopped["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(stopped["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0),
+        ).unwrap(), "uncertain");
+        assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn headless_uncertain_effect_does_not_preempt_live_provider_recovery() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private uncertain effect recovery",
+            "headless-live-uncertain-recovery", false,
+        ).unwrap();
+        assert!(launched);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'remote-uncertain',?2,'uncertain',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let path = store.path.clone();
+        let audit_before = history(&store, &ticket.id, 100).unwrap().len();
+        for _ in 0..2 {
+            let observed: serde_json::Value = serde_json::from_str(
+                &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+            ).unwrap();
+            assert_eq!(observed["recovery"]["uncertainExternalEffects"], 1);
+            assert_eq!(observed["recovery"]["requiresIndependentRemoteReconciliation"], true);
+            assert_eq!(observed["recovery"]["requiresLiveHostVerification"], true);
+            assert_eq!(observed["recovery"]["nextOperatorAction"],
+                "verify_live_serve_provider_before_intervention");
+            assert_eq!(observed["recovery"]["automaticReplayAllowed"], false);
+        }
+        assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_before);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state,
+            "uncertain", "read-only inspection may not settle or replay an effect");
+        // After native Stop removes the running Assignment, the same effect
+        // must remain unresolved and become eligible for independent inquiry.
+        stop(&store, &ticket.id).unwrap();
+        let reopened = Store::open_read_only(&path).unwrap();
+        let observed: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(observed["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(observed["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 5).unwrap()[0].state,
+            "uncertain");
+        assert_eq!(observed["recovery"]["automaticReplayAllowed"], false);
+    }
+
+    #[test]
+    fn admitted_bot_prompt_identity_denies_untrusted_role_or_instruction_rewrites() {
+        for (field, changed) in [
+            ("role", "unapproved elevated role"),
+            ("instructions", "Unapproved replacement task instructions"),
+        ] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let key = format!("native-prompt-drift-{field}");
+            let (ticket, started) = admit(
+                &mut store, &cfg.id, "Keep the admitted task context", &key, false,
+            ).unwrap();
+            assert!(started);
+            let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let admitted = roster::ticket_profile(&store, &ticket.id).unwrap().unwrap();
+            assert!(admitted.members.iter().any(|member| {
+                member.bot_id == "worker"
+                    && member.prompt_identity_sha256.as_deref().is_some_and(|value| value.len()==64)
+            }));
+            assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+            let update = format!("UPDATE bots SET {field}=?1 WHERE id='worker'");
+            store.db.execute(&update, [changed]).unwrap();
+            assert!(read_only_policy(&store, &session_id).is_err(),
+                "{field} drift must deny native tool/provider admission");
+            assert!(on_run_finished(
+                &store, &session_id, true, "Stale model completion",
+            ).unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+                "{field} drift must never become approvable evidence");
+        }
+    }
+
+    #[test]
+    fn historic_read_only_profiles_without_prompt_digest_remain_compatible() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Legacy read-only inspection","legacy-prompt-field",false,
+        ).unwrap();
+        assert!(started);
+        let session_id=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_ticket_profiles
+             SET profiles_json=json_remove(profiles_json,
+               '$[0].promptIdentitySha256','$[1].promptIdentitySha256')
+             WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let snapshot=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert!(snapshot.members.iter().all(|m|m.prompt_identity_sha256.is_none()));
+        assert!(read_only_policy(&store,&session_id).unwrap().is_some());
+        let grant=mandate(&store,&ticket.id).unwrap();
+        assert!(grant.allowed_tools.is_empty() && !grant.allowed_side_effects);
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=
+             json_set(profiles_json,'$[1].promptIdentitySha256','invalid')
+             WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(roster::ticket_profile(&store,&ticket.id).is_err());
+        assert!(read_only_policy(&store,&session_id).is_err());
+    }
+
+    #[test]
+    fn admitted_session_profile_drift_denies_provider_and_final_callback() {
+        for (field, changed) in [
+            ("provider", "claude"),
+            ("model", "unauthorized-model"),
+            ("mode", "ask"),
+            ("reasoning_effort", "high"),
+        ] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let key = format!("session-drift-{field}");
+            let (ticket, started) = admit(
+                &mut store, &cfg.id, "Session-bound inspection", &key, false,
+            ).unwrap();
+            assert!(started, "{field}");
+            let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+            // Only fixed test-owned SQL column names are used; model text
+            // never has permission to change the production session directly.
+            let change = format!("UPDATE sessions SET {field}=?2 WHERE id=?1");
+            store.db.execute(&change, params![session_id, changed]).unwrap();
+            assert!(read_only_policy(&store, &session_id).is_err(),
+                "{field} drift must deny native provider/tool admission");
+            assert!(on_run_finished(
+                &store, &session_id, true, "Untrusted apparent completion",
+            ).unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+                "{field} drift must not become a human-approvable result");
+            let grant = mandate(&store, &ticket.id).unwrap();
+            assert!(grant.allowed_tools.is_empty() && !grant.allowed_side_effects);
+        }
+    }
+
+    #[test]
+    fn admitted_session_survives_bot_profile_edits_without_inheriting_permissions() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Frozen provider inspection", "frozen-session", false,
+        ).unwrap();
+        assert!(started);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original = store.session(&session_id).unwrap();
+        store.db.execute(
+            "UPDATE bots SET provider='claude',model='other-model',mode='full',
+             reasoning_effort='high' WHERE id='worker'",
+            [],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let preserved = store.session(&session_id).unwrap();
+        assert_eq!(preserved.provider, original.provider);
+        assert_eq!(preserved.model, original.model);
+        assert_eq!(preserved.mode, original.mode);
+        assert_eq!(preserved.reasoning_effort, original.reasoning_effort);
+        assert!(on_run_finished(&store, &session_id, true, "Read-only evidence").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+    }
+
+    #[test]
+    fn admitted_team_profiles_are_immutable_restart_safe_and_recheck_new_attempts() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        store.db.execute(
+            "UPDATE bots SET skills='[\"reviewer-skill\"]',reasoning_effort='high'
+             WHERE id='worker'",[],
+        ).unwrap();
+        let (ticket,started)=admit(&mut store,&cfg.id,"Private scope","profile-pin",true).unwrap();
+        assert!(!started);
+        let original=ticket_snapshot(&store,&ticket.id,10).unwrap()
+            .admitted_profile.expect("new Tickets must capture profiles");
+        assert_eq!(original.policy_revision,cfg.policy_revision);
+        assert_eq!(original.members.len(),2);
+        assert_eq!(original.members[1].role,"worker");
+        assert_eq!(original.members[1].model,"default");
+        assert_eq!(original.members[1].reasoning_effort,"high");
+        assert_eq!(original.members[1].assigned_skill_ids,vec!["reviewer-skill"]);
+        let audit_before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET provider='claude',model='different',mode='full',
+                reasoning_effort='low',skills='[]' WHERE id='worker'",[],
+        ).unwrap();
+        let replay=admit(&mut store,&cfg.id,"Private scope","profile-pin",true).unwrap();
+        assert_eq!(replay.0.id,ticket.id);
+        assert!(!replay.1);
+        let pinned=ticket_snapshot(&store,&ticket.id,10).unwrap()
+            .admitted_profile.unwrap();
+        assert_eq!(pinned.members,original.members);
+        let denied=retry_blocked(&mut store,&ticket.id,false).unwrap_err();
+        assert!(denied.contains("changed after Demand admission"));
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),audit_before);
+        let (fresh,_) = admit(&mut store,&cfg.id,"New private scope","fresh-profile",true).unwrap();
+        let new_profile=ticket_snapshot(&store,&fresh.id,10).unwrap()
+            .admitted_profile.unwrap();
+        assert_eq!(new_profile.members[1].model,"different");
+        assert_eq!(new_profile.members[1].assigned_skill_ids,Vec::<String>::new());
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(roster::ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,
+            original.members);
+        assert_eq!(roster::ticket_profile(&reopened,&fresh.id).unwrap().unwrap().members,
+            new_profile.members);
+    }
+
+    #[test]
+    fn v45_upgrade_preserves_historical_ticket_without_fabricating_profile() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (legacy,_) = admit(&mut store,&cfg.id,"Legacy demand","legacy-profile",true).unwrap();
+        store.db.execute_batch(
+            "DROP TABLE sa_ticket_profiles; PRAGMA user_version=45;",
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        let mut migrated=Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&migrated,&legacy.id).unwrap().state,"blocked");
+        assert!(ticket_snapshot(&migrated,&legacy.id,10).unwrap().admitted_profile.is_none());
+        let (fresh,_) = admit(&mut migrated,&cfg.id,"New demand","migrated-profile",true).unwrap();
+        assert!(ticket_snapshot(&migrated,&fresh.id,10).unwrap().admitted_profile.is_some());
+        assert_eq!(migrated.db.pragma_query_value(None,"user_version",
+            |r|r.get::<_,i64>(0)).unwrap(),storage::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn native_ticket_snapshot_inspects_attempt_budget_and_revocation_without_grants() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Private fixture objective", "insight-1", false,
+        ).unwrap();
+        assert!(started);
+        let first = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(first.attempt_insights.len(), 1);
+        let insight = &first.attempt_insights[0];
+        assert_eq!(insight.assignment_id, first.assignments[0].id);
+        assert!(insight.current_assignment);
+        assert!(!insight.mandate_revoked);
+        assert!(!insight.has_result);
+        assert!(!insight.run_budget_expired);
+        assert!(insight.remaining_run_budget_ms.unwrap() > 0);
+        let count_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |r| r.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2, result='private provider result'
+             WHERE id=?1",
+            params![insight.assignment_id, storage::now() - MAX_ASSIGNMENT_RUN_MS - 1000],
+        ).unwrap();
+        let overdue = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(overdue.attempt_insights[0].run_budget_expired);
+        assert!(overdue.attempt_insights[0].has_result);
+        assert_eq!(overdue.attempt_insights[0].remaining_run_budget_ms, Some(0));
+        assert!(!serde_json::to_string(&overdue.attempt_insights).unwrap()
+            .contains("private provider result"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |r| r.get::<_, i64>(0)).unwrap(), count_before);
+        stop(&store, &ticket.id).unwrap();
+        let stopped = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(!stopped.attempt_insights[0].current_assignment);
+        assert!(stopped.attempt_insights[0].mandate_revoked);
+        assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
+    }
+
+
+    #[test]
+    fn headless_run_graph_is_durable_redacted_and_never_recovers_a_live_task() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &config.id, "Private headless graph objective",
+            "headless-graph-1", false,
+        ).unwrap();
+        assert!(admitted);
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let before_mandates: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get(0),
+        ).unwrap();
+        let output = inspect_headless_ticket_graph(&store.path, &ticket.id).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(view["graph"]["ticketId"], ticket.id);
+        assert_eq!(view["graph"]["ticketRevision"], ticket.revision);
+        assert_eq!(view["graph"]["nodes"][0]["kind"], "ticket");
+        assert_eq!(view["graph"]["nodes"][1]["kind"], "assignment");
+        assert_eq!(view["graph"]["nodes"][1]["active"], true);
+        assert_eq!(view["graph"]["edges"][0]["relation"], "owns_attempt");
+        assert_eq!(view["observationalOnly"], true);
+        assert_eq!(view["dynamicSubagentsRepresented"], false);
+        assert_eq!(view["councilVerdictIncluded"], false);
+        assert_eq!(view["providerDispatchedByCommand"], false);
+        assert_eq!(view["recoveryPerformed"], false);
+        for private in ["Private headless graph objective", "headless-graph-1",
+            "authorizationId", "private provider result"] {
+            assert!(!output.contains(private), "Graph disclosed {private}");
+        }
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_mandates);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = inspect_headless_ticket_graph(&path, &ticket.id).unwrap();
+        let after: serde_json::Value = serde_json::from_str(&reopened).unwrap();
+        assert_eq!(after["graph"], view["graph"]);
+        assert!(inspect_headless_ticket_graph(&path, "missing-ticket").is_err());
+    }
+
+    #[test]
+    fn native_run_graph_uses_only_durable_ticket_attempt_edges_and_is_redacted() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &config.id,
+            "Private graph objective", "graph-1", false).unwrap();
+        assert!(launched);
+        let graph = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(graph.ticket_id, ticket.id);
+        assert_eq!(graph.ticket_revision, ticket.revision);
+        assert!(!graph.truncated_attempts);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].relation, "owns_attempt");
+        assert_eq!(graph.edges[0].from, format!("ticket:{}", ticket.id));
+        assert_eq!(graph.nodes[1].kind, "assignment");
+        assert_eq!(graph.nodes[1].attempt, Some(1));
+        assert!(graph.nodes[1].active);
+        let serialized = serde_json::to_string(&graph).unwrap();
+        assert!(!serialized.contains("Private graph objective"));
+        assert!(!serialized.contains("authorizationId"));
+        assert!(run_graph(&store, "another-ticket").is_err());
+        stop(&store, &ticket.id).unwrap();
+        let after = run_graph(&store, &ticket.id).unwrap();
+        assert!(!after.nodes[1].active);
+        assert_eq!(after.nodes[0].state, "stopped");
+        let total: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(total,1,"Graph inspection must not launch another demand");
+        // The native graph is bounded but must not claim truncation at
+        // exactly 50 attempts. Once a 51st exists, preserve the latest 50.
+        for attempt in 2..=50 {
+            store.db.execute(
+                "INSERT INTO sa_assignments
+                 (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+                 VALUES(?1,?2,'worker',?3,'finished',?4,?5,?5)",
+                params![
+                    format!("graph-assignment-{attempt}"), &ticket.id,
+                    format!("graph-session-{attempt}"),attempt,storage::now(),
+                ],
+            ).unwrap();
+        }
+        let exactly_fifty = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(exactly_fifty.nodes.len(), 51);
+        assert!(!exactly_fifty.truncated_attempts);
+        store.db.execute(
+            "INSERT INTO sa_assignments
+             (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES('graph-assignment-51',?1,'worker','graph-session-51',
+                    'finished',51,?2,?2)",
+            params![&ticket.id, storage::now()],
+        ).unwrap();
+        let capped = run_graph(&store, &ticket.id).unwrap();
+        assert_eq!(capped.nodes.len(),51);
+        assert!(capped.truncated_attempts);
+        assert_eq!(capped.nodes[1].attempt, Some(2));
+        assert_eq!(capped.nodes[50].attempt, Some(51));
+    }
+
+    #[test]
+    fn headless_revision_bound_stop_denies_stale_observation_without_revocation() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Revision-safe operator Stop", "headless-stop-cas", false,
+        ).unwrap();
+        assert!(admitted);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let audit_before = history(&store, &ticket.id, 20).unwrap().len();
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision + 1,
+        ).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before);
+        let result: serde_json::Value = serde_json::from_str(
+            &headless_stop_ticket_at_revision(&store.path, &ticket.id, ticket.revision).unwrap(),
+        ).unwrap();
+        assert_eq!(result["state"], "stopped");
+        assert_eq!(result["revision"], ticket.revision + 1);
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before + 1);
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision,
+        ).is_err(), "a stale command may not repeat or revive Stop");
+        assert!(!on_run_finished(&store, &session, true, "Late provider result").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+    }
+
+    #[test]
+    fn headless_stopped_ticket_cancels_only_its_live_native_provider_session() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(&mut store, &cfg.id,
+            "Stop test in disposable workspace", "headless-stop-live", false).unwrap();
+        assert!(admitted);
+        let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "unrelated-normal-chat",
+            "Unrelated ordinary chat",
+        ).unwrap().0;
+        let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+        assert!(headless_cancelled_assignments(&store, &active).unwrap().is_empty());
+        // Simulates a one-shot headless control process writing revocation to
+        // the same SQLite database while the owner retains its provider handle.
+        let stopped = headless_stop_ticket(&store.path, &ticket.id).unwrap();
+        assert!(stopped.contains("stopped"));
+        let to_cancel = headless_cancelled_assignments(&store, &active).unwrap();
+        assert_eq!(to_cancel, vec![assigned.clone()]);
+        assert!(!to_cancel.contains(&ordinary));
+        assert!(headless_cancelled_assignments(&store, &[]).unwrap().is_empty());
+        assert_eq!(headless_cancelled_assignments(&store, &active).unwrap(), to_cancel);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert!(read_only_policy(&store, &assigned).is_err());
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "normal bot paths cannot inherit task revocation");
+    }
+
+    #[test]
+    fn headless_poll_fences_admission_profile_and_thread_drift_before_watchdog() {
+        for scenario in ["thread-remapped", "model-changed", "checkout-moved"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Inspect native task authority",
+                &format!("headless-exact-authority-{scenario}"), false,
+            ).unwrap();
+            assert!(launched, "{scenario}");
+            let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let worker = bots::get(&store, "worker").unwrap();
+            let ordinary = bots::thread_session(
+                &store, &worker, "desktop", "ordinary-exact-authority",
+                "Ordinary bot chat",
+            ).unwrap().0;
+            let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+            assert!(headless_cancelled_assignments_with_pause(
+                &store, &active, false,
+            ).unwrap().is_empty(), "{scenario}: original authority is valid");
+
+            match scenario {
+                "thread-remapped" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bot_threads SET external_id='untrusted-ticket'
+                         WHERE session_id=?1 AND channel_id=?2",
+                        params![&assigned, CHANNEL],
+                    ).unwrap(), 1);
+                }
+                "model-changed" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                        [&assigned],
+                    ).unwrap(), 1);
+                }
+                "checkout-moved" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE projects SET path='/tmp/disposable-superagent-moved'
+                         WHERE id='project'",
+                        [],
+                    ).unwrap(), 1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &assigned).is_err(), "{scenario}");
+            let to_cancel = headless_cancelled_assignments_with_pause(
+                &store, &active, false,
+            ).unwrap();
+            assert_eq!(to_cancel, vec![assigned.clone()], "{scenario}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running",
+                "polling may cancel a handle but cannot settle a Ticket");
+            assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+                &store, &ordinary,
+            ).is_ok(), "{scenario}: ordinary chat remains unaffected");
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(headless_cancelled_assignments_with_pause(
+                &reopened, &active, false,
+            ).unwrap(), vec![assigned], "{scenario}: restart-safe native refusal");
+        }
+    }
+
+    #[test]
+    fn headless_poll_cancels_orphaned_or_revoked_running_native_sessions() {
+        for scenario in ["detached", "revoked", "policy-drift", "blocked",
+            "expired-mandate", "disabled-team", "paused-worker",
+            "paused-coordinator", "worker-project-drift", "expired-assignment",
+            "unexpected-tools"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, admitted) = admit(
+                &mut store, &cfg.id, "Recover task-owned provider",
+                "headless-authority-loss", false,
+            ).unwrap();
+            assert!(admitted, "{scenario}");
+            let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let worker = bots::get(&store, "worker").unwrap();
+            let ordinary = bots::thread_session(
+                &store, &worker, "desktop", "unrelated-normal-chat",
+                "Unrelated ordinary chat",
+            ).unwrap().0;
+            let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+            assert!(headless_cancelled_assignments(&store, &active).unwrap().is_empty());
+
+            // Another local operator or recovery path may invalidate native
+            // authority while the owning serve process retains a provider.
+            match scenario {
+                "detached" => store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "revoked" => store.db.execute(
+                    "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "policy-drift" => store.db.execute(
+                    "UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "blocked" => store.db.execute(
+                    "UPDATE sa_tickets SET state='blocked' WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "expired-mandate" => store.db.execute(
+                    "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+                    params![ticket.id, storage::now()-1],
+                ).unwrap(),
+                "disabled-team" => store.db.execute(
+                    "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                    [&cfg.id],
+                ).unwrap(),
+                "paused-worker" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='worker'", [],
+                ).unwrap(),
+                "paused-coordinator" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='router'", [],
+                ).unwrap(),
+                "worker-project-drift" => {
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path)
+                         VALUES('other-project','Other','/tmp/sa-worker-moved')", [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE bots SET project_id='other-project' WHERE id='worker'", [],
+                    ).unwrap()
+                },
+                "expired-assignment" => store.db.execute(
+                    "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+                    params![ticket.id, storage::now()-MAX_ASSIGNMENT_RUN_MS-1000],
+                ).unwrap(),
+                "unexpected-tools" => store.db.execute(
+                    "UPDATE sa_mandates SET allowed_tools=?2 WHERE ticket_id=?1",
+                    params![ticket.id, "[\"write\"]"],
+                ).unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(read_only_policy(&store, &assigned).is_err(), "{scenario}");
+            assert_eq!(
+                headless_cancelled_assignments(&store, &active).unwrap(),
+                vec![assigned.clone()],
+                "{scenario}",
+            );
+            assert_eq!(
+                headless_cancelled_assignments(&store, &active).unwrap(),
+                vec![assigned],
+                "watchdog polling is read-only and idempotent: {scenario}",
+            );
+            assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+                &store, &ordinary,
+            ).is_ok(), "ordinary bot paths must not inherit task revocation: {scenario}");
+        }
+    }
+
+    #[test]
+    fn headless_poll_immediately_fences_settled_and_paused_task_handles_only() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Finish without a lingering provider handle",
+            "headless-completion-lease", false,
+        ).unwrap();
+        assert!(admitted);
+        let task_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "ordinary-headless-poll",
+            "Unrelated ordinary chat",
+        ).unwrap().0;
+        let handles = vec![ordinary.clone(), task_session.clone(), task_session.clone()];
+
+        assert!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap().is_empty(), "healthy task and ordinary chat remain live");
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, true,
+        ).unwrap(), vec![task_session.clone()], "a global pause stops only task-owned providers");
+        assert!(headless_cancelled_assignments_with_pause(
+            &store, std::slice::from_ref(&ordinary), true,
+        ).unwrap().is_empty(), "ordinary sessions keep their independent cancellation path");
+
+        // A provider can retain a live handle after its native Assignment
+        // has settled; late turns must not continue that finished task.
+        assert!(on_run_finished(&store, &task_session, true, "Coordinator plan recorded").unwrap());
+        let state: String = store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE session_id=?1",
+            [&task_session], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "finished");
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap(), vec![task_session.clone()]);
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap(), vec![task_session], "polling remains read-only and deduplicated");
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "task settlement cannot alter ordinary bot permissions");
+    }
+
+    #[test]
+    fn orphaned_superagent_thread_is_cancelled_and_never_resumes_as_ordinary_work() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Protect the original task session",
+            "orphaned-internal-thread", false,
+        ).unwrap();
+        assert!(launched);
+        let task_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let ordinary = store.create_session("project", "codex", "default", "ask")
+            .unwrap().id;
+        let both = vec![task_session.clone(), ordinary.clone()];
+        assert!(headless_cancelled_assignments_with_pause(&store, &both, false)
+            .unwrap().is_empty(), "healthy native and ordinary sessions stay live");
+
+        // Simulate a corrupted legacy writer removing the native Assignment
+        // without deleting the still-running provider session or bot thread.
+        store.db.execute(
+            "DELETE FROM sa_assignments WHERE session_id=?1", [&task_session],
+        ).unwrap();
+        assert!(has_task_assignment_history(&store, &task_session).unwrap());
+        assert!(!has_task_assignment_history(&store, &ordinary).unwrap());
+        assert!(read_only_policy(&store, &task_session).is_err());
+        assert_eq!(
+            headless_cancelled_assignments_with_pause(&store, &both, false).unwrap(),
+            vec![task_session.clone()],
+            "an orphaned internal task must be cancelled without touching ordinary work",
+        );
+
+        let database_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&database_path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert!(has_task_assignment_history(&reopened, &task_session).unwrap());
+        assert!(!has_task_assignment_history(&reopened, &ordinary).unwrap());
+        assert_eq!(
+            headless_cancelled_assignments_with_pause(&reopened, &both, false).unwrap(),
+            vec![task_session],
+            "restart must not reclassify an orphaned provider as a regular chat",
+        );
+    }
+
+    #[test]
+    fn headless_unattended_resume_rejects_task_session_after_stop_and_restart() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Do not replay this assignment",
+            "headless-no-unattended-replay", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(has_task_assignment_history(&store, &session).unwrap());
+        assert!(!has_task_assignment_history(&store, "unrelated-normal-session").unwrap());
+        stop(&store, &ticket.id).unwrap();
+        assert!(has_task_assignment_history(&store, &session).unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert!(has_task_assignment_history(&reopened, &session).unwrap());
+        assert!(!has_task_assignment_history(&reopened, "unrelated-normal-session").unwrap());
+        // Both headless automatic delivery routes consult assignment history.
+        // Neither a discarded bot-thread nor a restart can reclassify this as
+        // an ordinary session eligible for unattended provider turns.
+        let attempts: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(attempts, 1);
+    }
 
     #[test]
     fn headless_run_budget_diagnostic_is_native_redacted_and_nonmutating() {
@@ -2117,6 +8268,851 @@ mod tests {
         assert!(read_only_policy(&store, &sid).is_err());
         assert!(!on_run_finished(&store, &sid, true, "late worker success").unwrap_or(false)
             || get_ticket(&store, &ticket.id).unwrap().state != "waiting_approval");
+    }
+
+    #[test]
+    fn native_review_inbox_separates_human_and_unverified_council_states() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Second native review Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let (human, started) = admit(
+            &mut store, &first.id, "Human review only", "review-inbox-human", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &human.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "PRIVATE NATIVE EVIDENCE").unwrap());
+        let (council, started) = admit(
+            &mut store, &second.id, "Council pending", "review-inbox-council", true,
+        ).unwrap();
+        assert!(!started);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review',updated_at=updated_at+1 WHERE id=?1",
+            [&council.id],
+        ).unwrap();
+        let pending = list_review_inbox(&store, 200).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|row| row.id == human.id
+            && row.state == "waiting_approval" && row.orchestration_id == first.id));
+        assert!(pending.iter().any(|row| row.id == council.id
+            && row.state == "waiting_review" && row.orchestration_id == second.id));
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(!json.contains("PRIVATE NATIVE EVIDENCE"));
+        assert!(!json.contains("review-inbox-human"));
+        assert!(list_review_inbox(&store, 1).unwrap().len() == 1);
+        assert!(list_review_inbox(&store, 0).is_err());
+        assert!(list_review_inbox(&store, 201).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_review_inbox(&read_only, 200).unwrap().len(), 2);
+        let headless = list_headless_review_inbox(&path).unwrap();
+        let projection:serde_json::Value = serde_json::from_str(&headless).unwrap();
+        let rows = projection["tickets"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|item| item["ticketId"] == human.id
+            && item["state"] == "waiting_approval"
+            && item["nextOperatorAction"] == "inspect_current_revision_before_human_decision"));
+        assert!(rows.iter().any(|item| item["ticketId"] == council.id
+            && item["state"] == "waiting_review"
+            && item["nextOperatorAction"] == "await_fresh_task_bound_native_council"));
+        assert_eq!(projection["observationalOnly"],true);
+        assert_eq!(projection["startupRecoveryPerformed"],false);
+        assert_eq!(projection["mayHaveMore"],false);
+        assert!(!headless.contains("Human review only"));
+        assert!(!headless.contains("Council pending"));
+        assert!(!headless.contains("PRIVATE NATIVE EVIDENCE"));
+        assert!(list_headless_review_inbox(
+            &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
+        ).is_err());
+    }
+
+    #[test]
+    fn headless_review_inbox_pages_tied_timestamps_after_restart_without_grants() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let state = if index % 2 == 0 { "waiting_approval" } else { "waiting_review" };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                         source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'PRIVATE review objective','local-user','manual',?4,
+                        'worker',?5,?6,100000,100000)",
+                params![format!("review-page-{index:03}"), team.id,
+                    format!("review-request-{index:03}"), team.project_id,
+                    team.policy_revision, state],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked' WHERE id='review-page-204'", [],
+        ).unwrap();
+        // Desktop and headless read the same durable native Ticket-state/cursor ordering.
+        let desktop_first = list_review_inbox_page(&store, 200, None, None).unwrap();
+        assert_eq!(desktop_first.len(), 200);
+        let last = desktop_first.last().unwrap();
+        let desktop_next = list_review_inbox_page(
+            &store, 200, Some(last.updated_at), Some(&last.id),
+        ).unwrap();
+        assert_eq!(desktop_next.len(), 4);
+        let unique: std::collections::HashSet<_> = desktop_first.iter()
+            .chain(desktop_next.iter()).map(|item| item.id.as_str()).collect();
+        assert_eq!(unique.len(), 204);
+        assert!(desktop_first.iter().chain(desktop_next.iter()).all(|item|
+            item.state == "waiting_approval" || item.state == "waiting_review"));
+        assert!(list_review_inbox_page(&store, 200, Some(last.updated_at), None).is_err());
+        assert!(list_review_inbox_page(&store, 200, Some(last.updated_at), Some("../bad")).is_err());
+        let first: serde_json::Value = serde_json::from_str(
+            &list_headless_review_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(first["tickets"].as_array().unwrap().len(), 200);
+        assert_eq!(first["mayHaveMore"], true);
+        let at = first["nextCursor"]["updatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["ticketId"].as_str().unwrap().to_string();
+        let path = store.path.clone();
+        drop(store);
+        let later_text = list_headless_review_inbox_page(&path, Some(at), Some(&id)).unwrap();
+        let later: serde_json::Value = serde_json::from_str(&later_text).unwrap();
+        assert_eq!(later["tickets"].as_array().unwrap().len(), 4);
+        assert_eq!(later["mayHaveMore"], false);
+        assert!(later["nextCursor"].is_null());
+        let mut ids = std::collections::HashSet::new();
+        for page in [&first, &later] {
+            for item in page["tickets"].as_array().unwrap() {
+                assert!(ids.insert(item["ticketId"].as_str().unwrap()));
+                assert!(item["state"] == "waiting_approval" || item["state"] == "waiting_review");
+                assert_eq!(item["nativeCouncilPassVerifiedByThisCommand"], false);
+                assert_eq!(item["acceptanceAuthorizedByThisCommand"], false);
+            }
+        }
+        assert_eq!(ids.len(), 204);
+        assert!(!later_text.contains("PRIVATE review objective"));
+        assert!(list_headless_review_inbox_page(&path, Some(at), None).is_err());
+        assert!(list_headless_review_inbox_page(&path, None, Some(&id)).is_err());
+        assert!(list_headless_review_inbox_page(&path, Some(at), Some("../bad")).is_err());
+        assert!(list_headless_review_inbox_page(&path, Some(0), Some(&id)).is_err());
+    }
+
+    #[test]
+    fn headless_team_review_inbox_scopes_before_paging_and_rejects_foreign_cursors() {
+        let store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Other review Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        for index in 0..208_i64 {
+            let team = if index < 205 { &first } else { &second };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                         source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'PRIVATE TEAM REVIEW','local-user','manual',?4,
+                        'worker',?5,?6,100000,100000)",
+                params![format!("team-review-{index:03}"),team.id,
+                    format!("team-review-key-{index:03}"),team.project_id,
+                    team.policy_revision,
+                    if index % 2 == 0 { "waiting_approval" } else { "waiting_review" }],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        let first_team_id = first.id.clone();
+        let second_team_id = second.id.clone();
+        let first_text = list_headless_team_review_inbox_page(
+            &path, &first_team_id, None, None,
+        ).unwrap();
+        let first_page: serde_json::Value = serde_json::from_str(&first_text).unwrap();
+        assert_eq!(first_page["tickets"].as_array().unwrap().len(), 200);
+        assert_eq!(first_page["mayHaveMore"], true);
+        assert_eq!(first_page["orchestrationId"].as_str(), Some(first_team_id.as_str()));
+        let at = first_page["nextCursor"]["updatedAt"].as_i64().unwrap();
+        let id = first_page["nextCursor"]["ticketId"].as_str().unwrap().to_owned();
+        assert!(list_headless_team_review_inbox_page(
+            &path, &second_team_id, Some(at), Some(&id),
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, "unknown-team", None, None,
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), Some("team-review-205"),
+        ).is_err());
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), None,
+        ).is_err());
+        drop(store);
+        let next_text = list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(at), Some(&id),
+        ).unwrap();
+        let next: serde_json::Value = serde_json::from_str(&next_text).unwrap();
+        assert_eq!(next["tickets"].as_array().unwrap().len(), 5);
+        assert_eq!(next["mayHaveMore"], false);
+        assert!(next["nextCursor"].is_null());
+        let mut seen = std::collections::HashSet::new();
+        for page in [&first_page, &next] {
+            for row in page["tickets"].as_array().unwrap() {
+                assert_eq!(row["orchestrationId"].as_str(), Some(first_team_id.as_str()));
+                assert_eq!(row["nativeCouncilPassVerifiedByThisCommand"], false);
+                assert_eq!(row["acceptanceAuthorizedByThisCommand"], false);
+                assert!(seen.insert(row["ticketId"].as_str().unwrap().to_owned()));
+            }
+        }
+        assert_eq!(seen.len(), 205);
+        let other_text = list_headless_team_review_inbox_page(
+            &path, &second_team_id, None, None,
+        ).unwrap();
+        let other: serde_json::Value = serde_json::from_str(&other_text).unwrap();
+        assert_eq!(other["tickets"].as_array().unwrap().len(), 3);
+        assert!(!first_text.contains("PRIVATE TEAM REVIEW"));
+        assert!(!next_text.contains("PRIVATE TEAM REVIEW"));
+        let after = Store::open_read_only(&path).unwrap();
+        let audit_after: i64 = after.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_before, audit_after);
+        assert!(list_headless_team_review_inbox_page(
+            &path, &first_team_id, Some(0), Some(&id),
+        ).is_err());
+    }
+
+    #[test]
+    fn native_cross_team_demand_index_is_bounded_and_excludes_private_evidence() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Second reusable Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let (one, started) = admit(
+            &mut store, &first.id, "First demand", "first-demand", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &one.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "PRIVATE WORKER EVIDENCE").unwrap());
+        let pending = get_ticket(&store, &one.id).unwrap();
+        accept(&store, &one.id, pending.revision).unwrap();
+        let (two, started) = admit(
+            &mut store, &second.id, "Second demand", "second-demand", false,
+        ).unwrap();
+        assert!(started);
+        let all = list_all_demands(&store, 200).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|row| row.id == one.id && row.orchestration_id == first.id
+            && row.state == "completed"));
+        assert!(all.iter().any(|row| row.id == two.id && row.orchestration_id == second.id
+            && row.state == "running"));
+        assert_eq!(list_all_demands(&store, 1).unwrap().len(), 1);
+        assert!(list_all_demands(&store, 0).is_err());
+        assert!(list_all_demands(&store, 201).is_err());
+        assert_eq!(list_tickets(&store, &first.id, 50).unwrap().len(), 1);
+        let serialized = serde_json::to_string(&all).unwrap();
+        assert!(!serialized.contains("PRIVATE WORKER EVIDENCE"));
+        assert!(!serialized.contains("first-demand"));
+        assert!(!serialized.contains("authorizationId"));
+        assert!(!serialized.contains("sessionId"));
+    }
+
+
+    #[test]
+    fn native_demand_search_is_pre_paginated_scoped_literal_and_restart_safe() {
+        let store = fixture();
+        let first = create_configuration(&store, NewOrchestration {
+            name: "Searchable Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Unrelated Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Unrelated newer demand','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("recent-{index:03}"), first.id,
+                    format!("recent-request-{index:03}"), first.project_id,
+                    first.policy_revision, 5000 + index],
+            ).unwrap();
+        }
+        for (id, objective, timestamp) in [
+            ("match-a", "Needle delivery", 3000_i64),
+            ("match-b", "Review 100%_NEEDLE evidence", 2000_i64),
+            ("match-c", "needle regression", 1000_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',
+                        ?5,'worker',?6,'blocked',?7,?7)",
+                params![id,first.id,format!("{id}-request"),objective,
+                    first.project_id,first.policy_revision,timestamp],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('other-needle',?1,'other-needle-request','Needle other Team',
+                    'local-user','manual',?2,'worker',?3,'blocked',9000,9000)",
+            params![other.id,other.project_id,other.policy_revision],
+        ).unwrap();
+        let search = |before_at, before_id| list_all_demands_page_searched(
+            &store, 2, before_at, before_id, Some(&first.id), Some("blocked"),
+            Some("NEEDLE"),
+        );
+        let first_page = search(None, None).unwrap();
+        assert_eq!(first_page.iter().map(|item| item.id.as_str())
+            .collect::<Vec<_>>(), vec!["match-a", "match-b"]);
+        let second_page = search(Some(2000), Some("match-b")).unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].id, "match-c");
+        assert!(search(Some(1000), Some("match-c")).unwrap().is_empty());
+        assert_eq!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"), Some("%_needle"),
+        ).unwrap()[0].id, "match-b");
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("running"), Some("needle"),
+        ).unwrap().is_empty());
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"),
+            Some("' OR 1=1 --"),
+        ).unwrap().is_empty());
+        for invalid in ["", "   ", "a\nneedle", "a\u{0000}needle"] {
+            assert!(list_all_demands_page_searched(
+                &store, 200, None, None, Some(&first.id), None, Some(invalid),
+            ).is_err());
+        }
+        let oversized = "n".repeat(129);
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, None, None, Some(&oversized),
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_searched(
+            &reopened, 200, None, None, Some(&first.id), Some("blocked"), Some("needle"),
+        ).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn native_state_filter_is_bounded_pre_paginated_team_scoped_and_restart_safe() {
+        let store = fixture();
+        let first = create_configuration(&store, NewOrchestration {
+            name:"State filter".into(), coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let second = create_configuration(&store, NewOrchestration {
+            name:"Other state".into(), coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        for i in 0..205_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Filtered native objective','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("blocked-{i:03}"),first.id,format!("blocked-key-{i:03}"),
+                    first.project_id,first.policy_revision,1000+i/3],
+            ).unwrap();
+        }
+        for i in 0..3_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Other state objective','local-user','manual',
+                        ?4,'worker',?5,'running',?6,?6)",
+                params![format!("running-{i}"),first.id,format!("running-key-{i}"),
+                    first.project_id,first.policy_revision,3000+i],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('other-blocked',?1,'other-key','Other team objective',
+                    'local-user','manual',?2,'worker',?3,'blocked',4000,4000)",
+            params![second.id,second.project_id,second.policy_revision],
+        ).unwrap();
+        let first_page = list_all_demands_page_filtered(
+            &store,200,None,None,Some(&first.id),Some("blocked"),
+        ).unwrap();
+        assert_eq!(first_page.len(),200);
+        assert!(first_page.iter().all(|t| t.orchestration_id==first.id
+            && t.state=="blocked"));
+        let boundary=first_page.last().unwrap();
+        let last_page=list_all_demands_page_filtered(
+            &store,200,Some(boundary.updated_at),Some(&boundary.id),
+            Some(&first.id),Some("blocked"),
+        ).unwrap();
+        assert_eq!(last_page.len(),5);
+        let ids:std::collections::HashSet<_>=first_page.iter().chain(last_page.iter())
+            .map(|t|t.id.as_str()).collect();
+        assert_eq!(ids.len(),205);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,Some(&first.id),Some("running"),
+        ).unwrap().len(),3);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,Some(&second.id),Some("blocked"),
+        ).unwrap().len(),1);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,None,Some("blocked"),
+        ).unwrap()[0].orchestration_id,second.id);
+        for invalid in ["all","BLOCKED","blocked' OR 1=1 --","", "running "] {
+            assert!(list_all_demands_page_filtered(
+                &store,200,None,None,Some(&first.id),Some(invalid),
+            ).is_err());
+        }
+        assert!(list_all_demands_page_filtered(
+            &store,200,Some(5),None,Some(&first.id),Some("blocked"),
+        ).is_err());
+        let path=store.path.clone(); drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_filtered(
+            &reopened,200,None,None,Some(&first.id),Some("running"),
+        ).unwrap().len(),3);
+    }
+
+    #[test]
+    fn native_team_filtered_demand_pages_are_complete_isolated_and_restart_safe() {
+        let store = fixture();
+        let first_team = create_configuration(&store, NewOrchestration {
+            name: "Economy Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let second_team = create_configuration(&store, NewOrchestration {
+            name: "Performance Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205_i64 {
+            let id = format!("economy-{index:03}");
+            let key = format!("economy-request-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Private native objective','local-user','manual',
+                        ?4,'worker',?5,'queued',?6,?6)",
+                params![id,first_team.id,key,first_team.project_id,
+                    first_team.policy_revision,1_000 + index / 3],
+            ).unwrap();
+        }
+        for index in 0..3_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Other Team private demand','local-user','manual',
+                        ?4,'worker',?5,'queued',?6,?6)",
+                params![format!("performance-{index}"),second_team.id,
+                    format!("performance-request-{index}"),second_team.project_id,
+                    second_team.policy_revision,2_000 + index],
+            ).unwrap();
+        }
+        let first = list_all_demands_page(
+            &store, 200, None, None, Some(&first_team.id),
+        ).unwrap();
+        assert_eq!(first.len(), 200);
+        assert!(first.iter().all(|ticket| ticket.orchestration_id == first_team.id));
+        let last = first.last().unwrap();
+        let next = list_all_demands_page(
+            &store, 200, Some(last.updated_at), Some(&last.id),
+            Some(&first_team.id),
+        ).unwrap();
+        assert_eq!(next.len(), 5);
+        let ids: std::collections::HashSet<_> = first.iter().chain(next.iter())
+            .map(|ticket| ticket.id.as_str()).collect();
+        assert_eq!(ids.len(), 205, "Pagination must not skip or duplicate Team Tickets");
+        let other = list_all_demands_page(
+            &store, 200, None, None, Some(&second_team.id),
+        ).unwrap();
+        assert_eq!(other.len(), 3);
+        assert!(other.iter().all(|ticket| ticket.orchestration_id == second_team.id));
+        assert_eq!(list_all_demands_page(&store, 200, None, None, None).unwrap().len(), 200);
+        assert!(list_all_demands_page(&store, 200, None, None, Some("../escape")).is_err());
+        assert!(list_all_demands_page(&store, 200, None, None, Some("unknown-team")).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let readonly = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page(
+            &readonly, 200, None, None, Some(&second_team.id)
+        ).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn cross_team_demand_pages_preserve_order_ties_and_durable_history() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let id = format!("page-{index:03}");
+            let key = format!("request-{index:03}");
+            let objective = format!("Work item {index}");
+            // Several Tickets share the same clock tick; the ID breaks ties.
+            let at = 1_000 + index / 3;
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',?5,'worker',?6,'queued',?7,?7)",
+                params![id,team.id,key,objective,team.project_id,team.policy_revision,at],
+            ).unwrap();
+        }
+        let first = list_all_demands_page(&store, 200, None, None, None).unwrap();
+        assert_eq!(first.len(), 200);
+        assert_eq!(first[0].id, "page-204");
+        let boundary = first.last().unwrap();
+        let second = list_all_demands_page(
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id), None
+        ).unwrap();
+        assert_eq!(second.len(), 5);
+        assert_eq!(second.last().unwrap().id, "page-000");
+        let all_ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
+            .map(|item| item.id.clone()).collect();
+        assert_eq!(all_ids.len(), 205, "No skipped or repeated Ticket at timestamp ties");
+        assert!(list_all_demands_page(&store, 10, Some(1), None, None).is_err());
+        assert!(list_all_demands_page(&store, 10, None, Some("page-000"), None).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(-1), Some("page-000"), None).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(1000), Some("../leak"), None).is_err());
+        assert!(list_all_demands_page(&store, 201, None, None, None).is_err());
+        // A newer update cannot enter a page requested with an older cursor.
+        store.db.execute(
+            "UPDATE sa_tickets SET updated_at=9999 WHERE id='page-000'", []
+        ).unwrap();
+        assert!(!list_all_demands_page(
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id), None
+        ).unwrap().iter().any(|item| item.id == "page-000"));
+        assert_eq!(list_all_demands_page(&store, 1, None, None, None).unwrap()[0].id, "page-000");
+        assert!(first.iter().all(|item| item.revision == 0));
+    }
+
+    #[test]
+    fn headless_team_demand_listing_is_native_read_only_redacted_and_state_scoped() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name:"Headless filtered Team".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name:"Other filtered Team".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        for (id,owner,state) in [
+            ("task-blocked",&team,"blocked"),
+            ("task-running",&team,"running"),
+            ("other-blocked",&other,"blocked"),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,?5,1000,1000)",
+                params![id,owner.id,owner.project_id,owner.policy_revision,state],
+            ).unwrap();
+        }
+        let path=store.path.clone();
+        drop(store);
+        let output=list_headless_team_demands(&path,&team.id,"blocked",None,None).unwrap();
+        let parsed:serde_json::Value=serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["orchestrationId"],team.id);
+        assert_eq!(parsed["observationalOnly"],true);
+        assert_eq!(parsed["mayHaveMore"],false);
+        assert_eq!(parsed["demands"].as_array().unwrap().len(),1);
+        assert_eq!(parsed["demands"][0]["ticketId"],"task-blocked");
+        for private in ["PRIVATE OBJECTIVE","authorizationId","sessionId",
+            "worker_bot_id","other-blocked","task-running"] {
+            assert!(!output.contains(private), "Leak: {private}");
+        }
+        let all=list_headless_team_demands(&path,&team.id,"all",None,None).unwrap();
+        let parsed:serde_json::Value=serde_json::from_str(&all).unwrap();
+        assert_eq!(parsed["demands"].as_array().unwrap().len(),2);
+        assert!(list_headless_team_demands(&path,&team.id,"BLOCKED",None,None).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked' OR 1=1 --",None,None).is_err());
+        assert!(list_headless_team_demands(&path,"not-a-Team","all",None,None).is_err());
+        let verify=Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_filtered(
+            &verify,200,None,None,Some(&team.id),None,
+        ).unwrap().len(),2);
+    }
+
+    #[test]
+    fn headless_team_demand_cursor_is_complete_redacted_and_restart_safe() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Headless paged Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205 {
+            let id = format!("page-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE CURSOR OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,'blocked',1000,2000)",
+                params![id,team.id,team.project_id,team.policy_revision],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let first_raw = list_headless_team_demands(&path,&team.id,"blocked",None,None).unwrap();
+        let searched_raw = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("CURSOR"),
+        ).unwrap();
+        let searched: serde_json::Value = serde_json::from_str(&searched_raw).unwrap();
+        assert_eq!(searched["searchApplied"], true);
+        assert_eq!(searched["demands"].as_array().unwrap().len(), 200);
+        assert!(!searched_raw.contains("PRIVATE CURSOR OBJECTIVE"));
+        let no_match = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("unrelated"),
+        ).unwrap();
+        let no_match: serde_json::Value = serde_json::from_str(&no_match).unwrap();
+        assert_eq!(no_match["demands"].as_array().unwrap().len(), 0);
+        let injection = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("' OR 1=1 --"),
+        ).unwrap();
+        let injection: serde_json::Value = serde_json::from_str(&injection).unwrap();
+        assert_eq!(injection["demands"].as_array().unwrap().len(), 0);
+        for invalid in ["", "  ", "a\nnewline"] {
+            assert!(list_headless_team_demands_searched(
+                &path, &team.id, "blocked", None, None, Some(invalid),
+            ).is_err());
+        }
+        let oversized = "x".repeat(129);
+        assert!(list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some(&oversized),
+        ).is_err());
+        let first:serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        assert_eq!(first["demands"].as_array().unwrap().len(),200);
+        assert_eq!(first["mayHaveMore"],true);
+        let time = first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["beforeId"].as_str().unwrap();
+        let next_raw = list_headless_team_demands(
+            &path,&team.id,"blocked",Some(time),Some(id),
+        ).unwrap();
+        let next:serde_json::Value = serde_json::from_str(&next_raw).unwrap();
+        assert_eq!(next["demands"].as_array().unwrap().len(),5);
+        let searched_next = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", Some(time), Some(id), Some("CURSOR"),
+        ).unwrap();
+        let searched_next: serde_json::Value = serde_json::from_str(&searched_next).unwrap();
+        assert_eq!(searched_next["demands"].as_array().unwrap().len(), 5);
+        assert_eq!(next["mayHaveMore"],false);
+        assert!(next["nextCursor"].is_null());
+        let ids:std::collections::HashSet<_> = first["demands"].as_array().unwrap()
+            .iter().chain(next["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids.len(),205);
+        for secret in ["PRIVATE CURSOR OBJECTIVE","request_key","actor","sessionId",
+            "authorizationId","worker_bot_id"] {
+            assert!(!first_raw.contains(secret) && !next_raw.contains(secret));
+        }
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",Some(time),None).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",None,Some(id)).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",Some(-1),Some(id)).is_err());
+        assert!(list_headless_team_demands(
+            &path,&team.id,"blocked",Some(time),Some("../invalid"),
+        ).is_err());
+        let verify = Store::open_read_only(&path).unwrap();
+        let total:i64 = verify.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&team.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(total,205);
+    }
+
+
+    #[test]
+    fn headless_global_demand_search_is_cross_team_paginated_and_redacted() {
+        let store = fixture();
+        let economy = create_configuration(&store, NewOrchestration {
+            name: "Global headless Economy".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let performance = create_configuration(&store, NewOrchestration {
+            name: "Global headless Performance".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..208 {
+            let owner = if index < 201 { &economy } else { &performance };
+            let id = format!("global-{index:03}");
+            let objective = if index >= 205 { "PRIVATE UNRELATED OBJECTIVE" }
+                else { "PRIVATE MATCHING NEEDLE OBJECTIVE" };
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,?3,'local-user','manual',
+                        ?4,'worker',?5,'blocked',1000,2000)",
+                params![id,owner.id,objective,owner.project_id,owner.policy_revision],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let first_raw = list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("needle"),
+        ).unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        assert_eq!(first["scope"], "allTeams");
+        assert_eq!(first["observationalOnly"], true);
+        assert_eq!(first["searchApplied"], true);
+        assert_eq!(first["demands"].as_array().unwrap().len(), 200);
+        assert!(first["demands"].as_array().unwrap().iter()
+            .any(|item| item["orchestrationId"] == performance.id));
+        let time = first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["beforeId"].as_str().unwrap();
+        let second_raw = list_headless_all_demands_searched(
+            &path, "blocked", Some(time), Some(id), Some("needle"),
+        ).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&second_raw).unwrap();
+        assert_eq!(second["demands"].as_array().unwrap().len(), 5);
+        let distinct: std::collections::HashSet<_> = first["demands"].as_array().unwrap()
+            .iter().chain(second["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap()).collect();
+        assert_eq!(distinct.len(), 205);
+        assert_eq!(second["mayHaveMore"], false);
+        for secret in ["PRIVATE", "OBJECTIVE", "local-user", "authorizationId", "request_key"] {
+            assert!(!first_raw.contains(secret) && !second_raw.contains(secret));
+        }
+        let empty = list_headless_all_demands_searched(
+            &path, "running", None, None, None,
+        ).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&empty).unwrap()
+            ["demands"].as_array().unwrap().is_empty());
+        let injection = list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("' OR 1=1 --"),
+        ).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&injection).unwrap()
+            ["demands"].as_array().unwrap().is_empty());
+        assert!(list_headless_all_demands_searched(
+            &path, "ALL", None, None, None,
+        ).is_err());
+        assert!(list_headless_all_demands_searched(
+            &path, "blocked", Some(time), None, None,
+        ).is_err());
+        assert!(list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("a\ninvalid"),
+        ).is_err());
+        let check = Store::open_read_only(&path).unwrap();
+        assert_eq!(check.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 208);
+    }
+
+
+    #[test]
+    fn headless_project_filter_uses_admitted_ticket_project_before_paging() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Headless historical project".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Headless independent Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205 {
+            let owner = if index == 203 { &other } else { &team };
+            let project = if index == 204 { "other-project" } else { "archived-project" };
+            let id = format!("history-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE ORIGINAL OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,'blocked',1000,9000)",
+                params![id,owner.id,project,owner.policy_revision],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='current-project' WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let team_first_raw = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None,
+            Some("ORIGINAL"), Some("archived-project"),
+        ).unwrap();
+        let team_first: serde_json::Value = serde_json::from_str(&team_first_raw).unwrap();
+        assert_eq!(team_first["projectFilterApplied"], true);
+        assert_eq!(team_first["searchApplied"], true);
+        assert_eq!(team_first["demands"].as_array().unwrap().len(), 200);
+        assert!(team_first["demands"].as_array().unwrap().iter()
+            .all(|item| item["ticketId"].as_str().unwrap() != "history-203"));
+        let timestamp = team_first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let cursor = team_first["nextCursor"]["beforeId"].as_str().unwrap();
+        let team_next_raw = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", Some(timestamp), Some(cursor),
+            Some("ORIGINAL"), Some("archived-project"),
+        ).unwrap();
+        let team_next: serde_json::Value = serde_json::from_str(&team_next_raw).unwrap();
+        assert_eq!(team_next["demands"].as_array().unwrap().len(), 3);
+        let team_ids: std::collections::HashSet<_> = team_first["demands"].as_array().unwrap()
+            .iter().chain(team_next["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap()).collect();
+        assert_eq!(team_ids.len(), 203);
+        assert!(team_next["nextCursor"].is_null());
+        let global_first_raw = list_headless_all_demands_project_searched(
+            &path, "blocked", None, None, None, Some("archived-project"),
+        ).unwrap();
+        let global_first: serde_json::Value = serde_json::from_str(&global_first_raw).unwrap();
+        assert_eq!(global_first["demands"].as_array().unwrap().len(), 200);
+        let global_time = global_first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let global_id = global_first["nextCursor"]["beforeId"].as_str().unwrap();
+        let global_next_raw = list_headless_all_demands_project_searched(
+            &path, "blocked", Some(global_time), Some(global_id), None,
+            Some("archived-project"),
+        ).unwrap();
+        let global_next: serde_json::Value = serde_json::from_str(&global_next_raw).unwrap();
+        assert_eq!(global_next["demands"].as_array().unwrap().len(), 4);
+        assert!(global_first["demands"].as_array().unwrap().iter()
+            .chain(global_next["demands"].as_array().unwrap().iter())
+            .any(|item| item["orchestrationId"] == other.id));
+        let excluded = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None, None, Some("other-project"),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&excluded).unwrap()
+            ["demands"].as_array().unwrap().len(), 1);
+        let missing = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None, None, Some("current-project"),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&missing).unwrap()
+            ["demands"].as_array().unwrap().len(), 0);
+        for invalid in ["", "../escape", "project' OR 1=1 --", " spaced "] {
+            assert!(list_headless_all_demands_project_searched(
+                &path, "blocked", None, None, None, Some(invalid),
+            ).is_err());
+        }
+        assert!(list_headless_team_demands_project_searched(
+            &path, "other-nonexistent", "blocked", None, None, None,
+            Some("archived-project"),
+        ).is_err());
+        for private in ["PRIVATE", "ORIGINAL OBJECTIVE", "local-user", "authorizationId"] {
+            assert!(!team_first_raw.contains(private)
+                && !team_next_raw.contains(private)
+                && !global_first_raw.contains(private));
+        }
+        let check = Store::open_read_only(&path).unwrap();
+        assert_eq!(check.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 205);
     }
 
     #[test]
@@ -2158,6 +9154,342 @@ mod tests {
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
         assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
         assert_eq!(history(&store, &ticket.id, 10).unwrap()
+            .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+    }
+
+    #[test]
+    fn watchdog_quarantines_terminal_orphan_assignments_without_reopening_tickets() {
+        for terminal_state in ["completed","failed","stopped","interrupted","inconclusive"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, started) = admit(
+                &mut store, &config.id, "Private terminal-orphan work",
+                "watchdog-terminal-orphan", false,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let now = storage::now();
+            store.db.execute(
+                "UPDATE sa_tickets SET state=?2,revision=revision+1 WHERE id=?1",
+                params![&ticket.id,terminal_state],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'unresolved-remote-effect',?2,'pending',?3,?3)",
+                params![&ticket.id,"a".repeat(64),now],
+            ).unwrap();
+            let before = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(watchdog_expired_assignments(&store, now).unwrap(),
+                vec![session.clone()], "{terminal_state}");
+            let after = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(after.state, terminal_state, "Terminal verdict must not change");
+            assert_eq!(after.revision, before.revision + 1);
+            assert!(after.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state,
+                "interrupted");
+            assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+                .filter(|entry| entry.kind == "watchdog_terminal_orphan_quarantined")
+                .count(), 1);
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty(),
+                "Repeated watchdog polls must not produce new cancellation or audit");
+            assert!(!on_run_finished(&store, &session, true, "Late result").unwrap());
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, terminal_state);
+            assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn watchdog_terminal_orphan_audit_failure_rolls_back_entire_quarantine() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Private orphan rollback",
+            "watchdog-terminal-audit-failure", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'pending-effect',?2,'pending',?3,?3)",
+            params![&ticket.id,"b".repeat(64),storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER deny_terminal_orphan_audit
+             BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_terminal_orphan_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected terminal orphan audit failure'); END;",
+        ).unwrap();
+        assert!(watchdog_expired_assignments(&store, storage::now()).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "pending");
+        store.db.execute_batch("DROP TRIGGER deny_terminal_orphan_audit").unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(),
+            vec![session]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "uncertain");
+    }
+
+    #[test]
+    fn watchdog_quarantines_unlinked_running_tickets_without_replaying_provider_effects() {
+        for fault in ["missing-link", "wrong-link", "assignment-not-running", "team-missing"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, started) = admit(
+                &mut store, &config.id, "Private task objective",
+                "watchdog-orphan-running", false,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let original_revision = ticket.revision;
+            let now = storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'orphan-effect','digest','pending',?2,?2)",
+                params![&ticket.id,now],
+            ).unwrap();
+            match fault {
+                "missing-link" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "wrong-link" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET active_assignment_id='unrelated-attempt' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "assignment-not-running" => {
+                    store.db.execute(
+                        "UPDATE sa_assignments SET state='interrupted'
+                         WHERE ticket_id=?1", [&ticket.id],
+                    ).unwrap();
+                }
+                "team-missing" => {
+                    // Simulate a pre-existing corrupt/legacy database; normal
+                    // foreign keys forbid this deletion during healthy operation.
+                    store.db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+                    store.db.execute(
+                        "DELETE FROM sa_orchestrations WHERE id=?1", [&config.id],
+                    ).unwrap();
+                    store.db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            let stopped = watchdog_expired_assignments(&store, now).unwrap();
+            if fault == "assignment-not-running" {
+                assert!(stopped.is_empty(), "{fault}");
+            } else {
+                assert_eq!(stopped, vec![session.clone()], "{fault}");
+            }
+            let interrupted = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(interrupted.state, "interrupted", "{fault}");
+            assert_eq!(interrupted.revision, original_revision + 1, "{fault}");
+            assert!(interrupted.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert!(assignments(&store, &ticket.id, 10).unwrap()
+                .iter().all(|a| a.state == "interrupted"));
+            assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+                .filter(|entry| entry.kind == "watchdog_orphan_interrupted").count(), 1);
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &session, true, "Late completion").unwrap());
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+            assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn watchdog_orphan_audit_error_rolls_back_all_revocation_and_quarantine() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Private recovery task", "watchdog-orphan-rollback", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'rollback-effect','digest','pending',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_orphan_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_orphan_interrupted'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(watchdog_expired_assignments(&store, storage::now()).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, ticket.revision);
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10)
+            .unwrap()[0].state, "pending");
+        store.db.execute_batch("DROP TRIGGER deny_orphan_audit").unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(),
+            vec![session]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+    }
+
+    #[test]
+    fn watchdog_keeps_healthy_assignments_and_revokes_stale_runtime_paths() {
+        for fault in ["clock", "paused-worker", "disabled-team", "expired-mandate", "revoked-mandate"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Private unfinished work", "watchdog-stale", false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let now = storage::now();
+            assert!(watchdog_expired_assignments(&store, now).unwrap().is_empty());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            match fault {
+                "clock" => {
+                    store.db.execute(
+                        "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+                        params![ticket.id, now + 60_000],
+                    ).unwrap();
+                }
+                "paused-worker" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+                }
+                "disabled-team" => {
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                        [&config.id],
+                    ).unwrap();
+                }
+                "expired-mandate" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+                        params![ticket.id, now - 1],
+                    ).unwrap();
+                }
+                "revoked-mandate" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(watchdog_expired_assignments(&store, now).unwrap(), vec![session.clone()], "{fault}");
+            assert!(watchdog_expired_assignments(&store, now + 1).unwrap().is_empty());
+            let interrupted = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(interrupted.state, "interrupted");
+            assert!(interrupted.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert_eq!(history(&store, &ticket.id, 20).unwrap()
+                .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+            assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
+            assert_ne!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        }
+    }
+
+    #[test]
+    fn watchdog_preserves_separate_coordinator_checkout_and_fences_session_drift() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('watchdog-coordinator-project','Coordinator','/tmp/sa-watchdog-coordinator')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='watchdog-coordinator-project' WHERE id='router'",
+            [],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &config.id, "Plan in coordinator checkout",
+            "watchdog-coordinator-workspace", false, true,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&session).unwrap().project_id, "watchdog-coordinator-project");
+
+        // A healthy admitted coordinator is not a worker in the Ticket's
+        // project. It must survive watchdog polling until its turn completes.
+        assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap()
+            .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 0);
+
+        // A moved or relabelled native session is no longer in the original
+        // coordinator's checkout, so the same watchdog must revoke it.
+        store.db.execute(
+            "UPDATE sessions SET project_id='project' WHERE id=?1",
+            [&session],
+        ).unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(), vec![session.clone()]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(!on_run_finished(&store, &session, true, "Late coordinator advice").unwrap());
+        assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn watchdog_interruption_and_uncertain_effect_survive_reopen_without_replay() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Private provider payload",
+            "watchdog-restart", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        // A transport timeout might already have issued an external effect.
+        // Never infer a missing remote outcome is safe to retry after restart.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:issue:42',?2,'pending',?3,?3)",
+            params![ticket.id, "a".repeat(64), storage::now()],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(), vec![session.clone()]);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 10).unwrap()[0].state, "uncertain");
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        assert!(watchdog_expired_assignments(&reopened, storage::now()).unwrap().is_empty());
+        assert!(!on_run_finished(&reopened, &session, true, "Replay success").unwrap());
+        assert_eq!(history(&reopened, &ticket.id, 20).unwrap()
             .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
     }
 
@@ -2218,12 +9550,36 @@ mod tests {
             worker_bot_id: "worker".into(),
         }).unwrap();
 
+        // Correlated role counts must not inflate native Ticket aggregates.
+        for id in ["worker-extra", "reviewer-extra"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'worker-extra')", [&other.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer-extra')", [&other.id],
+        ).unwrap();
         let before = orchestration_overview(&store).unwrap();
         assert_eq!(before.len(), 2);
+        let first = before.iter().find(|item| item.config.id == config.id).unwrap();
+        let second = before.iter().find(|item| item.config.id == other.id).unwrap();
+        assert_eq!((first.worker_count, first.reviewer_count), (1, 0));
+        assert_eq!((second.worker_count, second.reviewer_count), (2, 1));
+        assert_eq!(serde_json::to_value(second).unwrap()["workerCount"], 2);
+        assert_eq!(serde_json::to_value(second).unwrap()["reviewerCount"], 1);
         for item in &before {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
             assert_eq!(item.blocked_count, 0);
+            assert_eq!((item.queued_count, item.completed_count), (0, 0));
+            assert_eq!((item.waiting_approval_count, item.waiting_review_count), (0, 0));
             assert!(item.last_activity_at > 0);
         }
         let (active, launched) = admit(
@@ -2240,6 +9596,8 @@ mod tests {
         assert_eq!(serialized["coordinatorBotId"], "router");
         assert_eq!(serialized["ticketCount"], 1);
         assert_eq!(serialized["runningCount"], 1);
+        assert_eq!(serialized["workerCount"], 1);
+        assert_eq!(serialized["reviewerCount"], 0);
 
         stop(&store, &active.id).unwrap();
         let (blocked, launched) = admit(
@@ -2252,6 +9610,40 @@ mod tests {
         let selected = after.iter().find(|c| c.config.id == config.id).unwrap();
         assert_eq!((selected.ticket_count, selected.running_count, selected.blocked_count), (2,0,1));
         assert!(selected.last_activity_at >= before[0].last_activity_at);
+        // Projection-only oracle: raw test fixtures enter both native waiting
+        // states without implying an actual approval, reviewer or tool grant.
+        store.db.execute("UPDATE sa_tickets SET state='waiting_approval' WHERE id=?1",
+            [&blocked.id]).unwrap();
+        store.db.execute("UPDATE sa_tickets SET state='waiting_review' WHERE id=?1",
+            [&active.id]).unwrap();
+        let waiting = orchestration_overview(&store).unwrap();
+        let selected = waiting.iter().find(|c| c.config.id == config.id).unwrap();
+        assert_eq!((selected.waiting_approval_count, selected.waiting_review_count), (1, 1));
+        assert_eq!((selected.running_count, selected.blocked_count), (0, 0));
+        let unrelated = waiting.iter().find(|c| c.config.id == other.id).unwrap();
+        assert_eq!((unrelated.waiting_approval_count, unrelated.waiting_review_count), (0, 0));
+        let serialized = serde_json::to_value(selected).unwrap();
+        assert_eq!(serialized["waitingApprovalCount"], 1);
+        assert_eq!(serialized["waitingReviewCount"], 1);
+        // Count the durable lifecycle, not only the latest native Ticket page.
+        store.db.execute("UPDATE sa_tickets SET state='queued' WHERE id=?1",
+            [&blocked.id]).unwrap();
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id=?1",
+            [&active.id]).unwrap();
+        let projected=orchestration_overview(&store).unwrap();
+        let owned=projected.iter().find(|item|item.config.id==config.id).unwrap();
+        let unrelated=projected.iter().find(|item|item.config.id==other.id).unwrap();
+        assert_eq!((owned.queued_count,owned.completed_count),(1,1));
+        assert_eq!((unrelated.queued_count,unrelated.completed_count),(0,0));
+        let encoded=serde_json::to_value(owned).unwrap();
+        assert_eq!(encoded["queuedCount"],1);
+        assert_eq!(encoded["completedCount"],1);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persistent=orchestration_overview(&reopened).unwrap();
+        let restored=persistent.iter().find(|item|item.config.id==config.id).unwrap();
+        assert_eq!((restored.queued_count,restored.completed_count),(1,1));
     }
 
     #[test]
@@ -2353,9 +9745,310 @@ mod tests {
             assert!(on_run_finished(&store, &session, true, "Untrusted success").unwrap());
             let blocked = get_ticket(&store, &ticket.id).unwrap();
             assert_eq!(blocked.state, "blocked");
+            assert!(blocked.evidence.is_none(), "Rejected callbacks must not retain provider evidence: {suffix}");
+            assert!(assignments(&store, &ticket.id, 10).unwrap()[0].result.is_none(),
+                "Rejected attempts must not retain untrusted provider text: {suffix}");
             assert!(accept(&store, &ticket.id, blocked.revision).is_err());
             assert_eq!(history(&store, &ticket.id, 10).unwrap()[0].kind, "callback_rejected");
             assert!(!on_run_finished(&store, &session, true, "Duplicate").unwrap());
+        }
+    }
+
+
+    #[test]
+    fn revoked_live_callback_discards_untrusted_evidence_across_restart() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Inspect without external effects",
+            "revoked-evidence-restart", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(on_run_finished(
+            &store, &session, true, "UNTRUSTED POST-REVOCATION OUTPUT",
+        ).unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(assignments(&store, &ticket.id, 10).unwrap()[0].result.is_none());
+        assert!(history(&store, &ticket.id, 10).unwrap().iter()
+            .any(|entry| entry.kind == "callback_rejected"));
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let persisted = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(persisted.state, "blocked");
+        assert!(persisted.evidence.is_none());
+        assert!(assignments(&reopened, &ticket.id, 10).unwrap()[0].result.is_none());
+        assert!(accept(&reopened, &ticket.id, persisted.revision).is_err());
+        assert!(!on_run_finished(&reopened, &session, true, "REPLAYED CALLBACK").unwrap());
+    }
+
+    #[test]
+    fn stale_ticket_or_team_project_policy_denies_provider_and_callback_settlement() {
+        for scenario in ["ticket-revision", "team-project"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Original scoped read-only task",
+                &format!("policy-drift-{scenario}"), false,
+            ).unwrap();
+            assert!(launched);
+            let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+            if scenario == "ticket-revision" {
+                store.db.execute(
+                    "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap();
+            } else {
+                store.db.execute(
+                    "INSERT INTO projects(id,name,path) VALUES('moved-team','Moved team','/tmp/sa-moved-team')",
+                    [],
+                ).unwrap();
+                store.db.execute(
+                    "UPDATE sa_orchestrations SET project_id='moved-team' WHERE id=?1",
+                    [&config.id],
+                ).unwrap();
+            }
+
+            assert!(read_only_policy(&store, &sid).is_err(), "{scenario}");
+            assert!(guard_run_admission(&store, &sid, &[]).is_err(), "{scenario}");
+            assert!(on_run_finished(&store, &sid, true, "Stale provider result").unwrap());
+            let blocked = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(blocked.state, "blocked", "{scenario}");
+            assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+            assert!(history(&store, &ticket.id, 20).unwrap().iter()
+                .any(|event| event.kind == "callback_rejected"));
+            assert!(!on_run_finished(&store, &sid, true, "Duplicate").unwrap());
+        }
+    }
+
+    #[test]
+    fn mandate_issuer_drift_denies_provider_admission_and_callback() {
+        for fault in ["missing-issuer", "blank-issuer", "wrong-actor"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private test evidence",
+                &format!("issuer-callback-{fault}"), false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &session).unwrap().is_some());
+            let mutation = match fault {
+                "missing-issuer" => "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1",
+                "blank-issuer" => "UPDATE sa_mandates SET authorization_id='  ' WHERE ticket_id=?1",
+                "wrong-actor" => "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+                _ => unreachable!(),
+            };
+            store.db.execute(mutation, [&ticket.id]).unwrap();
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            assert!(on_run_finished(&store, &session, true, "Untrusted result").unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked", "{fault}");
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "failed");
+            assert!(history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|entry| entry.kind == "callback_rejected"));
+        }
+    }
+
+    #[test]
+    fn mandate_issuer_drift_blocks_human_acceptance_of_existing_evidence() {
+        for fault in ["missing-issuer", "blank-issuer", "wrong-actor"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Original private task",
+                &format!("issuer-approval-{fault}"), false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Native worker evidence").unwrap());
+            let waiting = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(waiting.state, "waiting_approval");
+            let mutation = match fault {
+                "missing-issuer" => "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1",
+                "blank-issuer" => "UPDATE sa_mandates SET authorization_id='  ' WHERE ticket_id=?1",
+                "wrong-actor" => "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+                _ => unreachable!(),
+            };
+            store.db.execute(mutation, [&ticket.id]).unwrap();
+            assert!(accept(&store, &ticket.id, waiting.revision).is_err(), "{fault}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+            assert!(!history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|entry| entry.kind == "human_accepted"));
+        }
+    }
+
+    #[test]
+    fn changed_worker_skills_deny_current_task_provider_and_callback_evidence() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Native Skill snapshot admission",
+            "task-skill-snapshot-drift", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+
+        // A bot remains reusable, but its editable Skill assignments cannot
+        // expand the immutable in-flight Ticket's task-facing environment.
+        assert_eq!(store.db.execute(
+            "UPDATE bots SET skills='[\"late-added-skill\"]' WHERE id=?1",
+            [&config.worker_bot_id],
+        ).unwrap(), 1);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(on_run_finished(&store, &session, true, "Untrusted late output").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(history(&store, &ticket.id, 20).unwrap().iter()
+            .any(|entry| entry.kind == "callback_rejected"));
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Repeated stale output").unwrap());
+    }
+
+    #[test]
+    fn watchdog_settles_task_thread_profile_and_checkout_drift_without_replay() {
+        for fault in ["thread", "provider", "instructions", "skills", "checkout"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Watchdog native identity guard",
+                &format!("watchdog-native-identity-{fault}"), false,
+            ).unwrap();
+            assert!(launched, "{fault}");
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+
+            match fault {
+                "thread" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bot_threads SET external_id='untrusted-ticket'
+                         WHERE session_id=?1 AND channel_id=?2",
+                        params![&session, CHANNEL],
+                    ).unwrap(), 1);
+                }
+                "provider" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                        [&session],
+                    ).unwrap(), 1);
+                }
+                "instructions" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bots SET instructions='Changed operator instructions'
+                         WHERE id=?1",
+                        [&config.worker_bot_id],
+                    ).unwrap(), 1);
+                }
+                "skills" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bots SET skills='[\"new-skill\"]' WHERE id=?1",
+                        [&config.worker_bot_id],
+                    ).unwrap(), 1);
+                }
+                "checkout" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE projects SET path='/tmp/superagent-watchdog-rebound'
+                         WHERE id=?1",
+                        [&config.project_id],
+                    ).unwrap(), 1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            let interrupted = watchdog_expired_assignments(&store, storage::now()).unwrap();
+            assert_eq!(interrupted, vec![session.clone()], "{fault}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            assert!(mandate(&store, &ticket.id).unwrap().revoked, "{fault}");
+            assert!(history(&store, &ticket.id, 20).unwrap().iter().any(|entry| {
+                entry.kind == "watchdog_interrupted"
+                    && entry.detail.contains("Native task admission or session identity changed")
+            }), "{fault}");
+            assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &session, true, "Stale success").unwrap());
+        }
+    }
+
+    #[test]
+    fn watchdog_interrupts_unsupported_grants_and_drift_before_budget_expires() {
+        for scenario in ["tools", "effects", "ticket-revision", "team-project", "issuer-missing", "issuer-actor"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Watchdog must revoke stale task scope",
+                &format!("watchdog-policy-{scenario}"), false,
+            ).unwrap();
+            assert!(launched);
+            let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+            match scenario {
+                "tools" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_tools='[\"shell\"]' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "effects" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "ticket-revision" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "issuer-missing" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET authorization_id=' ' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "issuer-actor" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "team-project" => {
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path) VALUES('moved-team','Moved team','/tmp/sa-moved-team')",
+                        [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET project_id='moved-team' WHERE id=?1",
+                        [&config.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(read_only_policy(&store, &sid).is_err(), "{scenario}");
+            let cancelled = watchdog_expired_assignments(&store, storage::now()).unwrap();
+            assert_eq!(cancelled, vec![sid.clone()], "{scenario}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            let revoked: i64 = store.db.query_row(
+                "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(revoked, 1, "{scenario}");
+            assert!(history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|event| event.kind == "watchdog_interrupted"));
+            assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &sid, true, "Late result").unwrap());
         }
     }
 
@@ -2615,6 +10308,60 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_bot_tools_cannot_escape_an_active_or_revoked_superagent_mandate() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "independent-normal", "Normal bot chat",
+        ).unwrap().0;
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(&store, &ordinary).is_ok());
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(&store, &ordinary).is_ok());
+
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "No ambient tool rights", "ambient-tool-fence", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let error = crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &session_id,
+        ).unwrap_err();
+        assert!(error.contains("cannot invoke ambient bot tools"));
+        let task_tool_error = crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).unwrap_err();
+        assert!(task_tool_error.contains("cannot invoke ambient task tools"));
+
+        // A stopped assignment is denied by the same effect-time check even
+        // if the native session and its original bot binding still exist.
+        let (stopped, _) = stop(&store, &ticket.id).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &session_id,
+        ).is_err());
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "ordinary direct bot conversations must not inherit the task fence");
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).is_err(), "stopped native sessions cannot regain ambient task tools");
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "ordinary bot chats must retain native app tool access");
+
+        // Changing a persisted mandate must never make a writable or stale
+        // SuperAgent session fall back to ordinary task-tool authorization.
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=0,allowed_side_effects=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session_id,
+        ).is_err());
+    }
+
+    #[test]
     fn desktop_superagent_commands_require_a_trusted_main_window() {
         assert!(require_main_window_label("main").is_ok());
         for window in ["", "overlay", "mini", "bot", "main-secondary"] {
@@ -2654,6 +10401,127 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_running_session_blocks_same_project_manual_team_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let active = vec![ordinary.id.clone()];
+        assert!(active_manual_conflict(&store, &active, "worker", "project").unwrap());
+        assert!(!manual_preflight(&store, &cfg.id, "Inspect the checkout", false,
+            active_manual_conflict(&store, &active, "worker", "project").unwrap())
+            .unwrap().eligible);
+        let (blocked, launched) = admit(&mut store, &cfg.id, "Inspect the checkout",
+            "occupied-by-direct-chat", true).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        assert!(assignment_session(&store, &blocked.id).unwrap().is_none());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-project','Other','/tmp/disposable-superagent-other')", [],
+        ).unwrap();
+        let unrelated = store.create_session("other-project", "codex", "default", "ask").unwrap();
+        assert!(!active_manual_conflict(&store, &[unrelated.id], "worker", "project").unwrap(),
+            "Unrelated projects must remain independently executable");
+        assert!(active_manual_conflict(&store, &["missing-live-session".to_owned()],
+            "worker", "project").is_err(), "Missing live metadata must fail closed");
+    }
+
+    #[test]
+    fn superagent_cloud_reconnect_is_denied_before_unrestricted_provider_admission() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Inspect disposable fixture",
+            "cloud-reconnect-guard", false,
+        ).unwrap();
+        assert!(launched);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let active_error = guard_cloud_attach(&store, &sid).unwrap_err();
+        assert!(active_error.contains("policy_unsupported"));
+        assert!(active_error.contains("unrestricted cloud"));
+        // An unrelated ordinary cloud session is not affected by this
+        // SuperAgent-specific gate.
+        assert!(guard_cloud_attach(&store, "unrelated-session").is_ok());
+        stop(&store, &ticket.id).unwrap();
+        assert!(guard_cloud_attach(&store, &sid).is_err(),
+            "A revoked task must never reattach with ambient cloud permissions");
+    }
+
+    #[test]
+    fn unsupported_primary_harnesses_fail_before_team_creation_or_activation() {
+        let store = fixture();
+        let input = || NewOrchestration {
+            name: "Unsupported primary".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        };
+        store.db.execute("UPDATE bots SET provider='not-a-real-harness' WHERE id='router'", []).unwrap();
+        assert!(create_configuration(&store, input()).unwrap_err().contains("harness"));
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "Rejected Team must leave no disabled orphan");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'", []).unwrap();
+        let config = create_configuration(&store, input()).unwrap();
+        store.db.execute("UPDATE bots SET mode='unsupported-test-mode' WHERE id='worker'", []).unwrap();
+        let error = change_enabled(&store, &config.id, config.policy_revision, true).unwrap_err();
+        assert!(error.contains("permission mode"), "{error}");
+        let persisted = configuration(&store, &config.id).unwrap();
+        assert!(!persisted.enabled);
+        assert_eq!(persisted.policy_revision, config.policy_revision);
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
+        assert!(change_enabled(&store, &config.id, config.policy_revision, true).unwrap().enabled);
+    }
+
+    #[test]
+    fn directory_reports_native_manual_enable_denials_without_changing_authority() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Eligibility Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let view = |store: &Store| -> OrchestrationOverview {
+            orchestration_overview(store).unwrap().into_iter()
+                .find(|item| item.config.id == cfg.id).unwrap()
+        };
+        assert!(view(&store).manual_enable_blocker.is_none());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused = view(&store);
+        assert_eq!(paused.manual_enable_blocker.as_deref(),
+            Some("Selected bots are paused or their worker scope has changed."));
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, true).is_err());
+        store.db.execute(
+            "UPDATE bots SET paused=0,mode='unsupported-test-mode' WHERE id='worker'",[],
+        ).unwrap();
+        let unsupported = view(&store);
+        assert!(unsupported.manual_enable_blocker.as_deref().unwrap()
+            .contains("permission mode"));
+        let denied = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap_err();
+        assert_eq!(Some(denied.as_str()), unsupported.manual_enable_blocker.as_deref());
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
+        assert!(view(&store).manual_enable_blocker.is_none());
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('reviewer','Reviewer','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')", [&cfg.id],
+        ).unwrap();
+        let multirole = view(&store);
+        assert_eq!(multirole.manual_enable_blocker.as_deref(),
+            Some("Configured multi-member Teams cannot run without native scoped admission."));
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, true).is_err());
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        let db_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(view(&reopened).manual_enable_blocker, multirole.manual_enable_blocker);
+    }
+
+    #[test]
     fn unused_disabled_preset_is_revision_guarded_and_never_auto_enabled() {
         let store=fixture();
         let config=create_configuration(&store,NewOrchestration{
@@ -2672,7 +10540,304 @@ mod tests {
     }
 
     #[test]
-    fn durable_ticket_blocks_reconfiguration_and_deletion_after_disable() {
+    fn settled_profiled_demands_allow_safe_primary_role_rotation_and_new_admission() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (previous,launched)=admit(&mut store,&config.id,
+            "Original bounded task","rotation-original",false).unwrap();
+        assert!(launched);
+        let original=roster::ticket_profile(&store,&previous.id).unwrap().unwrap();
+        assert_eq!(original.members[0].bot_id,"router");
+        assert_eq!(original.members[1].bot_id,"worker");
+        stop(&store,&previous.id).unwrap();
+        let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
+        let swap=NewOrchestration {
+            name:"Reused Team".into(),coordinator_bot_id:"worker".into(),
+            worker_bot_id:"router".into(),
+        };
+
+        // An unresolved effect or a Team-scoped GitHub source must not be
+        // silently rebound by the new Team policy.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(
+                ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unresolved','fixture','uncertain',?2,?2)",
+            params![previous.id,storage::now()],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("unsettled work"));
+        store.db.execute(
+            "DELETE FROM sa_effect_receipts WHERE ticket_id=?1",[&previous.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_sources(
+                id,orchestration_id,repository,actor_filter,event_kind,created_at,updated_at)
+             VALUES('rotation-source',?1,'owner/repo','actor','issues.opened',?2,?2)",
+            params![config.id,storage::now()],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("GitHub sources"));
+        store.db.execute(
+            "DELETE FROM sa_event_sources WHERE id='rotation-source'",[],
+        ).unwrap();
+
+        // Valid JSON with an invalid role shape cannot prove that historical
+        // identity remains recoverable.
+        let snapshot_json:String=store.db.query_row(
+            "SELECT profiles_json FROM sa_ticket_profiles WHERE ticket_id=?1",
+            [&previous.id],|row|row.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json='{}' WHERE ticket_id=?1",
+            [&previous.id],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("Invalid persisted task-effective Team profile"));
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![previous.id,snapshot_json],
+        ).unwrap();
+
+        let updated=update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.policy_revision,disabled.policy_revision+1);
+        assert_eq!(updated.coordinator_bot_id,"worker");
+        assert_eq!(updated.worker_bot_id,"router");
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap).is_err());
+        assert_eq!(roster::ticket_profile(&store,&previous.id).unwrap().unwrap()
+            .members[1].bot_id,"worker");
+        let original_ticket:(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,project_id FROM sa_tickets WHERE id=?1",
+            [&previous.id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(original_ticket,(config.policy_revision,"worker".into(),"project".into()));
+        assert!(mandate(&store,&previous.id).unwrap().revoked);
+
+        let path=store.path.clone();
+        drop(store);
+        let mut reopened=Store::open(&path).unwrap();
+        assert_eq!(roster::ticket_profile(&reopened,&previous.id).unwrap().unwrap()
+            .members[0].bot_id,"router");
+        let resumed=change_enabled(&reopened,&config.id,updated.policy_revision,true).unwrap();
+        assert!(resumed.enabled);
+        // Stage a new busy request without starting a provider. It must pin
+        // the new roles, not silently adopt the historical role selection.
+        let (next,launched)=admit(&mut reopened,&config.id,
+            "New bounded task","rotation-next",true).unwrap();
+        assert!(!launched);
+        let new_profile=roster::ticket_profile(&reopened,&next.id).unwrap().unwrap();
+        assert_eq!(new_profile.members[0].bot_id,"worker");
+        assert_eq!(new_profile.members[1].bot_id,"router");
+        assert_eq!(get_ticket(&reopened,&previous.id).unwrap().state,"stopped");
+        assert_ne!(previous.id,next.id);
+    }
+
+    #[test]
+    fn settled_history_allows_rename_without_rebinding_roles_or_original_ticket_policy() {
+        let store=fixture();
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Original Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('review-bot','Independent Reviewer','project','codex','default','plan',?1,?1)",
+            [now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'review-bot')",[&cfg.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'settled-history',?1,'settled-history-key','Original immutable objective',
+                'local-user','manual','project','worker',?2,'completed',?3,?3
+             )",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&NewOrchestration {
+            name:"Reusable Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
+        assert!(!renamed.enabled);
+        assert_eq!(roster::read(&store,&cfg.id).unwrap().reviewer_bot_ids,vec!["review-bot"]);
+        let original:(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,objective FROM sa_tickets WHERE id='settled-history'",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!(original,(cfg.policy_revision,"worker".into(),
+            "Original immutable objective".into()));
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&NewOrchestration {
+            name:"Stale update".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).is_err());
+        assert!(delete_configuration(&store,&cfg.id,renamed.policy_revision).is_err());
+    }
+
+    #[test]
+    fn rename_with_history_denies_unsettled_review_effect_and_primary_identity_change() {
+        let store=fixture();
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Pinned Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'review-history',?1,'review-history-key','Pinned evidence',
+                'local-user','manual','project','worker',?2,'waiting_review',?3,?3
+             )",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let rename=NewOrchestration {
+            name:"Renamed after settlement".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        };
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).is_err());
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='review-history'",[])
+            .unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(
+                ticket_id,effect_key,payload_sha256,state,created_at,updated_at
+             ) VALUES('review-history','pending-reply','fixture-digest','uncertain',?1,?1)",
+            [now],
+        ).unwrap();
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).is_err());
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id='review-history'",[],
+        ).unwrap();
+        let swapped=NewOrchestration {
+            name:"Unauthorized rebind".into(),coordinator_bot_id:"worker".into(),
+            worker_bot_id:"router".into(),
+        };
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&swapped).unwrap_err()
+            .contains("Legacy Ticket history has no immutable Team profile"));
+        assert_eq!(configuration(&store,&cfg.id).unwrap().policy_revision,cfg.policy_revision);
+        let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).unwrap();
+        assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
+        assert_eq!(get_ticket(&store,"review-history").unwrap().state,"completed");
+    }
+
+    #[test]
+    fn headless_rename_reuses_native_history_and_revision_guards_without_provider_launch() {
+        let path=std::env::temp_dir().join(format!("sa-headless-rename-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('rename-project','Rename','/tmp/sa-headless-rename')",[],
+        ).unwrap();
+        for id in ["rename-lead","rename-worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'rename-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Original".into(),coordinator_bot_id:"rename-lead".into(),
+            worker_bot_id:"rename-worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'headless-history',?1,'headless-history-key','Private original objective',
+                'local-user','manual','rename-project','rename-worker',?2,'completed',?3,?3)",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let result=headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision,"Renamed Team").unwrap();
+        let json:serde_json::Value=serde_json::from_str(&result).unwrap();
+        assert_eq!(json["name"],"Renamed Team");
+        assert_eq!(json["policyRevision"],cfg.policy_revision+1);
+        assert_eq!(json["grantIssued"],false);
+        assert!(headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision,"Replay")
+            .is_err());
+        let original:(i64,String)=store.db.query_row(
+            "SELECT policy_revision,objective FROM sa_tickets WHERE id='headless-history'",
+            [],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(original,(cfg.policy_revision,"Private original objective".into()));
+        assert_eq!(configuration(&store,&cfg.id).unwrap().name,"Renamed Team");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review' WHERE id='headless-history'",[],
+        ).unwrap();
+        assert!(headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision+1,"Unsafe")
+            .is_err());
+        assert_eq!(configuration(&store,&cfg.id).unwrap().name,"Renamed Team");
+    }
+
+    #[test]
+    fn headless_strategy_uses_native_policy_cas_and_preserves_history_across_restart() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Strategy CLI".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let path = store.path.clone();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+              project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('strategy-cli-history',?1,'strategy-cli-history','Private original objective',
+              'local-user','manual',?2,?3,?4,'completed',?5,?5)",
+            params![&team.id,&team.project_id,&team.worker_bot_id,team.policy_revision,now],
+        ).unwrap();
+        let output = headless_set_team_strategy(
+            &path, &team.id, team.policy_revision, "Release engineering", "economy",
+        ).unwrap();
+        let outcome: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(outcome["policyRevision"], team.policy_revision + 1);
+        assert_eq!(outcome["purposeConfigured"], true);
+        assert!(outcome.get("purpose").is_none());
+        assert!(!output.contains("Release engineering"), "private purpose must not reach stdout");
+        assert_eq!(outcome["strategy"], "economy");
+        assert_eq!(outcome["grantIssued"], false);
+        assert_eq!(outcome["providerDispatched"], false);
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision, "Replay", "performance",
+        ).is_err(), "stale revision cannot rewrite the Team");
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision + 1, "Invalid", "unrestricted",
+        ).is_err(), "CLI cannot bypass native strategy validation");
+        assert_eq!(get_ticket(&store,"strategy-cli-history").unwrap().objective,
+            "Private original objective");
+        let recorded_policy_revision: i64 = store.db.query_row(
+            "SELECT policy_revision FROM sa_tickets WHERE id=?1",
+            ["strategy-cli-history"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recorded_policy_revision, team.policy_revision);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review'
+             WHERE id='strategy-cli-history'", [],
+        ).unwrap();
+        assert!(headless_set_team_strategy(
+            &path, &team.id, team.policy_revision + 1, "Cannot change", "performance",
+        ).is_err(), "reviewable Demand must block policy edits");
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='strategy-cli-history'", [],
+        ).unwrap();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let saved = roster::read(&reopened, &team.id).unwrap();
+        assert_eq!(saved.purpose, "Release engineering");
+        assert_eq!(saved.strategy, "economy");
+        assert_eq!(saved.policy_revision, team.policy_revision + 1);
+    }
+
+    #[test]
+    fn disabled_team_rotation_preserves_durable_ticket_and_blocks_deletion() {
         let mut store=fixture();
         let config=enabled(&store);
         let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
@@ -2680,9 +10845,23 @@ mod tests {
         let input=NewOrchestration{
             name:"Changed".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         };
-        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
-        assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
+        // A disabled Team with settled Ticket history may be renamed, but
+        // its historical identities and audit remain immutable.
+        let renamed=update_configuration(&store,&config.id,disabled.policy_revision,&input).unwrap();
+        assert_eq!(renamed.name,"Changed");
+        assert_eq!(renamed.policy_revision,disabled.policy_revision+1);
+        let forbidden=NewOrchestration{
+            name:"Rebound".into(),coordinator_bot_id:"worker".into(),worker_bot_id:"router".into(),
+        };
+        let rotated=update_configuration(&store,&config.id,renamed.policy_revision,&forbidden).unwrap();
+        assert_eq!(rotated.coordinator_bot_id,"worker");
+        assert_eq!(rotated.worker_bot_id,"router");
+        let profile=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert_eq!(profile.members[0].bot_id,"router");
+        assert_eq!(ticket_worker(&store,&ticket.id).unwrap(),"worker");
+        assert!(delete_configuration(&store,&config.id,rotated.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
+        assert_eq!(configuration(&store,&config.id).unwrap().name,"Rebound");
     }
 
     #[test]
@@ -2726,6 +10905,74 @@ mod tests {
         ).unwrap();
         assert!(started);
         assert_eq!(fresh.state, "running");
+    }
+
+    #[test]
+    fn disabled_team_cannot_reenable_with_unsettled_native_work() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Repair disabled Team", "reenable-unsettled", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // Simulate an interrupted legacy Off write: the Team flag was stored,
+        // but the Ticket, mandate and Assignment were never settled.
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1", [&team.id],
+        ).unwrap();
+        let stale = configuration(&store, &team.id).unwrap();
+        let blocker = manual_enable_blocker(&store, &stale).unwrap().unwrap();
+        assert!(blocker.contains("unreconciled") || blocker.contains("orphaned"));
+        assert!(change_enabled(&store, &team.id, stale.policy_revision, true).is_err());
+        assert!(headless_enable_orchestration(
+            &store.path, &team.id, stale.policy_revision,
+        ).is_err(), "detached CLI must share the same native guard");
+        assert!(!configuration(&store, &team.id).unwrap().enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+
+        // Repeating Off is the existing audited, transactional repair path.
+        let repaired = change_enabled(&store, &team.id, stale.policy_revision, false).unwrap();
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "late provider completion").unwrap());
+        assert!(change_enabled(&store, &team.id, repaired.policy_revision, true).unwrap().enabled);
+    }
+
+    #[test]
+    fn terminal_orphan_assignment_blocks_reenable_until_quarantined() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Preserve terminal evidence", "reenable-orphan", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let terminal = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(terminal.state, "stopped");
+
+        // A damaged legacy settlement can leave a running Assignment even
+        // on a terminal Ticket. Off does not fabricate provider termination.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let disabled = change_enabled(&store, &team.id, team.policy_revision, false).unwrap();
+        assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(configuration(&store, &team.id).unwrap().policy_revision, disabled.policy_revision);
+
+        let receipt: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(
+                &store.path, &ticket.id, terminal.revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["quarantinedAssignments"], 1);
+        assert_eq!(receipt["providerStoppedByCommand"], false);
+        assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).unwrap().enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
     }
 
     #[test]
@@ -2921,6 +11168,300 @@ mod tests {
     }
 
     #[test]
+    fn secondary_team_member_reset_revokes_only_affected_demands_and_survives_restart() {
+        let mut store = fixture();
+        for id in ["secondary-worker", "secondary-reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let affected_team = enabled(&store);
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Independent Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&other.id],
+        ).unwrap();
+        let unaffected_team = configuration(&store, &other.id).unwrap();
+        let (affected, started) = admit(
+            &mut store, &affected_team.id, "Scoped task", "secondary-reset-1", true,
+        ).unwrap();
+        assert!(!started);
+        let (unaffected, started) = admit(
+            &mut store, &unaffected_team.id, "Other task", "secondary-reset-2", true,
+        ).unwrap();
+        assert!(!started);
+        assert!(!mandate(&store, &affected.id).unwrap().revoked);
+        // A repaired or imported legacy Team can acquire additional members
+        // while a queued Ticket exists. Their reset must not leave its original
+        // Mandate viable, regardless of whether the topology can execute yet.
+        for (role, position, bot_id) in [
+            ("worker", 1, "secondary-worker"),
+            ("reviewer", 0, "secondary-reviewer"),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+                 VALUES(?1,?2,?3,?4)",
+                params![&affected_team.id, role, position, bot_id],
+            ).unwrap();
+        }
+        invalidate_bot(&store, "secondary-worker", false).unwrap();
+        assert!(mandate(&store, &affected.id).unwrap().revoked);
+        assert!(!mandate(&store, &unaffected.id).unwrap().revoked);
+        let previous_revision = get_ticket(&store, &affected.id).unwrap().revision;
+        // Deleting a configured secondary bot must fail before any mutation;
+        // the FK-restricted role still owns its identity and durable history.
+        assert!(bots::delete(&store, "secondary-reviewer").unwrap_err()
+            .contains("Remove this bot from disabled SuperAgent Team roles"));
+        assert!(bots::get(&store, "secondary-reviewer").is_ok());
+        assert_eq!(get_ticket(&store, &affected.id).unwrap().revision, previous_revision);
+        assert!(configuration(&store, &affected_team.id).unwrap().enabled);
+        invalidate_bot(&store, "secondary-reviewer", false).unwrap();
+        assert_eq!(get_ticket(&store, &affected.id).unwrap().revision, previous_revision + 1);
+        assert!(configuration(&store, &unaffected_team.id).unwrap().enabled);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(mandate(&reopened, &affected.id).unwrap().revoked);
+        assert!(!mandate(&reopened, &unaffected.id).unwrap().revoked);
+        assert!(configuration(&reopened, &affected_team.id).unwrap().enabled);
+        assert!(bots::get(&reopened, "secondary-reviewer").is_ok());
+    }
+
+    #[test]
+    fn reset_snapshotted_member_without_current_roster_revokes_original_ticket() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('historical-reviewer','Historical Reviewer','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Pinned legacy task", "pinned-reviewer", true,
+        ).unwrap();
+        assert!(!launched);
+        let original = roster::ticket_profile(&store, &ticket.id).unwrap().unwrap();
+        let mut members = original.members;
+        let bot = bots::get(&store, "historical-reviewer").unwrap();
+        members.push(roster::AdmittedMemberProfile {
+            role: "reviewer".into(), position: 0, bot_id: bot.id,
+            project_id: bot.project_id, project_path: None, resolved_project_path: None,
+            checkout_existed_at_admission: None, // Historical read-only snapshot.
+            provider: bot.provider, model: bot.model, mode: bot.mode,
+            reasoning_effort: bot.reasoning_effort, assigned_skill_ids: bot.skills,
+            prompt_identity_sha256: None, // Historical snapshot without a prompt digest.
+            brief_name_sha256: None, // Historical snapshot without the later brief-name digest.
+        });
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![ticket.id, serde_json::to_string(&members).unwrap()],
+        ).unwrap();
+        // Historical member was pinned by admission but is no longer in the
+        // current Team roster. Reset must still revoke its Ticket Mandate.
+        assert!(!roster::has_additional_members(&store, &team.id).unwrap());
+        invalidate_bot(&store, "historical-reviewer", false).unwrap();
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+    }
+
+    #[test]
+    fn unsupported_multi_role_team_cannot_bypass_native_admission_or_retry() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        // Leave one blocked ticket and one coordinator-planned ticket before
+        // simulating a stale enabled Team with a newly configured Worker.
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Pending task", "roster-blocked", true,
+        ).unwrap();
+        assert!(!launched);
+        let (planned, launched) = admit_role(
+            &mut store, &config.id, "Coordinated task", "roster-planned", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &planned.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Read-only plan").unwrap());
+        assert_eq!(get_ticket(&store, &planned.id).unwrap().state, "queued");
+
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('worker-b','Other Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        // Normal roster editing refuses enabled Teams; an inconsistent DB
+        // or concurrent writer still must not gain native execution authority.
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'worker-b')",
+            [&config.id],
+        ).unwrap();
+
+        let advisory = manual_preflight(&store, &config.id, "Fresh task", false, false).unwrap();
+        assert!(!advisory.eligible);
+        assert!(advisory.reason.unwrap().contains("Multi-member"));
+        assert!(admit(&mut store, &config.id, "Fresh task", "roster-denied", false)
+            .unwrap_err().contains("Multi-member"));
+        assert!(retry_blocked(&mut store, &blocked.id, false)
+            .unwrap_err().contains("Multi-member"));
+        assert!(prepare_coordinated_worker(&mut store, &planned.id, false)
+            .unwrap_err().contains("Multi-member"));
+
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
+        assert_eq!(get_ticket(&store, &planned.id).unwrap().state, "queued");
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(tickets, 2, "unsupported role topology must not create new Tickets");
+        let worker_attempts: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE bot_id='worker-b'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(worker_attempts, 0, "no unsupported Worker may be admitted");
+    }
+
+    #[test]
+    fn explicit_secondary_worker_is_admitted_only_with_native_read_only_scope() {
+        let mut store=fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('second','Second','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let team=create_configuration(&store,NewOrchestration {
+            name:"Direct member".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let roles=roster::set(&store,&team.id,team.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],
+            reviewer_bot_ids:vec![],
+        }).unwrap();
+        let team=change_enabled(&store,&team.id,roles.policy_revision,true).unwrap();
+        let preflight=manual_preflight_worker(&store,&team.id,"Read safely","second",false).unwrap();
+        assert!(preflight.eligible);
+        assert!(preflight.allowed_tools.is_empty());
+        assert!(!preflight.allowed_side_effects);
+        let (ticket,launch)=admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
+        ).unwrap();
+        assert!(launch);
+        assert_eq!(ticket_worker(&store,&ticket.id).unwrap(),"second");
+        let assignment=assignments(&store,&ticket.id,10).unwrap();
+        assert_eq!(assignment[0].bot_id,"second");
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+        assert_eq!(roster::ticket_profile(&store,&ticket.id).unwrap().unwrap().members.len(),3);
+        assert!(!manual_preflight_worker(&store,&team.id,"Second demand","worker",false).unwrap().eligible);
+        assert!(admit(&mut store,&team.id,"Unselected","legacy-request",false).is_err());
+        let (repeated,launched)=admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
+        ).unwrap();
+        assert_eq!(repeated.id,ticket.id);
+        assert!(!launched);
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Read safely","worker-selection",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("worker") },
+        ).unwrap_err().contains("another selected Worker"));
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Out of team","new-key",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("router") },
+        ).is_err());
+        stop(&store,&ticket.id).unwrap();
+        assert!(read_only_policy(&store,&session).is_err());
+        assert!(!on_run_finished(&store,&session,true,"stale success").unwrap());
+        let path=store.path.clone();drop(store);
+        let persisted=Store::open(&path).unwrap();
+        assert_eq!(ticket_worker(&persisted,&ticket.id).unwrap(),"second");
+    }
+
+    #[test]
+    fn direct_member_rejects_reviewers_and_paused_secondary_workers() {
+        let mut store=fixture();
+        for id in ["second","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team=create_configuration(&store,NewOrchestration {
+            name:"Guarded Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let roles=roster::set(&store,&team.id,team.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],reviewer_bot_ids:vec![],
+        }).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='second'",[]).unwrap();
+        assert!(change_enabled(&store,&team.id,roles.policy_revision,true).is_err());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='second'",[]).unwrap();
+        let reviewers=roster::set(&store,&team.id,roles.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        }).unwrap();
+        assert!(change_enabled(&store,&team.id,reviewers.policy_revision,true).is_err());
+        assert!(manual_preflight_worker(&store,&team.id,"Task","second",false).is_err());
+        assert!(admit_role_with_staging_member(
+            &mut store,&team.id,"Task","guarded",false,ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some("second") },
+        ).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn native_manual_preflight_is_read_only_and_reports_current_role_and_limits() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Preflight fixture".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let disabled = manual_preflight(&store, &cfg.id, "Inspect safely", false, false).unwrap();
+        assert!(!disabled.eligible);
+        assert!(disabled.reason.unwrap().contains("disabled"));
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let direct = manual_preflight(&store, &cfg.id, "Inspect safely", false, false).unwrap();
+        assert!(direct.eligible);
+        assert!(!direct.can_stage_blocked);
+        assert_eq!(direct.policy_revision, enabled.policy_revision);
+        assert_eq!(direct.selected_role, "worker");
+        assert_eq!(direct.selected_bot_id, "worker");
+        assert_eq!(direct.project_id, "project");
+        assert!(direct.allowed_tools.is_empty());
+        assert!(!direct.allowed_side_effects);
+        assert_eq!(direct.attempt_budget_ms, MAX_ASSIGNMENT_RUN_MS);
+        let coordinator = manual_preflight(&store, &cfg.id, "Inspect safely", true, false).unwrap();
+        assert_eq!(coordinator.selected_role, "coordinator");
+        assert_eq!(coordinator.selected_bot_id, "router");
+        assert!(manual_preflight(&store, &cfg.id, " ", false, false).is_err());
+        let count: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "Preflight must not create a Ticket or any grant");
+    }
+
+    #[test]
+    fn native_manual_preflight_detects_checkout_contention_and_revoked_bot() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        assert!(!manual_preflight(&store, &cfg.id, "Inspect", false, true).unwrap().eligible);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Active task", "preflight-lease", false).unwrap();
+        assert!(started);
+        let busy = manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap();
+        assert!(!busy.eligible);
+        assert!(busy.can_stage_blocked, "busy direct Workers can stage a blocked Ticket");
+        assert!(busy.reason.unwrap().contains("occupied"));
+        let coordinated = manual_preflight(&store, &cfg.id, "Other task", true, true).unwrap();
+        assert!(!coordinated.eligible);
+        assert!(!coordinated.can_stage_blocked, "busy Coordinator cannot stage");
+        stop(&store, &ticket.id).unwrap();
+        assert!(manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap().eligible);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let denied = manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap();
+        assert!(!denied.eligible);
+        assert!(!denied.can_stage_blocked, "paused Worker cannot stage");
+    }
+
+    #[test]
     fn manual_dispatch_is_durable_deduplicated_and_requires_native_acceptance() {
         let mut store=fixture();
         let cfg=enabled(&store);
@@ -2942,6 +11483,321 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn native_snapshot_reports_true_finalization_gate_without_granting_acceptance() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (task, launched) = admit(&mut store, &cfg.id, "Inspect finalization",
+            "snapshot-approval-gate", false).unwrap();
+        assert!(launched);
+        let active = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(active.finalization_gate, "not_pending");
+        let sid = assignment_session(&store, &task.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &sid, true, "Recorded result").unwrap());
+        let waiting = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(waiting.finalization_gate, "native_recheck_required");
+        assert_eq!(waiting.unresolved_external_effects, 0);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect','digest','uncertain',?2,?2)",
+            params![task.id,now],
+        ).unwrap();
+        let blocked = ticket_snapshot(&store, &task.id, 20).unwrap();
+        assert_eq!(blocked.finalization_gate, "effects_unresolved");
+        assert_eq!(blocked.unresolved_external_effects, 1);
+        assert!(accept(&store, &task.id, blocked.ticket.revision).is_err());
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+    }
+
+    #[test]
+    fn unresolved_effects_block_manual_and_headless_acceptance_without_losing_evidence() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (task, started) = admit(
+            &mut store, &config.id, "Verify external state",
+            "unresolved-effect-finalization", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &task.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Worker evidence").unwrap());
+        let waiting = get_ticket(&store, &task.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        let now = storage::now();
+        // Simulate durable effect receipts retained from an interrupted
+        // remote request, not a fabricated provider success.
+        for (key, state) in [("write", "pending"), ("comment", "uncertain")] {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                  (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,'sha256-fixture',?3,?4,?4)",
+                params![task.id,key,state,now],
+            ).unwrap();
+        }
+        let refusal = accept(&store, &task.id, waiting.revision).unwrap_err();
+        assert!(refusal.contains("unresolved external effects"));
+        assert!(headless_accept_ticket(&store.path, &task.id, waiting.revision)
+            .unwrap_err().contains("unresolved external effects"));
+        assert_eq!(get_ticket(&store, &task.id).unwrap().revision, waiting.revision);
+        assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='human_accepted'",
+            [&task.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        // Settling only one receipt does not clear the other uncertainty.
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='write'", [&task.id],
+        ).unwrap();
+        assert!(accept(&store, &task.id, waiting.revision).is_err());
+        // Test-only remote reconciliation fixture: production must verify
+        // provider state before changing a receipt to applied.
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='comment'", [&task.id],
+        ).unwrap();
+        assert_eq!(accept(&store, &task.id, waiting.revision).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn disabling_team_quarantines_terminal_pending_effects_and_repeated_off_repairs_legacy_receipts() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private terminal effect", "terminal-effect-off", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let terminal_revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let timestamp = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-first','digest','pending',?2,?2)",
+            params![&ticket.id,timestamp],
+        ).unwrap();
+
+        let off = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert!(!off.enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, terminal_revision);
+        let first_state: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='legacy-first'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_state, "uncertain");
+
+        // The Team is already Off, but a legacy or interrupted writer left
+        // another pending receipt. Reissuing Off must not silently skip it.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-second','digest','pending',?2,?2)",
+            params![&ticket.id,timestamp],
+        ).unwrap();
+        let repaired = change_enabled(&store, &cfg.id, off.policy_revision, false).unwrap();
+        assert!(!repaired.enabled);
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 2);
+        let uncertain: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND state='uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, 2);
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='orchestration_disabled_effect_uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_count, 2);
+        let unchanged = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
+        assert_eq!(unchanged.policy_revision, repaired.policy_revision);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 2);
+        let all_uncertain: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND state='uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(all_uncertain, 2, "restart must not replay or bless remote effects");
+    }
+
+    #[test]
+    fn terminal_pending_effect_off_quarantine_rolls_back_on_audit_failure() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private legacy effect", "terminal-effect-rollback", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-pending','digest','pending',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_terminal_effect_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='orchestration_disabled_effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'injected recovery audit failure'); END;",
+        ).unwrap();
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, false).is_err());
+        assert!(configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        let pending: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='legacy-pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pending, "pending", "audit failure must roll back the entire Off transaction");
+        store.db.execute_batch("DROP TRIGGER fail_terminal_effect_audit").unwrap();
+        change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let uncertain: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='legacy-pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, "uncertain");
+    }
+
+    #[test]
+    fn revocation_preserves_external_effect_identity_as_uncertain_atomically() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let receipt_state = |db: &Store, ticket: &str| -> String {
+            db.db.query_row("SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+                [ticket], |r| r.get(0)).unwrap()
+        };
+        let (first, launched) = admit(&mut store, &cfg.id, "Inspect external receipt",
+            "stop-effect-recovery", false).unwrap();
+        assert!(launched);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect-1','digest','pending',?2,?2)",
+            params![first.id,now],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER deny_stop_receipt BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='stopped'
+             BEGIN SELECT RAISE(ABORT,'injected stop audit failure'); END;",
+        ).unwrap();
+        assert!(stop(&store, &first.id).is_err());
+        assert_eq!(receipt_state(&store, &first.id), "pending");
+        assert!(!mandate(&store, &first.id).unwrap().revoked);
+        store.db.execute_batch("DROP TRIGGER deny_stop_receipt").unwrap();
+        assert_eq!(stop(&store, &first.id).unwrap().0.state, "stopped");
+        assert_eq!(receipt_state(&store, &first.id), "uncertain");
+        assert!(stop(&store, &first.id).is_err());
+        let (second, launched) = admit(&mut store, &cfg.id, "Inspect another effect",
+            "disable-effect-recovery", false).unwrap();
+        assert!(launched);
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'effect-2','digest','pending',?2,?2)",
+            params![second.id,now],
+        ).unwrap();
+        change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert_eq!(receipt_state(&store, &second.id), "uncertain");
+        assert_eq!(get_ticket(&store, &second.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &second.id).unwrap().revoked);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='applied'",
+            [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_enable_is_revision_bound_and_never_creates_task_authority() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Headless-enabled Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        assert!(!cfg.enabled);
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, 0).is_err());
+        let enabled: serde_json::Value = serde_json::from_str(
+            &headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(enabled["orchestrationId"], cfg.id);
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["policyRevision"], cfg.policy_revision + 1);
+        assert_eq!(enabled["grantIssued"], false);
+        assert_eq!(enabled["providerDispatched"], false);
+        let again: serde_json::Value = serde_json::from_str(
+            &headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap(),
+        ).unwrap();
+        assert_eq!(again["policyRevision"], cfg.policy_revision + 1);
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision).is_err());
+        for table in ["sa_tickets", "sa_mandates", "sa_assignments"] {
+            let count: i64 = store.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "{table} must not be created by enabling a Team");
+        }
+        headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 2).is_err());
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision,
+            cfg.policy_revision + 2);
+    }
+
+    #[test]
+    fn headless_disable_revokes_only_its_team_without_live_store_recovery() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let unrelated = create_configuration(&store, NewOrchestration {
+            name: "Other Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Active, private work", "headless-disable", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(headless_disable_orchestration(
+            &store.path, &cfg.id, cfg.policy_revision + 1,
+        ).is_err(), "stale revision must reject the entire policy mutation");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+
+        let outcome: serde_json::Value = serde_json::from_str(
+            &headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(outcome["orchestrationId"], cfg.id);
+        assert_eq!(outcome["enabled"], false);
+        assert_eq!(outcome["policyRevision"], cfg.policy_revision + 1);
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert!(!configuration(&store, &unrelated.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &unrelated.id).unwrap().policy_revision,
+            unrelated.policy_revision, "unrelated Team must be untouched");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Late provider success").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(headless_disable_orchestration(
+            &store.path, &cfg.id, cfg.policy_revision,
+        ).is_err(), "replayed old revision cannot change policy");
+        let repeated: serde_json::Value = serde_json::from_str(
+            &headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap(),
+        ).unwrap();
+        assert_eq!(repeated["policyRevision"], cfg.policy_revision + 1,
+            "idempotent Off does not create a spurious revision");
+        assert_eq!(history(&store, &ticket.id, 10).unwrap().iter()
+            .filter(|entry| entry.kind == "orchestration_disabled").count(), 1);
     }
 
     #[test]
@@ -3204,6 +12060,41 @@ mod tests {
         let (ticket, launch) = admit(&mut store, &config.id, "Must roll back", "fault-1", false).unwrap();
         assert!(launch);
         assert_eq!(ticket.state, "running");
+    }
+
+    #[test]
+    fn stop_quarantines_detached_native_attempt_and_preserves_restart_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Stop detached attempt", "stop-orphan-native-1", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // A legacy interrupted state writer lost the active link while its
+        // provider session remained running. Stop must not leave a live
+        // assignment merely because the current Ticket pointer is absent.
+        store.db.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let (stopped, direct_session) = stop(&store, &ticket.id).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert!(direct_session.is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "stopped");
+        assert_eq!(
+            headless_cancelled_assignments(&store, std::slice::from_ref(&session_id)).unwrap(),
+            vec![session_id.clone()],
+        );
+        assert!(read_only_policy(&store, &session_id).is_err());
+        assert!(!on_run_finished(&store, &session_id, true, "late completion").unwrap());
+        let database_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&database_path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "stopped");
     }
 
     #[test]
@@ -3694,6 +12585,315 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_checkout_identity_blocks_native_and_ordinary_session_races() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        // A NUL makes filesystem identity unresolvable on all platforms.
+        // A rejected path must not be interpreted as a separate checkout.
+        let opaque = format!("unknown-{}\0checkout", storage::id());
+        assert!(canonical_checkout_intent(&opaque).is_none());
+        let root = std::env::temp_dir().join(format!("sa-valid-{}", storage::id()));
+        let sibling = std::env::temp_dir().join(format!("sa-other-{}", storage::id()));
+        assert!(!checkout_paths_overlap(&root.to_string_lossy(), &sibling.to_string_lossy()),
+            "Resolvable unrelated checkouts remain independent");
+        assert!(checkout_paths_overlap(&opaque, &root.to_string_lossy()),
+            "Unresolvable checkout identity must fail closed");
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('opaque-project','Opaque',?1)",
+            [&opaque],
+        ).unwrap();
+        let ordinary = store.create_session("opaque-project", "codex", "default", "ask").unwrap();
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), &cfg.worker_bot_id, &cfg.project_id,
+        ).unwrap());
+
+        // Simulate an ordinary provider arriving after the initial Ticket
+        // reservation; the second native admission fence must still deny it.
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect only", "opaque-checkout-race", false,
+        ).unwrap();
+        assert!(launched);
+        let native = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_run_admission(
+            &store, &native, std::slice::from_ref(&ordinary.id),
+        ).is_err());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        fail_launch(&store, &ticket.id, "No concurrent checkout access").unwrap();
+    }
+
+    #[test]
+    fn nested_checkout_roots_fence_native_and_ordinary_sessions_but_not_siblings() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-nested-checkout-{}", storage::id(),
+        ));
+        let checkout = root.join("workspace");
+        let child = checkout.join("service");
+        let sibling = root.join("workspace-other");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let checkout_path_text = checkout.to_string_lossy().to_string();
+        let child_path_text = child.to_string_lossy().to_string();
+        let sibling_path_text = sibling.to_string_lossy().to_string();
+
+        // Lexical prefix matches are not sufficient; only path components and
+        // resolved existing ancestors define a shared writeable resource.
+        assert!(!checkout_paths_equivalent(&checkout_path_text, &child_path_text));
+        assert!(checkout_paths_overlap(&checkout_path_text, &child_path_text));
+        assert!(checkout_paths_overlap(
+            &checkout_path_text,
+            &child.join("future").to_string_lossy(),
+        ));
+        assert!(!checkout_paths_overlap(&checkout_path_text, &sibling_path_text));
+
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&checkout_path_text],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('child-project','Child',?1)",
+            [&child_path_text],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('sibling-project','Sibling',?1)",
+            [&sibling_path_text],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Fence nested checkouts", "nested-checkout", false,
+        ).unwrap();
+        assert!(launched);
+        let native_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let child_session = store.create_session(
+            "child-project", "codex", "default", "plan",
+        ).unwrap();
+        let sibling_session = store.create_session(
+            "sibling-project", "codex", "default", "plan",
+        ).unwrap();
+
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&child_session.id), "worker", "project",
+        ).unwrap());
+        assert!(!active_manual_conflict(
+            &store, std::slice::from_ref(&sibling_session.id), "worker", "project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store, "different-bot", "child-project", "child-project",
+        ).unwrap());
+        assert!(!manual_candidate_occupied(
+            &store, "different-bot", "sibling-project", "sibling-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &child_session.id, &[]).is_err());
+        assert!(guard_run_admission(&store, &sibling_session.id, &[]).is_ok());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&child_session.id),
+        ).is_err());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&sibling_session.id),
+        ).is_ok());
+
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "different-bot", "child-project", "child-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &child_session.id, &[]).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn physical_checkout_aliases_block_native_and_ordinary_cross_project_admission() {
+        let mut store=fixture();
+        let checkout=std::env::temp_dir().join(format!(
+            "sa-checkout-identity-{}",storage::id(),
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let physical=checkout.to_string_lossy().to_string();
+        let alias=checkout.join(".").to_string_lossy().to_string();
+        assert_ne!(physical,alias);
+        assert!(checkout_paths_equivalent(&physical,&alias));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",[&physical],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Protect the physical checkout","physical-alias",false,
+        ).unwrap();
+        assert!(started);
+        let native=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let ordinary=store.create_session(
+            "alias-project","codex","default","plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store,std::slice::from_ref(&ordinary.id),"worker","project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
+        assert!(guard_run_admission(
+            &store,&native,std::slice::from_ref(&ordinary.id),
+        ).is_err());
+        stop(&store,&ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
+        std::fs::remove_dir(&checkout).unwrap();
+    }
+
+    #[test]
+    fn unresolved_dot_checkout_alias_fences_native_leases_without_path_creation() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-unresolved-checkout-{}", storage::id(),
+        ));
+        let original = root.join("checkout").to_string_lossy().to_string();
+        let alias = root.join(".").join("checkout").to_string_lossy().to_string();
+        let unrelated = root.join("other").to_string_lossy().to_string();
+        assert!(!root.exists());
+        assert_ne!(original, alias);
+        assert!(checkout_paths_equivalent(&original, &alias));
+        assert!(!checkout_paths_equivalent(&original, &unrelated));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&original],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Keep an uncreated checkout reserved",
+            "unresolved-dot-alias", false,
+        ).unwrap();
+        assert!(started);
+        let ordinary = store.create_session(
+            "alias-project", "codex", "default", "plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+    }
+
+    #[test]
+    fn unresolved_relative_and_absolute_checkout_aliases_share_native_identity() {
+        let relative = std::path::PathBuf::from(format!(
+            "sa-uncreated-relative-{}", storage::id(),
+        )).join("checkout");
+        let absolute = std::env::current_dir().unwrap().join(&relative);
+        assert!(!absolute.exists());
+        assert!(checkout_paths_equivalent(
+            &relative.to_string_lossy(), &absolute.to_string_lossy(),
+        ));
+        let unrelated = absolute.with_file_name("another-checkout");
+        assert!(!checkout_paths_equivalent(
+            &relative.to_string_lossy(), &unrelated.to_string_lossy(),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_symlinked_parent_checkout_alias_keeps_native_lease() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-pending-symlink-checkout-{}", storage::id(),
+        ));
+        let physical = root.join("physical");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let pending = physical.join("future").join("checkout");
+        let pending_alias = alias.join("future").join("checkout");
+        assert!(!pending.exists() && !pending_alias.exists());
+        let original = pending.to_string_lossy().to_string();
+        let alternate = pending_alias.to_string_lossy().to_string();
+        assert!(checkout_paths_equivalent(&original, &alternate));
+        assert!(!checkout_paths_equivalent(
+            &original, &alias.join("future").join("different").to_string_lossy(),
+        ));
+
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&original],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('unresolved-alias','Alias',?1)",
+            [&alternate],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Fence an uncreated symlinked checkout",
+            "unresolved-symlink-checkout", false,
+        ).unwrap();
+        assert!(started);
+        let ordinary = store.create_session(
+            "unresolved-alias", "codex", "default", "plan",
+        ).unwrap();
+        assert!(manual_candidate_occupied(
+            &store, "other-worker", "unresolved-alias", "unresolved-alias",
+        ).unwrap());
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "other-worker", "unresolved-alias", "unresolved-alias",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn native_bot_lease_fences_stale_ordinary_session_in_another_project() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('old-project','Old workspace','/tmp/sa-old-session-project')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='old-project' WHERE id='worker'", [],
+        ).unwrap();
+        let previous_worker = bots::get(&store, "worker").unwrap();
+        let (old_session, _) = bots::thread_session(
+            &store, &previous_worker, bots::DESKTOP, "old-workspace-chat", "Older conversation",
+        ).unwrap();
+        // A bot can change its current project while its earlier session is
+        // still active. The stale session must not race a fresh Team lease.
+        store.db.execute(
+            "UPDATE bots SET project_id='project' WHERE id='worker'", [],
+        ).unwrap();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Read-only inspection", "same-bot-other-project", false,
+        ).unwrap();
+        assert!(launched);
+        let native_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_run_admission(&store, &native_session, &[]).is_ok());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&old_session),
+        ).is_err());
+        assert!(guard_run_admission(&store, &old_session, &[]).is_err());
+        fail_launch(&store, &ticket.id, "Release exclusive bot lease").unwrap();
+        assert!(guard_run_admission(&store, &old_session, &[]).is_ok());
+    }
+
+    #[test]
     fn native_run_admission_closes_cross_session_project_races() {
         let mut store = fixture();
         let config = enabled(&store);
@@ -3722,6 +12922,46 @@ mod tests {
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_session, &[]).is_ok());
         assert!(guard_run_admission(&store, &superagent_session, &[]).is_err());
+    }
+
+    #[test]
+    fn settled_native_provider_keeps_checkout_fenced_until_process_exit() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket, started)=admit(
+            &mut store,&cfg.id,"Read-only task that is stopping",
+            "settled-provider-run-fence",false,
+        ).unwrap();
+        assert!(started);
+        let native=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let worker=bots::get(&store,"worker").unwrap();
+        let ordinary=bots::thread_session(
+            &store,&worker,bots::DESKTOP,"ordinary-after-stop","Normal chat",
+        ).unwrap().0;
+        stop(&store,&ticket.id).unwrap();
+
+        // The durable lease is gone, but a delayed provider exit still
+        // occupies the task's checkout and bot. No new ordinary agent
+        // may execute there until the live agent registry removes it.
+        assert!(guard_run_admission(&store,&ordinary,&[]).is_ok());
+        let error=guard_run_admission(
+            &store,&ordinary,std::slice::from_ref(&native),
+        ).unwrap_err();
+        assert!(error.contains("still running on this bot or checkout"));
+
+        // A separate project and separate bot remain independently usable.
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('independent','Independent','/tmp/disposable-superagent-independent')",
+            [],
+        ).unwrap();
+        let independent=store.create_session(
+            "independent","codex","default","plan",
+        ).unwrap();
+        assert!(guard_run_admission(
+            &store,&independent.id,std::slice::from_ref(&native),
+        ).is_ok());
+        assert!(guard_run_admission(&store,&ordinary,&[]).is_ok());
     }
 
     #[test]
@@ -4006,6 +13246,12 @@ mod tests {
         ).unwrap();
         assert!(!launched, "native admission must reserve the coordinator's actual workspace");
         assert_eq!(blocked.state, "blocked");
+        // Retry must detect the coordinator's actual session checkout before
+        // any session/assignment is created, not depend only on the SQL
+        // trigger rejecting the conflicting insert.
+        assert!(retry_blocked(&mut store, &blocked.id, false)
+            .unwrap_err().contains("occupied"));
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
 
         // The SQLite trigger is a second line of defense against callers
         // that attempt to bypass the normal occupied-workspace preflight.
@@ -4022,6 +13268,76 @@ mod tests {
         let (retried, _, worker) = retry_blocked(&mut store, &blocked.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_eq!(worker, "other-worker");
+    }
+
+    #[test]
+    fn coordinated_worker_preflight_reserves_other_coordinator_checkout() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-worker-project','Other worker','/tmp/sa-coordinated-preflight')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-coordinator','Other coordinator','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Other worker','other-worker-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+
+        let config = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &config.id, "Plan a worker change",
+            "coordinated-preflight-target", false, true,
+        ).unwrap();
+        assert!(started);
+        let plan_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &plan_session, true, "Current plan").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+
+        // The unrelated Team's Ticket targets another project, but its
+        // coordinator session is actively using this Team's worker checkout.
+        let foreign = create_configuration(&store, NewOrchestration {
+            name: "Unrelated coordinated Team".into(),
+            coordinator_bot_id: "other-coordinator".into(),
+            worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        let foreign = change_enabled(
+            &store, &foreign.id, foreign.policy_revision, true,
+        ).unwrap();
+        let (foreign_ticket, foreign_started) = admit_role(
+            &mut store, &foreign.id, "Plan in first worker checkout",
+            "coordinated-preflight-foreign", false, true,
+        ).unwrap();
+        assert!(foreign_started);
+        assert_eq!(get_ticket(&store, &foreign_ticket.id).unwrap().state, "running");
+        assert!(manual_candidate_occupied(
+            &store, "worker", &config.project_id, &config.project_id,
+        ).unwrap());
+
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let error = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap_err();
+        assert!(error.contains("occupied"), "Unexpected preflight error: {error}");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        let after: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(before, after, "Denied admission must not create an assignment");
+
+        fail_launch(&store, &foreign_ticket.id, "Coordinator cancelled").unwrap();
+        let (dispatched, _, worker_id, _) = prepare_coordinated_worker(
+            &mut store, &ticket.id, false,
+        ).unwrap();
+        assert_eq!(dispatched.state, "running");
+        assert_eq!(worker_id, "worker");
     }
 
     #[test]
@@ -4231,5 +13547,90 @@ mod tests {
         assert!(read_only_policy(&store,&sid).is_err());
         assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
+
+    #[test]
+    fn duplicate_checkout_path_is_rejected_by_storage_and_active_lease_is_preserved() {
+        let mut store=fixture();
+        let first=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&first.id,
+            "First checkout owner","checkout-unique-first",false).unwrap();
+        assert!(launched);
+
+        // projects.path is UNIQUE. Two project IDs cannot have an identical
+        // stored path, so the previous alias fixture was impossible to create.
+        // Physical/symlink aliases with different strings need separate guards.
+        assert!(store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias','/tmp/disposable-superagent')",[]
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM projects WHERE id='alias-project'",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+
+        // A regular session cannot bypass the original Ticket's checkout lease.
+        let ordinary=store.create_session("project","codex","default","ask").unwrap();
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
+        assert!(active_manual_conflict(&store,&[ordinary.id],"worker","project").unwrap());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+    }
+
+    #[test]
+    fn changed_checkout_path_invalidates_admitted_session_and_late_result() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&config.id,
+            "Read original checkout","checkout-path-snapshot",false).unwrap();
+        assert!(launched);
+        let sid=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let profile=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert!(profile.members.iter().all(|m|
+            m.project_path.as_deref()==Some("/tmp/disposable-superagent")));
+        assert!(roster::checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(read_only_policy(&store,&sid).unwrap().is_some());
+        store.db.execute(
+            "UPDATE projects SET path='/tmp/superagent-reassigned-checkout' WHERE id='project'",[]
+        ).unwrap();
+        assert!(!roster::checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(read_only_policy(&store,&sid).is_err());
+        assert!(guard_run_admission(&store,&sid,&[]).is_err());
+        assert!(on_run_finished(&store,&sid,true,"Untrusted success").unwrap());
+        let blocked=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(blocked.state,"blocked");
+        assert!(accept(&store,&ticket.id,blocked.revision).is_err());
+        assert!(!on_run_finished(&store,&sid,true,"Repeated success").unwrap());
+    }
+
+    #[test]
+    fn v46_upgrade_restores_alias_safe_checkout_lease_triggers() {
+        let store=fixture();
+        let path=store.path.clone();
+        store.db.execute_batch(
+            "DROP TRIGGER sa_project_lease_insert;
+             DROP TRIGGER sa_project_lease_update;
+             PRAGMA user_version=46;",
+        ).unwrap();
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        let version:i64=reopened.db.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+        assert_eq!(version,storage::SCHEMA_VERSION);
+        for name in ["sa_project_lease_insert","sa_project_lease_update"] {
+            let sql:String=reopened.db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],|row|row.get(0),
+            ).unwrap();
+            assert!(sql.contains("old_checkout.path=new_checkout.path"),"{name}");
+        }
+    }
+
+    #[test]
+    fn ordinary_chat_admission_retains_legacy_empty_project_path_behavior() {
+        let store=fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('legacy-empty-project','Legacy','')",[]
+        ).unwrap();
+        let ordinary=store.create_session("legacy-empty-project","codex","default","ask").unwrap();
+        // No SuperAgent owns this session. The new exact-checkout guard cannot
+        // turn a legacy ordinary chat into a task-scoped provider admission.
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
     }
 }

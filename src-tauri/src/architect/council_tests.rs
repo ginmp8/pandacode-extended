@@ -10412,6 +10412,129 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
 }
 
 #[test]
+fn nested_m5_unforced_s2_respects_stricter_required_criterion_with_native_terminal() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('criterion-child','criterion-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.automatic_reviewers = 1;
+        config.criteria_source = council::CouncilCriteriaSource::User;
+        config.criteria.push(council::CouncilCriterion {
+            id: "correctness".into(), lens: "correctness".into(),
+            required: true, target: 9.7,
+            evidence_required: false, native_evidence: None,
+        });
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "criterion-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Keep a required user criterion stricter than the root score", None, None).unwrap();
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "c".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "nested-m5-criterion-trigger", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments":[reviewer_assignment("root-original", "correctness")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (first_run, _) = claim(&state, action);
+    finish(&state, &first_run,
+        "Global target met, required criterion missed.\nCouncil score: 9.3/10", true);
+    let second = json!({
+        "assignments":[reviewer_assignment("root-fresh", "correctness")]
+    });
+    assert!(call(&state, &sid, "pandacode_dispatch_workers", second.clone()).is_err(),
+        "a missing child receipt cannot authorize a fresh root wave");
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Wait for pinned child findings"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&leaf.sid, "assistant",
+                "Independent child criterion evidence.\nCouncil score: 9.8/10").unwrap();
+        }
+        completed_state(&state, &leaf.sid, Some(&leaf.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Verify child first-wave receipts"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let config = root.config.council.as_ref().unwrap();
+        assert!(root.workers.iter().any(|worker| worker.council.as_ref()
+            .is_some_and(|seat| seat.round == 1 && seat.score == Some(9.3))));
+        assert!(council::root_s2_unforced_trigger(&root, config, 1),
+            "the stricter required target is an escalation trigger");
+        assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
+            "one real child Council and authenticated criterion deficit permit a fresh root review");
+        assert!(!verified_council_pass(&store, &root));
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "nested-m5-criterion-trigger",
+            &artifact, &request.request_id,
+        ).is_err(), "an admitted escalation is not a terminal approval");
+    }
+    call(&state, &sid, "pandacode_dispatch_workers", second).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (second_run, _) = claim(&state, action);
+    assert_ne!(first_run.config.session_id, second_run.config.session_id);
+    finish(&state, &second_run,
+        "Fresh independent required-criterion review.\nCouncil score: 9.8/10", true);
+    let (completed, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Verify all required criterion evidence"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(completed["completed"], true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(verified_council_pass(&store, &root));
+    assert_eq!(authenticated_hierarchical_status(&store, &root).unwrap().round, 2);
+    let receipt = council_requests::record_native_terminal(
+        &store, &sid, &project, "nested-m5-criterion-trigger",
+        &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(receipt.outcome, "passed");
+    assert_eq!(receipt.reviewed_round, Some(2));
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m5-criterion-trigger",
+        &artifact, &request.request_id,
+    ).unwrap(), receipt);
+    let mut no_trigger = root.clone();
+    no_trigger.workers.iter_mut().find(|worker| worker.council.as_ref()
+        .is_some_and(|seat| seat.round == 1)).unwrap()
+        .council.as_mut().unwrap().score = Some(9.8);
+    assert!(!council::root_s2_unforced_trigger(
+        &no_trigger, no_trigger.config.council.as_ref().unwrap(), 1),
+        "a clean first wave cannot create an unsolicited escalation");
+    assert!(authenticated_hierarchical_status(&store, &no_trigger).is_none(),
+        "changing the first native callback revokes this terminal verdict");
+}
+
+#[test]
 fn nested_m4_triggered_s2_requires_authenticated_evidence_before_terminal_pass() {
     let (state, sid) = state_fixture();
     {

@@ -2631,6 +2631,18 @@ pub(super) fn independent_s2_root_identities(team: &TeamSnapshot) -> bool {
     })
 }
 
+/// A required user criterion may demand a higher score than the global
+/// Council target. Missing native evidence is also an S2 trigger, never an
+/// excuse to accept an unverified first wave or add a new reviewer source.
+pub(super) fn root_s2_unforced_trigger(
+    team: &TeamSnapshot, config: &CouncilConfig, round: usize,
+) -> bool {
+    in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+        && seat.score.is_some_and(|score| score.is_finite() && score < config.target))
+        || !criterion_blockers(team, config, round).is_empty()
+        || !unverified_required_skill_checks(team, round).is_empty()
+}
+
 /// Settle an unforced S2 root-score trigger only after a genuinely fresh,
 /// independently authenticated root wave passes. A clean child keeps its
 /// original composite receipt; no synthetic child second wave is invented.
@@ -2662,8 +2674,7 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
     let second = in_round(team, 2).filter(|(worker, seat)| counts(worker, seat))
         .collect::<Vec<_>>();
     if first.len() != required || second.len() != required
-        || !first.iter().any(|(_, seat)| seat.score.is_some_and(|score|
-            score.is_finite() && score < config.target))
+        || !root_s2_unforced_trigger(team, config, 1)
     {
         return None;
     }

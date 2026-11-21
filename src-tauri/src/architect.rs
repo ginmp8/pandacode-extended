@@ -891,9 +891,7 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
             && council::independent_s2_root_identities(team)
             && children.len() == config.nested_bot_reviewers.len()
             && first_roots.len() == required
-            && first_roots.iter().any(|worker| worker.council.as_ref()
-                .and_then(|seat| seat.score)
-                .is_some_and(|score| score.is_finite() && score < config.target))
+            && council::root_s2_unforced_trigger(&first, config, 1)
             && mixed_native_authority_current(store, &first);
     }
     // A forced second wave only uses native first-wave proof for admission,

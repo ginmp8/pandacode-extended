@@ -232,7 +232,7 @@ pub(super) fn dispatch_state(
         .map_err(|_| "reviewer_session_mismatch: native root session unavailable.".to_string())?;
     if root_session.archived || root_session.task_stage == "completed"
         || matches!(root_session.status.as_str(),
-            "interrupted" | "error" | "paused" | "stopped")
+            "interrupted" | "error" | "paused" | "stopped" | "completed")
     {
         return Err("reviewer_session_mismatch: native root Council session is no longer authorized.".into());
     }
@@ -356,7 +356,7 @@ fn dispatch_file_state(
         .map_err(|_| "reviewer_session_mismatch: native Council session unavailable.".to_string())?;
     if root.archived || root.task_stage == "completed"
         || matches!(root.status.as_str(),
-            "interrupted" | "error" | "paused" | "stopped")
+            "interrupted" | "error" | "paused" | "stopped" | "completed")
         || team.generation != generation || !active(&team.status)
     {
         return Err("reviewer_session_mismatch: Council is no longer authorized.".into());

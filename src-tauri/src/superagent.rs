@@ -1135,6 +1135,55 @@ pub(crate) fn inspect_headless_status(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let observed_at = storage::now();
+    // A damaged or partially migrated Ticket can lose its Mandate. The
+    // recovery inbox already exposes such Tickets, but the detailed headless
+    // inspector must not fail just because the native grant is absent.
+    // Report the grant as missing; never synthesize an authorization.
+    if let Some(ticket_id) = ticket_id {
+        let mandate_exists: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
+            [ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !mandate_exists {
+            // Keep the degraded status, assignment list, and effect count in
+            // one read-only snapshot while another host may be recovering it.
+            let read = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let ticket = get_ticket(&store, ticket_id)?;
+            let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+            let unresolved = effects::unresolved_count(&store, ticket_id)?;
+            let native_assignments = assignments(&store, ticket_id, 50)?;
+            let native_history = history(&store, ticket_id, 50)?;
+            read.commit().map_err(|e| e.to_string())?;
+            let result = serde_json::json!({
+                "ticketId": ticket.id,
+                "orchestrationId": ticket.orchestration_id,
+                "state": ticket.state,
+                "revision": ticket.revision,
+                "activeAssignmentId": ticket.active_assignment_id,
+                "hasEvidence": ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
+                "unresolvedExternalEffects": unresolved,
+                "recovery": recovery,
+                "mandate": null,
+                "mandateMissing": true,
+                "assignments": native_assignments.iter().map(|a| {
+                    let (expired, remaining) = headless_assignment_budget(a, observed_at);
+                    serde_json::json!({
+                        "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
+                        "state": &a.state, "attempt": a.attempt,
+                        "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty()),
+                        "runBudgetExpired": expired,
+                        "remainingRunBudgetMs": remaining
+                    })
+                }).collect::<Vec<_>>(),
+                "activity": native_history.iter().map(|a| serde_json::json!({
+                    "kind": &a.kind, "at": a.at
+                })).collect::<Vec<_>>(),
+                "observationalOnly": true,
+                "automaticReplayAllowed": false
+            });
+            return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
+        }
+    }
     let value = if let Some(ticket_id) = ticket_id {
         let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
         serde_json::json!({
@@ -6386,6 +6435,29 @@ mod tests {
             [&ticket.id], |row| row.get::<_, i64>(0),
         ).unwrap(), audits_before);
 
+        // The detailed CLI inspector must remain usable when a Mandate is
+        // missing. It returns no invented grant or raw objective and cannot
+        // mutate the running provider or resolve the pending external effect.
+        let damaged_status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert!(damaged_status["mandate"].is_null());
+        assert_eq!(damaged_status["mandateMissing"], true);
+        assert_eq!(damaged_status["state"], "running");
+        assert_eq!(damaged_status["recovery"]["mandateMissing"], true);
+        assert_eq!(damaged_status["recovery"]["nextOperatorAction"],
+            "quarantine_missing_native_mandate");
+        assert_eq!(damaged_status["unresolvedExternalEffects"], 1);
+        assert_eq!(damaged_status["assignments"][0]["sessionId"], session);
+        assert_eq!(damaged_status["observationalOnly"], true);
+        assert_eq!(damaged_status["automaticReplayAllowed"], false);
+        assert!(!damaged_status.to_string().contains("Private missing mandate work"));
+        assert!(inspect_headless_status(&path, Some("not-a-ticket")).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audits_before);
+
         assert!(headless_quarantine_orphan_running_ticket(
             &path, &ticket.id, revision + 1,
         ).is_err(), "A stale operator revision cannot settle this Ticket");
@@ -6400,6 +6472,14 @@ mod tests {
         assert_eq!(settled["pendingEffectsMarkedUncertain"], 1);
         assert_eq!(settled["providerStoppedByCommand"], false);
         assert_eq!(settled["externalEffectReplayAllowed"], false);
+        let after_quarantine: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(after_quarantine["state"], "interrupted");
+        assert_eq!(after_quarantine["revision"], revision + 1);
+        assert!(after_quarantine["mandate"].is_null());
+        assert_eq!(after_quarantine["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(after_quarantine["recovery"]["automaticReplayAllowed"], false);
         assert!(headless_quarantine_orphan_running_ticket(
             &path, &ticket.id, revision,
         ).is_err(), "Duplicate quarantine must not repeat audit or effects");

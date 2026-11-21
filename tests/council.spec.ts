@@ -366,6 +366,62 @@ test('Council inspector does not present invalid native reviewer scores or usage
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
 
+test('Council inspector rejects invalid root, child and composed metering but preserves real zero observations', async ({ page }) => {
+  const invalid = {
+    uniqueAttempts: -3, queueMeasuredAttempts: -2, spanMeasuredAttempts: -1,
+    cumulativeQueueWaitMs: -30, cumulativeObservedSpanMs: -10, settledReviewWindowMs: -5,
+    tokenCount: -800, costAmount: -42, costCurrency: 'USD', usageProvenance: 'unknown',
+  };
+  const inspection = {
+    mode: 'm4', cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    usage: invalid, composedUsage: invalid,
+    usageByRoundSource: [{ round: 1, reviewerSource: 'automatic', usage: invalid }],
+    composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_bot', usage: invalid }],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-usage', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 2, status: 'reviewing', observedLeafUsage: invalid,
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const rootUsage = inspector.locator('.council-usage-totals');
+  await expect(rootUsage).toContainText('Native attempts: unknown');
+  await expect(rootUsage).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(rootUsage).toContainText('Cumulative queue unknown');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Root + child native attempts: unknown');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(inspector.getByRole('region', { name: 'Root usage by round and source' }))
+    .toContainText('Native attempts unknown');
+  await expect(inspector.getByRole('region', { name: 'Root and child usage by round and source' }))
+    .toContainText('Native attempts unknown');
+  const child = inspector.getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('Child-observed native leaf attempts: unknown');
+  await expect(child).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(inspector).not.toContainText('Cost -42 USD');
+  await expect(inspector).not.toContainText('Provider tokens -800');
+  await expect(inspector).not.toContainText('attempts: -3');
+  await expect(inspector).toContainText('Native pass not verified');
+  // Zero is valid observed usage; rejecting bad values must preserve it.
+  const zero = { ...invalid, uniqueAttempts: 0, queueMeasuredAttempts: 0,
+    spanMeasuredAttempts: 0, cumulativeQueueWaitMs: 0,
+    cumulativeObservedSpanMs: 0, settledReviewWindowMs: 0,
+    tokenCount: 0, costAmount: 0 };
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, usage: zero, composedUsage: zero,
+    reservedChildren: [{ ...inspection.reservedChildren[0], observedLeafUsage: zero }],
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(rootUsage).toContainText('Native attempts: 0');
+  await expect(rootUsage).toContainText('Provider tokens 0 · Cost 0 USD');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens 0 · Cost 0 USD');
+  await expect(child).toContainText('Child-observed native leaf attempts: 0');
+});
+
 test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
   const inspection = {
     mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',

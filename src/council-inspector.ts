@@ -7,6 +7,18 @@ function observedDuration(label: string, ms: number | null | undefined): string 
   return label + ' ' + (ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : Math.round(ms) + ' ms');
 }
 
+/** Malformed or unobserved native usage must not appear as measured work. */
+function nonNegativeCount(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? String(value) : 'unknown';
+}
+
+function observedProviderCost(amount: number | null | undefined, currency: string | null | undefined): string {
+  return typeof amount === 'number' && Number.isFinite(amount) && amount >= 0
+    && typeof currency === 'string' && currency.trim().length > 0
+    ? amount + ' ' + currency : 'unknown';
+}
+
 /** Safe read-only native projection, reusable without the task orchestrator. */
 export function councilInspectionHtml(inspection: CouncilInspection | null): string {
   if (!inspection) return '<p>No task-owned Council is available.</p>';
@@ -228,15 +240,14 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && challengeIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
         const measured = child.observedLeafUsage;
         const childUsageHtml = measured
-          ? '<p>Child-observed native leaf attempts: ' + escape(String(measured.uniqueAttempts)) +
+          ? '<p>Child-observed native leaf attempts: ' + escape(nonNegativeCount(measured.uniqueAttempts)) +
             ' · Queue ' + escape(observedDuration('', measured.cumulativeQueueWaitMs).trim()) +
-            ' (' + escape(String(measured.queueMeasuredAttempts)) + ' measured)' +
+            ' (' + escape(nonNegativeCount(measured.queueMeasuredAttempts)) + ' measured)' +
             ' · Observed span ' + escape(observedDuration('', measured.cumulativeObservedSpanMs).trim()) +
-            ' (' + escape(String(measured.spanMeasuredAttempts)) + ' measured)' +
+            ' (' + escape(nonNegativeCount(measured.spanMeasuredAttempts)) + ' measured)' +
             ' · Settled review window ' + escape(observedDuration('', measured.settledReviewWindowMs).trim()) +
-            ' · Provider tokens ' + (measured.tokenCount == null ? 'unknown' : escape(String(measured.tokenCount))) +
-            ' · Cost ' + (measured.costAmount == null || !measured.costCurrency
-              ? 'unknown' : escape(String(measured.costAmount) + ' ' + measured.costCurrency)) +
+            ' · Provider tokens ' + escape(nonNegativeCount(measured.tokenCount)) +
+            ' · Cost ' + escape(observedProviderCost(measured.costAmount, measured.costCurrency)) +
             '</p>'
           : '<p>No child leaf attempts have been admitted.</p>';
         // An escalated child can have two waves of up to eight native leaves.
@@ -339,29 +350,28 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   const hidden = inspection.attempts.length - shown.length;
   const usage = inspection.usage;
   const usageHtml = usage
-    ? '<p class="council-usage-totals">Native attempts: ' + escape(String(usage.uniqueAttempts)) +
+    ? '<p class="council-usage-totals">Native attempts: ' + escape(nonNegativeCount(usage.uniqueAttempts)) +
       ' · Cumulative queue ' + escape(observedDuration('', usage.cumulativeQueueWaitMs).trim()) +
-      ' (' + escape(String(usage.queueMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
+      ' (' + escape(nonNegativeCount(usage.queueMeasuredAttempts)) + '/' + escape(nonNegativeCount(usage.uniqueAttempts)) + ' measured)' +
       ' · Cumulative observed span ' + escape(observedDuration('', usage.cumulativeObservedSpanMs).trim()) +
-      ' (' + escape(String(usage.spanMeasuredAttempts)) + '/' + escape(String(usage.uniqueAttempts)) + ' measured)' +
+      ' (' + escape(nonNegativeCount(usage.spanMeasuredAttempts)) + '/' + escape(nonNegativeCount(usage.uniqueAttempts)) + ' measured)' +
       ' · Settled review window ' + escape(observedDuration('', usage.settledReviewWindowMs).trim()) +
       ' (overlap counted once; not provider time)' +
-      ' · Provider tokens ' + (usage.tokenCount === null ? 'unknown' : escape(String(usage.tokenCount))) +
-      ' · Cost ' + (usage.costAmount === null || !usage.costCurrency ? 'unknown' : escape(String(usage.costAmount) + ' ' + usage.costCurrency)) +
+      ' · Provider tokens ' + escape(nonNegativeCount(usage.tokenCount)) +
+      ' · Cost ' + escape(observedProviderCost(usage.costAmount, usage.costCurrency)) +
       '</p>'
     : '';
   const composed = inspection.composedUsage;
   const composedHtml = composed && children.length
-    ? '<p class="council-composed-usage">Root + child native attempts: ' + escape(String(composed.uniqueAttempts)) +
+    ? '<p class="council-composed-usage">Root + child native attempts: ' + escape(nonNegativeCount(composed.uniqueAttempts)) +
       ' · Cumulative queue ' + escape(observedDuration('', composed.cumulativeQueueWaitMs).trim()) +
-      ' (' + escape(String(composed.queueMeasuredAttempts)) + ' measured)' +
+      ' (' + escape(nonNegativeCount(composed.queueMeasuredAttempts)) + ' measured)' +
       ' · Cumulative observed span ' + escape(observedDuration('', composed.cumulativeObservedSpanMs).trim()) +
-      ' (' + escape(String(composed.spanMeasuredAttempts)) + ' measured)' +
+      ' (' + escape(nonNegativeCount(composed.spanMeasuredAttempts)) + ' measured)' +
       ' · Settled review window ' + escape(observedDuration('', composed.settledReviewWindowMs).trim()) +
       ' (overlap counted once; not provider time)' +
-      ' · Provider tokens ' + (composed.tokenCount == null ? 'unknown' : escape(String(composed.tokenCount))) +
-      ' · Cost ' + (composed.costAmount == null || !composed.costCurrency
-        ? 'unknown' : escape(String(composed.costAmount) + ' ' + composed.costCurrency)) +
+      ' · Provider tokens ' + escape(nonNegativeCount(composed.tokenCount)) +
+      ' · Cost ' + escape(observedProviderCost(composed.costAmount, composed.costCurrency)) +
       ' · Child reservations and parent composite seats excluded.</p>'
     : '';
   const groups = inspection.usageByRoundSource ?? [];
@@ -371,11 +381,11 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '<p>Each native attempt is counted once across these groups. Child reservations are excluded; provider tokens and cost remain unknown without receipts.</p><ul>' +
       groups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +
         escape(group.reviewerSource.replace('_', ' ')) +
-        ' · Native attempts ' + escape(String(group.usage.uniqueAttempts)) +
+        ' · Native attempts ' + escape(nonNegativeCount(group.usage.uniqueAttempts)) +
         ' · Queue ' + escape(observedDuration('', group.usage.cumulativeQueueWaitMs).trim()) +
-        ' (' + escape(String(group.usage.queueMeasuredAttempts)) + ' measured)' +
+        ' (' + escape(nonNegativeCount(group.usage.queueMeasuredAttempts)) + ' measured)' +
         ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) +
-        ' (' + escape(String(group.usage.spanMeasuredAttempts)) + ' measured)' +
+        ' (' + escape(nonNegativeCount(group.usage.spanMeasuredAttempts)) + ' measured)' +
         ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +
       '</ul></section>'
     : '';
@@ -386,7 +396,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '<p>Each admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p><ul>' +
       allGroups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +
         escape(group.reviewerSource.replace('_', ' ')) +
-        ' · Native attempts ' + escape(String(group.usage.uniqueAttempts)) +
+        ' · Native attempts ' + escape(nonNegativeCount(group.usage.uniqueAttempts)) +
         ' · Queue ' + escape(observedDuration('', group.usage.cumulativeQueueWaitMs).trim()) +
         ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) +
         ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +

@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 52;
+pub const SCHEMA_VERSION: i64 = 53;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -783,6 +783,14 @@ impl Store {
                     }
                 }
                 migration.execute_batch("PRAGMA user_version=52;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 53 {
+                // Additive, non-authorizing GitHub Events actor identity pin.
+                // Legacy decisions remain preserved without a fabricated actor ID.
+                migration.execute_batch(crate::superagent::events::ACTOR_ID_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=53;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;

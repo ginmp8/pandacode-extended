@@ -106,7 +106,8 @@ interface SourceDecision {
 interface LinkedActivityCursor { at: number; sourceId: string; deliveryId: string }
 interface LinkedActivityPage { decisions: SourceDecision[]; nextCursor?: LinkedActivityCursor | null }
 interface SourceIntegrity {
-  sourceId: string; repository: string; mode: 'off' | 'observe';
+  sourceId: string; repository: string; repositoryId?: number | null; actorId?: number | null;
+  mode: 'off' | 'observe';
   policyRevision: number; cursorKind: string; lastSequence: number;
   receiptCount: number; permittedReceiptCount: number;
   maxReceiptSequence: number; cursorConsistent: boolean;
@@ -608,6 +609,8 @@ export function mountSuperagent(
             '<h5>Native source integrity</h5><p>' +
             safe(sourceIntegrity.repository) + ' · ' + safe(sourceIntegrity.mode) +
             ' · Revision ' + safe(sourceIntegrity.policyRevision) + '</p>' +
+            '<p>GitHub repository ID: ' + safe(sourceIntegrity.repositoryId ?? 'Not attested') +
+            ' · GitHub Events actor ID: ' + safe(sourceIntegrity.actorId ?? 'Not attested') + '</p>' +
             '<p>Cursor type: ' +
             safe(sourceIntegrity.cursorKind === 'local_check_run_observation_count'
               ? 'Local Check Run observation count' : 'GitHub Events high-watermark') +

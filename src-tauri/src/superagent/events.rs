@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS sa_source_repository_identity (
 );
 "#;
 
+/// Pin the GitHub actor's immutable numeric account identity for a source.
+/// A renamed/deleted account must not silently transfer Observe authority to
+/// a later account using the same login. Historical name-only receipts remain.
+pub(crate) const ACTOR_ID_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_source_actor_identity (
+  source_id TEXT PRIMARY KEY REFERENCES sa_event_sources(id) ON DELETE RESTRICT,
+  actor_id INTEGER NOT NULL CHECK(actor_id > 0),
+  attested_at INTEGER NOT NULL CHECK(attested_at > 0)
+);
+"#;
+
 /// Durable evidence of a bounded GitHub Events window that did not verify
 /// continuity. An incident is diagnostic only: it never grants Auto, infers a
 /// Ticket, rewinds a source cursor or claims that missing events were recovered.
@@ -611,6 +622,7 @@ pub struct SourceIntegrity {
     pub source_id: String,
     pub repository: String,
     pub repository_id: Option<i64>,
+    pub actor_id: Option<i64>,
     pub mode: String,
     pub policy_revision: i64,
     pub cursor_kind: &'static str,
@@ -634,6 +646,10 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
     let selected = source(store, source_id)?;
     let repository_id: Option<i64> = store.db.query_row(
         "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
+        [source_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let actor_id: Option<i64> = store.db.query_row(
+        "SELECT actor_id FROM sa_source_actor_identity WHERE source_id=?1",
         [source_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     let (receipt_count, permitted_receipt_count, max_receipt_sequence):
@@ -670,7 +686,8 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "source_off_no_poll"
     } else { "explicit_observe_available" };
     Ok(SourceIntegrity {
-        source_id:selected.id, repository:selected.repository, repository_id, mode:selected.mode,
+        source_id:selected.id, repository:selected.repository, repository_id, actor_id,
+        mode:selected.mode,
         policy_revision:selected.policy_revision,
         cursor_kind:if selected.event_kind == "check_run.completed" {
             "local_check_run_observation_count"
@@ -1174,6 +1191,69 @@ fn pin_authenticated_repository_identity(
     Ok(())
 }
 
+/// The GitHub Events feed includes an immutable numeric actor ID even when
+/// the account changes its login. Legacy in-process fixtures may lack IDs,
+/// but the real authenticated network adapter rejects such responses.
+fn matching_authenticated_actor_id(
+    events: &[serde_json::Value], expected_login: &str,
+) -> Result<Option<i64>> {
+    let mut matching_id = None;
+    for event in events {
+        let Some(login) = event.pointer("/actor/login").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if !login.eq_ignore_ascii_case(expected_login) { continue; }
+        let Some(raw_id) = event.pointer("/actor/id") else { continue; };
+        let id = raw_id.as_i64().filter(|id| *id > 0)
+            .ok_or("Authenticated GitHub actor ID is invalid.")?;
+        if matching_id.is_some_and(|previous| previous != id) {
+            return Err("Authenticated GitHub Events window changes configured actor identity; cursor unchanged.".into());
+        }
+        matching_id = Some(id);
+    }
+    Ok(matching_id)
+}
+
+/// Apply to the complete real provider response, not just matching event kinds.
+/// Missing/invalid IDs cannot masquerade as a different account with the
+/// same display login and must not advance the source cursor.
+fn require_authenticated_feed_actor_ids(raw: &serde_json::Value) -> Result<()> {
+    let events = raw.as_array().ok_or("Authenticated GitHub Events response is not an array.")?;
+    if events.iter().any(|event| {
+        event.pointer("/actor/login").and_then(|value| value.as_str())
+            .filter(|login| token_ok(login, 80)).is_none()
+            || event.pointer("/actor/id").and_then(|value| value.as_i64())
+                .is_none_or(|id| id <= 0)
+    }) {
+        return Err("Authenticated GitHub Events feed has a missing or invalid numeric actor ID; cursor unchanged.".into());
+    }
+    Ok(())
+}
+
+/// Persist an actor pin in the same transaction as the source receipt/cursor.
+/// Off/On, restart and duplicates cannot rebind a previously attested source.
+fn pin_authenticated_actor_identity(
+    tx: &rusqlite::Transaction<'_>, source_id: &str, actor_id: i64,
+) -> Result<()> {
+    if actor_id <= 0 { return Err("Authenticated GitHub actor identity is invalid.".into()); }
+    let previous: Option<i64> = tx.query_row(
+        "SELECT actor_id FROM sa_source_actor_identity WHERE source_id=?1",
+        [source_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(previous) = previous {
+        if previous != actor_id {
+            return Err("GitHub actor identity changed since source attestation; cursor unchanged.".into());
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO sa_source_actor_identity(source_id,actor_id,attested_at)
+             VALUES(?1,?2,?3)",
+            params![source_id,actor_id,storage::now()],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// A GitHub Events window must belong to the exact ID resolved from the
 /// signed-in repository API on this request, not merely share its display
 /// name. Reject the entire window before any receipt or cursor transaction.
@@ -1591,6 +1671,7 @@ fn poll_authenticated_events_with_repository_id_scoped(
     // Verify the complete repository-scoped feed, including unsupported
     // kinds and actors, before any receipt or high-watermark is persisted.
     let feed_watermark = github_feed_watermark(events, &source_now.repository)?;
+    let actor_id = matching_authenticated_actor_id(events, &source_now.actor_filter)?;
     // Newer-first provider pages are normalized before recording, without
     // claiming that a single finite page is a durable subscription cursor.
     let mut parsed = Vec::new();
@@ -1627,6 +1708,9 @@ fn poll_authenticated_events_with_repository_id_scoped(
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
     pin_authenticated_repository_identity(&tx, &current_policy.id, repository_id)?;
+    if let Some(actor_id) = actor_id {
+        pin_authenticated_actor_identity(&tx, &current_policy.id, actor_id)?;
+    }
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
@@ -1750,6 +1834,7 @@ fn fetch_authenticated_github_window(
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
     require_authenticated_feed_repository(&response, repository_id)?;
+    require_authenticated_feed_actor_ids(&response)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, response, pages.len(), repository_id))
 }
@@ -3066,6 +3151,84 @@ mod tests {
         ).unwrap().duplicates, 1);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn github_observe_pins_actor_id_and_rejects_login_reuse_after_restart() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |delivery_id: &str, actor_id: i64| serde_json::json!([{
+            "id":delivery_id, "created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":73},
+            "actor":{"login":"trusted-bot","id":actor_id},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        let first = event("5000080001", 101);
+        assert!(require_authenticated_feed_actor_ids(&first).is_ok());
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &on, 0, &first, "operator", 1, 73,
+        ).unwrap().recorded, 1);
+        assert_eq!(inspect_source_integrity(&store, &on.id).unwrap().actor_id, Some(101));
+
+        let replacement = event("5000080002", 202);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &on, 0, &replacement, "operator", 1, 73,
+        ).is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 5_000_080_001);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+
+        let mut missing = replacement.clone();
+        missing[0]["actor"].as_object_mut().unwrap().remove("id");
+        assert!(require_authenticated_feed_actor_ids(&missing).is_err());
+        let mut malformed = replacement.clone();
+        malformed[0]["actor"]["id"] = serde_json::json!("202");
+        assert!(require_authenticated_feed_actor_ids(&malformed).is_err());
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &on, 0, &malformed, "operator", 1, 73,
+        ).is_err());
+
+        let disabled = set_mode(&store, &on.id, on.policy_revision, "off").unwrap();
+        let enabled = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(inspect_source_integrity(&reopened, &enabled.id).unwrap().actor_id, Some(101));
+        assert!(poll_authenticated_events_with_repository_id(
+            &reopened, &enabled, 0, &replacement, "operator", 1, 73,
+        ).is_err());
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &reopened, &enabled, 0, &first, "operator", 1, 73,
+        ).unwrap().duplicates, 1);
+        assert_eq!(list_decisions(&reopened, &enabled.id, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn github_actor_id_pin_is_atomic_with_observe_decisions() {
+        let (store, _) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = serde_json::json!([{
+            "id":"5000081001", "created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":73},
+            "actor":{"login":"trusted-bot","id":101},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_observe BEFORE INSERT ON sa_event_decisions
+             BEGIN SELECT RAISE(ABORT,'simulated write failure'); END;"
+        ).unwrap();
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &on, 0, &event, "operator", 1, 73,
+        ).is_err());
+        assert_eq!(inspect_source_integrity(&store, &on.id).unwrap().actor_id, None);
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
+        store.db.execute_batch("DROP TRIGGER reject_observe;").unwrap();
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &on, 0, &event, "operator", 1, 73,
+        ).unwrap().recorded, 1);
+        assert_eq!(inspect_source_integrity(&store, &on.id).unwrap().actor_id, Some(101));
     }
 
     #[test]

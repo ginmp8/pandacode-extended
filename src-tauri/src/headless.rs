@@ -171,6 +171,57 @@ pub fn handle() -> bool {
 fn serve(command: Command, import: Option<PathBuf>) -> ! {
     let app = tauri::Builder::default()
         .setup(move |app| {
+            // Portable manifest operations are also detached administrative
+            // commands. Store::open inside setup_common would revoke healthy
+            // serve-owned Tickets and quarantine pending effects on startup.
+            if matches!(&command,
+                Command::PreviewOrchestrations { .. }
+                | Command::ImportOrchestrations { .. }
+                | Command::ExportOrchestrations { .. }
+            ) {
+                let result = (|| -> Result<String, String> {
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    let database = dir.join("kingcode.sqlite3");
+                    match &command {
+                        Command::PreviewOrchestrations { path } => {
+                            let plan = crate::superagent::manifest::run_headless_preview(
+                                &database, path,
+                            )?;
+                            Ok(format!(
+                                "Would create disabled presets: {}\\nUnchanged presets: {}",
+                                plan.would_create.join(", "), plan.unchanged.join(", "),
+                            ))
+                        }
+                        Command::ImportOrchestrations { path } => {
+                            let imported = crate::superagent::manifest::run_headless_import(
+                                &database, &dir, path,
+                            )?;
+                            let mut summary = format!(
+                                "Created {} disabled orchestration presets; {} unchanged.",
+                                imported.created.len(), imported.unchanged.len(),
+                            );
+                            if let Some(backup) = imported.backup_path {
+                                summary.push_str(&format!("\\nVerified orchestration backup: {backup}"));
+                            }
+                            Ok(summary)
+                        }
+                        Command::ExportOrchestrations { path } => {
+                            crate::superagent::manifest::run_headless_export(&database, path)?;
+                            Ok(format!(
+                                "Orchestration configuration written to {}.", path.display(),
+                            ))
+                        }
+                        _ => unreachable!(),
+                    }
+                })();
+                match result {
+                    Ok(summary) => { println!("{summary}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent manifest operation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             // One-shot inspection and Ticket decisions precede setup_common:
             // Store::open performs restart recovery and could interrupt a
             // healthy concurrently running serve process.
@@ -944,7 +995,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::CreateOrchestration { .. }
+        Command::PreviewOrchestrations { .. }
+        | Command::ImportOrchestrations { .. }
+        | Command::ExportOrchestrations { .. }
+        | Command::InspectOrchestrations | Command::CreateOrchestration { .. }
         | Command::ListTickets | Command::ListTicketActivity { .. }
         | Command::ListTeamMemberActivity { .. } | Command::ListReviewInbox { .. } | Command::ListTeamReviewInbox { .. }
         | Command::ListRecoveryInbox { .. } | Command::ListTeamRecoveryInbox { .. }
@@ -980,47 +1034,6 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::SetTeamAttemptLimit { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
-        }
-        Command::PreviewOrchestrations { path } => {
-            match crate::superagent::manifest::run_headless_preview(app, &path) {
-                Ok(plan) => {
-                    println!("Would create disabled presets: {}", plan.would_create.join(", "));
-                    println!("Unchanged presets: {}", plan.unchanged.join(", "));
-                    std::process::exit(0)
-                }
-                Err(error) => {
-                    eprintln!("Orchestration preview failed: {error}");
-                    std::process::exit(1)
-                }
-            }
-        }
-        Command::ImportOrchestrations { path } => {
-            match crate::superagent::manifest::run_headless_import(app, &path) {
-                Ok(result) => {
-                    println!("Created {} disabled orchestration presets; {} unchanged.",
-                        result.created.len(), result.unchanged.len());
-                    if let Some(path) = result.backup_path {
-                        println!("Verified orchestration backup: {path}");
-                    }
-                    std::process::exit(0)
-                }
-                Err(error) => {
-                    eprintln!("Orchestration import failed: {error}");
-                    std::process::exit(1)
-                }
-            }
-        }
-        Command::ExportOrchestrations { path } => {
-            match crate::superagent::manifest::run_headless_export(app, &path) {
-                Ok(()) => {
-                    println!("Orchestration configuration written to {}.", path.display());
-                    std::process::exit(0)
-                }
-                Err(error) => {
-                    eprintln!("Orchestration export failed: {error}");
-                    std::process::exit(1)
-                }
-            }
         }
         Command::SyncBots { path } => {
             let app = app.clone();

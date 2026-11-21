@@ -553,33 +553,31 @@ fn read_headless_document(path: &Path) -> Result<serde_json::Value> {
 }
 
 /// Validates dependencies without importing presets or writing a backup.
+/// Detached CLI preview never creates a Store or runs restart settlement.
 pub(crate) fn run_headless_preview(
-    app: &tauri::AppHandle, path: &Path,
+    database_path: &Path, path: &Path,
 ) -> Result<ImportPreview> {
     let document = read_headless_document(path)?;
-    let state = app.state::<AppState>();
-    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let store = Store::open_read_only(database_path)?;
     preview(&store, &document)
 }
 
+/// Imported Teams are disabled and committed by the existing transactional
+/// importer, without interrupting a live serve process through Store::open.
 pub(crate) fn run_headless_import(
-    app: &tauri::AppHandle, path: &Path,
+    database_path: &Path, data_dir: &Path, path: &Path,
 ) -> Result<ImportResult> {
     let document = read_headless_document(path)?;
-    let state = app.state::<AppState>();
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    apply_with_backup(&store, &dir, &document, true)
+    let store = super::open_headless_transition_store(database_path)?;
+    apply_with_backup(&store, data_dir, &document, true)
 }
 
+/// Passive configuration backup must not migrate or recover a live database.
 pub(crate) fn run_headless_export(
-    app: &tauri::AppHandle, path: &Path,
+    database_path: &Path, path: &Path,
 ) -> Result<()> {
-    let state = app.state::<AppState>();
-    let document = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        export(&store)?
-    };
+    let store = Store::open_read_only(database_path)?;
+    let document = export(&store)?;
     let mut bytes = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
     crate::headless_bots::write_export_atomically(path, &bytes)
@@ -652,6 +650,85 @@ mod tests {
              "enabled":true,"autonomy":"off","maxConcurrentTasks":1,
              "maxAttemptsPerAssignment":2,"council":{"enabled":false}}
         ]})
+    }
+
+    #[test]
+    fn detached_manifest_cli_preserves_live_ticket_and_pending_effect() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-live-manifest-{}", storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        apply(&store, &document("Existing Team"), true).unwrap();
+        let (team_id, project_id, worker_id, policy_revision): (String, String, String, i64) =
+            store.db.query_row(
+                "SELECT id,project_id,worker_bot_id,policy_revision FROM sa_orchestrations
+                 WHERE name='Existing Team'",
+                [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).unwrap();
+        // A separate serve process can own these rows. Opening Store::open
+        // from an administrative CLI would interrupt the Ticket and quarantine
+        // its possibly dispatched receipt, even though the host is healthy.
+        let ticket_id = storage::id();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES(?1,?2,'live-owner','Do not interrupt','local-user','manual',
+                    ?3,?4,?5,'running',?6,?6)",
+            params![ticket_id,team_id,project_id,worker_id,policy_revision,now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:comment:live',?2,'pending',?3,?3)",
+            params![ticket_id,"a".repeat(64),now],
+        ).unwrap();
+        let input = root.join("new-team.json");
+        std::fs::write(&input,serde_json::to_vec(&document("Imported Team")).unwrap()).unwrap();
+        let database = store.path.clone();
+        let preview = run_headless_preview(&database, &input).unwrap();
+        assert_eq!(preview.would_create, vec!["Imported Team"]);
+        let exported = root.join("exported.json");
+        run_headless_export(&database, &exported).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&exported).unwrap()).unwrap();
+        assert_eq!(saved["orchestrations"].as_array().unwrap().len(), 1);
+        let imported = run_headless_import(&database, &root, &input).unwrap();
+        assert_eq!(imported.created, vec!["Imported Team"]);
+        assert!(imported.backup_path.is_some());
+        let repeated = run_headless_import(&database, &root, &input).unwrap();
+        assert_eq!(repeated.unchanged, vec!["Imported Team"]);
+        assert!(repeated.backup_path.is_none());
+        let imported_enabled: i64 = store.db.query_row(
+            "SELECT enabled FROM sa_orchestrations WHERE name='Imported Team'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(imported_enabled, 0);
+        let ticket_state: String = store.db.query_row(
+            "SELECT state FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(ticket_state, "running");
+        let effect_state: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(effect_state, "pending");
+        let restart_audits: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind LIKE 'restart%'",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(restart_audits, 0);
+        drop(store);
+        let reopened = Store::open_read_only(&database).unwrap();
+        let preserved: String = reopened.db.query_row(
+            "SELECT state FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preserved, "running");
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

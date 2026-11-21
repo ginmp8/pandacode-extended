@@ -374,6 +374,9 @@ export function mountSuperagent(
         ? safe(item.waitingApprovalCount) + ' awaiting human approval · ' +
           safe(item.waitingReviewCount) + ' awaiting Council (not approved)'
         : 'Native review counts unavailable') + '</small>' +
+      '<button type="button" data-sa-review-team="' + safe(item.id) +
+      '" aria-label="Review pending decisions for ' + safe(item.name) +
+      '">Open review inbox</button>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
@@ -2325,6 +2328,46 @@ export function mountSuperagent(
       });
       return;
     }
+    if (target.dataset.saReviewTeam) {
+      if (busy || loading) return;
+      const teamId = target.dataset.saReviewTeam;
+      if (!presets.some(team => team.id === teamId)) return;
+      // A Team shortcut is a read-only navigation request, not an approval.
+      // Drop prior Team and decision state before exposing any native controls.
+      selected = teamId;
+      workspaceView = 'review';
+      reviewTeamFilter = teamId;
+      globalRejection = null; globalAcceptance = null;
+      reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
+      tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedAssignmentId = ''; clearMemberActivity();
+      roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
+      sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      sourceIntegrity = null; selectedDemandWorkerId = ''; demandPreflight = null;
+      render();
+      void work(async () => {
+        const [teamTickets, pending] = await Promise.all([
+          call<Ticket[]>('superagent_tickets',{orchestrationId:teamId,limit:50}),
+          fetchReviewPage(teamId),
+        ]);
+        if (selected !== teamId || workspaceView !== 'review' || reviewTeamFilter !== teamId) return;
+        if (!Array.isArray(teamTickets) || teamTickets.some(ticket =>
+            !ticket || ticket.orchestrationId !== teamId ||
+            typeof ticket.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(ticket.id))) {
+          throw new Error('Native Team Ticket list returned foreign or malformed records; review navigation denied.');
+        }
+        tickets = teamTickets;
+        reviewQueue = pending;
+        reviewQueueHasMore = pending.length === 200;
+        reviewQueueLoaded = true;
+      }).then(() => {
+        if (!error && selected === teamId && workspaceView === 'review') {
+          host.querySelector<HTMLSelectElement>('[data-sa-review-team-filter]')
+            ?.focus({preventScroll:true});
+        }
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-open-runs')) {
       if (busy || loading || !selected || !presets.some(team => team.id === selected)) return;
       const teamId = selected;
@@ -2373,7 +2416,10 @@ export function mountSuperagent(
         }
       };
       const loadTeamDemands = async () => {
-        const loaded = await fetchDemandPage({limit:200,orchestrationId:next});
+        const loaded = await fetchDemandPage({
+          limit:200,orchestrationId:next,
+          stateFilter:attentionOnly ? 'needs_attention' : undefined,
+        });
         if (selected !== next || demandTeamFilter !== next) return;
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;

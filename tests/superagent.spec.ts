@@ -355,6 +355,132 @@ test('Team detail opens scoped native Demand history without dispatch or inherit
     .toBe(false);
 });
 
+test('Team attention shortcut queries only native needs-attention states and rejects a stale mixed page',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-team-attention-scope';document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    let returnForeignState=false;
+    (window as unknown as {saAttentionQueries:typeof queries;saAttentionInvalid:()=>void})
+      .saAttentionQueries=queries;
+    (window as unknown as {saAttentionInvalid:()=>void}).saAttentionInvalid=()=>{
+      returnForeignState=true;
+    };
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Other Team',coordinatorBotId:'coordinator',
+          workerBotId:'worker',enabled:false,policyRevision:1,needsAttentionCount:0},
+        {id:'team-b',name:'Build Team',coordinatorBotId:'coordinator',
+          workerBotId:'worker',enabled:false,policyRevision:1,needsAttentionCount:2},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as Record<string,unknown> | undefined;
+        queries.push({...query});
+        if(query?.orchestrationId!=='team-b'||query?.stateFilter!=='needs_attention')
+          throw Error('Attention shortcut omitted the native Team/state filter.');
+        if(returnForeignState)return [{
+          id:'completed-b',orchestrationId:'team-b',objective:'Already complete',
+          state:'completed',revision:1,updatedAt:1003,
+        }] as never;
+        return [
+          {id:'blocked-b',orchestrationId:'team-b',objective:'Blocked deployment',
+            state:'blocked',revision:1,updatedAt:1002},
+          {id:'failed-b',orchestrationId:'team-b',objective:'Failed regression',
+            state:'failed',revision:1,updatedAt:1001},
+        ] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-team-attention-scope');
+  await host.getByRole('button',{name:'Show Demands needing attention for Build Team'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await expect(global.getByRole('combobox',{name:'Filter Demands by Team'})).toHaveValue('team-b');
+  await expect(global).toContainText('Blocked deployment');
+  await expect(global).toContainText('Failed regression');
+  await expect(global).toContainText('2 native Demands loaded.');
+  await page.evaluate(()=>(window as unknown as {saAttentionInvalid:()=>void}).saAttentionInvalid());
+  await global.getByRole('button',{name:'Refresh selected Team'}).click();
+  await expect(host.getByRole('alert')).toContainText('out-of-scope records');
+  await expect(global.getByRole('button',{name:'Open demand'})).toHaveCount(0);
+  const queries=await page.evaluate(()=>
+    (window as unknown as {saAttentionQueries:Record<string,unknown>[]}).saAttentionQueries);
+  expect(queries).toEqual([
+    {limit:200,orchestrationId:'team-b',stateFilter:'needs_attention'},
+    {limit:200,orchestrationId:'team-b',stateFilter:'needs_attention'},
+  ]);
+});
+
+test('Team review shortcut opens an isolated native decision inbox without approving anything',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-team-review-route';document.body.appendChild(host);
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    let invalidPage=false;
+    (window as unknown as {saReviewRouteCalls:typeof calls;saReviewRouteInvalid:()=>void})
+      .saReviewRouteCalls=calls;
+    (window as unknown as {saReviewRouteInvalid:()=>void}).saReviewRouteInvalid=()=>{
+      invalidPage=true;
+    };
+    mountSuperagent(host,async(command,args)=>{
+      calls.push({command,args});
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Unrelated Team',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:false,policyRevision:1,waitingApprovalCount:1,waitingReviewCount:0},
+        {id:'team-b',name:'Review Team',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:false,policyRevision:1,waitingApprovalCount:1,waitingReviewCount:1},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_team_review_inbox'){
+        if(args?.orchestrationId!=='team-b'||args?.limit!==200)
+          throw Error('Review shortcut was not scoped to the selected Team.');
+        return [{
+          id:invalidPage?'foreign-review':'review-b',
+          orchestrationId:invalidPage?'team-a':'team-b',
+          objective:'Verify release evidence',state:'waiting_approval',
+          revision:3,updatedAt:2000,
+        }] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-team-review-route');
+  await host.getByRole('button',{name:'Review pending decisions for Review Team'}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await expect(host.getByRole('button',{name:'Review inbox',exact:true}))
+    .toHaveAttribute('aria-current','page');
+  await expect(inbox.getByRole('combobox',{name:'Filter review inbox by Team'}))
+    .toHaveValue('team-b');
+  await expect(inbox).toContainText('Verify release evidence');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(1);
+  await page.evaluate(()=>(window as unknown as {saReviewRouteInvalid:()=>void}).saReviewRouteInvalid());
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(host.getByRole('alert')).toContainText('out-of-scope decisions');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(0);
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saReviewRouteCalls:Array<{command:string;args?:Record<string,unknown>}>})
+      .saReviewRouteCalls);
+  expect(calls.filter(entry=>entry.command==='superagent_team_review_inbox')
+    .map(entry=>entry.args)).toEqual([
+      {limit:200,orchestrationId:'team-b'},
+      {limit:200,orchestrationId:'team-b'},
+    ]);
+  expect(calls.some(entry=>/superagent_(accept|reject|submit|grant|dispatch|stop|retry)/.test(entry.command)))
+    .toBe(false);
+});
+
 test('Team strategy changes through native CAS and persists after refresh',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{

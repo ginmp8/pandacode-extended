@@ -2637,14 +2637,17 @@ pub(super) fn independent_s2_root_identities(team: &TeamSnapshot) -> bool {
     })
 }
 
-/// A required user criterion may demand a higher score than the global
-/// Council target. Missing native evidence is also an S2 trigger, never an
-/// excuse to accept an unverified first wave or add a new reviewer source.
+/// An unforced S2 root wave must respond to every deterministic native
+/// trigger: low scores, high-severity findings, conflicting verdicts, missing
+/// mandatory criteria or required evidence. Reading a trigger never grants
+/// reviewer authority or treats the subsequent wave as an approved result.
 pub(super) fn root_s2_unforced_trigger(
     team: &TeamSnapshot, config: &CouncilConfig, round: usize,
 ) -> bool {
     in_round(team, round).any(|(worker, seat)| counts(worker, seat)
         && seat.score.is_some_and(|score| score.is_finite() && score < config.target))
+        || severe_findings(team, round)
+        || reported_conflicts(team, round)
         || !criterion_blockers(team, config, round).is_empty()
         || !unverified_required_skill_checks(team, round).is_empty()
 }

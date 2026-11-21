@@ -10527,6 +10527,114 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
 }
 
 #[test]
+fn nested_m5_unforced_s2_severe_root_report_triggers_native_review_without_false_approval() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('severity-child','severity-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "severity-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review a high-severity first-wave finding with native child evidence",
+        None, None,
+    ).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments":[reviewer_assignment("root-severity-first", "security")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (first_run, _) = claim(&state, action);
+    finish(&state, &first_run,
+        "Council findings JSON: [{\"severity\":\"high\",\"category\":\"authorization\",\"title\":\"Missing access check\",\"explanation\":\"An endpoint has no proven authorization guard\"}]\nCouncil score: 9.8/10",
+        true,
+    );
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let config = root.config.council.as_ref().unwrap();
+        let initial = root.workers.iter().find(|worker|
+            worker.council.as_ref().is_some_and(|seat| seat.round == 1)).unwrap();
+        assert_eq!(initial.council.as_ref().unwrap().score, Some(9.8));
+        assert!(initial.council.as_ref().unwrap().reported_severe_finding);
+        assert!(council::root_s2_unforced_trigger(&root, config, 1),
+            "a native high-severity report must trigger S2 despite a passing numeric score");
+        assert!(!verified_council_pass(&store, &root),
+            "a high score and an unresolved severe finding cannot approve the root");
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await native child review"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent child verification.\nCouncil score: 9.7/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission),
+            true, false, &mut |_| {});
+    }
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_some());
+    assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
+        "a verified severe native root report and child receipts must admit a fresh root wave");
+    assert!(!verified_council_pass(&store, &root),
+        "an escalated root wave is not a completed or corrected severe finding");
+    drop(store);
+    let admitted = call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments":[reviewer_assignment("root-severity-second", "security")]
+    })).unwrap();
+    assert_eq!(admitted["queued"], true);
+    let root = saved(&state, &sid);
+    assert_eq!(root.workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 1);
+    assert_ne!(council::status(&root).unwrap().state, "passed",
+        "admission cannot suppress the unresolved first-wave security finding");
+}
+
+#[test]
+fn nested_s2_root_conflict_claim_triggers_without_an_automatic_source_switch() {
+    let mut config = on(9.0, 3, 0);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.automatic_reviewers = 1;
+    config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+        bot_id: "security-child".into(), child_reviewers: 2,
+        child_target: 9.5, child_max_rounds: 2,
+    });
+    assert_eq!(config.mode(), "m5");
+    let clean = team_with(config.clone(),
+        vec![seat("root-source", 1, Some(9.8), SINCE + 1)]);
+    assert!(!council::root_s2_unforced_trigger(&clean, &config, 1),
+        "a clean native root score is not an on-demand escalation trigger");
+    let mut conflicted = clean.clone();
+    conflicted.workers[0].council.as_mut().unwrap().reported_conflict = true;
+    assert!(council::root_s2_unforced_trigger(&conflicted, &config, 1),
+        "an independently scored conflicting verdict requires a fresh S2 wave");
+    conflicted.workers[0].council.as_mut().unwrap().score = None;
+    assert!(!council::root_s2_unforced_trigger(&conflicted, &config, 1),
+        "an unscored model claim must not authorize a native escalation");
+}
+
+#[test]
 fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_review() {
     let (state, sid) = state_fixture();
     {

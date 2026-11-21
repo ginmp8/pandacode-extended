@@ -2109,8 +2109,28 @@ export function mountSuperagent(
       return;
     }
     if (target.hasAttribute('data-sa-open-runs')) {
-      workspaceView = 'runs'; render();
-      host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
+      if (busy || loading || !selected || !presets.some(team => team.id === selected)) return;
+      const teamId = selected;
+      // Team detail navigates to a real native Team-scoped Demand page.
+      // Do not reuse another Team's prior query or infer a new admission.
+      workspaceView = 'runs';
+      demandTeamFilter = teamId; demandProjectFilter = ''; demandStateFilter = '';
+      demandSearch = ''; demandSearchDraft = '';
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const page = await fetchDemandPage({limit:200, orchestrationId:teamId});
+        if (selected !== teamId || workspaceView !== 'runs' || demandTeamFilter !== teamId) return;
+        allDemands = page;
+        allDemandsHasMore = page.length === 200;
+        allDemandsLoaded = true;
+      }).then(() => {
+        if (!error && selected === teamId && workspaceView === 'runs') {
+          host.querySelector<HTMLTextAreaElement>(
+            'form[data-sa-form="run"] textarea[name="objective"]',
+          )?.focus({preventScroll:true});
+        }
+      });
       return;
     }
     if (target.dataset.saSelect || target.dataset.saAssignTeam) {

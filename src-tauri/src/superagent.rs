@@ -1865,6 +1865,7 @@ fn list_headless_recovery_inbox_page_scoped(
             "orchestrationId": ticket.orchestration_id,
             "state": ticket.state,
             "revision": ticket.revision,
+            "createdAt": ticket.created_at,
             "updatedAt": ticket.updated_at,
             "recovery": recovery
         }));
@@ -6211,7 +6212,7 @@ mod tests {
             "reconcile_authoritative_remote_effects");
         assert_eq!(items[1]["ticketId"], blocked.id);
         assert_eq!(items[1]["state"], "blocked");
-        let cursor_at = items[0]["updatedAt"].as_i64().unwrap();
+        let cursor_at = items[0]["createdAt"].as_i64().unwrap();
         let cursor_id = items[0]["ticketId"].as_str().unwrap();
         let continuation: serde_json::Value = serde_json::from_str(
             &list_headless_recovery_inbox_page(

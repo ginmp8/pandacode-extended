@@ -197,7 +197,7 @@ pub(super) fn prompt_identity(bot:&bots::Bot)->String {
 
 // Unlike ordinary bot conversations, SuperAgent briefs deliberately omit
 // goals and soul. The bot name is included and must not drift mid-Demand.
-fn brief_name_identity(bot:&bots::Bot)->String {
+pub(super) fn brief_name_identity(bot:&bots::Bot)->String {
     let mut digest=Sha256::new();
     digest.update(bot.name.as_bytes());
     format!("{:x}",digest.finalize())
@@ -1369,15 +1369,23 @@ mod tests {
         let frozen=ticket_profile(&store,&ticket.id).unwrap().unwrap().members;
         assert!(frozen.iter().all(|member|member.brief_name_sha256.is_some()));
         assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+        let session=super::super::assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
 
         // The name is part of bots::brief::superagent. A new assignment
         // cannot silently adopt a different effective prompt after admission.
         store.db.execute("UPDATE bots SET name='Renamed worker' WHERE id='worker'",[])
             .unwrap();
         assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        // A live provider/tool admission is fenced as well, not just retries.
+        assert!(super::super::read_only_policy(&store,&session).is_err());
+        let reopened_active=Store::open_read_only(&path).unwrap();
+        assert!(super::super::read_only_policy(&reopened_active,&session).is_err());
+        drop(reopened_active);
         assert_eq!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members,frozen);
         store.db.execute("UPDATE bots SET name='worker' WHERE id='worker'",[]).unwrap();
         assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
 
         // Historical v46 snapshots omitted the name digest. Treat that
         // absence as legacy read-only evidence, not as a fabricated digest.
@@ -1390,11 +1398,18 @@ mod tests {
         store.db.execute("UPDATE bots SET name='Renamed worker' WHERE id='worker'",[])
             .unwrap();
         assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
         // The original legacy role/instructions identity still rejects drift.
         store.db.execute(
             "UPDATE bots SET instructions='New instruction' WHERE id='worker'",[],
         ).unwrap();
         assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        assert!(super::super::read_only_policy(&store,&session).is_err());
+        assert!(super::super::on_run_finished(&store,&session,true,
+            "Untrusted prompt from changed live bot").unwrap());
+        let blocked=super::super::get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(blocked.state,"blocked");
+        assert!(blocked.evidence.is_none());
         drop(store);
         let reopened=Store::open_read_only(&path).unwrap();
         assert_eq!(

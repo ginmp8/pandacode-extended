@@ -2463,12 +2463,16 @@ fn linked_pr_check_source(store: &Store, source_id: &str, ticket_id: &str,
 
 const LINKED_PR_CHECK_LIMIT: usize = 100;
 
+// A complete PR Check Run batch is a single validated observation result.
+// Name its wire shape to keep the native boundary readable and Clippy-clean.
+type LinkedPrCheckBatch = (String, Vec<(i64, serde_json::Value)>, usize);
+
 /// Validate the entire, finite authenticated API response before writing any
 /// receipts. A truncated response must never be reported as all PR checks.
 fn authenticated_linked_pr_checks(
     selected: &EventSource, repository_id: u64, pull_key: &str,
     pull: &serde_json::Value, listing: &serde_json::Value,
-) -> Result<(String, Vec<(i64, serde_json::Value)>, usize)> {
+) -> Result<LinkedPrCheckBatch> {
     let number = pull_key.strip_prefix("pull:")
         .filter(|_| valid_thread_key(pull_key))
         .and_then(|value| value.parse::<u64>().ok())

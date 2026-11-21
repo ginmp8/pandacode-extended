@@ -3552,7 +3552,14 @@ fn admitted_session_matches_profile(
     // assigned Skill must not enter an already admitted Demand through an
     // unchanged provider session, even when the role and instructions match.
     let skills_current = live_bot.skills == member.assigned_skill_ids;
-    Ok(prompt_current && skills_current && session.project_id == member.project_id
+    // The native bot brief includes the live name on every provider turn.
+    // Admission-time pinning must also apply to an already running session,
+    // otherwise a renamed bot can change its task context before the next tool.
+    let brief_name_current = member.brief_name_sha256.as_ref().is_none_or(|expected| {
+        roster::brief_name_identity(&live_bot) == *expected
+    });
+    Ok(prompt_current && skills_current && brief_name_current
+        && session.project_id == member.project_id
         && session.provider == member.provider
         && session.model == member.model
         && session.mode == member.mode

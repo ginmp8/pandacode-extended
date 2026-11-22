@@ -2563,6 +2563,8 @@ pub(super) fn status_for_authenticated_children(
         // criterion until an independent native evidence receipt exists.
         || config.criteria.iter().filter(|criterion| criterion.required).any(|criterion| {
             criterion.evidence_required || children.iter().any(|child| {
+                let Some(choice) = config.nested_bot_reviewers.iter()
+                    .find(|choice| choice.bot_id == child.bot_id) else { return true; };
                 !child.criterion_evidence.iter().any(|proof| {
                     proof.id == criterion.id
                         && same_lens(&proof.lens, &criterion.lens)

@@ -8716,6 +8716,15 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
     }
     assert!(verified_council_pass(&store, &root),
         "an authentic scored criterion in each child is sufficient without invented root votes");
+    // A child must independently meet its configured 9.5 minimum for a
+    // required lens, even if the root's criterion threshold is only 9.0.
+    let mut lower_root_criterion = root.clone();
+    lower_root_criterion.config.council.as_mut().unwrap().criteria[0].target = 9.0;
+    let mut under_child_criterion = children.clone();
+    under_child_criterion[0].criterion_evidence[0].lowest_score = 9.2;
+    assert!(council::status_for_authenticated_children(
+        &lower_root_criterion, &under_child_criterion).is_none(),
+        "a weak child criterion cannot be hidden by a lower root threshold");
     let mut mismatched = root.clone();
     mismatched.config.council.as_mut().unwrap().criteria[0].lens = "Missing lens".into();
     assert!(council::status_for_authenticated_children(&mismatched, &children).is_none(),

@@ -38,6 +38,11 @@ pub struct MemberActivityPage {
     pub orchestration_id: String,
     pub bot_id: String,
     pub items: Vec<MemberActivityItem>,
+    /// Counts cover this bot's entire Team history, not just the loaded page.
+    /// Demand counts are distinct Ticket identities across retry attempts.
+    pub assignment_count: i64,
+    pub demand_count: i64,
+    pub attention_demand_count: i64,
     pub has_more: bool,
     pub next_cursor: Option<MemberActivityCursor>,
 }
@@ -68,6 +73,17 @@ pub(super) fn page(
         }
     }
     configuration(store, orchestration_id)?;
+    let (assignment_count, demand_count, attention_demand_count): (i64, i64, i64) =
+        store.db.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT t.id),
+                    COUNT(DISTINCT CASE WHEN t.state IN
+                        ('blocked','failed','interrupted','inconclusive')
+                        THEN t.id END)
+             FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
+             WHERE t.orchestration_id=?1 AND a.bot_id=?2",
+            params![orchestration_id, bot_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|e| e.to_string())?;
     if let Some(cursor) = &before {
         // A syntactically valid keyset boundary is not authority to skip
         // arbitrary history. Tie it to the exact Team, bot and immutable
@@ -142,6 +158,9 @@ pub(super) fn page(
         orchestration_id: orchestration_id.into(),
         bot_id: bot_id.into(),
         items,
+        assignment_count,
+        demand_count,
+        attention_demand_count,
         has_more,
         next_cursor,
     })
@@ -269,6 +288,11 @@ mod tests {
         assert!(launched);
         let activity = page(&store, &team.id, "worker", None, 25).unwrap();
         assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.assignment_count, 1);
+        assert_eq!(activity.demand_count, 1);
+        assert_eq!(activity.attention_demand_count, 0);
+        assert_eq!(page(&store, &other.id, "other-worker", None, 25)
+            .unwrap().assignment_count, 0, "Team totals must not borrow another Team's assignments");
         assert_eq!(activity.items[0].ticket_id, ticket.id);
         let item = &activity.items[0];
         let cursor = MemberActivityCursor {
@@ -291,6 +315,14 @@ mod tests {
             created_at: cursor.created_at,
             assignment_id: "forged-assignment".into(),
         }), 25).is_err(), "A well-formed fabricated cursor cannot skip native history");
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked' WHERE id=?1", [&ticket.id],
+        ).unwrap();
+        let updated = page(&store, &team.id, "worker", None, 25).unwrap();
+        assert_eq!(updated.assignment_count, 1);
+        assert_eq!(updated.demand_count, 1);
+        assert_eq!(updated.attention_demand_count, 1,
+            "Attention reflects native Ticket state, not presence of a provider result");
         let stored_path = store.path.clone();
         drop(store);
         let reopened = Store::open(&stored_path).unwrap();
@@ -326,8 +358,14 @@ mod tests {
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(audit_before, audit_after, "headless reads cannot append audit");
-        assert!(page(&reopened, &team.id, "worker", Some(cursor.clone()), 25)
-            .unwrap().items.is_empty());
+        let history = page(&reopened, &team.id, "worker", Some(cursor.clone()), 25)
+            .unwrap();
+        assert!(history.items.is_empty());
+        assert_eq!(history.assignment_count, 1,
+            "Counts must cover all native history even after the final cursor");
+        assert_eq!(history.demand_count, 1);
+        assert_eq!(history.attention_demand_count, 1,
+            "Native attention totals must survive reopening SQLite");
         assert!(page(&reopened, &other.id, "other-worker", Some(cursor), 25)
             .is_err(), "Isolation must survive SQLite reopening");
     }

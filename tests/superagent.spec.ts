@@ -3079,7 +3079,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
             botId:'lead',sessionId:'foreign-session',role:'coordinator',attempt:1,
             assignmentState:'finished',ticketState:'completed',createdAt:800,updatedAt:800,
             hasResult:true,chatAvailable:true
-          }],hasMore:false,nextCursor:null
+          }],assignmentCount:1,demandCount:1,attentionDemandCount:0,
+          hasMore:false,nextCursor:null
         } as never;
         if (!args?.before) return {
           orchestrationId:'team',botId:'worker',items:[{
@@ -3087,7 +3088,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
             botId:'worker',sessionId:'missing-session',role:'worker',attempt:2,
             assignmentState:'finished',ticketState:'blocked',createdAt:500,updatedAt:501,
             hasResult:false,chatAvailable:false
-          }],hasMore:true,nextCursor:{createdAt:500,assignmentId:'a-new'}
+          }],assignmentCount:2,demandCount:2,attentionDemandCount:1,
+          hasMore:true,nextCursor:{createdAt:500,assignmentId:'a-new'}
         } as never;
         return {
           orchestrationId:'team',botId:'worker',items:[{
@@ -3095,7 +3097,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
             botId:'worker',sessionId:'real-session',role:'worker',attempt:1,
             assignmentState:'finished',ticketState:'waiting_approval',createdAt:499,updatedAt:499,
             hasResult:true,chatAvailable:true
-          }],hasMore:false,nextCursor:null
+          }],assignmentCount:2,demandCount:2,attentionDemandCount:1,
+          hasMore:false,nextCursor:null
         } as never;
       }
       if (command==='superagent_member_assignment_chat_link') {
@@ -3134,6 +3137,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await roles.getByRole('button',{name:'View activity for Worker'}).click();
   const activity=roles.getByRole('region',{name:'Team member activity'});
   await expect(activity).toContainText('ticket-new');
+  await expect(activity.locator('.sa-member-summary')).toContainText(
+    '2 assignments · 2 demands · 1 needs attention');
   await expect(activity).toContainText('Native chat unavailable');
   await expect(activity.getByRole('button',{name:'Open chat for assignment a-new'})).toHaveCount(0);
   // A historical row cannot navigate if native ownership/assignment proof is missing.
@@ -3188,6 +3193,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await roles.getByRole('button',{name:'View activity for Worker'}).click();
   await roles.getByRole('region',{name:'Team member activity'})
     .getByRole('button',{name:'Older activity'}).click();
+  await expect(roles.locator('.sa-member-summary')).toContainText(
+    '2 assignments · 2 demands · 1 needs attention');
   await roles.getByRole('region',{name:'Team member activity'})
     .getByRole('button',{name:'Open demand for assignment a-old'}).click();
   await expect(host.getByRole('button',{name:'Demands / Runs'}))

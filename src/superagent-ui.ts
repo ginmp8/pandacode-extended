@@ -68,6 +68,7 @@ interface MemberActivityItem {
 }
 interface MemberActivityPage {
   orchestrationId: string; botId: string; items: MemberActivityItem[];
+  assignmentCount: number; demandCount: number; attentionDemandCount: number;
   hasMore: boolean; nextCursor: MemberActivityCursor | null;
 }
 interface AssignmentChatLink {
@@ -186,10 +187,12 @@ let demandArchived = false;
   let effectiveTeam: EffectiveTeam | null = null;
   let memberActivityTeamId = '', memberActivityBotId = '';
   let memberActivityItems: MemberActivityItem[] = [];
+  let memberActivityCounts: Pick<MemberActivityPage, 'assignmentCount' | 'demandCount' | 'attentionDemandCount'> | null = null;
   let memberActivityHasMore = false, memberActivityCursor: MemberActivityCursor | null = null;
   const clearMemberActivity = () => {
     memberActivityTeamId = ''; memberActivityBotId = '';
-    memberActivityItems = []; memberActivityHasMore = false; memberActivityCursor = null;
+    memberActivityItems = []; memberActivityCounts = null;
+    memberActivityHasMore = false; memberActivityCursor = null;
   };
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -301,6 +304,11 @@ let demandArchived = false;
       (older.createdAt === newer.createdAt && older.assignmentId < newer.assignmentId);
     if (!page || page.orchestrationId !== teamId || page.botId !== botId ||
         !Array.isArray(page.items) || page.items.length > 25 ||
+        !Number.isSafeInteger(page.assignmentCount) || page.assignmentCount < page.items.length ||
+        !Number.isSafeInteger(page.demandCount) || page.demandCount < 0 ||
+        page.demandCount > page.assignmentCount ||
+        !Number.isSafeInteger(page.attentionDemandCount) || page.attentionDemandCount < 0 ||
+        page.attentionDemandCount > page.demandCount ||
         typeof page.hasMore !== 'boolean' ||
         page.items.some((entry, index) => {
           if (!entry || entry.orchestrationId !== teamId || entry.botId !== botId ||
@@ -961,6 +969,13 @@ let demandArchived = false;
       ? '<section class="sa-pane" role="region" aria-label="Team member activity">' +
         '<h5>Team activity: ' + safe(botName(memberActivityBotId)) + '</h5>' +
         '<p>Actual native Assignment history for this Team only. A recorded result is not verified delivery or Council approval.</p>' +
+        '<p class="sa-member-summary" role="status">' +
+        (memberActivityCounts
+          ? '<strong>' + memberActivityCounts.assignmentCount + ' assignments</strong> · ' +
+            '<strong>' + memberActivityCounts.demandCount + ' demands</strong> · ' +
+            '<strong>' + memberActivityCounts.attentionDemandCount + ' needs attention</strong> ' +
+            '(entire recorded Team history)'
+          : 'Loading native member summary') + '</p>' +
         '<button type="button" data-sa-member-clear>Close activity</button>' +
         '<ol aria-label="Member assignment history">' +
         (memberActivityItems.map(item =>
@@ -2303,6 +2318,11 @@ let demandArchived = false;
         const page = await fetchMemberActivity(cfg.id, botId);
         if (selected !== cfg.id || memberActivityBotId !== botId) return;
         memberActivityItems = page.items;
+        memberActivityCounts = {
+          assignmentCount: page.assignmentCount,
+          demandCount: page.demandCount,
+          attentionDemandCount: page.attentionDemandCount,
+        };
         memberActivityHasMore = page.hasMore;
         memberActivityCursor = page.nextCursor;
       });
@@ -2323,6 +2343,11 @@ let demandArchived = false;
           throw new Error('Native activity page overlaps already inspected Team history.');
         }
         memberActivityItems = [...memberActivityItems, ...page.items];
+        memberActivityCounts = {
+          assignmentCount: page.assignmentCount,
+          demandCount: page.demandCount,
+          attentionDemandCount: page.attentionDemandCount,
+        };
         memberActivityHasMore = page.hasMore;
         memberActivityCursor = page.nextCursor;
       });

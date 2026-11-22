@@ -309,6 +309,17 @@ refresh` (Playwright). Execution results must be checked on the **exact
 published commit**, not inferred from these test declarations.
 
 
+### Team member native history counters
+
+Each member's Team-scoped Activity inspector displays native totals for recorded
+Assignments, distinct Demands and distinct Demands in blocked, failed, interrupted
+or inconclusive states. The counts are computed from all persisted assignments
+before pagination and are not inferred from loaded rows or provider messages.
+Retries of a Demand count as additional Assignments, not additional Demands.
+Counts are observational only: they grant no tools and imply no verified Council
+approval. Team and bot identity filters are applied in SQLite; cursor pages,
+including the final empty page, retain the full-history summary.
+
 ### Team activity chat navigation boundary
 
 Team member Activity uses the immutable native Team, Ticket, Assignment and bot

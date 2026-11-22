@@ -531,6 +531,11 @@ pub(crate) fn admit_native_task(
     // Admission is prospective: a completed, paused or merely configured
     // Council must not gain a new task/artefact binding from an old pass.
     // Existing identical requests remain idempotently inspectable/settleable.
+    // A user-accepted Council cycle is terminal even if its TeamSnapshot still
+    // says running. An existing request above stays idempotently inspectable.
+    if team.council_accepted == Some(team.council_since) {
+        return Err("council_task_denied: user-accepted Council cannot admit a new native task.".into());
+    }
     if team.status != "running" {
         return Err("council_task_denied: new requests require an active root Council execution.".into());
     }

@@ -7590,6 +7590,46 @@ fn native_task_admission_rejects_invalid_persisted_council_policy() {
 }
 
 #[test]
+fn native_task_admission_denies_new_tasks_after_user_accepted_cycle() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review before human acceptance", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let artifact = "a".repeat(64);
+    let admitted = council_requests::admit_native_task(
+        &store, &sid, &project, "original-before-acceptance", &artifact,
+    ).unwrap();
+    // Model a persisted user acceptance observed before the running Team
+    // snapshot settles. It closes the exact cycle without authorizing a new
+    // assignment or altering a previously admitted request.
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    assert_ne!(team.council_accepted, Some(team.council_since));
+    team.council_accepted = Some(team.council_since);
+    save(&store, &mut team).unwrap();
+    let denied = council_requests::admit_native_task(
+        &store, &sid, &project, "new-after-acceptance", &artifact,
+    ).unwrap_err();
+    assert!(denied.contains("user-accepted Council"), "{denied}");
+    assert_eq!(council_requests::admit_native_task(
+        &store, &sid, &project, "original-before-acceptance", &artifact,
+    ).unwrap(), admitted, "an earlier task binding remains idempotent");
+    let requests: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(requests, 1, "user acceptance cannot mint another task authority");
+}
+
+#[test]
 fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
     let (state, sid) = state_fixture();
     {

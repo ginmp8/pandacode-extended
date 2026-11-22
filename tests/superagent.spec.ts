@@ -1701,8 +1701,8 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   const global=host.getByRole('region',{name:'All Demands across Teams'});
   await global.getByRole('button',{name:'Refresh all Teams'}).click();
-  await expect(global.getByRole('button',{name:'Stop demand'})).toBeVisible();
-  await global.getByRole('button',{name:'Stop demand'}).click();
+  await expect(global.getByRole('button',{name:'Cancel Demand'})).toBeVisible();
+  await global.getByRole('button',{name:'Cancel Demand'}).click();
   await expect(host.getByRole('alert')).toContainText('Demand changed since the native page');
   await expect(host.getByRole('alertdialog')).toHaveCount(0);
   let trace=await page.evaluate(()=>
@@ -1711,7 +1711,7 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   await page.evaluate(() => {
     (window as unknown as {saGlobalStopStale:boolean}).saGlobalStopStale=false;
   });
-  await global.getByRole('button',{name:'Stop demand'}).click();
+  await global.getByRole('button',{name:'Cancel Demand'}).click();
   const confirm=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
   await expect(confirm).toContainText('revision 6');
   trace=await page.evaluate(()=>
@@ -1723,14 +1723,14 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   // result without an extra operator click; Stop must no longer be offered.
   await expect(global).toContainText('Stop bounded work');
   await expect(global).toContainText('stopped');
-  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await expect(global.getByRole('button',{name:'Cancel Demand'})).toHaveCount(0);
   trace=await page.evaluate(()=>
     (window as unknown as {saGlobalStopTrace:{command:string;args?:Record<string,unknown>}[]}).saGlobalStopTrace);
   expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(1);
   expect(trace.find(item=>item.command==='superagent_stop')?.args)
     .toMatchObject({ticketId:'run-stop',expectedRevision:6});
   await global.getByRole('button',{name:'Refresh all Teams'}).click();
-  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await expect(global.getByRole('button',{name:'Cancel Demand'})).toHaveCount(0);
   await expect(global).toContainText('stopped');
 });
 
@@ -2009,7 +2009,7 @@ test('native Demand first page denies foreign Team, state, project and duplicate
       .setSaFirstPageMode('duplicate'));
   await global.getByRole('button',{name:'Refresh selected Team'}).click();
   await expect(host.getByRole('alert')).toContainText(rejected);
-  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await expect(global.getByRole('button',{name:'Cancel Demand'})).toHaveCount(0);
   await page.evaluate(() =>
     (window as unknown as {setSaFirstPageMode:(mode:'valid')=>void})
       .setSaFirstPageMode('valid'));
@@ -2076,7 +2076,7 @@ test('Demand search rejects out-of-scope native rows and unordered first pages w
   await search.press('Enter');
   const scopeError='Native Demand index returned invalid, duplicate or out-of-scope records';
   await expect(host.getByRole('alert')).toContainText(scopeError);
-  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await expect(global.getByRole('button',{name:'Cancel Demand'})).toHaveCount(0);
   await page.evaluate(()=>(window as unknown as {saSetSearchMode:(value:string)=>void})
     .saSetSearchMode('unordered-first'));
   await search.press('Enter');
@@ -4229,4 +4229,71 @@ test('Team directory activation uses native CAS without selecting or executing o
     ]);
   expect(calls.some(item=>/superagent_(submit|preflight|grant|dispatch|retry|stop|accept)/.test(item.command)))
     .toBe(false);
+});
+
+test('archive and restore use real native Demand commands, CAS and separate visibility views',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-visibility-fixture';document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {saVisibilityCalls:string[]}).saVisibilityCalls=calls;
+    let archived=false,revision=3;
+    const team={id:'archive-team',name:'Archive Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker',enabled:false,policyRevision:1,workerCount:1,reviewerCount:0};
+    const ticket=()=>({id:'demand-archive',orchestrationId:team.id,
+      objective:'Keep durable history',state:'stopped',revision,evidence:null});
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [team] as never;
+      if(command==='superagent_tickets')return (archived?[]:[ticket()]) as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as {archived?:boolean} | undefined;
+        return (Boolean(query?.archived)===archived ? [{...ticket(),archived,
+          updatedAt:1000+revision,projectId:'project-1'}] : []) as never;
+      }
+      if(command==='superagent_snapshot')return {
+        ticket:ticket(),mandate:{actor:'local-user',authorizationId:'native-test',
+          policyRevision:1,projectId:'project-1',expiresAt:9999999999999,
+          revoked:true,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],
+      } as never;
+      if(command==='superagent_archive_demand'||command==='superagent_restore_demand'){
+        if(args?.ticketId!=='demand-archive'||args?.expectedRevision!==revision)
+          throw Error('Stale or cross-Demand visibility request');
+        if((command==='superagent_archive_demand')===archived)
+          throw Error('Unexpected visibility transition');
+        archived=command==='superagent_archive_demand';revision++;
+        return ticket() as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-visibility-fixture');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const runs=host.getByRole('region',{name:'All Demands across Teams'});
+  await runs.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(runs.getByRole('button',{name:'Delete Demand'})).toBeVisible();
+  await runs.getByRole('button',{name:'Delete Demand'}).click();
+  await expect(host.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toContainText('durable Ticket, native chat, receipts and audit are retained');
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(runs.getByRole('button',{name:'Delete Demand'})).toHaveCount(0);
+  await runs.getByRole('combobox',{name:'Filter Demands by Visibility'}).selectOption('archived');
+  await expect(runs.getByRole('button',{name:'Restore Demand'})).toBeVisible();
+  await runs.getByRole('button',{name:'Restore Demand'}).click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(runs.getByRole('button',{name:'Restore Demand'})).toHaveCount(0);
+  await runs.getByRole('combobox',{name:'Filter Demands by Visibility'}).selectOption('active');
+  await expect(runs.getByRole('button',{name:'Delete Demand'})).toBeVisible();
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saVisibilityCalls:string[]}).saVisibilityCalls);
+  expect(calls.filter(name=>name==='superagent_archive_demand')).toHaveLength(1);
+  expect(calls.filter(name=>name==='superagent_restore_demand')).toHaveLength(1);
+  expect(calls).not.toContain('superagent_submit');
 });

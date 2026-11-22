@@ -33,9 +33,9 @@ interface EffectiveTeam {
 }
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
-  state: string; revision: number; updatedAt: number; projectId?: string }
+  state: string; revision: number; updatedAt: number; projectId?: string; archived?: boolean }
 interface DemandQuery { limit?: number; beforeUpdatedAt?: number; beforeId?: string;
-  orchestrationId?: string; stateFilter?: string; searchQuery?: string; projectId?: string }
+  orchestrationId?: string; stateFilter?: string; searchQuery?: string; projectId?: string; archived?: boolean }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean; reviewDigest: string }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
@@ -146,6 +146,7 @@ export function mountSuperagent(
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
+let demandArchived = false;
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false, reviewQueueHasMore = false;
   let reviewTeamFilter = '';
@@ -205,7 +206,8 @@ export function mountSuperagent(
       (filter === 'needs_attention' &&
         ['blocked','failed','interrupted','inconclusive'].includes(state));
   const fetchDemandPage = async (query: DemandQuery): Promise<DemandIndex[]> => {
-    const page = await call<DemandIndex[]>('superagent_all_demands', {query});
+    const nativeQuery: DemandQuery = demandArchived ? {...query, archived:true} : query;
+    const page = await call<DemandIndex[]>('superagent_all_demands', {query:nativeQuery});
     // A first page is untrusted until its native filter scope and identities
     // match this request. Never expose foreign rows or their Stop controls.
     // Continuations additionally validate their cursor against the last row.
@@ -227,6 +229,7 @@ export function mountSuperagent(
                   (item.updatedAt === page[index - 1].updatedAt && item.id < page[index - 1].id))) ||
                 (query.orchestrationId && item.orchestrationId !== query.orchestrationId) ||
                 !isDemandStateMatch(query.stateFilter, item.state) ||
+                (demandArchived ? item.archived !== true : item.archived === true) ||
                 (query.projectId && item.projectId !== query.projectId) ||
                 seen.has(item.id)) return true;
             seen.add(item.id);
@@ -243,7 +246,8 @@ export function mountSuperagent(
           typeof item.state !== 'string' || !item.state ||
           !Number.isSafeInteger(item.revision) || item.revision < 0 ||
           !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
-          (item.projectId !== undefined && typeof item.projectId !== 'string'))) {
+          (item.projectId !== undefined && typeof item.projectId !== 'string') ||
+          (demandArchived ? item.archived !== true : item.archived === true))) {
       // Continuations get ordering, overlap and filter checks at the caller,
       // but still require valid native Ticket metadata before exposing actions.
       throw new Error('Native Demand continuation has malformed Ticket identity or revision; refresh the index.');
@@ -765,9 +769,14 @@ export function mountSuperagent(
               : '<button type="button" data-sa-retry-global-demand="' + safe(demand.id) +
                 '">Retry demand</button>'
           : '') +
-        (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
-          ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
-            '">Stop demand</button>' : '') + '</li>';
+        (demandArchived
+          ? '<button type="button" data-sa-restore-global-demand="' + safe(demand.id) +
+            '">Restore Demand</button>'
+          : ['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
+            ? '<button type="button" data-sa-archive-global-demand="' + safe(demand.id) +
+              '">Delete Demand</button>'
+            : '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
+              '">Cancel Demand</button>') + '</li>';
     };
     const demandGroups = [
       {label:'Working',states:['queued','running']},
@@ -805,6 +814,9 @@ export function mountSuperagent(
       '<label>Historical project ID<input type="text" name="projectId" maxlength="128" ' +
       'aria-label="Exact admitted Project ID" value="' + safe(demandProjectFilter) + '"></label>' +
       '<button type="submit">Apply project filter</button></form>' +
+      '<label>Visibility<select aria-label="Filter Demands by Visibility" data-sa-demand-visibility-filter>' +
+      '<option value="active"' + (!demandArchived ? ' selected' : '') + '>Active</option>' +
+      '<option value="archived"' + (demandArchived ? ' selected' : '') + '>Archived</option></select></label>' +
       '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
       '<option value="">All States</option>' +
       (['queued','running','waiting_approval','waiting_review','blocked','completed',
@@ -822,6 +834,7 @@ export function mountSuperagent(
       (demandProjectFilter ? ' in native project ' + safe(demandProjectFilter) : '') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter.split('_').join(' ')) : '') +
       (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
+      (demandArchived ? ' in archived history' : ' in active history') +
       ', loaded 200 at a time in newest-first order. Search filters native records ' +
       'before pagination (ASCII case-insensitive, literal text). Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
@@ -1584,6 +1597,24 @@ export function mountSuperagent(
       });
       return;
     }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-visibility-filter')) {
+      if (busy) { target.value = demandArchived ? 'archived' : 'active'; return; }
+      if (target.value !== 'active' && target.value !== 'archived') return;
+      demandArchived = target.value === 'archived';
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await fetchDemandPage({
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-state-filter')) {
       if (busy) { target.value = demandStateFilter; return; }
       const filter = target.value;
@@ -2035,7 +2066,7 @@ export function mountSuperagent(
         return;
       }
       const team = demandTeamFilter, state = demandStateFilter;
-      const project = demandProjectFilter, search = demandSearch;
+      const project = demandProjectFilter, search = demandSearch, archived = demandArchived;
       void work(async () => {
         const loaded = await fetchDemandPage({
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
@@ -2056,6 +2087,7 @@ export function mountSuperagent(
                   !descends(index === 0 ? last : loaded[index - 1], item) ||
                   (team && item.orchestrationId !== team) ||
                   !isDemandStateMatch(state, item.state) ||
+                  (archived ? item.archived !== true : item.archived === true) ||
                   (project && item.projectId !== project) ||
                   (search && (typeof item.objective !== 'string' ||
                     !nativeCaseFold(item.objective).includes(nativeCaseFold(search)))) ||
@@ -2066,7 +2098,8 @@ export function mountSuperagent(
             !allDemandsLoaded || allDemands[allDemands.length - 1]?.id !== last.id ||
             allDemands[allDemands.length - 1]?.updatedAt !== last.updatedAt ||
             team !== demandTeamFilter || state !== demandStateFilter ||
-            project !== demandProjectFilter || search !== demandSearch) {
+            project !== demandProjectFilter || search !== demandSearch ||
+            archived !== demandArchived) {
           throw new Error('Native Demand page overlaps, changed scope or is out of order; refresh the index.');
         }
         allDemands = [...allDemands, ...loaded];
@@ -2127,6 +2160,51 @@ export function mountSuperagent(
       });
       return;
     }
+
+    if (target.dataset.saArchiveGlobalDemand || target.dataset.saRestoreGlobalDemand) {
+      const archive = Boolean(target.dataset.saArchiveGlobalDemand);
+      const id = target.dataset.saArchiveGlobalDemand ?? target.dataset.saRestoreGlobalDemand;
+      const demand = allDemands.find(item => item.id === id);
+      if (!demand || busy || Boolean(demand.archived) === archive ||
+          !presets.some(item => item.id === demand.orchestrationId)) return;
+      void work(async () => {
+        const snapshot = await call<TicketDetails>('superagent_snapshot',{
+          ticketId:demand.id,limit:1,
+        });
+        if (snapshot.ticket.id !== demand.id ||
+            snapshot.ticket.orchestrationId !== demand.orchestrationId ||
+            snapshot.ticket.revision !== demand.revision ||
+            snapshot.ticket.state !== demand.state) {
+          throw new Error('Demand changed since the native page was loaded; refresh before archive/restore.');
+        }
+        ask((archive ? 'Delete Demand ' : 'Restore Demand ') + demand.id +
+          ' at revision ' + demand.revision +
+          '? This only changes visibility; durable Ticket, native chat, receipts and audit are retained. ' +
+          'Cancellation does not undo applied Git/file effects.', async () => {
+          const updated = await call<Ticket>(archive ?
+              'superagent_archive_demand' : 'superagent_restore_demand',{
+            ticketId:demand.id,expectedRevision:demand.revision,
+          });
+          if (!updated || updated.id !== demand.id ||
+              updated.orchestrationId !== demand.orchestrationId ||
+              updated.revision !== demand.revision + 1) {
+            await reload();
+            throw new Error('Native archive/restore returned an inconsistent Ticket identity or revision.');
+          }
+          await reload();
+          const page = await fetchDemandPage({
+            limit:200, orchestrationId:demandTeamFilter || undefined,
+            stateFilter:demandStateFilter || undefined,
+            searchQuery:demandSearch || undefined,
+            projectId:demandProjectFilter || undefined,
+          });
+          allDemands = page; allDemandsLoaded = true;
+          allDemandsHasMore = page.length === 200;
+          feedback = 'Demand visibility changed. Native audit history and effect receipts remain intact.';
+        });
+      });
+      return;
+    }
     if (target.dataset.saStopGlobalDemand) {
       const demand = allDemands.find(item => item.id === target.dataset.saStopGlobalDemand);
       if (!demand || busy || !presets.some(item => item.id === demand.orchestrationId)) return;
@@ -2143,8 +2221,8 @@ export function mountSuperagent(
         }
         if (['completed','failed','stopped','interrupted','inconclusive']
           .includes(snapshot.ticket.state)) return;
-        ask('Stop Demand ' + demand.id + ' at revision ' + demand.revision +
-          '? The native operation revokes its mandate and quarantines pending effects.', async () => {
+        ask('Cancel Demand ' + demand.id + ' at revision ' + demand.revision +
+          '? Native revocation stops future work and quarantines pending effects. Applied Git/file changes cannot be undone.', async () => {
           const stopped = await call<Ticket>('superagent_stop',
             {ticketId:demand.id,expectedRevision:snapshot.ticket.revision});
           // The mutating operation is only confirmed by its own native Ticket

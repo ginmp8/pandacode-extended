@@ -149,6 +149,11 @@ CREATE TABLE IF NOT EXISTS sa_audit (
   at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sa_audit_ticket ON sa_audit(ticket_id,id);
+-- Archive only visibility; durable Tickets, native assignments and evidence remain.
+CREATE TABLE IF NOT EXISTS sa_demand_archives (
+ ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ archived_at INTEGER NOT NULL
+);
 "#;
 
 /// Cross-bot resource admission is a database invariant, not only an
@@ -473,6 +478,7 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
         "SELECT id,orchestration_id,request_key,objective,actor,state,revision,
                 active_assignment_id,evidence,created_at,updated_at
          FROM sa_tickets WHERE orchestration_id=?1
+           AND NOT EXISTS(SELECT 1 FROM sa_demand_archives a WHERE a.ticket_id=sa_tickets.id)
          ORDER BY created_at DESC,id DESC LIMIT ?2"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![config_id,limit], ticket_row)
@@ -494,6 +500,7 @@ pub struct DemandQuery {
     state_filter: Option<String>,
     search_query: Option<String>,
     project_id: Option<String>,
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -507,6 +514,7 @@ pub struct DemandIndex {
     pub updated_at: i64,
     /// Immutable project chosen when this Ticket was admitted, never the Team's current project.
     pub project_id: String,
+    pub archived: bool,
 }
 
 /// Test-only compatibility helper for pagination oracles; production callers
@@ -532,7 +540,7 @@ fn list_all_demands_page_filtered(
     list_all_demands_page_for_project(
         store, limit, before_updated_at, before_id, DemandPageFilters {
             orchestration_id, state_filter, search_query: None, project_id: None,
-        },
+         archived: false },
     )
 }
 
@@ -547,7 +555,7 @@ fn list_all_demands_page_searched(
     list_all_demands_page_for_project(
         store, limit, before_updated_at, before_id, DemandPageFilters {
             orchestration_id, state_filter, search_query, project_id: None,
-        },
+         archived: false },
     )
 }
 
@@ -557,6 +565,7 @@ struct DemandPageFilters<'a> {
     state_filter: Option<&'a str>,
     search_query: Option<&'a str>,
     project_id: Option<&'a str>,
+    archived: bool,
 }
 
 /// Native project scope is evaluated against each Ticket's immutable admitted
@@ -565,7 +574,7 @@ fn list_all_demands_page_for_project(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     filters: DemandPageFilters<'_>,
 ) -> Result<Vec<DemandIndex>> {
-    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id } = filters;
+    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id, archived } = filters;
     if let Some(id) = project_id {
         if id.is_empty() || id.len() > 128
             || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
@@ -620,8 +629,9 @@ fn list_all_demands_page_for_project(
                         ('blocked','failed','interrupted','inconclusive')))
                   AND (?5 IS NULL OR instr(lower(t.objective),lower(?5)) > 0)
                   AND (?6 IS NULL OR t.project_id=?6)
+                  AND EXISTS(SELECT 1 FROM sa_demand_archives a WHERE a.ticket_id=t.id)=?7
             )",
-            params![id,at,orchestration_id,state_filter,search_query,project_id],
+            params![id,at,orchestration_id,state_filter,search_query,project_id,archived],
             |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if visible != 1 {
@@ -629,7 +639,8 @@ fn list_all_demands_page_for_project(
         }
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id,
+            EXISTS(SELECT 1 FROM sa_demand_archives a WHERE a.ticket_id=t.id)
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
@@ -639,12 +650,13 @@ fn list_all_demands_page_for_project(
                  ('blocked','failed','interrupted','inconclusive')))
            AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
            AND (?7 IS NULL OR t.project_id=?7)
+           AND EXISTS(SELECT 1 FROM sa_demand_archives a WHERE a.ticket_id=t.id)=?8
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id,archived], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
-        project_id: row.get(6)?,
+        project_id: row.get(6)?, archived: row.get::<_, i64>(7)? != 0,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -718,7 +730,7 @@ fn list_review_inbox_page_scoped(
         |row| Ok(DemandIndex {
             id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
             state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
-            project_id: row.get(6)?,
+            project_id: row.get(6)?, archived: false,
         }),
     ).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -1667,7 +1679,7 @@ pub(crate) fn list_headless_team_demands_project_searched(
         &store, 200, before_updated_at, before_id, DemandPageFilters {
             orchestration_id: Some(orchestration_id), state_filter,
             search_query, project_id,
-        },
+         archived: false },
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -1717,7 +1729,7 @@ pub(crate) fn list_headless_all_demands_project_searched(
     let page = list_all_demands_page_for_project(
         &store, 200, before_updated_at, before_id, DemandPageFilters {
             orchestration_id: None, state_filter, search_query, project_id,
-        },
+         archived: false },
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -4297,6 +4309,61 @@ fn stop_with_expected_revision(
     Ok((get_ticket(store,ticket_id)?,session))
 }
 
+
+fn change_demand_archive(store: &Store, id: &str, revision: i64, archived: bool) -> Result<Ticket> {
+    // This is a reversible visibility change, never a destructive SQL DELETE.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let current = get_ticket(store,id)?;
+    if current.revision != revision {
+        return Err("Demand changed before archive/restore; refresh its native revision.".into());
+    }
+    if !matches!(current.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
+        return Err("Cancel and settle the Demand before archiving it.".into());
+    }
+    let existing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_archives WHERE ticket_id=?1)",
+        [id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if existing == archived { return Ok(current); } // Idempotent at this exact revision.
+    let active: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1 AND state='running')",
+        [id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if active { return Err("Demand has an active Assignment; settle it before archiving.".into()); }
+    let unresolved: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts WHERE ticket_id=?1
+            AND state IN ('pending','uncertain'))",
+        [id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Err("Demand has unresolved external effects; reconcile receipts first.".into());
+    }
+    let now=storage::now();
+    if archived {
+        tx.execute("INSERT INTO sa_demand_archives(ticket_id,archived_at) VALUES(?1,?2)",
+            params![id,now]).map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM sa_demand_archives WHERE ticket_id=?1",
+            [id]).map_err(|e| e.to_string())?;
+    }
+    let changed = tx.execute(
+        "UPDATE sa_tickets SET revision=revision+1,
+         updated_at=CASE WHEN updated_at>=?2 THEN updated_at+1 ELSE ?2 END
+         WHERE id=?1 AND revision=?3 AND state IN
+             ('completed','failed','stopped','interrupted','inconclusive')",
+        params![id,now,revision],
+    ).map_err(|e| e.to_string())?;
+    if changed!=1 { return Err("Demand changed during archive/restore; transaction aborted.".into()); }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+        params![id,if archived {"demand_archived"} else {"demand_restored"},
+            if archived {"Local user archived a settled Demand; audit and effects preserved"}
+            else {"Local user restored a settled Demand"},now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_ticket(store,id)
+}
+
 /// A native bot reset/delete invalidates in-flight SuperAgent ownership, but
 /// its Ticket/Mandate/Assignment evidence remains independent of bot history.
 /// Called inside the bot reset's existing transaction; never makes a new runner.
@@ -4829,8 +4896,7 @@ pub async fn superagent_all_demands(
             orchestration_id: query.orchestration_id.as_deref(),
             state_filter: query.state_filter.as_deref(),
             search_query: query.search_query.as_deref(),
-            project_id: query.project_id.as_deref(),
-        },
+            project_id: query.project_id.as_deref(), archived: query.archived.unwrap_or(false) },
     )
 }
 
@@ -5379,9 +5445,83 @@ pub async fn superagent_stop(
     Ok(ticket)
 }
 
+
+#[tauri::command]
+pub async fn superagent_archive_demand(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+    expected_revision: i64,
+) -> Result<Ticket> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e| e.to_string())?;
+    change_demand_archive(&store,&ticket_id,expected_revision,true)
+}
+
+#[tauri::command]
+pub async fn superagent_restore_demand(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+    expected_revision: i64,
+) -> Result<Ticket> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e| e.to_string())?;
+    change_demand_archive(&store,&ticket_id,expected_revision,false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_demand_keeps_native_evidence_and_recovery_safe() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,_) = admit(&mut store,&team.id,"Preserve archived Demand",
+            "archive-test",false).unwrap();
+        assert!(change_demand_archive(&store,&ticket.id,ticket.revision,true).is_err());
+        let (stopped,_) = stop(&store,&ticket.id).unwrap();
+        let archived=change_demand_archive(&store,&ticket.id,stopped.revision,true).unwrap();
+        assert_eq!(archived.revision,stopped.revision+1);
+        assert!(list_tickets(&store,&team.id,20).unwrap().is_empty());
+        let list=|store:&Store,archived| list_all_demands_page_for_project(
+            store,20,None,None,DemandPageFilters {
+                orchestration_id:Some(&team.id),state_filter:None,search_query:None,
+                project_id:None,archived,
+            },
+        ).unwrap();
+        assert!(list(&store,false).is_empty());
+        assert_eq!(list(&store,true).len(),1);
+        assert!(list(&store,true)[0].archived);
+        assert!(change_demand_archive(&store,&ticket.id,stopped.revision,false).is_err());
+        assert_eq!(change_demand_archive(&store,&ticket.id,archived.revision,true)
+            .unwrap().revision,archived.revision);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"stopped");
+        assert!(!assignments(&store,&ticket.id,20).unwrap().is_empty());
+        assert!(history(&store,&ticket.id,20).unwrap().iter()
+            .any(|item|item.kind=="demand_archived"));
+        let path=store.path.clone();
+        drop(store);
+        let store=Store::open(&path).unwrap();
+        assert_eq!(list(&store,true).len(),1);
+        let restored=change_demand_archive(&store,&ticket.id,archived.revision,false).unwrap();
+        assert_eq!(restored.revision,archived.revision+1);
+        assert_eq!(list_tickets(&store,&team.id,20).unwrap().len(),1);
+        assert!(history(&store,&ticket.id,20).unwrap().iter()
+            .any(|item|item.kind=="demand_restored"));
+
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (pending,_) = admit(&mut store,&team.id,"Uncertain receipt",
+            "archive-uncertain",false).unwrap();
+        let (stopped,_) = stop(&store,&pending.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,
+             created_at,updated_at) VALUES(?1,'remote-effect','digest','uncertain',?2,?2)",
+            params![pending.id,storage::now()],
+        ).unwrap();
+        assert!(change_demand_archive(&store,&pending.id,stopped.revision,true)
+            .unwrap_err().contains("unresolved external effects"));
+        assert_eq!(list_tickets(&store,&team.id,20).unwrap().len(),1);
+    }
+
 
     #[test]
     fn native_team_member_activity_is_scoped_keyset_paginated_and_restart_safe() {
@@ -5649,7 +5789,7 @@ mod tests {
                 store, 200, before_at, before_id, DemandPageFilters {
                     orchestration_id: Some(&team.id), state_filter: Some("blocked"),
                     search_query: None, project_id: project,
-                },
+                 archived: false },
             )
         };
         let first = page(&store, None, None, Some(&team.project_id)).unwrap();
@@ -5721,7 +5861,7 @@ mod tests {
             &store, 200, None, None, DemandPageFilters {
                 orchestration_id: Some(&team.id), state_filter: Some("waiting_review"),
                 search_query: None, project_id: Some("archived-project"),
-            },
+             archived: false },
         ).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].project_id, "archived-project");

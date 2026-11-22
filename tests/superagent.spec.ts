@@ -4136,3 +4136,89 @@ test('Team attention badge opens a native pre-paginated four-state Demand scope 
   expect(calls.some(item=>/submit|dispatch|accept|grant|reserve|effect/.test(item.command)))
     .toBe(false);
 });
+
+test('Team directory activation uses native CAS without selecting or executing other Teams', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-team-directory-activation';
+    document.body.appendChild(host);
+    const teams = [
+      {id:'team-a',name:'Routine Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:false,policyRevision:1,workerCount:1,reviewerCount:0},
+      {id:'team-b',name:'Build Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:false,policyRevision:4,workerCount:1,reviewerCount:0},
+      {id:'team-c',name:'Review Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:false,policyRevision:2,workerCount:1,reviewerCount:1,
+        manualEnableBlocker:'Native Council admission not available'},
+    ];
+    const calls:Array<{command:string;args?:Record<string,unknown>}> = [];
+    let rejectNext = false;
+    (window as unknown as {
+      saDirectoryActivationCalls:typeof calls;
+      saDirectoryActivationReject:()=>void;
+    }).saDirectoryActivationCalls = calls;
+    (window as unknown as {saDirectoryActivationReject:()=>void})
+      .saDirectoryActivationReject = () => { rejectNext = true; };
+    mountSuperagent(host, async(command,args) => {
+      calls.push({command,args});
+      if(command === 'bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command === 'superagent_list')return teams.map(team=>({...team})) as never;
+      if(command === 'superagent_tickets')return [] as never;
+      if(command === 'superagent_set_enabled'){
+        if(rejectNext){rejectNext=false;throw Error('Native policy revision conflict');}
+        const team = teams.find(item=>item.id === args?.orchestrationId);
+        if(!team || args?.expectedRevision !== team.policyRevision ||
+            args?.enabled === team.enabled)throw Error('Native policy revision conflict');
+        team.enabled = args?.enabled === true;
+        team.policyRevision++;
+        return {...team} as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host = page.locator('#sa-team-directory-activation');
+  const enable = () => host.getByRole('button',{
+    name:'Enable manual mode for Build Team from Teams directory',
+  });
+  const disable = () => host.getByRole('button',{
+    name:'Disable Build Team from Teams directory',
+  });
+  await expect(host.getByRole('button',{
+    name:'Enable manual mode for Review Team from Teams directory',
+  })).toBeDisabled();
+  await enable().click();
+  await expect(host.getByRole('alertdialog')).toContainText('grants no tools or automatic tasks');
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(disable()).toBeVisible();
+  await expect(host.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Routine Team');
+  await disable().click();
+  await expect(host.getByRole('alertdialog')).toContainText('Already applied external changes cannot be undone');
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(enable()).toBeVisible();
+  await expect(host.getByRole('status').filter({hasText:'Native mandates were revoked'}))
+    .toBeVisible();
+  await enable().click();
+  await page.evaluate(() => (window as unknown as {
+    saDirectoryActivationReject:()=>void;
+  }).saDirectoryActivationReject());
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText('Native policy revision conflict');
+  await expect(enable()).toBeVisible();
+  const calls=await page.evaluate(() => (window as unknown as {
+    saDirectoryActivationCalls:Array<{command:string;args?:Record<string,unknown>}>;
+  }).saDirectoryActivationCalls);
+  expect(calls.filter(item=>item.command==='superagent_set_enabled').map(item=>item.args))
+    .toEqual([
+      {orchestrationId:'team-b',expectedRevision:4,enabled:true},
+      {orchestrationId:'team-b',expectedRevision:5,enabled:false},
+      {orchestrationId:'team-b',expectedRevision:6,enabled:true},
+    ]);
+  expect(calls.some(item=>/superagent_(submit|preflight|grant|dispatch|retry|stop|accept)/.test(item.command)))
+    .toBe(false);
+});

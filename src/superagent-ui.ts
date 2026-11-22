@@ -325,6 +325,13 @@ export function mountSuperagent(
     return page;
   };
   const current = () => presets.find(item => item.id === selected);
+  // Native eligibility must agree between the directory and Team inspector.
+  // Neither view issues grants or overrides provider/Council policy.
+  const teamActivationBlocker = (team: Config): string | null =>
+    team.enabled ? null : team.manualEnableBlocker ||
+      ((team.reviewerCount ?? 0) > 0
+        ? 'Configured multi-member Teams cannot run without native scoped admission.'
+        : null);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
@@ -386,6 +393,14 @@ export function mountSuperagent(
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button>' +
+      '<button type="button" data-sa-enable="' + safe(item.id) +
+      '" aria-label="' + (item.enabled ? 'Disable ' : 'Enable manual mode for ') +
+      safe(item.name) + ' from Teams directory"' +
+      (teamActivationBlocker(item) ? ' disabled' : '') + '>' +
+      (item.enabled ? 'Disable Team' : 'Enable manual') + '</button>' +
+      (teamActivationBlocker(item)
+        ? '<small role="status">Manual activation unavailable: ' +
+          safe(teamActivationBlocker(item)) + '</small>' : '') +
       '<button type="button" data-sa-assign-team="' + safe(item.id) +
       '" aria-label="Assign demand to ' +
       safe(item.name) + '">Assign demand</button></li>').join('');
@@ -850,12 +865,7 @@ export function mountSuperagent(
         'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
     // A live native directory projection explains disabled controls. Missing
     // fields from legacy previews retain the conservative multi-member fence.
-    const enableBlocker = chosen && !chosen.enabled
-      ? chosen.manualEnableBlocker || (
-        (chosen.reviewerCount ?? 0) > 0
-          ? 'Configured multi-member Teams cannot run without native scoped admission.'
-          : null)
-      : null;
+    const enableBlocker = chosen ? teamActivationBlocker(chosen) : null;
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '"' +
@@ -2456,9 +2466,35 @@ export function mountSuperagent(
     }
     if (target.dataset.saEnable) {
       const c = presets.find(item => item.id === target.dataset.saEnable);
-      if (c) ask((c.enabled ? 'Disable ' : 'Enable manual mode for ') + c.name + '?', async () => {
-        await call('superagent_set_enabled',{ orchestrationId:c.id, expectedRevision:c.policyRevision, enabled:!c.enabled });
+      if (!c || busy || loading || !Number.isSafeInteger(c.policyRevision) ||
+          teamActivationBlocker(c)) return;
+      const requestedEnabled = !c.enabled;
+      ask(requestedEnabled
+        ? 'Enable manual mode for ' + c.name +
+          '? Native admission still checks every Demand; this grants no tools or automatic tasks.'
+        : 'Disable Team ' + c.name +
+          '? Native Off revokes active mandates and quarantines unresolved effects. ' +
+          'Already applied external changes cannot be undone.', async () => {
+        // The directory and inspector share one revision-guarded local action.
+        // A stale confirmation cannot authorize a different policy revision.
+        const updated = await call<Config>('superagent_set_enabled', {
+          orchestrationId:c.id, expectedRevision:c.policyRevision, enabled:requestedEnabled,
+        });
+        if (!updated || updated.id !== c.id ||
+            updated.enabled !== requestedEnabled ||
+            updated.policyRevision !== c.policyRevision + 1) {
+          await reload();
+          throw new Error('Native Team status response was inconsistent. Refresh before retrying.');
+        }
         await reload();
+        const persisted = presets.find(item => item.id === c.id);
+        if (!persisted || persisted.enabled !== requestedEnabled ||
+            persisted.policyRevision !== updated.policyRevision) {
+          throw new Error('Native Team status change could not be verified after reload. Inspect the Team before retrying.');
+        }
+        feedback = requestedEnabled
+          ? 'Manual Team enabled. No grant or task was started.'
+          : 'Team disabled. Native mandates were revoked; verify any unresolved external effects.';
       });
       return;
     }

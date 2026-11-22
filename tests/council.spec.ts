@@ -46,7 +46,7 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       }
       if (command === 'architect_control' && args.action === 'recover' && ${Boolean(recovery)}) {
         (window.__councilRecoverCalls ??= []).push(structuredClone(args));
-        if (${recovery === 'denied'}) throw new Error('child_council_recovery_denied: interrupted child has existing work.');
+        if (${recovery === 'denied'}) throw new Error((window as any).__councilRecoveryError ?? 'child_council_recovery_denied: interrupted child has existing work.');
         return architect.get(args.sessionId);
       }
       switch (command) {
@@ -1329,11 +1329,29 @@ test('native child recovery denial is visible but cannot silently resume or appr
   await button(page).click();
   await panel(page).getByRole('button', { name: 'Recover interrupted child Council' }).click();
   await expect(panel(page).locator('.council-recovery-feedback[role="alert"]'))
-    .toContainText('child_council_recovery_denied: interrupted child has existing work');
+    .toContainText('Child Council recovery denied. Inspect the child Council state before retrying.');
   expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
     { sessionId: 'session-1', action: 'recover' },
   ]);
   await expect(panel(page).getByRole('button', { name: 'Recover interrupted child Council' })).toBeEnabled();
+});
+
+test('native child recovery errors never disclose private backend context to the Council modal or live region', async ({ page }) => {
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'denied');
+  const secret = '/private/channel/participants-and-secrets';
+  await page.evaluate(detail => { (window as any).__councilRecoveryError = `child_council_recovery_denied: ${detail}`; }, secret);
+  await button(page).click();
+  const recovery = panel(page).getByRole('button', { name: 'Recover interrupted child Council' });
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  const alert = panel(page).locator('.council-recovery-feedback[role="alert"]');
+  await expect(alert).toContainText('Inspect the child Council state before retrying.');
+  await expect(alert).not.toContainText(secret);
+  await expect(page.locator('#composer-live')).not.toContainText(secret);
+  await expect(recovery).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
 });
 
 test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {

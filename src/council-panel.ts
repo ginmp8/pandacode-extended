@@ -508,8 +508,10 @@ export function createCouncil(host: CouncilHost) {
       const message = 'An unstarted child reservation was recovered. Reopen review evidence to inspect it, then resume the team separately.';
       recoveryFeedback.set(sessionId, { message, denied: false });
       host.announce(message);
-    } catch (cause) {
-      const message = 'Child Council recovery denied: ' + (cause instanceof Error ? cause.message : String(cause));
+    } catch {
+      // Native recovery failures may include private task paths or session details.
+      // Never echo backend text into the modal or the accessible live region.
+      const message = 'Child Council recovery denied. Inspect the child Council state before retrying.';
       recoveryFeedback.set(sessionId, { message, denied: true });
       host.announce(message);
     } finally {

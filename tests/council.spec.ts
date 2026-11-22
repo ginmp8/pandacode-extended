@@ -159,6 +159,44 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(refresh).toBeEnabled();
 });
 
+test('keyboard refresh retains focus during a pending native Council read', async ({ page }) => {
+  const inspection = {
+    sessionId: 'native-read', cycleStartedAt: 1000, teamRevision: 3,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').click();
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeEnabled();
+
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => {
+      state.__releaseCouncilInspection = resolve;
+    });
+  });
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toHaveAttribute('aria-disabled', 'true');
+  await expect(refresh).toHaveAttribute('aria-busy', 'true');
+  // A second keypress while pending cannot launch another native request.
+  await page.keyboard.press('Enter');
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await page.evaluate(() => (window as any).__releaseCouncilInspection());
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toBeEnabled();
+  await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+  await inspector.locator('summary').click();
+  await expect(refresh).toBeDisabled();
+});
+
 test('Council inspector does not present stale human acceptance as current approval', async ({ page }) => {
   const accepted = {
     sessionId: 'accepted-task', mode: 'm1', cycleStartedAt: 1000, teamRevision: 8,

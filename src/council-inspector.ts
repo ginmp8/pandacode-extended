@@ -438,9 +438,15 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       ? JSON.stringify([snapshot.sessionId, snapshot.cycleStartedAt, snapshot.teamRevision]) : null;
   let shownScope: string | null = null;
   let serial = 0;
+  let loading = false;
   const load = () => {
     const current = ++serial;
-    refresh.disabled = true;
+    loading = true;
+    // Native disabled buttons lose keyboard focus during an asynchronous refresh.
+    // Keep this read-only control focusable, but make in-flight calls inert.
+    refresh.disabled = false;
+    refresh.setAttribute('aria-disabled', 'true');
+    refresh.setAttribute('aria-busy', 'true');
     const priorScope = shownScope;
     const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
       .map(child => child.dataset.councilChildKey));
@@ -466,15 +472,27 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       error.textContent = 'Could not inspect this Council: ' + (reason instanceof Error ? reason.message : String(reason));
       body.append(error);
     }).finally(() => {
-      if (serial === current) refresh.disabled = false;
+      if (serial === current) {
+        loading = false;
+        refresh.removeAttribute('aria-disabled');
+        refresh.removeAttribute('aria-busy');
+        refresh.disabled = !details.open;
+      }
     });
   };
   details.addEventListener('toggle', () => {
-    if (!details.open) { serial++; refresh.disabled = true; return; }
+    if (!details.open) {
+      serial++;
+      loading = false;
+      refresh.disabled = true;
+      refresh.removeAttribute('aria-disabled');
+      refresh.removeAttribute('aria-busy');
+      return;
+    }
     load();
   });
   refresh.addEventListener('click', () => {
-    if (details.open) load();
+    if (details.open && !loading) load();
   });
   return details;
 }

@@ -1110,7 +1110,7 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// after mode changes, restart, or later cursor advancement.
 fn observe_authenticated_in_tx(
     tx: &rusqlite::Transaction<'_>, src: &EventSource,
-    event: &EventEnvelope, signed_in: &str,
+    event: &EventEnvelope, signed_in: &str, verified_self_actor: bool,
 ) -> Result<EventDecision> {
     if !token_ok(signed_in, 80) {
         return Err("Signed-in GitHub identity is unavailable; source observation denied.".into());
@@ -1153,7 +1153,8 @@ fn observe_authenticated_in_tx(
             || src.event_kind != event.event_kind
             // The signed-in operator cannot infer work from their own events,
             // even if the exact source actor filter happens to match.
-            || event.actor.eq_ignore_ascii_case(signed_in) { "ignored_filter" }
+            || event.actor.eq_ignore_ascii_case(signed_in)
+            || verified_self_actor { "ignored_filter" }
         else { "observed_permitted" };
     let at = storage::now();
     tx.execute(
@@ -1212,7 +1213,7 @@ fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let src = source(store, &event.source_id)?;
     require_source_cursor_integrity(&tx, &src)?;
-    let receipt = observe_authenticated_in_tx(&tx, &src, event, signed_in)?;
+    let receipt = observe_authenticated_in_tx(&tx, &src, event, signed_in, false)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(receipt)
 }
@@ -1757,11 +1758,15 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
 
 /// Authenticated feed identity and the optional in-flight Team revision are
 /// one receipt context, never an execution grant.
+#[derive(Clone, Copy)]
 struct ObserveFeedContext {
     repository_id: u64,
+    // Resolved by native authenticated gh api user, never from event content.
+    operator_id: Option<u64>,
     background_team_revision: Option<i64>,
 }
 
+#[cfg(test)]
 fn poll_authenticated_events_with_repository_id(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
@@ -1769,7 +1774,7 @@ fn poll_authenticated_events_with_repository_id(
 ) -> Result<AuthenticatedPoll> {
     poll_authenticated_events_with_repository_id_scoped(
         store, expected, since, raw, signed_in, pages_fetched,
-        ObserveFeedContext { repository_id, background_team_revision: None },
+        ObserveFeedContext { repository_id, operator_id: None, background_team_revision: None },
     )
 }
 
@@ -1782,7 +1787,7 @@ fn poll_authenticated_events_with_repository_id_scoped(
     feed: ObserveFeedContext,
 ) -> Result<AuthenticatedPoll>
 {
-    let ObserveFeedContext { repository_id, background_team_revision } = feed;
+    let ObserveFeedContext { repository_id, operator_id, background_team_revision } = feed;
     if !token_ok(signed_in, 80) || !(1..=GITHUB_MAX_PAGES).contains(&pages_fetched) {
         return Err("Authenticated source polling requires a verified operator and bounded pages.".into());
     }
@@ -1845,15 +1850,23 @@ fn poll_authenticated_events_with_repository_id_scoped(
     if let Some(actor_id) = actor_id {
         pin_authenticated_actor_identity(&tx, &current_policy.id, actor_id)?;
     }
+    // A GitHub account can rename its login. Comparing text alone would then
+    // classify its older events as independent third-party activity.
+    let verified_self_actor = operator_id.is_some_and(|operator|
+        actor_id.and_then(|id| u64::try_from(id).ok()) == Some(operator));
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
     for event in &parsed {
-        let result = observe_authenticated_in_tx(&tx, &current_policy, event, signed_in)?;
+        let result = observe_authenticated_in_tx(
+            &tx, &current_policy, event, signed_in, verified_self_actor,
+        )?;
         if result.duplicate { duplicates += 1; }
         else {
             recorded += 1;
-            if event.actor.eq_ignore_ascii_case(signed_in) { self_ignored += 1; }
+            if verified_self_actor || event.actor.eq_ignore_ascii_case(signed_in) {
+                self_ignored += 1;
+            }
         }
     }
     // This high-watermark is *not* proof of a gap-free subscription: the
@@ -1941,7 +1954,7 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
 /// revalidated by the existing transactional decision adapter.
 fn fetch_authenticated_github_window(
     repo: &str, since: i64, prior_cursor: i64,
-) -> Result<(String, serde_json::Value, usize, u64)> {
+) -> Result<(String, serde_json::Value, usize, u64, u64)> {
     let root = std::env::temp_dir();
     let user = crate::github::run_gh(
         &root, &["api", "user"], crate::github::TIMEOUT,
@@ -1970,7 +1983,7 @@ fn fetch_authenticated_github_window(
     require_authenticated_feed_repository(&response, repository_id)?;
     require_authenticated_feed_actor_ids(&response)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;
-    Ok((signed_in, response, pages.len(), repository_id))
+    Ok((signed_in, response, pages.len(), repository_id, operator_id))
 }
 
 
@@ -1992,7 +2005,7 @@ fn observe_team_sources_with<F>(
     store: &Store, orchestration_id: &str, mut fetch: F,
 ) -> Result<TeamObserveBatch>
 where
-    F: FnMut(&EventSource, i64) -> Result<(String, serde_json::Value, usize, u64)>,
+    F: FnMut(&EventSource, i64) -> Result<(String, serde_json::Value, usize, u64, u64)>,
 {
     let sources = list_sources(store, orchestration_id)?;
     let mut observed = Vec::new();
@@ -2024,9 +2037,13 @@ where
             if let Err(failure) = &fetched {
                 record_observe_fetch_failure(store, &selected, failure)?;
             }
-            let (signed_in, response, pages, repository_id) = fetched?;
-            poll_authenticated_events_with_repository_id(
-                store, &selected, since, &response, &signed_in, pages, repository_id,
+            let (signed_in, response, pages, repository_id, operator_id) = fetched?;
+            poll_authenticated_events_with_repository_id_scoped(
+                store, &selected, since, &response, &signed_in, pages,
+                ObserveFeedContext {
+                    repository_id, operator_id: Some(operator_id),
+                    background_team_revision: None,
+                },
             )
         })();
         match result {
@@ -2090,9 +2107,13 @@ pub(crate) fn headless_observe_source(
     if let Err(failure) = &fetched {
         record_observe_fetch_failure(&store, &snapshot, failure)?;
     }
-    let (signed_in, response, pages_fetched, repository_id) = fetched?;
-    let receipt = poll_authenticated_events_with_repository_id(
-        &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
+    let (signed_in, response, pages_fetched, repository_id, operator_id) = fetched?;
+    let receipt = poll_authenticated_events_with_repository_id_scoped(
+        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+        ObserveFeedContext {
+            repository_id, operator_id: Some(operator_id),
+            background_team_revision: None,
+        },
     )?;
     serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
 }
@@ -2159,10 +2180,13 @@ async fn poll_source_authenticated(
     if let Err(failure) = &fetched {
         record_observe_fetch_failure(&store, &snapshot, failure)?;
     }
-    let (signed_in, response, pages_fetched, repository_id) = fetched?;
+    let (signed_in, response, pages_fetched, repository_id, operator_id) = fetched?;
     poll_authenticated_events_with_repository_id_scoped(
         &store, &snapshot, since, &response, &signed_in, pages_fetched,
-        ObserveFeedContext { repository_id, background_team_revision: team_revision },
+        ObserveFeedContext {
+            repository_id, operator_id: Some(operator_id),
+            background_team_revision: team_revision,
+        },
     )
 }
 
@@ -2429,7 +2453,7 @@ fn observe_authenticated_check_run_with_repository_id(
     // Pin within the same transaction as the source receipt and result sidecar.
     // A reused App slug or failed write cannot rebind the configured source.
     pin_authenticated_actor_identity(&tx, &current.id, authenticated_check_run_app_id(raw)?)?;
-    let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in)?;
+    let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in, false)?;
     // Replays must preserve their original result. A v41-v44 receipt with no
     // original verified result stays unknown; never backfill it on replay.
     let conclusion = raw.get("conclusion").and_then(serde_json::Value::as_str)
@@ -3206,7 +3230,7 @@ mod tests {
         }]);
         let denied = poll_authenticated_events_with_repository_id_scoped(
             &store, &selected, 0, &response, "operator", 1,
-            ObserveFeedContext { repository_id: 101, background_team_revision: Some(first_revision) },
+            ObserveFeedContext { repository_id: 101, operator_id: None, background_team_revision: Some(first_revision) },
         ).unwrap_err();
         assert!(denied.contains("activation changed"), "{denied}");
         assert!(list_decisions(&store, &selected.id, 10).unwrap().is_empty());
@@ -3226,7 +3250,7 @@ mod tests {
         ).is_err());
         assert!(poll_authenticated_events_with_repository_id_scoped(
             &store, &selected, 0, &response, "operator", 1,
-            ObserveFeedContext { repository_id: 101, background_team_revision: Some(first_revision) },
+            ObserveFeedContext { repository_id: 101, operator_id: None, background_team_revision: Some(first_revision) },
         ).is_err());
         store.db.execute(
             "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
@@ -3786,7 +3810,7 @@ mod tests {
             sequence: 5_000_072_001,
         };
         let tx = store.db.unchecked_transaction().unwrap();
-        observe_authenticated_in_tx(&tx, &observed, &envelope, "operator").unwrap();
+        observe_authenticated_in_tx(&tx, &observed, &envelope, "operator", false).unwrap();
         tx.commit().unwrap();
         store.db.execute_batch(
             "DROP TABLE sa_source_repository_identity; PRAGMA user_version=47;"
@@ -4400,6 +4424,64 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(list_decisions(&reopened,&src.id,10).unwrap()[0].decision,"ignored_filter");
         assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,5_000_001_001);
+    }
+
+
+    #[test]
+    fn authenticated_operator_rename_does_not_make_self_events_third_party_context() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "old-operator-login", "issues.opened",
+        ).unwrap();
+        let selected = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let old_login_event = serde_json::json!([{
+            "id":"5000180001", "created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":73},
+            "actor":{"login":"old-operator-login","id":101},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        // The authenticated operator has the same numeric account identity
+        // but a different current login. Text-only comparison was insufficient.
+        let identity = ObserveFeedContext {
+            repository_id:73, operator_id:Some(101), background_team_revision:None,
+        };
+        let first = poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &old_login_event, "new-operator-login", 1, identity,
+        ).unwrap();
+        assert_eq!((first.recorded, first.self_ignored), (1, 1));
+        assert_eq!(list_decisions(&store, &selected.id, 10).unwrap()[0].decision,
+            "ignored_filter");
+        assert_eq!(source(&store, &selected.id).unwrap().last_sequence, 5_000_180_001);
+        assert_eq!(poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &old_login_event, "new-operator-login", 1, identity,
+        ).unwrap().duplicates, 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+
+        // An independently identified GitHub actor remains observable.
+        let other = create_source(
+            &store, "orch", "owner/repo", "external-worker", "issues.opened",
+        ).unwrap();
+        let other = set_mode(&store, &other.id, other.policy_revision, "observe").unwrap();
+        let other_event = serde_json::json!([{
+            "id":"5000180002", "created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":73},
+            "actor":{"login":"external-worker","id":202},
+            "payload":{"action":"opened","issue":{"number":43}}
+        }]);
+        let permitted = poll_authenticated_events_with_repository_id_scoped(
+            &store, &other, 0, &other_event, "new-operator-login", 1, identity,
+        ).unwrap();
+        assert_eq!((permitted.recorded, permitted.self_ignored), (1, 0));
+        assert_eq!(list_decisions(&store, &other.id, 10).unwrap()[0].decision,
+            "observed_permitted");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &selected.id, 10).unwrap()[0].decision,
+            "ignored_filter");
+        assert_eq!(list_decisions(&reopened, &other.id, 10).unwrap()[0].decision,
+            "observed_permitted");
     }
 
     #[test]
@@ -5823,7 +5905,7 @@ mod tests {
         // Simulate a pre-v45 receipt with no checked outcome attached.
         let envelope = authenticated_check_run(&on, &run, 702, 1, 1).unwrap();
         let transaction = store.db.unchecked_transaction().unwrap();
-        observe_authenticated_in_tx(&transaction, &on, &envelope, "operator").unwrap();
+        observe_authenticated_in_tx(&transaction, &on, &envelope, "operator", false).unwrap();
         transaction.commit().unwrap();
         assert!(observe_authenticated_check_run(&store, &on, 702, &run, "operator")
             .unwrap().duplicate);
@@ -6048,7 +6130,7 @@ mod tests {
                 "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
                 "type":kind, "repo":{"name":"test/fixture","id":101},
                 "actor":{"login":"trusted-bot"}, "payload":payload
-            }]), 1, 101))
+            }]), 1, 101, 999))
         };
         let first = observe_team_sources_with(&store, "orch", &mut provider).unwrap();
         assert_eq!(first.observed.len(), 2);
@@ -6088,7 +6170,7 @@ mod tests {
                 "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
                 "type":kind, "repo":{"name":"test/fixture","id":101},
                 "actor":{"login":"trusted-bot"}, "payload":payload
-            }]),1,101))
+            }]),1,101,999))
         }).unwrap_err();
         assert!(error.contains("simulated provider outage"));
         assert_eq!(source(&store, &pull.id).unwrap().last_sequence, 0);
@@ -6136,7 +6218,7 @@ mod tests {
                 "payload":{"action":action,
                     "issue":{"number":number},
                     "pull_request":{"number":number}}
-            }]), 1, 101)
+            }]), 1, 101, 999)
         };
         let mut visited = Vec::new();
         let error = observe_team_sources_with(&store, "orch", |selected, _since| {

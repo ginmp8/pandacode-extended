@@ -15,7 +15,9 @@ test.setTimeout(60_000);
 async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null, recovery?: 'eligible' | 'denied', criteriaPreset?: object): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
-    const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
+    // Vite serves transpiled JavaScript here: injected mocks must not contain TypeScript syntax.
+    const source = await response.text();
+    const body = source.replace(/switch\s*\(command\)\s*\{/, `
       if (command === 'architect_set_council') (window.__councilCalls ??= []).push(structuredClone(args.council));
       if (command === 'architect_start') (window.__councilStarts ??= []).push(args.text);
       if (command === 'architect_council_accept') (window.__councilAccepts ??= []).push(args.sessionId);
@@ -46,11 +48,12 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       }
       if (command === 'architect_control' && args.action === 'recover' && ${Boolean(recovery)}) {
         (window.__councilRecoverCalls ??= []).push(structuredClone(args));
-        if (${recovery === 'denied'}) throw new Error((window as any).__councilRecoveryError ?? 'child_council_recovery_denied: interrupted child has existing work.');
+        if (${recovery === 'denied'}) throw new Error(window.__councilRecoveryError ?? 'child_council_recovery_denied: interrupted child has existing work.');
         return architect.get(args.sessionId);
       }
       switch (command) {
     `);
+    if (body === source) throw new Error('Council preview command interceptor was not installed.');
     await route.fulfill({ response, body });
   });
   await page.goto(url);

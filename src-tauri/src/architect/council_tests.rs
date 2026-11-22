@@ -416,6 +416,7 @@ fn native_composed_usage_requires_a_seated_nonblank_reviewer_identity() {
     measured_zero.worker_id = "zero-duration-leaf".into();
     measured_zero.round = 2;
     measured_zero.reviewer_source = "nested_child";
+    measured_zero.created_at = SINCE + 3;
     measured_zero.started_at = SINCE + 3;
     measured_zero.last_updated_at = SINCE + 3;
     measured_zero.queue_wait_ms = Some(0);
@@ -443,6 +444,49 @@ fn native_composed_usage_requires_a_seated_nonblank_reviewer_identity() {
     assert_eq!(groups[1].usage.cumulative_observed_span_ms, Some(0));
     assert_eq!(groups.iter().map(|group| group.usage.unique_attempts).sum::<usize>(),
         totals.unique_attempts, "source groups cannot mint unnamed reviewer attempts");
+}
+
+/// A positive reported duration is not a native measurement unless it agrees
+/// with the stored timestamps and the reviewer has actually settled.
+#[test]
+fn native_composed_usage_rejects_inconsistent_positive_timing_claims() {
+    let mut worker = seat("verified-timing", 1, Some(9.5), SINCE + 1);
+    worker.council.as_mut().unwrap().started_at = SINCE + 4;
+    worker.updated_at = SINCE + 9;
+    let inspected = council::inspection(
+        &team_with(on(9.0, 3, 2), vec![worker]), false,
+    ).unwrap();
+    let measured = inspected.attempts[0].clone();
+    assert_eq!(measured.queue_wait_ms, Some(3));
+    assert_eq!(measured.observed_span_ms, Some(5));
+
+    let mut forged = measured.clone();
+    forged.worker_id = "inflated-child-time".into();
+    forged.round = 2;
+    forged.reviewer_source = "nested_child";
+    forged.queue_wait_ms = Some(800);
+    forged.observed_span_ms = Some(900);
+    let mut premature = measured.clone();
+    premature.worker_id = "not-settled".into();
+    premature.round = 2;
+    premature.status = "running".into();
+
+    let attempts = [measured, forged, premature];
+    let totals = council::composed_usage(&attempts, &[]);
+    assert_eq!(totals.unique_attempts, 3);
+    assert_eq!(totals.queue_measured_attempts, 2);
+    assert_eq!(totals.span_measured_attempts, 1);
+    assert_eq!(totals.cumulative_queue_wait_ms, Some(6));
+    assert_eq!(totals.cumulative_observed_span_ms, Some(5));
+    assert_eq!(totals.settled_review_window_ms, Some(5));
+    assert!(totals.cost_amount.is_none() && totals.token_count.is_none());
+
+    let groups = council::composed_usage_by_round_source(&attempts, &[]);
+    let child = groups.iter().find(|group| group.reviewer_source == "nested_child").unwrap();
+    assert_eq!(child.usage.queue_measured_attempts, 0);
+    assert_eq!(child.usage.span_measured_attempts, 0);
+    assert_eq!(child.usage.cumulative_queue_wait_ms, None);
+    assert_eq!(child.usage.cumulative_observed_span_ms, None);
 }
 
 #[test]

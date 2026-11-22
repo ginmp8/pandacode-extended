@@ -699,18 +699,29 @@ fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
         .collect();
     // Invalid child attempt durations are unknown, not measured work.
     // Keep actual zero-duration observations distinct from malformed negatives.
-    let queue: Vec<i64> = unique.iter().filter_map(|attempt|
-        attempt.queue_wait_ms.filter(|ms| *ms >= 0)).collect();
-    let spans: Vec<i64> = unique.iter().filter_map(|attempt|
-        attempt.observed_span_ms.filter(|ms| *ms >= 0)).collect();
+    // Only timestamps observed by the native lifecycle may contribute to a
+    // measurement. A forged/imported attempt with a positive but inconsistent
+    // duration must not inflate the Council's reported time or coverage.
+    let queue: Vec<i64> = unique.iter().filter_map(|attempt| {
+        if attempt.created_at <= 0 || attempt.started_at <= 0 { return None; }
+        let observed = attempt.started_at.checked_sub(attempt.created_at)?;
+        (observed >= 0 && attempt.queue_wait_ms == Some(observed)).then_some(observed)
+    }).collect();
+    // A recorded span is meaningful only for a settled native reviewer and
+    // only when it matches the independently retained start/end timestamps.
+    let settled: Vec<_> = unique.iter().copied().filter(|attempt| {
+        attempt.started_at > 0
+            && matches!(attempt.status.as_str(), "completed" | "failed" | "stopped")
+            && attempt.last_updated_at.checked_sub(attempt.started_at)
+                .is_some_and(|observed| observed >= 0
+                    && attempt.observed_span_ms == Some(observed))
+    }).collect();
+    let spans: Vec<i64> = settled.iter().filter_map(|attempt| attempt.observed_span_ms).collect();
     let add = |values: &[i64]| (!values.is_empty())
         .then(|| values.iter().try_fold(0_i64, |sum, value| sum.checked_add(*value)))
         .flatten();
     // A sum of reviewer spans is not elapsed task time when independent reviewers
     // overlap. Exclude queued/live attempts and never invent a completed window.
-    let settled: Vec<_> = unique.iter().filter(|attempt|
-        attempt.observed_span_ms.is_some_and(|ms| ms >= 0) && attempt.started_at > 0
-            && attempt.last_updated_at >= attempt.started_at).collect();
     let settled_review_window_ms = settled.iter().map(|attempt| attempt.started_at).min()
         .zip(settled.iter().map(|attempt| attempt.last_updated_at).max())
         .and_then(|(first, last)| last.checked_sub(first));

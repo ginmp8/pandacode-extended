@@ -647,6 +647,11 @@ fn next_observe_subscription_sources(
          JOIN sa_orchestrations o ON o.id=s.orchestration_id
          WHERE o.enabled=1 AND s.mode='observe'
            AND s.event_kind<>'check_run.completed'
+           AND NOT EXISTS (
+               SELECT 1 FROM sa_source_history_gaps g
+               WHERE g.source_id=s.id AND g.cursor_sequence=s.last_sequence
+                 AND g.verified_at IS NULL
+           )
            AND (?1 IS NULL OR s.created_at>?1
                 OR (s.created_at=?1 AND s.id>?2))
          ORDER BY s.created_at,s.id LIMIT ?3",
@@ -747,8 +752,6 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "SELECT enabled FROM sa_orchestrations WHERE id=?1",
         [&selected.orchestration_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let background_selected = team_enabled == 1 && selected.mode == "observe"
-        && selected.event_kind != "check_run.completed";
     let repository_id: Option<i64> = store.db.query_row(
         "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
         [source_id], |row| row.get(0),
@@ -779,13 +782,20 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
                 (Some(cursor),Some(at),Some(reason),count,verified_at,verified_sequence),
             None => (None,None,None,0,None,None),
         };
+    // Background polling cannot heal an already unverified source history
+    // window by repeatedly retrying the same bounded feed. An explicit
+    // authenticated operator poll may still verify the exact cursor.
+    let gap_needs_operator = history_gap_cursor == Some(selected.last_sequence)
+        && history_gap_verified_at.is_none();
+    let background_selected = team_enabled == 1 && selected.mode == "observe"
+        && selected.event_kind != "check_run.completed" && !gap_needs_operator;
     let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
     let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
     let next_action = if !cursor_consistent {
         "investigate_cursor_receipt_mismatch"
     } else if receipt_capacity_reached {
         "receipt_limit_requires_operator_intervention"
-    } else if history_gap_cursor.is_some() && history_gap_verified_at.is_none() {
+    } else if gap_needs_operator {
         "investigate_unverified_github_history"
     } else if selected.mode == "off" {
         "source_off_no_poll"
@@ -888,6 +898,23 @@ fn require_observe_preflight(store: &Store, selected: &EventSource) -> Result<()
     }
     if integrity.receipt_capacity_reached {
         return Err("Source receipt capacity exhausted; observation denied before GitHub request.".into());
+    }
+    Ok(())
+}
+
+/// A selected source may acquire a gap while the scheduler is iterating.
+/// Recheck the exact durable cursor before a background GitHub network call;
+/// explicit local-operator Observe remains available for verified recovery.
+fn require_background_observe_preflight(
+    store: &Store, selected: &EventSource,
+) -> Result<()> {
+    let unresolved: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_source_history_gaps
+         WHERE source_id=?1 AND cursor_sequence=?2 AND verified_at IS NULL)",
+        params![&selected.id,selected.last_sequence], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Err("GitHub Observe history requires explicit operator reconciliation; background retry paused.".into());
     }
     Ok(())
 }
@@ -2098,6 +2125,9 @@ async fn poll_source_authenticated(
             return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
         }
         require_observe_preflight(&store, &selected)?;
+        if background {
+            require_background_observe_preflight(&store, &selected)?;
+        }
         let team_revision = if background {
             Some(require_background_team_revision(
                 &store, &selected.orchestration_id, None,
@@ -4529,6 +4559,68 @@ mod tests {
         assert_eq!(fresh.next_action, "investigate_unverified_github_history");
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn unresolved_github_history_pauses_background_only_until_exact_recovery() {
+        let (store, path) = fixture();
+        store.db.execute("UPDATE sa_orchestrations SET enabled=1 WHERE id='orch'", []).unwrap();
+        let blocked = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let other = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.closed",
+        ).unwrap();
+        let blocked = set_mode(&store, &blocked.id, blocked.policy_revision, "observe").unwrap();
+        let other = set_mode(&store, &other.id, other.policy_revision, "observe").unwrap();
+        let item = |id: i64| serde_json::json!({
+            "id":id.to_string(), "created_at":chrono::Utc::now().to_rfc3339(),
+            "type":"IssuesEvent", "repo":{"name":"owner/repo"},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        poll_authenticated_events(&store, &blocked, 0, &serde_json::json!([
+            item(5_000_000_600)
+        ])).unwrap();
+        let pinned = source(&store, &blocked.id).unwrap();
+        let error = combine_github_pages(
+            &[serde_json::json!([item(5_000_000_603),item(5_000_000_602)])],
+            0, pinned.last_sequence,
+        ).unwrap_err();
+        record_observe_fetch_failure(&store, &pinned, &error).unwrap();
+
+        let health = inspect_source_integrity(&store, &blocked.id).unwrap();
+        assert_eq!(health.next_action, "investigate_unverified_github_history");
+        assert!(!health.background_selected);
+        assert!(require_background_observe_preflight(&store, &pinned).is_err());
+        let selected = next_observe_subscription_sources(&store, None).unwrap();
+        assert!(!selected.iter().any(|(_, id)| id == &blocked.id));
+        assert!(selected.iter().any(|(_, id)| id == &other.id));
+
+        // Restart must not silently resume an unverified source or starve
+        // unrelated source polling. There is no task or external effect.
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(!inspect_source_integrity(&reopened, &blocked.id).unwrap().background_selected);
+        assert!(require_background_observe_preflight(
+            &reopened, &source(&reopened, &blocked.id).unwrap(),
+        ).is_err());
+        assert_eq!(next_observe_subscription_sources(&reopened, None).unwrap().len(), 1);
+        let current = source(&reopened, &blocked.id).unwrap();
+
+        // A deliberate authenticated Observe that sees the exact old event
+        // can resolve the diagnostic without guessing lost source history.
+        poll_authenticated_events(&reopened, &current, 0, &serde_json::json!([
+            item(5_000_000_603),item(5_000_000_602),item(5_000_000_601),
+            item(5_000_000_600)
+        ])).unwrap();
+        let resumed = source(&reopened, &blocked.id).unwrap();
+        assert!(inspect_source_integrity(&reopened, &blocked.id).unwrap().background_selected);
+        require_background_observe_preflight(&reopened, &resumed).unwrap();
+        assert_eq!(next_observe_subscription_sources(&reopened, None).unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
     }
 

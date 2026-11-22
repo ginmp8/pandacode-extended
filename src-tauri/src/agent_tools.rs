@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 struct PendingUi {
     reply: oneshot::Sender<Result<Value>>,
     stopped: Arc<AtomicBool>,
+    session_id: String,
 }
 #[derive(Default)]
 pub struct UiRequests(Mutex<HashMap<String, PendingUi>>);
@@ -46,6 +47,9 @@ pub fn with_preview(base: Option<ToolHost>, app: tauri::AppHandle, session_id: S
         let (base, app, sid, stopped) = (base.clone(), app.clone(), session_id.clone(), stopped.clone());
         Box::pin(async move {
             if stopped.load(Ordering::SeqCst) { return Err("Task has stopped.".into()); }
+            // Revalidate even a retained app-tool handler before delegating to the
+            // underlying provider or opening a renderer-backed action.
+            ensure_app_tool_permission(&app, &sid)?;
             if !matches!(name.as_str(), "pandacode_run_project" | "pandacode_preview_file") {
                 return match base { Some(base) => (base.handler)(name, args).await, None => Err("Unknown PandaCode tool.".into()) };
             }
@@ -121,6 +125,8 @@ pub fn with_jev(
                 if stopped.load(Ordering::SeqCst) {
                     return Err("Task has stopped.".into());
                 }
+                // A retained optional-tool host cannot bypass native task revocation.
+                ensure_app_tool_permission(&app, &sid)?;
                 if name.starts_with("pandacode_jev_") {
                     validate_spec(&enabled_jev_catalog(), &name, &args)?;
                     jev_dispatch(app, &sid, &name, args, stopped).await
@@ -163,6 +169,9 @@ async fn jev_dispatch(
     mut args: Value,
     stopped: Arc<AtomicBool>,
 ) -> Result<Value> {
+    // This boundary can perform paid/external work; check the original native
+    // session again rather than trusting the tool catalog advertised earlier.
+    ensure_app_tool_permission(&app, sid)?;
     let (target, project_id) = {
         let state = app.state::<AppState>();
         let current = state
@@ -716,6 +725,12 @@ fn mutate_task(
     }
 }
 
+fn ensure_app_tool_permission(app: &tauri::AppHandle, session_id: &str) -> Result<()> {
+    let state = app.state::<AppState>();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    ensure_ambient_agent_tool_permission(&store, session_id)
+}
+
 /// The normal PandaCode task-tool catalog is not a SuperAgent capability grant.
 /// Revalidate the original native Assignment at the effect boundary even when
 /// a previously advertised tool handler is invoked after stop or revocation.
@@ -954,6 +969,7 @@ async fn request_ui(
     if crate::headless::active() {
         return Err("This task runs on a headless host with no app window; work with it from a device instead.".into());
     }
+    ensure_app_tool_permission(&app, sid)?;
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     {
@@ -962,7 +978,7 @@ async fn request_ui(
         if pending.len() >= 16 {
             return Err("Too many pending app actions.".into());
         }
-        pending.insert(id.clone(), PendingUi { reply: tx, stopped });
+        pending.insert(id.clone(), PendingUi { reply: tx, stopped, session_id: sid.to_owned() });
     }
     let _guard = UiGuard {
         app: app.clone(),
@@ -980,22 +996,34 @@ async fn request_ui(
         .map_err(|_| "App action cancelled.".to_string())?
 }
 
+/// A renderer action is checked again just before the UI applies it. A
+/// pending request is not permanent authorization: stop, revocation or a
+/// detached SuperAgent session must invalidate the action immediately.
+pub(crate) fn pending_ui_permission(
+    store: &crate::storage::Store, session_id: &str, stopped: &AtomicBool,
+) -> Result<()> {
+    if stopped.load(Ordering::SeqCst) {
+        return Err("Task has stopped.".into());
+    }
+    ensure_ambient_agent_tool_permission(store, session_id)
+}
+
 #[tauri::command]
-pub fn agent_ui_request_active(state: State<'_, UiRequests>, request_id: String) -> bool {
-    state
-        .0
-        .lock()
-        .ok()
-        .and_then(|pending| {
-            pending
-                .get(&request_id)
-                .map(|p| !p.stopped.load(Ordering::SeqCst))
-        })
-        .unwrap_or(false)
+pub fn agent_ui_request_active(
+    state: State<'_, UiRequests>, native: State<'_, AppState>, request_id: String,
+) -> bool {
+    let pending = state.0.lock().ok().and_then(|requests| {
+        requests.get(&request_id).map(|p| (p.session_id.clone(), p.stopped.clone()))
+    });
+    let Some((session_id, stopped)) = pending else { return false };
+    native.store.lock().is_ok_and(|store| {
+        pending_ui_permission(&store, &session_id, &stopped).is_ok()
+    })
 }
 #[tauri::command]
 pub fn resolve_agent_ui_action(
     state: State<'_, UiRequests>,
+    native: State<'_, AppState>,
     request_id: String,
     result: Option<Value>,
     error: Option<String>,
@@ -1006,8 +1034,9 @@ pub fn resolve_agent_ui_action(
         .map_err(|e| e.to_string())?
         .remove(&request_id)
         .ok_or("App action expired.")?;
-    if pending.stopped.load(Ordering::SeqCst) {
-        return Err("Task has stopped.".into());
+    {
+        let store = native.store.lock().map_err(|e| e.to_string())?;
+        pending_ui_permission(&store, &pending.session_id, &pending.stopped)?;
     }
     let result = match error {
         Some(error) => Err(error.chars().take(1000).collect()),
@@ -1334,6 +1363,17 @@ for await (const line of createInterface({input: process.stdin})) {
         assert!(validate("pandacode_list_subagents", &json!({"offset":40})).is_ok());
         assert!(validate("pandacode_rename_task", &json!({"title":"New title"})).is_ok());
     }
+    #[test]
+    fn deferred_ui_action_permission_is_session_bound_and_stop_sensitive() {
+        let (state, ordinary) = fixture();
+        let stopped = AtomicBool::new(false);
+        let store = state.store.lock().unwrap();
+        assert!(pending_ui_permission(&store, &ordinary.id, &stopped).is_ok());
+        assert!(pending_ui_permission(&store, "missing-session", &stopped).is_err());
+        stopped.store(true, Ordering::SeqCst);
+        assert!(pending_ui_permission(&store, &ordinary.id, &stopped).is_err());
+    }
+
     #[test]
     fn task_access_stays_in_project() {
         let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());

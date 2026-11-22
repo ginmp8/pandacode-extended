@@ -10984,6 +10984,8 @@ mod tests {
         ).unwrap().0;
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(&store, &ordinary).is_ok());
         assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(&store, &ordinary).is_ok());
+        let pending_active = std::sync::atomic::AtomicBool::new(false);
+        assert!(crate::agent_tools::pending_ui_permission(&store, &ordinary, &pending_active).is_ok());
 
         let (ticket, launched) = admit(
             &mut store, &config.id, "No ambient tool rights", "ambient-tool-fence", false,
@@ -10999,6 +11001,8 @@ mod tests {
             &store, &session_id,
         ).unwrap_err();
         assert!(task_tool_error.contains("cannot invoke ambient task tools"));
+        assert!(crate::agent_tools::pending_ui_permission(&store, &session_id, &pending_active).is_err(),
+            "active read-only SuperAgent must deny deferred renderer effects");
 
         // A stopped assignment is denied by the same effect-time check even
         // if the native session and its original bot binding still exist.
@@ -11013,6 +11017,8 @@ mod tests {
         assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
             &store, &session_id,
         ).is_err(), "stopped native sessions cannot regain ambient task tools");
+        assert!(crate::agent_tools::pending_ui_permission(&store, &session_id, &pending_active).is_err(),
+            "stopped SuperAgent must deny a previously queued UI action");
         assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
             &store, &ordinary,
         ).is_ok(), "ordinary bot chats must retain native app tool access");
@@ -11026,6 +11032,8 @@ mod tests {
         assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
             &store, &session_id,
         ).is_err());
+        assert!(crate::agent_tools::pending_ui_permission(&store, &session_id, &pending_active).is_err(),
+            "tampered grants must never revive pending app effects");
     }
 
     #[test]

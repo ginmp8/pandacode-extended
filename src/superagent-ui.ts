@@ -424,7 +424,7 @@ let demandArchived = false;
     };
     // Native bot identities and shared PandaCode avatars; configuration only.
     // Checkbox names are submitted through the existing native roster API.
-    const roleChoices = (name: 'additionalWorkers' | 'reviewers', title: string,
+    const roleChoices = (name: 'workers' | 'additionalWorkers' | 'reviewers', title: string,
       selectedIds: string[], excludedIds: string[]) =>
       '<fieldset class="sa-member-picker" aria-label="' + safe(title) + '">' +
       '<legend>' + safe(title) + '</legend><div class="sa-member-choice-list">' +
@@ -1044,13 +1044,13 @@ let demandArchived = false;
         (!roleRoster || roleRoster.orchestrationId !== chosen.id
           ? '<button type="button" data-sa-role-load>Load native members</button>'
           : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
-            ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
+            ' · Workers: ' + roleRoster.workerBotIds.map(botName).map(safe).join(', ') +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              roleChoices('additionalWorkers', 'Additional Workers (up to 7)', workerOrder,
-                [chosen.coordinatorBotId, chosen.workerBotId]) +
-              '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
-              workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
+              roleChoices('workers', 'Workers (1 to 16)', workerOrder,
+                [chosen.coordinatorBotId]) +
+              '<ol class="sa-worker-order" aria-label="Worker order">' +
+              workerOrder.map((id,index) => '<li><span>' + (index + 1) + '. ' + safe(botName(id)) +
                 '</span><button type="button" data-sa-worker-move="' + safe(id) +
                 '" data-sa-direction="up" aria-label="Move ' + safe(botName(id)) +
                 ' up"' + (index === 0 || chosen.enabled ? ' disabled' : '') + '>Up</button>' +
@@ -1058,9 +1058,9 @@ let demandArchived = false;
                 '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
                 ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
                 '>Down</button></li>').join('') + '</ol>' +
-              roleChoices('reviewers', 'Optional Council Reviewers (up to 4)', reviewerDraft,
-                [chosen.coordinatorBotId, chosen.workerBotId]) +
-              '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
+              roleChoices('reviewers', 'Optional Council Reviewers (up to 8)', reviewerDraft,
+                [chosen.coordinatorBotId]) +
+              '<p>Choose at least one Worker. Order controls the legacy first-member API projection, not task priority. The current native executor remains limited to one Worker in one project; configured multi-role Teams cannot start. Active work and unresolved effects block saves.</p>' +
               '<button class="primary-button" type="submit"' +
                 (policyEditBlocker || roleRoster.policyRevision !== chosen.policyRevision
                    ? ' disabled aria-describedby="sa-role-edit-blocker"' : '') +
@@ -1264,7 +1264,7 @@ let demandArchived = false;
           optionsFor(draftWorkerBotId) + '</select></label></div>' +
           '<details class="sa-new-members"' + (draftMembersExpanded ? ' open' : '') +
           '><summary>Additional Team members (optional)</summary>' +
-          '<p>Choose up to seven additional Workers and four independent Reviewers. ' +
+          '<p>Choose up to fifteen additional Workers and eight independent Reviewers. ' +
           'Each bot has one role, and Workers must share the primary Worker project. ' +
           'Multi-member Teams remain Off until scoped admission is supported.</p>' +
           roleChoices('additionalWorkers', 'Additional Workers', draftAdditionalWorkerIds,
@@ -1464,7 +1464,7 @@ let demandArchived = false;
       await refreshTicketDetails();
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
-        workerOrder = roleRoster.workerBotIds.slice(1);
+        workerOrder = [...roleRoster.workerBotIds];
         reviewerDraft = [...roleRoster.reviewerBotIds];
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
@@ -1503,7 +1503,7 @@ let demandArchived = false;
   host.addEventListener('change', event => {
     const target = event.target;
     if (target instanceof HTMLInputElement && target.type === 'checkbox' &&
-        ['additionalWorkers', 'reviewers'].includes(target.name)) {
+        ['workers', 'additionalWorkers', 'reviewers'].includes(target.name)) {
       const form = target.closest<HTMLFormElement>('form[data-sa-form]');
       if (!form || busy) return;
       const checked = Array.from(form.querySelectorAll<HTMLInputElement>(
@@ -1522,7 +1522,7 @@ let demandArchived = false;
             ...checked.filter(id => !workerOrder.includes(id))];
           render();
           Array.from(host.querySelectorAll<HTMLInputElement>(
-            'form[data-sa-form="roster"] input[name="additionalWorkers"]',
+            'form[data-sa-form="roster"] input[name="workers"]',
           )).find(input => input.value === focusedId)?.focus({preventScroll:true});
         }
       }
@@ -2302,7 +2302,7 @@ let demandArchived = false;
     if (target.hasAttribute('data-sa-role-load')) {
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
-        workerOrder=roleRoster.workerBotIds.slice(1);
+        workerOrder=[...roleRoster.workerBotIds];
         reviewerDraft=[...roleRoster.reviewerBotIds];
       });
       return;
@@ -3024,7 +3024,11 @@ let demandArchived = false;
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
           cfg.enabled || cfg.policyEditBlocker || roleRoster.policyRevision!==cfg.policyRevision) return;
-      const workerBotIds=[cfg.workerBotId,...workerOrder];
+      const workerBotIds=[...workerOrder];
+      if (workerBotIds.length<1 || workerBotIds.length>16 || reviewerDraft.length>8) {
+        error='Choose 1 to 16 Workers and at most 8 Reviewers.';
+        render(); return;
+      }
       // Disabled checked controls are intentionally omitted by FormData.
       // Retain the native roster draft so a paused reviewer is never silently
       // dropped from the persisted Team as a side effect of editing Workers.
@@ -3145,8 +3149,8 @@ let demandArchived = false;
           throw new Error('Choose a Worker-attempt limit from 1 to 4.');
         if (!input.name || !input.coordinatorBotId || !input.workerBotId)
           throw new Error('Choose a Team name, Coordinator and primary Worker.');
-        if (additionalWorkers.length>7 || reviewerBotIds.length>4)
-          throw new Error('Choose up to seven additional Workers and four Reviewers.');
+        if (additionalWorkers.length>15 || reviewerBotIds.length>8)
+          throw new Error('Choose up to fifteen additional Workers and eight Reviewers.');
         const ids=[input.coordinatorBotId,input.workerBotId,...additionalWorkers,...reviewerBotIds];
         if(new Set(ids).size!==ids.length)
           throw new Error('Each Team bot must have exactly one role.');

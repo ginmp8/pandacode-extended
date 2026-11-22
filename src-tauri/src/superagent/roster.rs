@@ -104,8 +104,8 @@ pub(super) fn ticket_strategy(store:&Store,ticket_id:&str)->Result<Option<Admitt
         }),
     ).optional().map_err(|e|e.to_string())
 }
-const MAX_WORKERS:usize=8;
-const MAX_REVIEWERS:usize=4;
+const MAX_WORKERS:usize=16;
+const MAX_REVIEWERS:usize=8;
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -715,9 +715,8 @@ pub async fn superagent_effective_team(
 
 fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Result<()> {
     if input.worker_bot_ids.is_empty() || input.worker_bot_ids.len()>MAX_WORKERS
-       || input.reviewer_bot_ids.len()>MAX_REVIEWERS
-       || input.worker_bot_ids.first()!=Some(&cfg.worker_bot_id) {
-        return Err("Choose the original primary Worker, up to 8 Workers and 4 Reviewers.".into());
+       || input.reviewer_bot_ids.len()>MAX_REVIEWERS {
+        return Err("Choose 1 to 16 Workers and at most 8 Reviewers.".into());
     }
     // The primary Coordinator is not listed in the additional-role table,
     // but must meet the same eligibility contract as every selected member.
@@ -745,6 +744,11 @@ fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Resu
 }
 
 fn insert_member_roles(store:&Store,id:&str,input:&RosterInput)->Result<()> {
+    // The legacy worker_bot_id is a first-member compatibility projection.
+    // A create or roster edit must update it in the same transaction as roles.
+    if input.worker_bot_ids.first()!=Some(&configuration(store,id)?.worker_bot_id) {
+        return Err("Team Worker compatibility projection differs from the roster.".into());
+    }
     for (idx,bot_id) in input.worker_bot_ids.iter().enumerate().skip(1) {
         store.db.execute(
             "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
@@ -877,7 +881,8 @@ pub(super) fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<
        && previous.reviewer_bot_ids==input.reviewer_bot_ids {return Ok(previous);}
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let changed=tx.execute(
-        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1,updated_at=?3
+        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1,updated_at=?3,
+            worker_bot_id=?4
          WHERE id=?1 AND enabled=0 AND policy_revision=?2
            AND NOT EXISTS(
              SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
@@ -887,7 +892,7 @@ pub(super) fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<
                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
            )",
-        params![id,expected,storage::now()],
+        params![id,expected,storage::now(),&input.worker_bot_ids[0]],
     ).map_err(|e|e.to_string())?;
     if changed!=1{return Err("Concurrent Team policy change; reload required.".into());}
     tx.execute("DELETE FROM sa_team_roles WHERE orchestration_id=?1",[id])
@@ -1578,6 +1583,53 @@ mod tests {
             .any(|reason|reason.contains("worker bot no longer exists")));
     }
 
+
+    #[test]
+    fn native_roster_supports_sixteen_workers_and_eight_reviewers_without_execution() {
+        let path=std::env::temp_dir().join(format!("sa-role-capacity-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Capacity','/tmp/sa-capacity')",[],
+        ).unwrap();
+        for id in std::iter::once("lead".to_owned())
+            .chain((0..17).map(|n|format!("worker-{n}")))
+            .chain((0..9).map(|n|format!("reviewer-{n}"))) {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=super::super::create_configuration(&store,NewOrchestration {
+            name:"Capacity".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker-0".into(),
+        }).unwrap();
+        let allowed=RosterInput {
+            worker_bot_ids:(0..16).map(|n|format!("worker-{n}")).collect(),
+            reviewer_bot_ids:(0..8).map(|n|format!("reviewer-{n}")).collect(),
+        };
+        let current=set(&store,&cfg.id,cfg.policy_revision,&allowed).unwrap();
+        assert_eq!(current.worker_bot_ids.len(),16);
+        assert_eq!(current.reviewer_bot_ids.len(),8);
+        assert!(!current.execution_ready);
+        assert!(super::super::change_enabled(&store,&cfg.id,current.policy_revision,true).is_err());
+        let mut extra_worker=allowed.clone();
+        extra_worker.worker_bot_ids.push("worker-16".into());
+        assert!(set(&store,&cfg.id,current.policy_revision,&extra_worker).is_err());
+        let mut extra_reviewer=allowed.clone();
+        extra_reviewer.reviewer_bot_ids.push("reviewer-8".into());
+        assert!(set(&store,&cfg.id,current.policy_revision,&extra_reviewer).is_err());
+        assert_eq!(read(&store,&cfg.id).unwrap().policy_revision,current.policy_revision);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0);
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persisted=read(&reopened,&cfg.id).unwrap();
+        assert_eq!(persisted.worker_bot_ids,allowed.worker_bot_ids);
+        assert_eq!(persisted.reviewer_bot_ids,allowed.reviewer_bot_ids);
+        assert!(!persisted.execution_ready);
+    }
     #[test]
     fn roster_is_persistent_revision_guarded_role_scoped_and_execution_stays_disabled() {
         let path=std::env::temp_dir().join(format!("sa-roster-{}.sqlite3",storage::id()));
@@ -1610,10 +1662,21 @@ mod tests {
         assert_eq!(read(&store,&config.id).unwrap().policy_revision,saved.policy_revision);
         assert_eq!(set(&store,&config.id,saved.policy_revision,&input)
             .unwrap().policy_revision,saved.policy_revision);
-        let clear=RosterInput{worker_bot_ids:vec!["worker-a".into()],reviewer_bot_ids:vec![]};
-        let reset=set(&store,&config.id,saved.policy_revision,&clear).unwrap();
+        // Reordering any Worker updates only the future legacy first-member projection.
+        let reordered=RosterInput{
+            worker_bot_ids:vec!["worker-b".into(),"worker-a".into(),"worker-c".into()],
+            reviewer_bot_ids:vec!["reviewer-a".into(),"reviewer-b".into()],
+        };
+        let promoted=set(&store,&config.id,saved.policy_revision,&reordered).unwrap();
+        assert_eq!(promoted.worker_bot_ids,reordered.worker_bot_ids);
+        assert_eq!(configuration(&store,&config.id).unwrap().worker_bot_id,"worker-b");
+        assert!(!promoted.execution_ready);
+        assert!(set(&store,&config.id,saved.policy_revision,&input).is_err());
+        let clear=RosterInput{worker_bot_ids:vec!["worker-b".into()],reviewer_bot_ids:vec![]};
+        let reset=set(&store,&config.id,promoted.policy_revision,&clear).unwrap();
         assert!(reset.execution_ready);
-        assert_eq!(reset.worker_bot_ids,vec!["worker-a"]);
+        assert_eq!(reset.worker_bot_ids,vec!["worker-b"]);
+        assert_eq!(configuration(&store,&config.id).unwrap().worker_bot_id,"worker-b");
         assert!(super::super::change_enabled(&store,&config.id,reset.policy_revision,true)
             .unwrap().enabled);
     }

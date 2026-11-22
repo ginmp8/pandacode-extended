@@ -501,6 +501,12 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     }
     load();
   });
+  // Native Channel updates invalidate any displayed approval immediately, even
+  // when a previous inspection request is still in flight. `load` uses the same
+  // serial guard as manual refresh to reject older asynchronous responses.
+  details.addEventListener('council-evidence-invalidated', () => {
+    if (details.open && details.isConnected) load();
+  });
   refresh.addEventListener('click', () => {
     if (details.open && !loading) load();
   });

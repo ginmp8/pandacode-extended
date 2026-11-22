@@ -382,6 +382,26 @@ test.describe('shared bot channels', () => {
     await expect(refresh).toBeEnabled();
     await expect(child).not.toHaveAttribute('open', '');
     await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    // A Channel notification invalidates the read-only native approval display
+    // without relying on a user clicking Refresh. Other Channels cannot trigger
+    // a read of this delivery or silently replace the inspected native scope.
+    const accepted = { ...inspection, teamRevision: 10, verifiedPass: true,
+      verifiedCompletion: { sessionId: 'channel-root', cycleId: 'channel-root:1000',
+        teamRevision: 10, round: 1, lowest: 9.7 } };
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
+    await refresh.click();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'other-channel' }));
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    await refresh.focus();
+    await page.evaluate(snapshot => {
+      (window as any).__channelCouncilInspectorOverride = snapshot;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    }, { ...inspection, teamRevision: 11, status: { ...inspection.status, state: 'reviewing', stale: true } });
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('Stale revision', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+    await expect(refresh).toBeFocused();
     // The browser must use the channel's delivery identity rather than allowing
     // an arbitrary DOM session id to select an unrelated Council.
     await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))

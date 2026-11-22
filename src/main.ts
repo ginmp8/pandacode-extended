@@ -7231,7 +7231,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       const inspector = createCouncilInspector(() =>
         call<import('./architect-types').CouncilInspection>('bot_shared_channel_council_inspect',
           { channelId, deliveryId }));
-      dialog.querySelector('.bc-council-inspector-host')?.append(inspector);
+      const host = dialog.querySelector<HTMLElement>('.bc-council-inspector-host');
+      if (host) { host.dataset.channelId = channelId; host.append(inspector); }
       const summary = inspector.querySelector<HTMLElement>('summary');
       summary?.focus();
       summary?.click();
@@ -7664,7 +7665,19 @@ async function boot(): Promise<void> {
   run((subscribe as (name: string, callback: (event: { sessionId?: string } | null) => void) => Promise<() => void>)('progress-changed', event => progressPip?.refresh(event?.sessionId)).then(() => undefined));
   run(subscribe('simulator-changed', event => { if (event?.show) openSimulator(); void simulatorPanel?.refresh(); }).then(() => undefined));
   run(subscribe('bots-changed', () => run((async () => { botProjectsLoad = reloadBotProjects(); await botProjectsLoad; botsView?.refresh(); })())).then(() => undefined));
-  run(subscribe('bot-shared-channel-changed', event => { run(reloadBotProjects(false)); if (state.sharedChannelId && (!event?.channelId || event.channelId === state.sharedChannelId)) void refreshSharedChannel(); }).then(() => undefined));
+  run(subscribe('bot-shared-channel-changed', event => {
+    run(reloadBotProjects(false));
+    if (!state.sharedChannelId || (event?.channelId && event.channelId !== state.sharedChannelId)) return;
+    // A read-only Council inspection can outlive the Channel message that
+    // opened it. Do not leave a cached native pass visible after this Channel
+    // changes: refresh the same authenticated delivery, not a DOM session ID.
+    const dialog = document.querySelector<HTMLDialogElement>('#dialog.bc-council-inspector-dialog[open]');
+    const host = dialog?.querySelector<HTMLElement>('.bc-council-inspector-host');
+    if (host?.dataset.channelId === state.sharedChannelId) {
+      host.querySelector('.council-inspection')?.dispatchEvent(new Event('council-evidence-invalidated'));
+    }
+    void refreshSharedChannel();
+  }).then(() => undefined));
   run(subscribe('bot-messages-changed', () => {
     botThreadMetaLoaded.clear();
     const bot = botForThread();

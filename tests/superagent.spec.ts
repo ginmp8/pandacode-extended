@@ -135,7 +135,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
         {id:'coordinator',name:'Coordinator',paused:false},
         {id:'worker',name:'Worker A',paused:false},
         {id:'worker-b',name:'Worker B',paused:false,avatar:'panda:2'},
-        {id:'reviewer',name:'Reviewer',paused:false},
+        {id:'reviewer',name:'Reviewer',paused:false,avatar:'panda:2'},
       ] as never;
       if (command === 'superagent_list') return [...configs] as never;
       if (command === 'superagent_tickets') return [] as never;
@@ -172,8 +172,8 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
   await host.locator('details.sa-new-members summary').click();
   await host.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Reviewer/}).check();
-  // The same existing bot appears in both eligible role pickers; each
-  // renders its native Panda avatar without duplicating the selected role.
+  // Worker and Reviewer fixtures both have real native avatar metadata.
+  // Selected roles remain exclusive while each picker renders the bot art.
   await expect(host.getByRole('group',{name:'Workers'})
     .locator('.sa-member-choice .bot-avatar.has-art svg')).toHaveCount(1);
   await expect(host.getByRole('group',{name:'Optional Reviewers'})

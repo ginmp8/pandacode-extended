@@ -3454,10 +3454,11 @@ fn admit_role_with_staging_member(
             if ticket_worker(store,&ticket.id)?!=worker_id {
                 return Err("Manual request key already belongs to another selected Worker.".into());
             }
-            if !headless_staging {
-                let config=configuration(store,config_id)?;
-                direct_team_member(store,&config,worker_id)?;
-            }
+            // Replaying an existing Ticket is a read-only idempotency lookup.
+            // The Ticket already pins its Worker, and launch stays false.
+            // A bot paused, removed or excluded from the current Team roster
+            // must not erase the original operator's durable Demand receipt.
+            // Fresh admissions still validate the current member below.
         } else if headless_staging {
             // Never replay a selected secondary-Worker key through the
             // legacy primary-Worker CLI and misrepresent its original scope.
@@ -5096,8 +5097,10 @@ pub async fn superagent_submit_to_worker(
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let config=configuration(&store,&orchestration_id)?;
-        let worker=direct_team_member(&store,&config,&worker_bot_id)?;
-        let busy=active_manual_conflict(&store,&active,&worker.id,&worker.project_id)?;
+        // Do not resolve live membership before the native idempotency check:
+        // an unavailable former member cannot relaunch an existing Demand,
+        // but its exact request key must remain inspectable without dispatch.
+        let busy=active_manual_conflict(&store,&active,&worker_bot_id,&config.project_id)?;
         // Deduplication must run before occupied-worker rejection. The native
         // admission boundary rechecks role, policy, lease and authorization for
         // new Tickets; a repeated request key returns its existing Ticket
@@ -5106,7 +5109,7 @@ pub async fn superagent_submit_to_worker(
             &mut store,&orchestration_id,&objective,&request_key,busy,
             ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker.id) },
         )?;
-        (ticket,launch,worker.id)
+        (ticket,launch,worker_bot_id)
     };
     if !launch {return Ok(ticket);}
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
@@ -12635,6 +12638,48 @@ mod tests {
             [&cfg.id], |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 3, "role-mismatched replay must not create another ticket");
+    }
+
+
+    #[test]
+    fn selected_worker_request_replay_remains_read_only_after_member_revocation() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let options = || ManualAdmissionOptions {
+            coordinate: false, headless_staging: false,
+            selected_worker_id: Some("worker"),
+        };
+        let (ticket, launched) = admit_role_with_staging_member(
+            &mut store, &cfg.id, "Inspect admitted scope", "selected-replay-revoked",
+            false, options(),
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+
+        // The exact key is an inspection-only replay, never a fresh grant,
+        // even after the original Worker becomes unavailable.
+        let (replayed, relaunched) = admit_role_with_staging_member(
+            &mut store, &cfg.id, "Inspect admitted scope", "selected-replay-revoked",
+            false, options(),
+        ).unwrap();
+        assert_eq!(replayed.id, ticket.id);
+        assert!(!relaunched);
+        assert_eq!(assignments(&store, &ticket.id, 20).unwrap().len(), 1);
+        assert!(admit_role_with_staging_member(
+            &mut store, &cfg.id, "Different objective", "selected-replay-revoked",
+            false, options(),
+        ).is_err());
+        assert!(admit_role_with_staging_member(
+            &mut store, &cfg.id, "Inspect admitted scope", "new-revoked-key",
+            false, options(),
+        ).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&cfg.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "stale replays must not create or dispatch another Demand");
     }
 
     #[test]

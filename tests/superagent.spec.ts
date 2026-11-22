@@ -1486,9 +1486,10 @@ test('multi-member Team Builder updates settled history safely without launching
       if(command==='superagent_roster_update') {
         if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
         const input=args?.input as {workerBotIds:string[];reviewerBotIds:string[]};
-        if(input.workerBotIds.join(',')!=='worker,worker-c,worker-b' ||
+        if(input.workerBotIds.join(',')!=='worker-c,worker,worker-b' ||
           input.reviewerBotIds.join(',')!=='review-a,review-b')throw Error('Role order validation failed');
         config.policyRevision++;
+        config.workerBotId=input.workerBotIds[0]; // Legacy first-member projection.
         roster={...roster,workerBotIds:input.workerBotIds,reviewerBotIds:input.reviewerBotIds,
           policyRevision:config.policyRevision,executionReady:false};
         return {...roster} as never;
@@ -1502,9 +1503,10 @@ test('multi-member Team Builder updates settled history safely without launching
   // Reviewer draft must survive selecting and reordering Workers before Save.
   await form.locator('input[name="reviewers"][value="review-a"]').check();
   await form.locator('input[name="reviewers"][value="review-b"]').check();
-  await form.locator('input[name="additionalWorkers"][value="worker-b"]').check();
-  await form.locator('input[name="additionalWorkers"][value="worker-c"]').check();
+  await form.locator('input[name="workers"][value="worker-b"]').check();
+  await form.locator('input[name="workers"][value="worker-c"]').check();
   await expect(form.locator('input[name="reviewers"]:checked')).toHaveCount(2);
+  await form.getByRole('button',{name:'Move Worker C up'}).click();
   await form.getByRole('button',{name:'Move Worker C up'}).click();
   await expect(form.locator('input[name="reviewers"]:checked')).toHaveCount(2);
   await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
@@ -1561,7 +1563,7 @@ test('paused reviewer remains in the native Team edit payload until explicitly c
   const paused=form.locator('input[name="reviewers"][value="review"]');
   await expect(paused).toBeChecked();
   await expect(paused).toBeDisabled();
-  await form.locator('input[name="additionalWorkers"][value="worker-b"]').check();
+  await form.locator('input[name="workers"][value="worker-b"]').check();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByRole('alert')).toContainText('Paused member must be reviewed');
   const attempts=await page.evaluate(()=>

@@ -274,7 +274,7 @@ export function mountSuperagent(
               !Number.isSafeInteger(item.revision) || item.revision < 0 ||
               !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
               known.has(item.id) ||
-              ((cursor || (teamId && index > 0)) &&
+              ((cursor || index > 0) &&
                 !descends(index === 0 ? cursor! : page[index - 1], item))) return true;
           known.add(item.id);
           return false;

@@ -2660,7 +2660,7 @@ test('native cross-Team review inbox exposes pending states without synthetic Co
     const seen:string[]=[];
     const demands=[
       {id:'needs-human',orchestrationId:'team-a',objective:'Evidence needs human',
-        state:'waiting_approval',revision:4,updatedAt:1794400000000},
+        state:'waiting_approval',revision:4,updatedAt:1794400000300},
       {id:'awaits-council',orchestrationId:'team-b',objective:'Real Council unavailable',
         state:'waiting_review',revision:8,updatedAt:1794400000200}
     ];
@@ -2840,6 +2840,60 @@ test('Team review inbox uses native scoped keyset pages and rejects foreign Team
   expect(calls.filter(c=>c.command==='superagent_team_review_inbox')).toHaveLength(3);
   expect(calls.filter(c=>c.command==='superagent_review_inbox')).toHaveLength(1);
   expect(calls.some(c=>/accept|submit|dispatch|grant|effect/.test(c.command))).toBe(false);
+});
+
+
+test('global native Review inbox refuses unordered first-page receipts before exposing decisions', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-review-order-test';document.body.appendChild(host);
+    const calls:string[]=[];
+    let unordered=true;
+    (window as unknown as {saReviewOrder:{
+      calls:string[];repair:()=>void;
+    }}).saReviewOrder={calls,repair:()=>{unordered=false;}};
+    const newest={id:'review-new',orchestrationId:'team-a',
+      objective:'Newest pending Council review',state:'waiting_review',
+      revision:2,updatedAt:1794400200000};
+    const older={id:'review-old',orchestrationId:'team-b',
+      objective:'Older human decision',state:'waiting_approval',
+      revision:2,updatedAt:1794400100000};
+    mountSuperagent(host,async command=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Team A',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+        {id:'team-b',name:'Team B',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:false,policyRevision:1}
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_review_inbox')
+        return (unordered?[older,newest]:[newest,older]) as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-review-order-test');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(host.getByRole('alert')).toContainText('out-of-scope decisions');
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(0);
+  await page.evaluate(()=>(window as unknown as {
+    saReviewOrder:{repair:()=>void}
+  }).saReviewOrder.repair());
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(2);
+  await expect(inbox).toContainText('2 native pending decisions loaded');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saReviewOrder:{calls:string[]}
+  }).saReviewOrder.calls);
+  expect(calls.filter(command=>command==='superagent_review_inbox')).toHaveLength(2);
+  expect(calls.some(command=>/submit|dispatch|accept|reject|grant|reserve/.test(command))).toBe(false);
 });
 
 test('native Run graph is lazy, revision-bound and read-only', async ({page}) => {

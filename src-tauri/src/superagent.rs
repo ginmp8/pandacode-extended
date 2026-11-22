@@ -689,16 +689,21 @@ fn list_review_inbox_page_scoped(
     }
     if let Some(team_id) = orchestration_id {
         configuration(store, team_id)?;
-        if let (Some(at), Some(ticket_id)) = (before_updated_at, before_id) {
-            let visible: i64 = store.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sa_tickets
-                  WHERE id=?1 AND updated_at=?2 AND orchestration_id=?3
-                    AND state IN ('waiting_approval','waiting_review'))",
-                params![ticket_id, at, team_id], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
-            if visible != 1 {
-                return Err("Review cursor is stale or outside the selected Team; refresh the inbox.".into());
-            }
+    }
+    // Global and Team-scoped pages use the same native cursor guarantee.
+    // A syntactically valid cursor is not permission to skip pending reviews.
+    if let (Some(at), Some(ticket_id)) = (before_updated_at, before_id) {
+        let visible: i64 = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_tickets t JOIN sa_orchestrations o
+                    ON o.id=t.orchestration_id
+                WHERE t.id=?1 AND t.updated_at=?2
+                  AND t.state IN ('waiting_approval','waiting_review')
+                  AND (?3 IS NULL OR t.orchestration_id=?3))",
+            params![ticket_id, at, orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if visible != 1 {
+            return Err("Review cursor is stale or outside the current native scope; refresh the inbox.".into());
         }
     }
     let mut stmt = store.db.prepare(
@@ -8385,6 +8390,17 @@ mod tests {
             &store, 200, Some(last.updated_at), Some(&last.id),
         ).unwrap();
         assert_eq!(desktop_next.len(), 4);
+        // A blocked, unknown or time-shifted Ticket must not anchor the
+        // global pending-review page, even with well-formed cursor fields.
+        assert!(list_review_inbox_page(
+            &store, 200, Some(100000), Some("review-page-204"),
+        ).is_err());
+        assert!(list_review_inbox_page(
+            &store, 200, Some(100000), Some("review-page-999"),
+        ).is_err());
+        assert!(list_review_inbox_page(
+            &store, 200, Some(last.updated_at + 1), Some(&last.id),
+        ).is_err());
         let unique: std::collections::HashSet<_> = desktop_first.iter()
             .chain(desktop_next.iter()).map(|item| item.id.as_str()).collect();
         assert_eq!(unique.len(), 204);
@@ -8417,6 +8433,14 @@ mod tests {
         }
         assert_eq!(ids.len(), 204);
         assert!(!later_text.contains("PRIVATE review objective"));
+        // Headless parity: an unreviewable or missing native cursor cannot
+        // become a continuation after the SQLite reader is reopened.
+        assert!(list_headless_review_inbox_page(
+            &path, Some(100000), Some("review-page-204"),
+        ).is_err());
+        assert!(list_headless_review_inbox_page(
+            &path, Some(100000), Some("review-page-999"),
+        ).is_err());
         assert!(list_headless_review_inbox_page(&path, Some(at), None).is_err());
         assert!(list_headless_review_inbox_page(&path, None, Some(&id)).is_err());
         assert!(list_headless_review_inbox_page(&path, Some(at), Some("../bad")).is_err());

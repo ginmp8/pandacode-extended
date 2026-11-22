@@ -726,6 +726,14 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 if detached != 1 {
                     return Err("child_council_recovery_denied: admitted leaf ownership changed.".into());
                 }
+                // Keep a durable denial marker on the retired session itself.
+                // The former parent may be deleted without granting this
+                // historical reviewer ordinary user check authority.
+                store.db.execute(
+                    "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+                     VALUES(?1,'native-council-revoked-leaf','council_revoked_leaf','{}',?1)",
+                    [&leaf.session_id],
+                ).map_err(|e| e.to_string())?;
             }
         }
         // Revocation precedes fresh reservation in this transaction. Both

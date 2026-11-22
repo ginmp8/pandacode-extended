@@ -25,6 +25,25 @@ pub(crate) fn eligible_turn_check_project(
     if crate::architect::parent_of(store, session_id)?.is_some() {
         return Err("reviewer_policy_denied: task-owned Architect workers cannot run project checks.".into());
     }
+    // Recovery detaches retired child reviewer grants from architect_workers.
+    // The session survives for audit and must never become a normal task with
+    // project-level execution rights. Also recognize pre-marker retired leaves
+    // through their original child TeamSnapshot.
+    let retired: i64 = store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM architect_requests
+            WHERE parent_session_id=?1 AND key='native-council-revoked-leaf'
+              AND kind='council_revoked_leaf' AND worker_id=?1
+         ) OR EXISTS(
+            SELECT 1 FROM architect_teams AS team,
+                 json_each(CASE WHEN json_valid(team.content) THEN team.content ELSE '{}' END, '$.workers') AS worker
+            WHERE json_extract(worker.value, '$.sessionId')=?1
+         )",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if retired != 0 {
+        return Err("reviewer_policy_denied: retired task-owned reviewers cannot run project checks.".into());
+    }
     Ok(session.project_id)
 }
 
@@ -302,6 +321,19 @@ mod tests {
         }
         assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id,
             "ordinary user-owned tasks retain their existing check behavior");
+
+        // A recovered leaf loses its scheduler owner but not its historical
+        // task-only identity. This durable marker must survive detachment.
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,'native-council-revoked-leaf','council_revoked_leaf','{}',?1)",
+            [&leaf.id],
+        ).unwrap();
+        store.db.execute("DELETE FROM architect_workers WHERE session_id=?1", [&leaf.id]).unwrap();
+        assert!(crate::architect::parent_of(&store, &leaf.id).unwrap().is_none());
+        let denied = eligible_turn_check_project(&store, &leaf.id).unwrap_err();
+        assert!(denied.contains("reviewer_policy_denied"), "{denied}");
+        assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id);
     }
 
     #[test]

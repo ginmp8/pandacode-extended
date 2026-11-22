@@ -5999,7 +5999,24 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
             assert_eq!(store.session(leaf).unwrap().status, "interrupted");
             assert!(parent_of(&store, leaf).unwrap().is_none(),
                 "revoked leaf ownership must not survive recovery");
+            let marker: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests
+                 WHERE parent_session_id=?1 AND key='native-council-revoked-leaf'
+                 AND kind='council_revoked_leaf' AND worker_id=?1",
+                [leaf], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(marker, 1, "retired reviewer keeps a durable denial marker");
+            assert!(crate::checks::eligible_turn_check_project(&store, leaf).unwrap_err()
+                .contains("reviewer_policy_denied"),
+                "a detached child reviewer must not gain user-enabled project checks");
         }
+        for leaf in &sibling_leaves {
+            assert!(crate::checks::eligible_turn_check_project(&store, leaf).unwrap_err()
+                .contains("reviewer_policy_denied"),
+                "retired sibling reviewers must remain task-scoped");
+        }
+        assert!(crate::checks::eligible_turn_check_project(&store, &sid).is_ok(),
+            "the original user-owned root retains its check opt-in");
     }
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot);
     let resumed = control_state(&state, &sid, "resume").unwrap();

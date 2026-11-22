@@ -5726,6 +5726,22 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
             assert_eq!(reserved, old_child,
                 "revoked native root must not replace a child reservation");
         }
+        // A paused TeamSnapshot may coexist with a still-running native root
+        // session after a remote disconnect. Neither state can recover children.
+        for live_status in ["running", "waiting"] {
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sid, live_status],
+            ).unwrap();
+            let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+            assert!(denied.contains("native root session is still active"), "{denied}");
+            let reserved: String = store.db.query_row(
+                "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1
+                 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, &old_child], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(reserved, old_child, "denied recovery must retain child ownership");
+        }
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![&sid, original_status],
@@ -5774,6 +5790,31 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
     };
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root,
         "recovery must neither approve nor mutate the root Council cycle");
+    let original_native_status = {
+        let store = state.store.lock().unwrap();
+        store.session(&sid).unwrap().status
+    };
+    // The local agents registry is empty in this fixture, but the native
+    // provider session remains authoritative for a resumed hierarchical task.
+    for live_status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sid, live_status],
+            ).unwrap();
+        }
+        let denied = control_state(&state, &sid, "resume").unwrap_err();
+        assert!(denied.contains("native root session is still active"), "{denied}");
+        assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sid, original_native_status],
+        ).unwrap();
+    }
     let resumed = control_state(&state, &sid, "resume").unwrap();
     assert_eq!(resumed.council_since, started.council_since);
     let (pending, _) = dispatch_state(

@@ -299,6 +299,11 @@ fn require_unsettled_root_on_resume(store: &Store, root: &TeamSnapshot) -> Resul
     }
     // A recorded human acceptance is terminal for this immutable Council
     // cycle, even if its native root session has not yet settled independently.
+    // An idle local agent registry is not proof that a remote/native root
+    // provider has stopped. Deny Resume while its session is still active.
+    if matches!(session.status.as_str(), "running" | "waiting") {
+        return Err("child_council_revoked: native root session is still active.".into());
+    }
     if root.council_accepted == Some(root.council_since) {
         return Err("child_council_revoked: user-accepted root Council cannot resume child reviewers.".into());
     }
@@ -558,6 +563,11 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         && !matches!(parent.status.as_str(), "interrupted" | "error")
     {
         return Err("child_council_recovery_denied: native root interruption is not confirmed.".into());
+    }
+    // A resting TeamSnapshot does not revoke a still-live remote root run.
+    // Recovery must not mint fresh child grants while native root work persists.
+    if matches!(parent.status.as_str(), "running" | "waiting") {
+        return Err("child_council_recovery_denied: native root session is still active.".into());
     }
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;

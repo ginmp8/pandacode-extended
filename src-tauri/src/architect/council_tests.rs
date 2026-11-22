@@ -7004,6 +7004,26 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
         let genuine_key = format!(
             "native-council-child:{}:roster-security", interrupted.council_since
         );
+        // A crashed root must not Resume while an unrelated child coordinator
+        // still has a live native process, even if its TeamSnapshot is blocked.
+        let security_child: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
+            rusqlite::params![&sid, &genuine_key], |row| row.get(0),
+        ).unwrap();
+        for active_status in ["running", "waiting"] {
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&security_child, active_status],
+            ).unwrap();
+            let denied = child_council::require_resumable_child_cycles(
+                &store, &interrupted,
+            ).unwrap_err();
+            assert!(denied.contains("child coordinator native session remains active"), "{denied}");
+            store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
+                [&security_child]).unwrap();
+        }
+        child_council::require_resumable_child_cycles(&store, &interrupted).unwrap();
         let extra_key = format!(
             "native-council-child:{}:unselected-bot", interrupted.council_since
         );

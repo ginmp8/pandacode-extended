@@ -322,7 +322,14 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     // this immutable cycle. Per-choice validation alone misses foreign rows.
     for choice in &config.nested_bot_reviewers {
         match read(store, root, choice) {
-            Ok(Some(_)) => {}
+            Ok(Some(record)) => {
+                // An interrupted root is not proof that a separate native
+                // child coordinator stopped; never Resume an active sibling.
+                let child = store.session(&record.child_session_id)?;
+                if matches!(child.status.as_str(), "running" | "waiting") {
+                    return Err("child_council_revoked: child coordinator native session remains active; start a fresh Council task.".into());
+                }
+            }
             Ok(None) => return Err(
                 "child_council_revoked: required child reservation is absent; start a fresh Council task.".into()
             ),

@@ -2501,6 +2501,9 @@ fn authenticated_linked_pr_checks(
     let mut selected_runs = Vec::new();
     let mut pending = 0;
     let mut seen_ids = std::collections::HashSet::new();
+    // A matching app slug may be reused by another GitHub App. Validate the
+    // complete finite snapshot before persisting any individual receipt.
+    let mut selected_app_id = None;
     for run in runs {
         let Some(slug) = run.pointer("/app/slug").and_then(serde_json::Value::as_str) else {
             return Err("Authenticated Check Run has no app identity.".into());
@@ -2509,10 +2512,38 @@ fn authenticated_linked_pr_checks(
             return Err("Authenticated Check Run has an invalid app identity.".into());
         }
         if !slug.eq_ignore_ascii_case(&selected.actor_filter) { continue; }
+        let app_id = authenticated_check_run_app_id(run)?;
+        if let Some(previous) = selected_app_id {
+            if previous != app_id {
+                return Err("Authenticated Check Runs batch contains conflicting GitHub App identities.".into());
+            }
+        } else {
+            selected_app_id = Some(app_id);
+        }
         let id = run.get("id").and_then(serde_json::Value::as_i64)
             .filter(|value| *value > 0).ok_or("Check Run has no positive identity.")?;
         if !seen_ids.insert(id) {
             return Err("Authenticated Check Runs listing repeats the same run identity.".into());
+        }
+        // Pending runs are not receipts, but their reported count must still
+        // belong to this exact PR head and base repository. Otherwise a mixed
+        // response could misrepresent how much work remains on this Demand.
+        if run.get("head_sha").and_then(serde_json::Value::as_str) != Some(sha) {
+            return Err("Check Run head differs from the authenticated PR revision.".into());
+        }
+        let associations = run.get("pull_requests")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("Check Run has no verified PR association.")?;
+        let expected_base_url = format!("https://api.github.com/repos/{}", selected.repository);
+        if associations.len() != 1
+            || associations[0].get("number").and_then(serde_json::Value::as_u64) != Some(number)
+            || associations[0].pointer("/head/sha").and_then(serde_json::Value::as_str) != Some(sha)
+            || associations[0].pointer("/base/repo/id").and_then(serde_json::Value::as_u64) != Some(repository_id)
+            || !associations[0].pointer("/base/repo/url")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|url| url.eq_ignore_ascii_case(&expected_base_url))
+        {
+            return Err("Check Run does not belong to the exact linked PR and repository.".into());
         }
         let status = run.get("status").and_then(serde_json::Value::as_str)
             .ok_or("Check Run has no status.")?;
@@ -2522,9 +2553,6 @@ fn authenticated_linked_pr_checks(
         }
         if status != "completed" {
             return Err("Unsupported Check Run status; no receipts committed.".into());
-        }
-        if run.get("head_sha").and_then(serde_json::Value::as_str) != Some(sha) {
-            return Err("Check Run head differs from the authenticated PR revision.".into());
         }
         let envelope = authenticated_check_run(selected, run, id, 1, repository_id)?;
         if envelope.subject_key != pull_key {
@@ -5275,14 +5303,45 @@ mod tests {
                 "base":{"repo":{"id":900,
                     "url":"https://api.github.com/repos/owner/repo"}}}]
         });
-        let listing = serde_json::json!({"total_count":2,"check_runs":[run.clone(),
-            {"id":78,"app":{"slug":"trusted-bot","id":44},"status":"in_progress"}]});
+        let mut pending_run = run.clone();
+        pending_run["id"] = serde_json::json!(78);
+        pending_run["status"] = serde_json::json!("in_progress");
+        pending_run["conclusion"] = serde_json::Value::Null;
+        let listing = serde_json::json!({"total_count":2,
+            "check_runs":[run.clone(),pending_run]});
         let (head, found, pending) = authenticated_linked_pr_checks(
             &src,900,"pull:42",&pull,&listing).unwrap();
         assert_eq!(head,sha);
         assert_eq!(found.len(),1);
         assert_eq!(pending,1);
+        // All selected app identities, including unfinished runs, must agree
+        // before the first per-run transaction could create a receipt.
         let mut broken = listing.clone();
+        broken["check_runs"][1]["app"]["id"] = serde_json::json!(45);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1]["app"]["id"] = serde_json::Value::Null;
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1]["head_sha"] = serde_json::json!(
+            "0000000000000000000000000000000000000000");
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1]["pull_requests"][0]["number"] = serde_json::json!(43);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1]["pull_requests"][0]["base"]["repo"]["id"] = serde_json::json!(901);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
+        broken["check_runs"][1]["pull_requests"] = serde_json::json!([]);
+        assert!(authenticated_linked_pr_checks(
+            &src,900,"pull:42",&pull,&broken).is_err());
+        broken = listing.clone();
         broken["total_count"] = serde_json::json!(101);
         assert!(authenticated_linked_pr_checks(
             &src,900,"pull:42",&pull,&broken).is_err());

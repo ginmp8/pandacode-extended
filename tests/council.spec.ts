@@ -279,6 +279,11 @@ test('Council inspector preserves expanded child drill-down only for the same na
   await page.keyboard.press('Enter');
   await expect(first).toHaveAttribute('open', '');
   await expect(second).not.toHaveAttribute('open', '');
+  // A Shared Channel/native event may refresh while the keyboard is on a child.
+  await first.locator('summary').focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(first.locator('summary')).toBeFocused();
+  await expect(first).toHaveAttribute('open', '');
   const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
   await refresh.click();
   await expect(refresh).toBeEnabled();
@@ -289,7 +294,9 @@ test('Council inspector preserves expanded child drill-down only for the same na
   await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
     ...inspection, teamRevision: 8,
   });
-  await refresh.click();
+  await first.locator('summary').focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(refresh).toBeFocused();
   await expect(refresh).toBeEnabled();
   await expect(first).not.toHaveAttribute('open', '');
   await first.locator('summary').click();

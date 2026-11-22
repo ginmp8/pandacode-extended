@@ -456,6 +456,13 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     refresh.setAttribute('aria-disabled', 'true');
     refresh.setAttribute('aria-busy', 'true');
     const priorScope = shownScope;
+    // Native updates can arrive while keyboard focus is on a child disclosure.
+    // Move focus to a stable control before replacing its summary, then restore
+    // it only if the authenticated task/cycle/revision is unchanged.
+    const active = document.activeElement;
+    const focusedChildKey = active instanceof HTMLElement && active.matches('.council-child-reservations details[data-council-child-key] > summary')
+      ? active.closest<HTMLDetailsElement>('details[data-council-child-key]')?.dataset.councilChildKey : undefined;
+    if (focusedChildKey) refresh.focus({ preventScroll: true });
     const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
       .map(child => child.dataset.councilChildKey));
     body.textContent = 'Loading native Council result…';
@@ -469,6 +476,12 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       if (priorScope !== null && priorScope === nextScope) {
         body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]')
           .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
+        // Do not steal focus if the user navigated elsewhere during the read.
+        if (focusedChildKey && document.activeElement === refresh) {
+          const child = Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]'))
+            .find(item => item.dataset.councilChildKey === focusedChildKey);
+          child?.querySelector<HTMLElement>(':scope > summary')?.focus({ preventScroll: true });
+        }
       }
       shownScope = nextScope;
     }).catch(() => {

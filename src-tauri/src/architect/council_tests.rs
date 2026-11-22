@@ -5695,14 +5695,16 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
         save(&store, &mut root).unwrap();
     }
     let (started, _) = start_state(&state, &sid, "Recover a pristine child", None, None).unwrap();
-    let (old_child, before_root) = {
+    let (old_child, sibling_child, before_root) = {
         let store = state.store.lock().unwrap();
-        let old = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+        let reservations = child_council::inspect(&store, &started).unwrap();
+        let old = reservations[0].child_session_id.clone();
+        let sibling = reservations[1].child_session_id.clone();
         let mut root = load(&store, &sid).unwrap().unwrap();
         root.status = "paused".into();
         save(&store, &mut root).unwrap();
         store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
-        (old, serde_json::to_value(&root).unwrap())
+        (old, sibling, serde_json::to_value(&root).unwrap())
     };
     // Terminal native root status must not mint a replacement child even when
     // the old paused TeamSnapshot and frozen reservations are unchanged.
@@ -5728,6 +5730,30 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![&sid, original_status],
         ).unwrap();
+    }
+    // An interrupted child and a still-live sibling must never be replaced
+    // together. Native coordinator state wins over a paused TeamSnapshot;
+    // the SQLite transaction must roll back the interrupted replacement.
+    for live_status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&sibling_child, live_status],
+            ).unwrap();
+        }
+        let denied = control_state(&state, &sid, "recover").unwrap_err();
+        assert!(denied.contains("child coordinator native session remains active"), "{denied}");
+        let store = state.store.lock().unwrap();
+        let reserved: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &old_child], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reserved, old_child, "failed recovery must roll back all sibling replacements");
+        assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
+            [&sibling_child]).unwrap();
     }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);

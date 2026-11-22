@@ -433,6 +433,12 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
             return Err("child_council_revoked: child leaf ownership roster changed; start a fresh Council task.".into());
         }
         let session = store.session(&child_id)?;
+        // A resting parent must not resume or recover a sibling coordinator
+        // whose native session still reports an active provider. An absent
+        // local agent after restart does not prove that remote work stopped.
+        if matches!(session.status.as_str(), "running" | "waiting") {
+            return Err("child_council_revoked: child coordinator native session remains active; start a fresh Council task.".into());
+        }
         if session.project_id != root_session.project_id
             || session.worktree_path != root_session.worktree_path
             || session.worktree_branch != root_session.worktree_branch

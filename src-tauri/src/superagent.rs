@@ -3494,6 +3494,7 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
     store.db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM bot_threads thread
+            JOIN sessions live_session ON live_session.id=thread.session_id
             JOIN sa_assignments assignment ON assignment.session_id=thread.session_id
             WHERE assignment.session_id=?1 AND assignment.bot_id=thread.bot_id
               AND assignment.ticket_id=?3 AND thread.channel_id=?2

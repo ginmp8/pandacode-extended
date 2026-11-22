@@ -70,6 +70,10 @@ interface MemberActivityPage {
   orchestrationId: string; botId: string; items: MemberActivityItem[];
   hasMore: boolean; nextCursor: MemberActivityCursor | null;
 }
+interface AssignmentChatLink {
+  orchestrationId: string; ticketId: string; assignmentId: string;
+  botId: string; sessionId: string;
+}
 interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
   nativePassVerified: boolean; ticketArtifactBound: boolean;
@@ -2291,25 +2295,27 @@ export function mountSuperagent(
           !memberActivityTeamId || memberActivityTeamId !== selected ||
           item.orchestrationId !== selected || item.botId !== memberActivityBotId) return;
       void work(async () => {
-        // A visible audit row alone is insufficient for navigation. Recheck
-        // immutable Ticket ownership and the actual assignment/session binding.
-        const fresh = await call<TicketDetails>('superagent_snapshot', {
-          ticketId: item.ticketId, limit: 200,
-        });
-        if (selected !== item.orchestrationId ||
-            fresh.ticket.id !== item.ticketId ||
-            fresh.ticket.orchestrationId !== item.orchestrationId ||
-            !fresh.assignments.some(assignment =>
-              assignment.id === item.assignmentId &&
-              assignment.botId === item.botId &&
-              assignment.sessionId === item.sessionId &&
-              assignment.attempt === item.attempt)) {
-          throw new Error('Native assignment identity changed; refresh Team activity before opening chat.');
+        // Recheck the native task thread at navigation time. An immutable
+        // Assignment alone cannot authorize a remapped bot conversation.
+        const link = await call<AssignmentChatLink>(
+          'superagent_member_assignment_chat_link', {
+            orchestrationId:item.orchestrationId, ticketId:item.ticketId,
+            assignmentId:item.assignmentId, botId:item.botId,
+          });
+        if (!link || selected !== item.orchestrationId ||
+            memberActivityTeamId !== item.orchestrationId ||
+            memberActivityBotId !== item.botId ||
+            link.orchestrationId !== item.orchestrationId ||
+            link.ticketId !== item.ticketId ||
+            link.assignmentId !== item.assignmentId ||
+            link.botId !== item.botId ||
+            link.sessionId !== item.sessionId) {
+          throw new Error('Native assignment chat identity changed; refresh Team activity before opening chat.');
         }
         await openAssignmentChat({
-          teamId: item.orchestrationId, ticketId: item.ticketId,
-          assignmentId: item.assignmentId, botId: item.botId,
-          sessionId: item.sessionId,
+          teamId: link.orchestrationId, ticketId: link.ticketId,
+          assignmentId: link.assignmentId, botId: link.botId,
+          sessionId: link.sessionId,
         });
       });
       return;

@@ -2987,6 +2987,8 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
     host.id='sa-member-activity-test'; document.body.appendChild(host);
     const seen: {command:string;args?:Record<string,unknown>}[]=[];
     const routes: unknown[]=[];
+    let staleChatLink = false;
+    (window as unknown as {saRejectChatLink:()=>void}).saRejectChatLink = () => { staleChatLink = true; };
     (window as unknown as {saMemberActivityEvidence:()=>unknown}).saMemberActivityEvidence=
       ()=>({seen,routes});
     mountSuperagent(host, async(command,args) => {
@@ -3042,6 +3044,13 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
           }],hasMore:false,nextCursor:null
         } as never;
       }
+      if (command==='superagent_member_assignment_chat_link') {
+        if (args?.orchestrationId!=='team' || args?.ticketId!=='ticket-old' ||
+            args?.assignmentId!=='a-old' || args?.botId!=='worker')
+          throw Error('Chat link escaped native Team/Assignment scope');
+        return {orchestrationId:'team',ticketId:'ticket-old',assignmentId:'a-old',
+          botId:'worker',sessionId:staleChatLink?'remapped-session':'real-session'} as never;
+      }
       if (command==='superagent_snapshot') {
         if (args?.ticketId!=='ticket-old') throw Error('wrong Ticket requested');
         return {
@@ -3094,6 +3103,18 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
     teamId:'team',ticketId:'ticket-old',assignmentId:'a-old',
     botId:'worker',sessionId:'real-session',
   });
+  await page.evaluate(() =>
+    (window as unknown as {saRejectChatLink:()=>void}).saRejectChatLink());
+  await activity.getByRole('button',{name:'Open chat for assignment a-old'}).click();
+  await expect(host).toContainText(
+    'Native assignment chat identity changed; refresh Team activity before opening chat.');
+  const blocked = await page.evaluate(() =>
+    (window as unknown as {saMemberActivityEvidence:()=>{
+      routes: unknown[]
+    }}).saMemberActivityEvidence().routes.length);
+  expect(blocked).toBe(1, 'Stale native links cannot dispatch chat navigation');
+  expect(evidence.seen.filter(call=>call.command==='superagent_member_assignment_chat_link'))
+    .toHaveLength(2);
   expect(evidence.seen.filter(call=>call.command==='superagent_member_activity_page'))
     .toHaveLength(2);
   expect(evidence.seen.some(call => /submit|dispatch|accept|grant|enable|reserve/.test(call.command)))

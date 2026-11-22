@@ -1,9 +1,9 @@
 //! Team-scoped, read-only assignment activity for the persistent Orchestrations workspace.
 //! Activity is not a provider completion, a Council verdict, or a tool grant.
 
-use super::{configuration, require_main_window, CHANNEL};
+use super::{configuration, require_main_window};
 use crate::{storage::Store, AppState, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -90,9 +90,6 @@ pub(super) fn page(
         "SELECT a.id,t.id,t.orchestration_id,a.bot_id,a.session_id,
                 a.state,t.state,a.attempt,a.created_at,a.updated_at,
                 length(trim(COALESCE(a.result,'')))>0,
-                EXISTS(SELECT 1 FROM bot_threads thread
-                  WHERE thread.session_id=a.session_id AND thread.bot_id=a.bot_id
-                    AND thread.channel_id=?6),
                 CASE WHEN a.attempt=1 AND EXISTS(
                   SELECT 1 FROM sa_audit initial
                   WHERE initial.ticket_id=t.id AND initial.kind='admitted'
@@ -105,7 +102,7 @@ pub(super) fn page(
          ORDER BY a.created_at DESC,a.id DESC LIMIT ?5"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(
-        params![orchestration_id, bot_id, cursor_at, cursor_id, limit + 1, CHANNEL],
+        params![orchestration_id, bot_id, cursor_at, cursor_id, limit + 1],
         |row| Ok(MemberActivityItem {
             assignment_id: row.get(0)?,
             ticket_id: row.get(1)?,
@@ -118,14 +115,21 @@ pub(super) fn page(
             created_at: row.get(8)?,
             updated_at: row.get(9)?,
             has_result: row.get::<_, i64>(10)? != 0,
-            chat_available: row.get::<_, i64>(11)? != 0,
-            role: row.get(12)?,
+            chat_available: false,
+            role: row.get(11)?,
         }),
     ).map_err(|e| e.to_string())?;
     let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     let has_more = items.len() > limit as usize;
     items.truncate(limit as usize);
+    // Reuse the exact native Ticket/attempt/thread identity check applied at
+    // provider admission. A session merely linked to this bot is not enough
+    // to offer historical chat navigation.
+    for item in &mut items {
+        item.chat_available =
+            super::assignment_thread_current(store, &item.session_id, &item.ticket_id)?;
+    }
     let next_cursor = if has_more {
         items.last().map(|item| MemberActivityCursor {
             created_at: item.created_at,
@@ -141,6 +145,70 @@ pub(super) fn page(
         has_more,
         next_cursor,
     })
+}
+
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentChatLink {
+    pub orchestration_id: String,
+    pub ticket_id: String,
+    pub assignment_id: String,
+    pub bot_id: String,
+    pub session_id: String,
+}
+
+/// Resolve the actual native thread immediately before opening a Team chat.
+/// Historical activity and a valid session ID alone cannot authorize
+/// navigation to an unrelated bot conversation.
+fn assignment_chat_link(
+    store: &Store,
+    orchestration_id: &str,
+    ticket_id: &str,
+    assignment_id: &str,
+    bot_id: &str,
+) -> Result<AssignmentChatLink> {
+    configuration(store, orchestration_id)?;
+    let session_id: Option<String> = store.db.query_row(
+        "SELECT a.session_id FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id
+         WHERE a.id=?1 AND a.ticket_id=?2 AND a.bot_id=?3
+           AND t.orchestration_id=?4",
+        params![assignment_id, ticket_id, bot_id, orchestration_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let session_id = session_id.ok_or(
+        "Native Team Demand/Assignment identity changed; refresh activity.",
+    )?;
+    if !super::assignment_thread_current(store, &session_id, ticket_id)? {
+        return Err(
+            "Native assignment chat thread is missing or no longer task-bound; refresh activity."
+                .into(),
+        );
+    }
+    Ok(AssignmentChatLink {
+        orchestration_id: orchestration_id.to_owned(),
+        ticket_id: ticket_id.to_owned(),
+        assignment_id: assignment_id.to_owned(),
+        bot_id: bot_id.to_owned(),
+        session_id,
+    })
+}
+
+#[tauri::command]
+pub async fn superagent_member_assignment_chat_link(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    orchestration_id: String,
+    ticket_id: String,
+    assignment_id: String,
+    bot_id: String,
+) -> Result<AssignmentChatLink> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    assignment_chat_link(
+        &store, &orchestration_id, &ticket_id, &assignment_id, &bot_id,
+    )
 }
 
 #[tauri::command]
@@ -262,5 +330,100 @@ mod tests {
             .unwrap().items.is_empty());
         assert!(page(&reopened, &other.id, "other-worker", Some(cursor), 25)
             .is_err(), "Isolation must survive SQLite reopening");
+    }
+
+    #[test]
+    fn assignment_chat_navigation_rechecks_original_thread_and_surviving_session() {
+        let path = std::env::temp_dir()
+            .join(format!("sa-chat-link-{}.db", storage::id()));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('chat-project','Disposable','/tmp/sa-chat-link')",
+            [],
+        ).unwrap();
+        for bot in ["chat-lead", "chat-worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'chat-project','codex','default','plan',?2,?2)",
+                params![bot, storage::now()],
+            ).unwrap();
+        }
+        let create = |name: &str, store: &Store| {
+            superagent::create_configuration(store, NewOrchestration {
+                name: name.into(),
+                coordinator_bot_id: "chat-lead".into(),
+                worker_bot_id: "chat-worker".into(),
+            }).unwrap()
+        };
+        let team = create("Chat Team", &store);
+        let foreign = create("Other Chat Team", &store);
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id=?1", [&team.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit(
+            &mut store, &team.id, "Task-private chat", "chat-link", false,
+        ).unwrap();
+        assert!(launched);
+        let activity = page(&store, &team.id, "chat-worker", None, 25).unwrap();
+        let item = &activity.items[0];
+        assert!(item.chat_available, "The original native thread is navigable");
+        let link = assignment_chat_link(
+            &store, &team.id, &ticket.id, &item.assignment_id, "chat-worker",
+        ).unwrap();
+        assert_eq!(link.session_id, item.session_id);
+        assert_eq!(link.ticket_id, ticket.id);
+        assert!(assignment_chat_link(
+            &store, &foreign.id, &ticket.id, &item.assignment_id, "chat-worker",
+        ).is_err(), "A shared bot cannot cross Team boundaries");
+        assert!(assignment_chat_link(
+            &store, &team.id, &ticket.id, &item.assignment_id, "chat-lead",
+        ).is_err());
+        assert!(assignment_chat_link(
+            &store, &team.id, "wrong-ticket", &item.assignment_id, "chat-worker",
+        ).is_err());
+        let assignment_id = item.assignment_id.clone();
+        let session_id = item.session_id.clone();
+        store.db.execute(
+            "UPDATE bot_threads SET external_id='unrelated-ticket' WHERE session_id=?1",
+            [&session_id],
+        ).unwrap();
+        assert!(!page(&store, &team.id, "chat-worker", None, 25).unwrap()
+            .items[0].chat_available);
+        assert!(assignment_chat_link(
+            &store, &team.id, &ticket.id, &assignment_id, "chat-worker",
+        ).is_err(), "A remapped thread cannot open another conversation");
+        store.db.execute(
+            "UPDATE bot_threads SET external_id=?2 WHERE session_id=?1",
+            params![&session_id, format!("{}:attempt:1", ticket.id)],
+        ).unwrap();
+        assert!(assignment_chat_link(
+            &store, &team.id, &ticket.id, &assignment_id, "chat-worker",
+        ).is_err(), "A fabricated retry alias is not native authority");
+        store.db.execute(
+            "UPDATE bot_threads SET external_id=?2 WHERE session_id=?1",
+            params![&session_id, &ticket.id],
+        ).unwrap();
+        assert!(assignment_chat_link(
+            &store, &team.id, &ticket.id, &assignment_id, "chat-worker",
+        ).is_ok());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(assignment_chat_link(
+            &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
+        ).is_ok(), "Historical native identity survives restart");
+        let audit_before: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        reopened.db.execute("DELETE FROM sessions WHERE id=?1", [&session_id]).unwrap();
+        assert!(assignment_chat_link(
+            &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
+        ).is_err(), "A removed session is not a navigable historical chat");
+        assert!(!page(&reopened, &team.id, "chat-worker", None, 25).unwrap()
+            .items[0].chat_available);
+        let audit_after: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_before, audit_after, "Chat inspection is read-only");
     }
 }

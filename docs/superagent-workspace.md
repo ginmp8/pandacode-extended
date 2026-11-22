@@ -307,3 +307,14 @@ Evidence targets: `team_strategy_is_versioned_portable_and_pinned_per_demand_aft
 (Rust), and `Team strategy changes through native CAS and persists after
 refresh` (Playwright). Execution results must be checked on the **exact
 published commit**, not inferred from these test declarations.
+
+
+### Team activity chat navigation boundary
+
+Team member Activity uses the immutable native Team, Ticket, Assignment and bot
+identities to obtain a fresh task-bound session link immediately before opening
+a chat. The backend checks the original native thread route and surviving
+session; moved, deleted, stale or fabricated thread mappings are unavailable.
+Historical audit rows remain inspectable without recreating conversations.
+The read-only link lookup never grants tools, launches workers, changes approvals
+or changes ordinary bot chats.

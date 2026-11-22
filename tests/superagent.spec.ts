@@ -13,9 +13,9 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Software Development');
   const coordinator=dialog.getByRole('combobox',{name:'Coordinator'});
-  const worker=dialog.getByRole('combobox',{name:'Worker'});
+  const worker=dialog.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'});
   await coordinator.selectOption({label:'Scout'});
-  await worker.selectOption({label:'Writer'});
+  await worker.check();
   // The separate attempt budget must not ambiguously match the Worker selector.
   await expect(dialog.getByRole('combobox',{name:'Maximum attempts per Demand',exact:true}))
     .toHaveValue('2');
@@ -25,7 +25,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.locator('details.sa-new-members')).toHaveAttribute('open','');
   await dialog.getByRole('searchbox',{name:'Search Teams'}).fill('not-yet-created');
   await expect(coordinator.locator('option:checked')).toHaveText('Scout');
-  await expect(worker.locator('option:checked')).toHaveText('Writer');
+  await expect(worker).toBeChecked();
   await dialog.getByRole('searchbox',{name:'Search Teams'}).fill('');
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Software Development');
@@ -133,8 +133,8 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     mountSuperagent(host, async (command, args) => {
       if (command === 'bots_list') return [
         {id:'coordinator',name:'Coordinator',paused:false},
-        {id:'worker',name:'Primary Worker',paused:false},
-        {id:'worker-b',name:'Additional Worker',paused:false,avatar:'panda:2'},
+        {id:'worker',name:'Worker A',paused:false},
+        {id:'worker-b',name:'Worker B',paused:false,avatar:'panda:2'},
         {id:'reviewer',name:'Reviewer',paused:false},
       ] as never;
       if (command === 'superagent_list') return [...configs] as never;
@@ -157,7 +157,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     });
   });
   const host = page.locator('#sa-new-team-draft');
-  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
+  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeDisabled();
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Economy');
   await expect(host.getByRole('combobox',{name:'Maximum attempts per Demand'})).toHaveValue('1');
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Performance');
@@ -167,23 +167,27 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     .toHaveValue('Prioritize thorough verification within explicit time and cost budgets.');
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker A'}).check();
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker B'}).check();
+  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
   await host.locator('details.sa-new-members summary').click();
-  await host.getByRole('group',{name:'Additional Workers'}).getByRole('checkbox',{name:/Additional Worker/}).check();
   await host.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Reviewer/}).check();
   // The same existing bot appears in both eligible role pickers; each
   // renders its native Panda avatar without duplicating the selected role.
-  await expect(host.getByRole('group',{name:'Additional Workers'})
+  await expect(host.getByRole('group',{name:'Workers'})
     .locator('.sa-member-choice .bot-avatar.has-art svg')).toHaveCount(1);
   await expect(host.getByRole('group',{name:'Optional Reviewers'})
     .locator('.sa-member-choice .bot-avatar.has-art svg')).toHaveCount(1);
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
   await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');
-  await expect(host.locator('input[name="additionalWorkers"][value="worker-b"]')).toBeChecked();
+  await expect(host.locator('input[name="workers"][value="worker-b"]')).toBeChecked();
+  await expect(host.locator('input[name="workers"][value="worker"]')).toBeChecked();
+  await expect(host.getByRole('group',{name:'Optional Reviewers'})
+    .getByRole('checkbox',{name:'Worker A'})).toHaveCount(0);
   await expect(host.locator('input[name="reviewers"][value="reviewer"]')).toBeChecked();
   await expect(host.locator('select[name="coordinatorBotId"]')).toHaveValue('coordinator');
-  await expect(host.locator('select[name="workerBotId"]')).toHaveValue('worker');
+  await expect(host.locator('input[name="workers"][value="worker"]')).toBeChecked();
   await expect(host.locator('select[name="maxWorkerAttempts"]')).toHaveValue('3');
   await expect(host.getByRole('combobox',{name:'Optimization strategy'})).toHaveValue('performance');
   await expect(host.getByRole('textbox',{name:'Team purpose'}))
@@ -238,7 +242,7 @@ test('new multi-role Team rejects a stale native roster after creation without r
   const host=page.locator('#sa-stale-created-roster');
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Reviewed Team');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
   await host.locator('details.sa-new-members summary').click();
   await host.getByRole('group',{name:'Optional Reviewers'})
     .getByRole('checkbox',{name:'Reviewer'}).check();
@@ -583,7 +587,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await dialog.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   // Wait for the native create ACK and the Runs view, not the click itself.
   // The CI host can complete a native reload after the usual 5s assertion window.
@@ -636,7 +640,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await dialog.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   // Wait for the committed Team and navigation before interacting with the edit form.
   await expect(dialog.locator('.sa-list .sa-item strong'))
@@ -902,7 +906,7 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await example.selectOption('Issue Resolution');
   await expect(name).toHaveValue('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
-  await dialog.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await dialog.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
@@ -1227,7 +1231,7 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
   await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Persistent Team');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await workspace.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
@@ -3276,7 +3280,7 @@ test('duplicate Team uses native atomic roster creation without copying source a
   const form=workspace.locator('form[data-sa-form="create"]');
   await form.getByRole('textbox',{name:'Name',exact:true}).fill('Review Fixture');
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
-  await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await form.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await form.locator('summary').click();
   await form.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
@@ -3394,7 +3398,7 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await expect(form).toBeVisible();
   await form.getByRole('textbox',{name:'Name',exact:true}).fill('Security Review Team');
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
-  await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await form.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Writer'}).check();
   await form.locator('summary').click();
   await form.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
@@ -3878,7 +3882,7 @@ test('native Team creation clears stale directory filters after creation is ackn
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('New Team');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
   await host.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(host.locator('.sa-list .sa-item strong')).toHaveText('New Team');
   await expect(host.getByRole('searchbox',{name:'Search Teams'})).toHaveValue('');
@@ -3922,7 +3926,7 @@ test('new Team ACK retries a stale directory read without duplicating creation',
   await expect(host.getByText('No orchestrations created.')).toBeVisible();
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Verified Team');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
   await host.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Verified Team');
   await expect(host.getByRole('button',{name:'Demands / Runs'}))
@@ -3958,7 +3962,7 @@ test('missing native Team after a successful ACK exposes an error without retryi
   await expect(host.getByText('No orchestrations created.')).toBeVisible();
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Unlisted Team');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
   await host.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(host.getByRole('alert'))
     .toContainText('its disabled identity could not be verified');

@@ -168,8 +168,8 @@ let demandArchived = false;
   let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
   let draftPresetPurpose = '', draftPresetStrategy = 'balanced';
   // Team roles are an unsaved draft until native create confirms the exact roster.
-  let draftCoordinatorBotId = '', draftWorkerBotId = '';
-  let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
+  let draftCoordinatorBotId = '';
+  let draftWorkerBotIds: string[] = [], draftReviewerBotIds: string[] = [];
   let draftMembersExpanded = false;
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -424,7 +424,7 @@ let demandArchived = false;
     };
     // Native bot identities and shared PandaCode avatars; configuration only.
     // Checkbox names are submitted through the existing native roster API.
-    const roleChoices = (name: 'workers' | 'additionalWorkers' | 'reviewers', title: string,
+    const roleChoices = (name: 'workers' | 'reviewers', title: string,
       selectedIds: string[], excludedIds: string[]) =>
       '<fieldset class="sa-member-picker" aria-label="' + safe(title) + '">' +
       '<legend>' + safe(title) + '</legend><div class="sa-member-choice-list">' +
@@ -1040,7 +1040,7 @@ let demandArchived = false;
       : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
-        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers and optional Reviewers are configuration only until native role admission is implemented.</p>' +
+        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional configured Workers and optional Reviewers are configuration only until native role admission is implemented.</p>' +
         (!roleRoster || roleRoster.orchestrationId !== chosen.id
           ? '<button type="button" data-sa-role-load>Load native members</button>'
           : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
@@ -1258,19 +1258,19 @@ let demandArchived = false;
           ).join('') + '</select></label>' +
           '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
           safe(draftPresetName) + '" required></label>' +
-          '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
+          '<label>Coordinator<select name="coordinatorBotId" required>' +
           '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label>' +
-          '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-          optionsFor(draftWorkerBotId) + '</select></label></div>' +
+          '<p>Select 1 to 16 existing Workers. All selected Workers are peers; the first ' +
+          'ID is only a legacy storage projection. Native manual execution currently requires ' +
+          'one project; cross-project execution and automatic delegation are unavailable.</p>' +
+          roleChoices('workers', 'Workers', draftWorkerBotIds,
+            [draftCoordinatorBotId,...draftReviewerBotIds]) +
           '<details class="sa-new-members"' + (draftMembersExpanded ? ' open' : '') +
-          '><summary>Additional Team members (optional)</summary>' +
-          '<p>Choose up to fifteen additional Workers and eight independent Reviewers. ' +
-          'Each bot has one role, and Workers must share the primary Worker project. ' +
-          'Multi-member Teams remain Off until scoped admission is supported.</p>' +
-          roleChoices('additionalWorkers', 'Additional Workers', draftAdditionalWorkerIds,
-            [draftCoordinatorBotId, draftWorkerBotId]) +
+          '><summary>Optional Council Reviewers</summary>' +
+          '<p>Choose up to eight independent Reviewers. Task-bound native Council ' +
+          'execution is currently unavailable; reviewers do not grant approval.</p>' +
           roleChoices('reviewers', 'Optional Reviewers', draftReviewerBotIds,
-            [draftCoordinatorBotId, draftWorkerBotId]) + '</details>' +
+            [draftCoordinatorBotId,...draftWorkerBotIds]) + '</details>' +
           '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
           [1,2,3,4].map(limit => '<option value="' + limit + '"' +
             (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
@@ -1288,7 +1288,8 @@ let demandArchived = false;
           'Balanced and Issue Resolution suggest 2; Performance and Software Development suggest 3. ' +
           'No automatic retry, tool grant or execution is enabled.</p>' +
           '<button class="primary-button" type="submit"' +
-          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
+          (bots.length < 2 || !draftCoordinatorBotId || draftWorkerBotIds.length < 1
+            ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
         : '') +
       (workspaceView === 'runs' ? globalDemands + (active ||
         '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
@@ -1503,15 +1504,19 @@ let demandArchived = false;
   host.addEventListener('change', event => {
     const target = event.target;
     if (target instanceof HTMLInputElement && target.type === 'checkbox' &&
-        ['workers', 'additionalWorkers', 'reviewers'].includes(target.name)) {
+        ['workers', 'reviewers'].includes(target.name)) {
       const form = target.closest<HTMLFormElement>('form[data-sa-form]');
       if (!form || busy) return;
       const checked = Array.from(form.querySelectorAll<HTMLInputElement>(
         'input[type="checkbox"][name="' + target.name + '"]:checked',
       )).map(input => input.value);
       if (form.dataset.saForm === 'create') {
-        if (target.name === 'additionalWorkers') draftAdditionalWorkerIds = checked;
+        if (target.name === 'workers') draftWorkerBotIds = checked;
         else draftReviewerBotIds = checked;
+        render();
+        Array.from(host.querySelectorAll<HTMLInputElement>(
+          'form[data-sa-form="create"] input[type="checkbox"][name="' + target.name + '"]',
+        )).find(input => input.value === target.value)?.focus({preventScroll:true});
       } else if (form.dataset.saForm === 'roster' &&
           roleRoster?.orchestrationId === selected) {
         if (target.name === 'reviewers') {
@@ -1530,13 +1535,10 @@ let demandArchived = false;
     }
     if (target instanceof HTMLSelectElement &&
         target.closest('form[data-sa-form="create"]') &&
-        ['coordinatorBotId', 'workerBotId'].includes(target.name)) {
-      if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
-      else draftWorkerBotId = target.value;
-      draftAdditionalWorkerIds = draftAdditionalWorkerIds.filter(id =>
-        id !== draftCoordinatorBotId && id !== draftWorkerBotId);
-      draftReviewerBotIds = draftReviewerBotIds.filter(id =>
-        id !== draftCoordinatorBotId && id !== draftWorkerBotId);
+        target.name === 'coordinatorBotId') {
+      draftCoordinatorBotId = target.value;
+      draftWorkerBotIds = draftWorkerBotIds.filter(id => id !== draftCoordinatorBotId);
+      draftReviewerBotIds = draftReviewerBotIds.filter(id => id !== draftCoordinatorBotId);
       render();
       Array.from(host.querySelectorAll<HTMLSelectElement>(
         'form[data-sa-form="create"] select',
@@ -3132,10 +3134,11 @@ let demandArchived = false;
       });
     }
     if (form.dataset.saForm === 'create') {
+      const workerBotIds=data.getAll('workers').map(String);
       const input = { name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? '') };
-      const additionalWorkers=data.getAll('additionalWorkers').map(String);
+        // Retained only for the existing native one-worker/legacy projection.
+        workerBotId:workerBotIds[0] ?? '' };
       const reviewerBotIds=data.getAll('reviewers').map(String);
       const maxWorkerAttempts=Number(data.get('maxWorkerAttempts'));
       const purpose=String(data.get('purpose') ?? '');
@@ -3147,23 +3150,23 @@ let demandArchived = false;
           throw new Error('Choose a supported optimization strategy.');
         if (![1,2,3,4].includes(maxWorkerAttempts))
           throw new Error('Choose a Worker-attempt limit from 1 to 4.');
-        if (!input.name || !input.coordinatorBotId || !input.workerBotId)
-          throw new Error('Choose a Team name, Coordinator and primary Worker.');
-        if (additionalWorkers.length>15 || reviewerBotIds.length>8)
-          throw new Error('Choose up to fifteen additional Workers and eight Reviewers.');
-        const ids=[input.coordinatorBotId,input.workerBotId,...additionalWorkers,...reviewerBotIds];
+        if (!input.name || !input.coordinatorBotId || !workerBotIds.length)
+          throw new Error('Choose a Team name, Coordinator and at least one Worker.');
+        if (workerBotIds.length>16 || reviewerBotIds.length>8)
+          throw new Error('Choose 1 to 16 Workers and up to eight Reviewers.');
+        const ids=[input.coordinatorBotId,...workerBotIds,...reviewerBotIds];
         if(new Set(ids).size!==ids.length)
           throw new Error('Each Team bot must have exactly one role.');
-        const roster=additionalWorkers.length || reviewerBotIds.length
-          ? {workerBotIds:[input.workerBotId,...additionalWorkers],reviewerBotIds}
+        const roster=workerBotIds.length>1 || reviewerBotIds.length
+          ? {workerBotIds,reviewerBotIds}
           : undefined;
         const created = await call<Config>('superagent_create',{
           input,roster,maxWorkerAttempts,purpose,strategy,
         });
         draftPresetName = ''; draftPresetTemplate = ''; draftWorkerAttemptLimit = 2;
         draftPresetPurpose = ''; draftPresetStrategy = 'balanced';
-        draftCoordinatorBotId = ''; draftWorkerBotId = '';
-        draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
+        draftCoordinatorBotId = '';
+        draftWorkerBotIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
         selectedDemandWorkerId = ''; demandPreflight = null;
         workspaceView = 'runs'; await reloadCreatedTeam(created,roster);
       });

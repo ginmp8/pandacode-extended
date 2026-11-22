@@ -188,6 +188,52 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(refresh).toBeEnabled();
 });
 
+test('direct-chat native Council updates invalidate displayed approval without affecting unrelated tasks', async ({ page }) => {
+  const current = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'session-1', cycleId: 'session-1:1000',
+      teamRevision: 7, round: 1, lowest: 9.5,
+    },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, current);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').click();
+  await expect(inspector).toContainText('Verified native pass');
+
+  await page.evaluate(next => {
+    (window as any).__councilInspectorOverride = next;
+    (window as any).__previewEmit('architect-event', { sessionId: 'unrelated-task', removed: true });
+  }, { ...current, teamRevision: 8, status: { ...current.status, state: 'reviewing', stale: true } });
+  await expect(inspector).toContainText('Verified native pass');
+
+  // A native update for this same task must hide the old approval before the
+  // asynchronous authoritative inspector read resolves, even on direct chat.
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => {
+      state.__releaseDirectCouncilInspection = resolve;
+    });
+    state.__councilSeat({ round: 2, lens: 'Security', score: 7.5 });
+  });
+  await expect(inspector.locator('.council-inspection-body'))
+    .toHaveText('Loading native Council result…');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseDirectCouncilInspection();
+    delete state.__hold.architect_council_inspect;
+  });
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Verified native pass');
+});
+
 test('keyboard refresh retains focus during a pending native Council read', async ({ page }) => {
   const inspection = {
     sessionId: 'native-read', cycleStartedAt: 1000, teamRevision: 3,

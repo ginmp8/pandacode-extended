@@ -246,7 +246,17 @@ async function ensureArchitectView(): Promise<ArchitectView> {
 }
 function onArchitect(team: TeamEvent): void {
   if (deletedSessions.has(team.sessionId)) return;
-  if ('removed' in team) { teams.set(team.sessionId, null); if (team.sessionId === state.sessionId) { architectView?.setTask(team.sessionId, null, state.providers); renderComposer(); } return; }
+  if ('removed' in team) {
+    teams.set(team.sessionId, null);
+    if (team.sessionId === state.sessionId) {
+      // A removed task cannot retain a displayed, previously verified Council pass.
+      document.querySelector<HTMLElement>('.council-panel .council-inspection')
+        ?.dispatchEvent(new Event('council-evidence-invalidated'));
+      architectView?.setTask(team.sessionId, null, state.providers);
+      renderComposer();
+    }
+    return;
+  }
   const current = teams.get(team.sessionId);
   if (current && current.revision > team.revision) return;
   // Pauses and failures the user did not ask for would otherwise only show inside the panel.
@@ -255,6 +265,14 @@ function onArchitect(team: TeamEvent): void {
   if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && team.councilStatus?.state !== 'asking' && !/^Team (paused|stopped)\./.test(team.error) && !LEAD_RETRY.test(team.error)) notify(councilNotice(team) ?? team.error);
   const wasActive = teamActive(current);
   teams.set(team.sessionId, team);
+  // The direct-chat results inspector shares the Channel inspector's native
+  // invalidation contract. Revision-only changes can invalidate earlier proof
+  // even when the visible Team status has not changed.
+  if (team.sessionId === state.sessionId && (!current || current.revision !== team.revision
+    || teamSignature(current) !== teamSignature(team))) {
+    document.querySelector<HTMLElement>('.council-panel .council-inspection')
+      ?.dispatchEvent(new Event('council-evidence-invalidated'));
+  }
   const task = state.sessions.find(s => s.id === team.sessionId), taskState = `${task?.status}:${task?.taskStage}`;
   if (task && teamActive(team)) { task.status = 'running'; task.taskStage = 'in_progress'; }
   if (task && !teamActive(team) && !state.streams.has(task.id)) task.status = 'idle';

@@ -1121,7 +1121,7 @@ fn verified_receipt(
     for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
         let matches = first.workers.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
-            (seat.lens.trim().to_lowercase() == criterion.lens.trim().to_lowercase())
+            super::council::same_lens(&seat.lens, &criterion.lens)
                 .then_some((leaf.id.clone(), seat.score?))
         }).collect::<Vec<_>>();
         if matches.is_empty() { return Ok(None); }
@@ -1305,7 +1305,7 @@ fn escalation_receipt(
         if criterion.evidence_required { return Ok(None); }
         let matching = fresh.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
-            seat.lens.eq_ignore_ascii_case(&criterion.lens)
+            super::council::same_lens(&seat.lens, &criterion.lens)
                 .then_some((leaf.id.clone(), seat.score?))
         }).collect::<Vec<_>>();
         if matching.is_empty() { return Ok(None); }
@@ -1482,7 +1482,7 @@ fn challenge_receipt(
         if criterion.evidence_required { return Ok(None); }
         let matching = challengers.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
-            seat.lens.eq_ignore_ascii_case(&criterion.lens)
+            super::council::same_lens(&seat.lens, &criterion.lens)
                 .then_some((leaf.id.clone(), seat.score?))
         }).collect::<Vec<_>>();
         if matching.is_empty() { return Ok(None); }
@@ -2689,6 +2689,20 @@ pub(super) fn missing_required_first_wave_evidence(
             && !super::council::native_criterion_check_verified(child, criterion, 1))
 }
 
+/// Use the same canonical criterion identities as the root Council. An
+/// independently scored child reviewer cannot be forced into S2 escalation
+/// merely because a user's required lens differs in case or surrounding space.
+pub(super) fn missing_required_first_wave_criterion(
+    first: &[&Worker], config: &CouncilConfig,
+) -> bool {
+    config.criteria.iter().filter(|criterion| criterion.required)
+        .any(|criterion| !first.iter().any(|leaf|
+            leaf.council.as_ref().is_some_and(|seat|
+                super::council::same_lens(&seat.lens, &criterion.lens)
+                    && seat.score.is_some_and(|score|
+                        score >= config.target.max(criterion.target)))))
+}
+
 fn authenticated_first_wave_s2_triggers(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
@@ -2746,12 +2760,7 @@ fn authenticated_first_wave_s2_triggers(
         severe |= native_severe;
         conflict |= native_conflict;
     }
-    let missing_criterion = config.criteria.iter().filter(|criterion| criterion.required)
-        .any(|criterion| !first.iter().any(|leaf| {
-            let Some(seat) = leaf.council.as_ref() else { return false };
-            seat.lens.eq_ignore_ascii_case(&criterion.lens)
-                && seat.score.is_some_and(|score| score >= config.target.max(criterion.target))
-        }));
+    let missing_criterion = missing_required_first_wave_criterion(&first, config);
     // A scored report never replaces required independent host evidence.
     let missing_evidence = missing_required_first_wave_evidence(child, config);
     let mut reasons = Vec::new();

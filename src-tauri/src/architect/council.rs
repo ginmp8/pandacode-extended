@@ -1330,7 +1330,7 @@ fn in_round(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = (&Worker,
 fn counts(worker: &Worker, seat: &CouncilSeat) -> bool {
     !worker.abandoned || seat.score.is_some()
 }
-fn same_lens(a: &str, b: &str) -> bool {
+pub(super) fn same_lens(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 /// Seats that have settled with a score.

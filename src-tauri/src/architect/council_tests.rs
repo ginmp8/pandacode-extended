@@ -11557,3 +11557,37 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
         }
     }
 }
+
+#[test]
+fn child_s2_criterion_trigger_uses_the_native_normalized_lens_and_target() {
+    let mut config = on(9.0, 3, 0);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria.push(council::CouncilCriterion {
+        id: "correctness".into(), lens: "  correctness  ".into(),
+        required: true, target: 9.7, evidence_required: false,
+        native_evidence: None,
+    });
+    config.validate().unwrap();
+    let mut reviewer = seat("native-child", 1, Some(9.8), SINCE + 1);
+    reviewer.council.as_mut().unwrap().lens = "CoRrEcTnEsS".into();
+    assert!(!child_council::missing_required_first_wave_criterion(
+        &[&reviewer], &config,
+    ), "a completed child criterion must not trigger a false S2 wave from formatting");
+
+    reviewer.council.as_mut().unwrap().score = Some(9.6);
+    assert!(child_council::missing_required_first_wave_criterion(
+        &[&reviewer], &config,
+    ), "a score below the stricter user-required target must still trigger escalation");
+
+    reviewer.council.as_mut().unwrap().score = None;
+    assert!(child_council::missing_required_first_wave_criterion(
+        &[&reviewer], &config,
+    ), "missing scores cannot satisfy required criteria");
+
+    reviewer.council.as_mut().unwrap().score = Some(9.8);
+    reviewer.council.as_mut().unwrap().lens = "architecture".into();
+    assert!(child_council::missing_required_first_wave_criterion(
+        &[&reviewer], &config,
+    ), "a high score for an unrelated lens is never equivalent evidence");
+}

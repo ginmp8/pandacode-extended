@@ -4183,13 +4183,13 @@ test('Team directory activation uses native CAS without selecting or executing o
   });
   const host = page.locator('#sa-team-directory-activation');
   const enable = () => host.getByRole('button',{
-    name:'Enable manual mode for Build Team from Teams directory',
+    name:'Activate Build Team from Teams directory',
   });
   const disable = () => host.getByRole('button',{
-    name:'Disable Build Team from Teams directory',
+    name:'Deactivate Build Team from Teams directory',
   });
   await expect(host.getByRole('button',{
-    name:'Enable manual mode for Review Team from Teams directory',
+    name:'Activate Review Team from Teams directory',
   })).toBeDisabled();
   await enable().click();
   await expect(host.getByRole('alertdialog')).toContainText('grants no tools or automatic tasks');

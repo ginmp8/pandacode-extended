@@ -394,7 +394,7 @@ export function mountSuperagent(
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button>' +
       '<button type="button" data-sa-enable="' + safe(item.id) +
-      '" aria-label="' + (item.enabled ? 'Disable ' : 'Enable manual mode for ') +
+      '" aria-label="' + (item.enabled ? 'Deactivate ' : 'Activate ') +
       safe(item.name) + ' from Teams directory"' +
       (teamActivationBlocker(item) ? ' disabled' : '') + '>' +
       (item.enabled ? 'Disable Team' : 'Enable manual') + '</button>' +

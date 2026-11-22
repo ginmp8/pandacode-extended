@@ -5107,7 +5107,7 @@ pub async fn superagent_submit_to_worker(
         // without ever delivering a second provider packet.
         let (ticket,launch)=admit_role_with_staging_member(
             &mut store,&orchestration_id,&objective,&request_key,busy,
-            ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker.id) },
+            ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker_bot_id) },
         )?;
         (ticket,launch,worker_bot_id)
     };

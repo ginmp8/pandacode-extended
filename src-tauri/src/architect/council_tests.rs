@@ -8484,6 +8484,10 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     below_child_target[0].lowest_score = 9.1;
     assert!(council::status_for_authenticated_children(&root, &below_child_target).is_none(),
         "a child scored below its 9.5 target cannot approve a 9.0 root Council");
+    let mut out_of_range_child = complete_roster.clone();
+    out_of_range_child[0].lowest_score = 10.1;
+    assert!(council::status_for_authenticated_children(&root, &out_of_range_child).is_none(),
+        "a composite score above 10 cannot authorize a root Council");
     assert_eq!(authenticated_hierarchical_status(&store, &root)
         .as_ref().map(|status| status.state.as_str()), Some("passed"));
     let mut live_projection = root.clone();
@@ -8766,6 +8770,10 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
     assert!(council::status_for_authenticated_children(
         &lower_root_criterion, &under_child_criterion).is_none(),
         "a weak child criterion cannot be hidden by a lower root threshold");
+    let mut out_of_range_criterion = children.clone();
+    out_of_range_criterion[0].criterion_evidence[0].lowest_score = 10.1;
+    assert!(council::status_for_authenticated_children(&root, &out_of_range_criterion).is_none(),
+        "a child criterion score above the native ten-point ceiling is not evidence");
     let mut mismatched = root.clone();
     mismatched.config.council.as_mut().unwrap().criteria[0].lens = "Missing lens".into();
     assert!(council::status_for_authenticated_children(&mismatched, &children).is_none(),
@@ -9855,6 +9863,18 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert!(council::status_for_authenticated_children_s2(
         &saved, &parent_seats, &below_child_target).is_none(),
         "a 9.2 child second wave cannot pass its stricter 9.5 target");
+    let mut out_of_range_s2 = child_receipts.clone();
+    out_of_range_s2[0].lowest_score = 10.1;
+    assert!(council::status_for_authenticated_children_s2(
+        &saved, &parent_seats, &out_of_range_s2).is_none(),
+        "S2 cannot approve a forged child score above 10");
+    let mut out_of_range_root = saved.clone();
+    out_of_range_root.workers.iter_mut()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().council.as_mut().unwrap().score = Some(10.1);
+    assert!(council::status_for_authenticated_children_s2(
+        &out_of_range_root, &parent_seats, &child_receipts).is_none(),
+        "S2 cannot approve an out-of-range native root score");
     // A corrupted phase-two root alias cannot be counted as a fresh vote on
     // top of the already authenticated child composite.
     let mut reused_child_session = saved.clone();
@@ -10788,6 +10808,18 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
         let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
         assert!(council::status_for_authenticated_children_s3(
             &root, &parents, &challenges).is_some());
+        let mut out_of_range_s3 = challenges.clone();
+        out_of_range_s3[0].phase_two.lowest_score = 10.1;
+        assert!(council::status_for_authenticated_children_s3(
+            &root, &parents, &out_of_range_s3).is_none(),
+            "S3 cannot approve a forged phase-two child score above 10");
+        let mut out_of_range_root = root.clone();
+        out_of_range_root.workers.iter_mut()
+            .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+            .unwrap().council.as_mut().unwrap().score = Some(10.1);
+        assert!(council::status_for_authenticated_children_s3(
+            &out_of_range_root, &parents, &challenges).is_none(),
+            "S3 cannot approve an out-of-range phase-two native root score");
         let mut reused_child_session = root.clone();
         reused_child_session.workers.iter_mut()
             .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))

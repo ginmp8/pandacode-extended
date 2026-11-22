@@ -2514,6 +2514,12 @@ pub(super) fn new_cycle(team: &TeamSnapshot) -> bool {
     team.council_since <= 0 || finish_refusal(team).is_none()
 }
 
+/// Preserve the native 0-10 score contract at every composed terminal gate.
+/// An out-of-range persisted projection never becomes independent review proof.
+fn valid_composed_score(score: f64) -> bool {
+    score.is_finite() && (0.0..=10.0).contains(&score)
+}
+
 /// Only real, revalidated child Council receipts and independently completed
 /// native root reviewers may settle a parallel hierarchical Council. Each child
 /// remains one top-level seat. Neither a child leaf nor an unchecked root score
@@ -2569,7 +2575,7 @@ pub(super) fn status_for_authenticated_children(
                     proof.id == criterion.id
                         && same_lens(&proof.lens, &criterion.lens)
                         && !proof.leaf_worker_ids.is_empty()
-                        && proof.lowest_score.is_finite()
+                        && valid_composed_score(proof.lowest_score)
                         && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
                 })
             })
@@ -2591,7 +2597,7 @@ pub(super) fn status_for_authenticated_children(
             || !worker_ids.insert(child.parent_worker_id.as_str())
             || !session_ids.insert(child.child_session_id.as_str())
             || !bot_ids.insert(child.bot_id.as_str())
-            || !child.lowest_score.is_finite()
+            || !valid_composed_score(child.lowest_score)
             || child.lowest_score < config.target.max(choice.child_target)
         {
             return None;
@@ -2606,7 +2612,7 @@ pub(super) fn status_for_authenticated_children(
         if !worker.read_only || worker.status != "completed" || worker.abandoned
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
-            || !score.is_finite() || score < config.target
+            || !valid_composed_score(score) || score < config.target
             || !worker_ids.insert(worker.id.as_str())
             || !session_ids.insert(worker.session_id.as_str())
             || binding.validate(team, worker).is_err()
@@ -2714,7 +2720,7 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
         if worker.status != "completed" || !worker.read_only || worker.abandoned
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
-            || seat.score.is_none_or(|score| !score.is_finite())
+            || seat.score.is_none_or(|score| !valid_composed_score(score))
             || worker.id.is_empty() || worker.session_id.is_empty()
             || !identities.insert(worker.id.as_str())
             || !sessions.insert(worker.session_id.as_str())
@@ -2749,14 +2755,14 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
             || child.parent_worker_id.is_empty() || child.child_session_id.is_empty()
             || !identities.insert(child.parent_worker_id.as_str())
             || !sessions.insert(child.child_session_id.as_str())
-            || !child.lowest_score.is_finite() || child.lowest_score < config.target.max(choice.child_target)
+            || !valid_composed_score(child.lowest_score) || child.lowest_score < config.target.max(choice.child_target)
             || config.criteria.iter().filter(|criterion| criterion.required)
                 .any(|criterion| criterion.evidence_required
                     || !child.criterion_evidence.iter().any(|proof| {
                         proof.id == criterion.id
                             && same_lens(&proof.lens, &criterion.lens)
                             && !proof.leaf_worker_ids.is_empty()
-                            && proof.lowest_score.is_finite()
+                            && valid_composed_score(proof.lowest_score)
                             && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
                     }))
         {
@@ -2772,7 +2778,7 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
         if worker.status != "completed" || !worker.read_only || worker.abandoned
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
-            || !score.is_finite() || score < config.target
+            || !valid_composed_score(score) || score < config.target
             || worker.id.is_empty() || worker.session_id.is_empty()
             || !identities.insert(worker.id.as_str())
             || !sessions.insert(worker.session_id.as_str())
@@ -2842,7 +2848,7 @@ pub(super) fn status_for_authenticated_children_s2(
         if parent.parent_worker_id.is_empty()
             || !bots.insert(receipt.bot_id.as_str())
             || receipt.leaf_worker_ids.len() != choice.child_reviewers
-            || !receipt.lowest_score.is_finite()
+            || !valid_composed_score(receipt.lowest_score)
             || receipt.lowest_score < config.target.max(choice.child_target)
             || receipt.leaf_worker_ids.iter().any(|id|
                 id.is_empty() || !leaf_ids.insert(id.as_str()))
@@ -2855,7 +2861,7 @@ pub(super) fn status_for_authenticated_children_s2(
                     && !proof.leaf_worker_ids.is_empty()
                     && proof.leaf_worker_ids.iter().all(|id|
                         receipt.leaf_worker_ids.contains(id))
-                    && proof.lowest_score.is_finite()
+                    && valid_composed_score(proof.lowest_score)
                     && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
             {
                 return None;
@@ -2890,7 +2896,7 @@ pub(super) fn status_for_authenticated_children_s2(
         if worker.status != "completed" || !worker.read_only || worker.abandoned
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
-            || !score.is_finite() || score < config.target
+            || !valid_composed_score(score) || score < config.target
             || first_ids.contains(worker.id.as_str())
             || worker.id.is_empty() || !occupied_workers.insert(worker.id.as_str())
             || first_sessions.contains(worker.session_id.as_str())
@@ -2969,7 +2975,7 @@ pub(super) fn status_for_authenticated_children_s3(
             || second.policy_sha256 != parent.policy_sha256
             || !bots.insert(second.bot_id.as_str())
             || second.leaf_worker_ids.len() != choice.child_reviewers
-            || !second.lowest_score.is_finite()
+            || !valid_composed_score(second.lowest_score)
             || second.lowest_score < config.target.max(choice.child_target)
             || second.leaf_worker_ids.iter().any(|id|
                 id.is_empty() || !leaf_ids.insert(id.as_str()))
@@ -2985,7 +2991,7 @@ pub(super) fn status_for_authenticated_children_s3(
                     && !proof.leaf_worker_ids.is_empty()
                     && proof.leaf_worker_ids.iter().all(|id|
                         second.leaf_worker_ids.contains(id))
-                    && proof.lowest_score.is_finite()
+                    && valid_composed_score(proof.lowest_score)
                     && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
             {
                 return None;
@@ -3024,7 +3030,7 @@ pub(super) fn status_for_authenticated_children_s3(
         if worker.status != "completed" || !worker.read_only || worker.abandoned
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
-            || !score.is_finite() || score < config.target
+            || !valid_composed_score(score) || score < config.target
             || worker.id.is_empty() || worker.session_id.is_empty()
             || prior_ids.contains(worker.id.as_str())
             || prior_sessions.contains(worker.session_id.as_str())

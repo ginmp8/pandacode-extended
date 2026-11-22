@@ -3860,7 +3860,7 @@ async fn start_run_script_terminal(
         let state = app.state::<AppState>();
         let _admission = state.agents.lock().map_err(|_| "Agent state is unavailable.")?;
         agent_updates::ensure_not_installing()?;
-        if request_id.is_some_and(|id| !agent_tools::agent_ui_request_active(app.state(), id)) {
+        if request_id.is_some_and(|id| !agent_tools::agent_ui_request_active(app.state(), app.state(), id)) {
             return Err("Run request was cancelled before the script could start.".into());
         }
         terminal::start_script(app.clone(), terms, &root, cols, rows)

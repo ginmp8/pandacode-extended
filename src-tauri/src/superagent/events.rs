@@ -1704,6 +1704,14 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     // identity. A conflicting URL must not attach context to a different
     // operator-linked Ticket even when the event's numeric field is valid.
     if kind.starts_with("pull_request") {
+        // An optional typed browser URL must agree with the authenticated
+        // repository and PR number, not silently point at a foreign thread.
+        if let Some(value) = raw.pointer("/payload/pull_request/html_url") {
+            let expected = format!("https://github.com/{}/pull/{number}", source.repository);
+            if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+                return Err("GitHub PR browser URL conflicts with authenticated thread identity.".into());
+            }
+        }
         require_matching_github_thread_url(raw, "/payload/pull_request/url",
             &source.repository, "pulls", number)?;
         if kind.starts_with("pull_request_review.") {
@@ -1716,6 +1724,15 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     } else {
         require_matching_github_thread_url(raw, "/payload/issue/url",
             &source.repository, "issues", number)?;
+        // GitHub issue/comment payloads may also carry their containing
+        // repository URL. Never associate a foreign issue with a locally
+        // linked Ticket solely because its numeric issue number matches.
+        if let Some(value) = raw.pointer("/payload/issue/repository_url") {
+            let expected = format!("https://api.github.com/repos/{}", source.repository);
+            if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+                return Err("GitHub issue repository URL conflicts with authenticated event identity.".into());
+            }
+        }
         if kind == "issue_comment.created" {
             require_matching_github_thread_url(raw, "/payload/comment/issue_url",
                 &source.repository, "issues", number)?;
@@ -3475,8 +3492,12 @@ mod tests {
         let mut wrong_base_url = valid.clone();
         wrong_base_url[0]["payload"]["pull_request"]["base"]["repo"]["url"] =
             serde_json::json!("https://api.github.com/repos/foreign/repo");
+        let mut wrong_browser_url = valid.clone();
+        wrong_browser_url[0]["payload"]["pull_request"]["html_url"] =
+            serde_json::json!("https://github.com/foreign/repo/pull/42");
         for invalid in [&wrong_number, &wrong_base, &malformed_number,
-                        &missing_base_id, &malformed_base_id, &wrong_base_url] {
+                        &missing_base_id, &malformed_base_id, &wrong_base_url,
+                        &wrong_browser_url] {
             assert!(poll_authenticated_events_with_repository_id(
                 &store, &observed, 0, invalid, "operator", 1, 101,
             ).is_err());
@@ -3509,6 +3530,58 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 1, "Observe must never admit a second Demand");
+    }
+
+    #[test]
+    fn issue_comment_foreign_repository_metadata_cannot_reach_linked_ticket() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "issue-repository-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let selected = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &selected.id, "issue-repository-ticket", "issue:42").unwrap();
+        let valid = serde_json::json!([{
+            "id": "5000042043", "created_at": "2026-11-12T09:00:00Z",
+            "type": "IssueCommentEvent",
+            "repo": {"name": "owner/repo", "id": 101},
+            "actor": {"login": "trusted-bot", "id": 303},
+            "payload": {
+                "action": "created",
+                "issue": {
+                    "number": 42,
+                    "url": "https://api.github.com/repos/owner/repo/issues/42",
+                    "repository_url": "https://api.github.com/repos/owner/repo"
+                },
+                "comment": {"issue_url": "https://api.github.com/repos/owner/repo/issues/42"}
+            }
+        }]);
+        let mut foreign = valid.clone();
+        foreign[0]["payload"]["issue"]["repository_url"] =
+            serde_json::json!("https://api.github.com/repos/foreign/repo");
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &selected, 0, &foreign, "operator", 1, 101,
+        ).is_err());
+        assert_eq!(source(&store, &selected.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &selected.id, 10).unwrap().is_empty());
+        assert!(linked_decisions(&store, "issue-repository-ticket", 10).unwrap().is_empty());
+        assert_eq!(inspect_source_integrity(&store, &selected.id).unwrap().repository_id, None);
+
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &selected, 0, &valid, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &selected, 0, &valid, "operator", 1, 101,
+        ).unwrap().duplicates, 1);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &selected, 0, &foreign, "operator", 1, 101,
+        ).is_err());
+        assert_eq!(linked_decisions(&store, "issue-repository-ticket", 10).unwrap().len(), 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "issue-repository-ticket", 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1, "Observe never admits a second Ticket");
     }
 
     #[test]

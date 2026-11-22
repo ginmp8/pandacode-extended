@@ -63,6 +63,10 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
     const team={id:'team',name:'Team',coordinatorBotId:'coordinator',
       workerBotId:'worker-a',enabled:true,policyRevision:2,workerCount:2,reviewerCount:0};
     const other={...team,id:'another-team',name:'Other team'};
+    const ticket={id:'task',orchestrationId:'team',objective:'Inspect safely',
+      state:'running',revision:1,evidence:null};
+    let submitted=false;
+    (window as unknown as {saTamperAdmission:boolean}).saTamperAdmission=true;
     mountSuperagent(host,async(command,args)=>{
       calls.push({command,args});
       if(command==='bots_list') return [
@@ -71,7 +75,18 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
         {id:'worker-b',name:'Worker B',paused:false},
       ] as never;
       if(command==='superagent_list') return [team,other] as never;
+      // Simulate a native Ticket outside the Team's latest 50 results.
       if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_snapshot') {
+        if(!submitted) throw Error('Ticket has not been admitted.');
+        return {
+        ticket,mandate:{actor:'local-user',authorizationId:'native',
+          policyRevision:2,projectId:'project',expiresAt:Date.now()+60000,
+          revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],finalizationGate:'not_pending',
+      } as never;
+      }
+      if(command==='superagent_source_thread_links') return [] as never;
       if(command==='superagent_roster') return {
         orchestrationId:(args as {orchestrationId:string}).orchestrationId,
         policyRevision:2,coordinatorBotId:'coordinator',
@@ -84,10 +99,11 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
         eligible:true,reason:null,canStageBlocked:false,
         allowedTools:[],allowedSideEffects:false,attemptBudgetMs:60000,
       } as never;
-      if(command==='superagent_submit_to_worker') return {
-        id:'task',orchestrationId:'team',objective:'Inspect safely',state:'running',
-        revision:1,evidence:null,
-      } as never;
+      if(command==='superagent_submit_to_worker') {
+        submitted=true;
+        return ((window as unknown as {saTamperAdmission:boolean}).saTamperAdmission
+          ? {...ticket,orchestrationId:'another-team'} : ticket) as never;
+      }
       throw Error('Unexpected command '+command);
     });
   });
@@ -104,12 +120,27 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
     .toContainText('Worker B');
   await host.getByRole('button',{name:'Dispatch manually'}).click();
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText('inconsistent Ticket identity');
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
+  // A foreign ACK must not advance the request key or claim admission success.
+  // Native request-key replay returns the original Ticket, not another launch.
+  await page.evaluate(() => {
+    (window as unknown as {saTamperAdmission:boolean}).saTamperAdmission=false;
+  });
+  await host.getByRole('button',{name:'Dispatch manually'}).click();
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toContainText('task');
+  await expect(host.locator('[data-sa-inspect-ticket="task"]')).toHaveAttribute('aria-expanded','true');
+  await expect(host.getByRole('status').filter({hasText:'Native Demand task opened'}))
+    .toContainText('No completion or Council approval inferred.');
   await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   const calls=await page.evaluate(()=>
     (window as unknown as {saDirectCalls:Array<{command:string;args:unknown}>}).saDirectCalls);
   const submitted=calls.filter(call=>call.command==='superagent_submit_to_worker');
-  expect(submitted).toHaveLength(1);
+  expect(submitted).toHaveLength(2);
   expect((submitted[0].args as {workerBotId:string}).workerBotId).toBe('worker-b');
+  expect((submitted[0].args as {requestKey:string}).requestKey)
+    .toBe((submitted[1].args as {requestKey:string}).requestKey);
   expect(calls.some(call=>call.command==='superagent_submit'
     || call.command==='superagent_submit_coordinated')).toBe(false);
   // Choosing a different Team must never carry an old Worker selection forward,

@@ -3240,11 +3240,37 @@ let demandArchived = false;
           demandPreflight = null;
           throw new Error('Native admission scope or availability changed. Review a fresh preflight.');
         }
-        await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key,
+        const admitted = await call<Ticket>(command,{
+          orchestrationId:selectedConfig.id, objective, requestKey:key,
           ...(isMulti ? {workerBotId:workerId} : {}),
         });
-        taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        // A successful provider dispatch is not a verified Ticket identity.
+        // Keep the request key if the native ACK is malformed or a subsequent
+        // read fails: retrying must never create a second independent Demand.
+        if (!admitted || typeof admitted.id !== 'string' ||
+            !/^[A-Za-z0-9_-]{1,128}$/.test(admitted.id) ||
+            admitted.orchestrationId !== selectedConfig.id ||
+            admitted.objective !== objective ||
+            !Number.isSafeInteger(admitted.revision) || admitted.revision < 0) {
+          throw new Error('Native admission returned an inconsistent Ticket identity. The Demand may already exist; inspect native history before retrying.');
+        }
+        // Pin the acknowledged native Ticket before the directory reload. A
+        // newly admitted or old idempotent Ticket might not be in the latest 50.
+        inspectedTicket = admitted.id;
         await reload();
+        const verifiedTicket = ticketDetails?.ticket;
+        if (!verifiedTicket || !tickets.some(ticket => ticket.id === admitted.id) ||
+            verifiedTicket.id !== admitted.id ||
+            verifiedTicket.orchestrationId !== selectedConfig.id ||
+            verifiedTicket.objective !== objective ||
+            verifiedTicket.revision < admitted.revision) {
+          throw new Error('Demand ' + admitted.id +
+            ' was admitted, but its native Ticket could not be verified. Refresh history before retrying.');
+        }
+        taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        feedback = 'Native Demand ' + admitted.id +
+          ' opened for inspection. Current state: ' + verifiedTicket.state +
+          '. No completion or Council approval inferred.';
       });
     }
   });

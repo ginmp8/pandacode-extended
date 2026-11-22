@@ -3805,12 +3805,25 @@ async fn get_run_script(
 /// clean turn. Bounded; no plan is a result, not an error.
 #[tauri::command]
 async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value> {
-    let project_id = {
+    let (project_id, task_request) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        checks::eligible_turn_check_project(&store, &session_id)?
+        let project_id = checks::eligible_turn_check_project(&store, &session_id)?;
+        let task_request = architect::council_requests::active_native_task_for_checks(&store, &session_id)?;
+        (project_id, task_request)
     };
     let root = state.root(&project_id, Some(&session_id))?;
     let mut report = blocking(move || Ok(checks::turn_report(&root))).await?;
+    // A check is not native task proof unless its original Council request
+    // still has identical live authority after the process has finished.
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        checks::eligible_turn_check_project(&store, &session_id)?;
+        if let (Some(request), Some(_)) = (task_request.as_ref(), report.get("hostObservation")) {
+            let receipt = architect::council_requests::record_native_host_check(&store, request, &report)?;
+            report["hostObservation"]["nativeTaskReceipt"] =
+                serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+        }
+    }
     // The existing user-enabled check belongs to the resolved native session.
     // This observation cannot grant tools to a Council reviewer or attest a
     // frozen artifact/cycle; that separate native C-2 gate remains mandatory.

@@ -7683,6 +7683,74 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     ).unwrap_err().contains("council_task_stale"));
 }
 
+
+#[test]
+fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review the frozen artifact and host check", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let artifact = "a".repeat(64);
+    assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none(),
+        "normal project checks cannot be mislabeled as admitted Council evidence");
+    let request = council_requests::admit_native_task(
+        &store, &sid, &project, "host-check-task", &artifact,
+    ).unwrap();
+    assert_eq!(council_requests::active_native_task_for_checks(&store, &sid).unwrap(), Some(request.clone()));
+
+    // The host execution itself is exercised separately by checks.rs with
+    // disposable programs. Here the Council boundary tests persistence and
+    // correlation; a JSON fixture cannot grant reviewer approval.
+    let observed = json!({
+        "checked": true, "ok": true,
+        "hostObservation": {
+            "kind": "manifest_declared_check", "name": "cargo check",
+            "manifestSha256": "a".repeat(64),
+            "observedAt": storage::now(), "passed": true,
+            "outputTruncated": false, "provenance": "native_host",
+            "scope": "manifest_only_not_artifact_verification"
+        }
+    });
+    let receipt = council_requests::record_native_host_check(&store, &request, &observed).unwrap();
+    assert_eq!(receipt.request_id, request.request_id);
+    assert_eq!(receipt.cycle_id, request.cycle_id);
+    assert_eq!(receipt.artifact_correlation_sha256, artifact);
+    assert!(receipt.check_passed);
+    assert_eq!(receipt.check_name, "cargo check");
+    let inspected = council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(inspected.host_checks, vec![receipt.clone()]);
+    assert!(!inspected.native.verified_pass, "a passing command cannot approve the Council");
+    assert!(council_requests::record_native_terminal(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).is_err());
+    let mut forged = observed.clone();
+    forged["hostObservation"]["provenance"] = json!("client");
+    assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err(),
+        "client-asserted success may not enter the native check ledger");
+    forged = observed.clone();
+    forged["hostObservation"]["manifestSha256"] = json!("invalid-digest");
+    assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err());
+
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.objective.push_str(" changed");
+    save(&store, &mut team).unwrap();
+    assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err(),
+        "a host check cannot be appended after task policy/objective drift");
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).is_err(), "old task observations must fail closed after a stale Council cycle");
+}
+
 #[test]
 fn native_task_admission_rejects_invalid_persisted_council_policy() {
     let (state, sid) = state_fixture();

@@ -394,6 +394,29 @@ fn native_receipt_matches(stored: &NativeTaskCouncilReceipt, expected: &NativeTa
 pub struct NativeTaskCouncilInspection {
     pub request: NativeTaskCouncilRequest,
     pub native: council::CouncilInspection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_checks: Vec<NativeTaskHostCheckReceipt>,
+}
+
+/// A native host's completed manifest-declared check, correlated to an
+/// admitted Council task. The artifact SHA is a caller-supplied correlation,
+/// NOT a host-verified source tree or a Council approval.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeTaskHostCheckReceipt {
+    pub schema_version: u32,
+    pub observation_id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub cycle_id: String,
+    pub policy_sha256: String,
+    pub task_scope_sha256: String,
+    pub artifact_correlation_sha256: String,
+    pub check_name: String,
+    pub manifest_sha256: String,
+    pub observed_at: i64,
+    pub check_passed: bool,
+    pub output_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -401,6 +424,8 @@ pub struct NativeTaskCouncilInspection {
 struct NativeTaskRecord {
     request: NativeTaskCouncilRequest,
     receipt: Option<NativeTaskCouncilReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_checks: Vec<NativeTaskHostCheckReceipt>,
 }
 
 fn native_task_key(assignment_key: &str) -> Result<String> {
@@ -554,7 +579,7 @@ pub(crate) fn admit_native_task(
         return Err("council_task_denied: admission after reviewer dispatch is not allowed.".into());
     }
     let body = serde_json::to_string(&NativeTaskRecord {
-        request: candidate.clone(), receipt: None,
+        request: candidate.clone(), receipt: None, host_checks: Vec::new(),
     }).map_err(|e| e.to_string())?;
     // One immutable reviewed artifact and assignment per root Council cycle.
     // An older request for a different cycle remains historical, but a second
@@ -603,7 +628,138 @@ pub(crate) fn inspect_native_task(
     if format!("{}:{}", session_id, native.cycle_started_at) != current.cycle_id {
         return Err("council_task_stale: native Council cycle changed.".into());
     }
-    Ok(NativeTaskCouncilInspection { request: current, native })
+    for check in &record.host_checks {
+        if !native_host_check_is_current(check, &current) {
+            return Err("council_task_stale: stored native host check has invalid task provenance.".into());
+        }
+    }
+    Ok(NativeTaskCouncilInspection { request: current, native, host_checks: record.host_checks })
+}
+
+
+fn native_host_check_is_current(
+    receipt: &NativeTaskHostCheckReceipt, request: &NativeTaskCouncilRequest,
+) -> bool {
+    receipt.schema_version == 1
+        && !receipt.observation_id.trim().is_empty()
+        && receipt.request_id == request.request_id
+        && receipt.session_id == request.session_id
+        && receipt.cycle_id == request.cycle_id
+        && receipt.policy_sha256 == request.policy_sha256
+        && receipt.task_scope_sha256 == request.task_scope_sha256
+        && receipt.artifact_correlation_sha256 == request.artifact_sha256
+        && matches!(receipt.check_name.as_str(), "npm test" | "cargo check")
+        && receipt.manifest_sha256.len() == 64
+        && receipt.manifest_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && receipt.observed_at > 0
+}
+
+/// Observe an already-admitted non-Channel root task before invoking the
+/// optional user-enabled host check. A later Council cycle cannot inherit
+/// this binding. Legacy ordinary chats continue without a task receipt.
+pub(crate) fn active_native_task_for_checks(
+    store: &Store, session_id: &str,
+) -> Result<Option<NativeTaskCouncilRequest>> {
+    let Some(team) = super::load(store, session_id)? else { return Ok(None) };
+    if team.council_since <= 0 { return Ok(None) }
+    let cycle_id = format!("{}:{}", session_id, team.council_since);
+    let mut stmt = store.db.prepare(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND worker_id=?1 AND kind='council_native_task'",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([session_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let records = rows.collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(|e| e.to_string())?;
+    let mut selected: Option<NativeTaskCouncilRequest> = None;
+    for raw in records {
+        let record: NativeTaskRecord = serde_json::from_str(&raw)
+            .map_err(|_| "council_task_denied: stored native task request is invalid.")?;
+        if record.request.cycle_id != cycle_id { continue }
+        if selected.replace(record.request).is_some() {
+            return Err("council_task_conflict: multiple tasks claim the same root Council cycle.".into());
+        }
+    }
+    let Some(request) = selected else { return Ok(None) };
+    inspect_native_task(
+        store, session_id, &request.project_id, &request.assignment_key,
+        &request.artifact_sha256, &request.request_id,
+    )?;
+    Ok(Some(request))
+}
+
+/// Persist one *observed* host check using the pre-execution task binding.
+/// Only run_turn_checks invokes this after a real process completes. Native
+/// CAS and live request revalidation prevent post-run policy/cycle drift,
+/// competing receipt writes or arbitrary reviewer-script execution.
+pub(crate) fn record_native_host_check(
+    store: &Store, request: &NativeTaskCouncilRequest, report: &serde_json::Value,
+) -> Result<NativeTaskHostCheckReceipt> {
+    let project = crate::checks::eligible_turn_check_project(store, &request.session_id)?;
+    if project != request.project_id {
+        return Err("council_task_stale: check owner changed projects.".into());
+    }
+    let current = inspect_native_task(
+        store, &request.session_id, &request.project_id, &request.assignment_key,
+        &request.artifact_sha256, &request.request_id,
+    )?;
+    if current.request != *request {
+        return Err("council_task_stale: the check was not run for this frozen Council task.".into());
+    }
+    let observed = report.get("hostObservation")
+        .ok_or("council_task_denied: no completed native check observation.")?;
+    let check_name = observed["name"].as_str()
+        .ok_or("council_task_denied: check name is missing.")?;
+    let manifest_sha256 = observed["manifestSha256"].as_str()
+        .ok_or("council_task_denied: checked manifest digest is missing.")?;
+    let observed_at = observed["observedAt"].as_i64()
+        .ok_or("council_task_denied: host check timestamp is missing.")?;
+    let check_passed = observed["passed"].as_bool()
+        .ok_or("council_task_denied: native check result is missing.")?;
+    let output_truncated = observed["outputTruncated"].as_bool()
+        .ok_or("council_task_denied: native output status is missing.")?;
+    if report["checked"] != true
+        || report["ok"] != check_passed
+        || observed["kind"] != "manifest_declared_check"
+        || observed["scope"] != "manifest_only_not_artifact_verification"
+        || observed["provenance"] != "native_host"
+    {
+        return Err("council_task_denied: native check provenance is inconsistent.".into());
+    }
+    let receipt = NativeTaskHostCheckReceipt {
+        schema_version: 1, observation_id: storage::id(),
+        request_id: request.request_id.clone(),
+        session_id: request.session_id.clone(),
+        cycle_id: request.cycle_id.clone(),
+        policy_sha256: request.policy_sha256.clone(),
+        task_scope_sha256: request.task_scope_sha256.clone(),
+        artifact_correlation_sha256: request.artifact_sha256.clone(),
+        check_name: check_name.to_owned(),
+        manifest_sha256: manifest_sha256.to_owned(),
+        observed_at, check_passed, output_truncated,
+    };
+    if !native_host_check_is_current(&receipt, request) {
+        return Err("council_task_denied: malformed host check evidence.".into());
+    }
+    let (old, mut record) = native_task_record(store, &request.session_id, &request.assignment_key)?;
+    if record.request != *request || record.receipt.is_some() {
+        return Err("council_task_stale: task has changed or already settled.".into());
+    }
+    if record.host_checks.len() >= 16 {
+        return Err("council_task_denied: maximum retained native checks reached.".into());
+    }
+    record.host_checks.push(receipt.clone());
+    let updated = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    let changed = store.db.execute(
+        "UPDATE architect_requests SET content=?1
+         WHERE parent_session_id=?2 AND worker_id=?2
+           AND key=?3 AND kind='council_native_task' AND content=?4",
+        params![updated, &request.session_id, native_task_key(&request.assignment_key)?, old],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("council_task_conflict: concurrent native task receipt change.".into());
+    }
+    Ok(receipt)
 }
 
 fn native_terminal_expected(

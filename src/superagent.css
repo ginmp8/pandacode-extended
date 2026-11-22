@@ -118,3 +118,13 @@
 .sa-new-members[open]{display:flex;flex-direction:column;gap:12px}
 /* Creation and revision-guarded role edits use the same checkbox picker. */
 .sa-new-members summary:focus-visible{outline:2px solid var(--text);outline-offset:3px}
+
+/* Guided Team setup shares native Team creation and its authorization guards. */
+.sa-team-wizard{display:grid;gap:14px;min-width:0}
+.sa-wizard-step{display:grid;gap:12px;min-width:0}
+.sa-wizard-step[hidden]{display:none}
+.sa-wizard-step h4{margin:0;font-size:var(--text-base)}
+.sa-wizard-progress{font-size:var(--text-sm);color:var(--muted);margin:10px 0 0}
+.sa-wizard-step dl{display:grid;grid-template-columns:minmax(100px,1fr) 2fr;gap:8px 12px;overflow-wrap:anywhere}
+.sa-wizard-step dl dt{font-weight:600}
+.sa-wizard-actions{justify-content:flex-start}

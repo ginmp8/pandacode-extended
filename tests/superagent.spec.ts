@@ -4341,3 +4341,60 @@ test('archive and restore use real native Demand commands, CAS and separate visi
   expect(calls.filter(name=>name==='superagent_restore_demand')).toHaveLength(1);
   expect(calls).not.toContain('superagent_submit');
 });
+
+test('guided Team setup uses native disabled-Team creation and prevents early submission', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div'); host.id = 'sa-guided'; document.body.appendChild(host);
+    const created: Array<Record<string,unknown>> = [];
+    let writes = 0;
+    (window as unknown as {guidedCreateCount:()=>number}).guidedCreateCount = () => writes;
+    mountSuperagent(host, async (command,args) => {
+      if (command === 'bots_list') return [
+        {id:'coord',name:'Planner',paused:false},
+        {id:'worker',name:'Developer',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [...created] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_create') {
+        writes++;
+        const input = args?.input as Record<string,unknown>;
+        const item = {...input,id:'guided-native-team',enabled:false,policyRevision:1,
+          workerCount:1,reviewerCount:0};
+        created.push(item);
+        return item as never;
+      }
+      throw Error('Unexpected native command ' + command);
+    });
+  });
+  const host = page.locator('#sa-guided');
+  await host.getByRole('button',{name:'Guided team setup'}).click();
+  await expect(host.getByRole('group',{name:'Purpose'})).toBeVisible();
+  await expect(host.getByRole('group',{name:'People and bots'})).toBeHidden();
+  await host.locator('form[data-sa-form="create"]').dispatchEvent('submit');
+  expect(await page.evaluate(() => (window as unknown as {guidedCreateCount:()=>number})
+    .guidedCreateCount())).toBe(0);
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Guided native Team');
+  await host.getByRole('button',{name:'Next step'}).click();
+  await expect(host.getByRole('group',{name:'People and bots'})).toBeVisible();
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coord');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Developer'}).check();
+  await host.getByRole('button',{name:'Next step'}).click();
+  await expect(host.getByRole('group',{name:'Skills and permissions'})).toContainText(
+    'No tool, file, shell, MCP or GitHub write permission is granted here.');
+  await host.getByRole('button',{name:'Next step'}).click();
+  await expect(host.getByRole('group',{name:'Execution and review'})).toBeVisible();
+  await host.getByRole('combobox',{name:'Maximum attempts per Demand'})
+    .selectOption('3');
+  await host.getByRole('combobox',{name:'Optimization strategy'}).selectOption('performance');
+  await host.getByRole('button',{name:'Next step'}).click();
+  await expect(host.getByRole('group',{name:'Preflight and Save'})).toContainText('Disabled / Off');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Guided native Team');
+  expect(await page.evaluate(() => (window as unknown as {guidedCreateCount:()=>number})
+    .guidedCreateCount())).toBe(1);
+  await expect(host.getByRole('button',{name:'Demands / Runs'}))
+    .toHaveAttribute('aria-current','page');
+});

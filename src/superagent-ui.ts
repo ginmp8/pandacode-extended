@@ -171,6 +171,7 @@ let demandArchived = false;
   let draftCoordinatorBotId = '';
   let draftWorkerBotIds: string[] = [], draftReviewerBotIds: string[] = [];
   let draftMembersExpanded = false;
+  let teamWizardStep: 0 | 1 | 2 | 3 | 4 | null = null;
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
   let activityMode: 'all' | 'compact' | 'json' = 'all';
@@ -1243,7 +1244,12 @@ let demandArchived = false;
       '</li>') + '</ul></section>' +
       '</aside><div class="sa-stage">' +
       (workspaceView === 'teams'
-        ? '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+        ? '<section class="sa-pane"><h3>' +
+          (teamWizardStep === null ? 'New manual preset' : 'New Team · guided setup') + '</h3>' +
+          '<div class="sa-actions"><button type="button" data-sa-wizard-start' +
+          (teamWizardStep !== null ? ' disabled' : '') + '>Guided team setup</button>' +
+          (teamWizardStep !== null ? '<button type="button" data-sa-wizard-cancel>Exit guided setup</button>' : '') +
+          '</div><form data-sa-form="create">' +
           '<label>Example preset<select data-sa-template aria-label="Example preset">' +
           '<option value="">Custom</option>' +
           '<option value="Software Development"' +
@@ -1308,6 +1314,109 @@ let demandArchived = false;
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
+
+    // Reuse the exact native create form and submit handler. Hidden steps still
+    // contribute their controls to FormData; no client-side grant is created.
+    const wizardForm = host.querySelector<HTMLFormElement>('form[data-sa-form="create"]');
+    if (wizardForm && teamWizardStep !== null) {
+      const labelFor = (selector: string) => wizardForm.querySelector(selector)?.closest('label');
+      const workers = wizardForm.querySelector<HTMLElement>('fieldset[aria-label="Workers"]');
+      const strategy = labelFor('select[name="strategy"]');
+      const instructions = strategy?.nextElementSibling;
+      const capNote = instructions?.nextElementSibling;
+      const save = wizardForm.querySelector<HTMLButtonElement>('button[type="submit"]');
+      const steps = [
+        {name: 'Purpose', nodes: [
+          labelFor('[data-sa-template]'), labelFor('input[name="name"]'),
+          labelFor('textarea[name="purpose"]')]},
+        {name: 'People and bots', nodes: [
+          labelFor('select[name="coordinatorBotId"]'),
+          workers?.previousElementSibling, workers,
+          wizardForm.querySelector('details.sa-new-members')]},
+        {name: 'Skills and permissions', nodes: []},
+        {name: 'Execution and review', nodes: [
+          labelFor('select[name="maxWorkerAttempts"]'), strategy, instructions, capNote]},
+        {name: 'Preflight and Save', nodes: [save]},
+      ];
+      const wizard = document.createElement('div');
+      wizard.className = 'sa-team-wizard';
+      const progress = document.createElement('p');
+      progress.className = 'sa-wizard-progress';
+      progress.setAttribute('role', 'status');
+      progress.textContent = 'Step ' + (teamWizardStep + 1) + ' of 5 · ' +
+        steps[teamWizardStep].name;
+      wizard.append(progress);
+      steps.forEach((step, index) => {
+        const section = document.createElement('section');
+        section.className = 'sa-wizard-step';
+        section.hidden = teamWizardStep !== index;
+        section.setAttribute('role', 'group');
+        section.setAttribute('aria-label', step.name);
+        if (index === teamWizardStep) {
+          section.tabIndex = -1;
+          section.setAttribute('data-sa-wizard-active', '');
+        }
+        const heading = document.createElement('h4');
+        heading.textContent = step.name;
+        section.append(heading);
+        step.nodes.forEach(node => { if (node) section.append(node); });
+        if (index === 2) {
+          const explanation = document.createElement('p');
+          explanation.textContent = 'Existing bot Skills and provider permissions remain native. ' +
+            'Task eligibility and actual invocation are not verified during Team creation. ' +
+            'No tool, file, shell, MCP or GitHub write permission is granted here.';
+          section.append(explanation);
+          const roster = document.createElement('p');
+          const memberIds = [draftCoordinatorBotId, ...draftWorkerBotIds, ...draftReviewerBotIds]
+            .filter(Boolean);
+          roster.textContent = memberIds.length
+            ? 'Selected existing bots: ' + memberIds.map(botName).join(', ') +
+              '. Review their native profiles before enabling any task.'
+            : 'Select the Team members in the previous step.';
+          section.append(roster);
+        }
+        if (index === 4) {
+          const note = document.createElement('p');
+          note.textContent = 'Creating the Team stores disabled configuration only. ' +
+            'The native backend validates roles and policy; no Demand, grant, Council verdict ' +
+            'or external effect is created.';
+          section.insertBefore(note, save ?? null);
+          const details = document.createElement('dl');
+          const values = [
+            ['Team', draftPresetName.trim() || 'Not specified'],
+            ['Coordinator', draftCoordinatorBotId ? botName(draftCoordinatorBotId) : 'Missing'],
+            ['Workers', draftWorkerBotIds.map(botName).join(', ') || 'Missing'],
+            ['Reviewers', draftReviewerBotIds.map(botName).join(', ') || 'None'],
+            ['Strategy', draftPresetStrategy],
+            ['Attempt cap', String(draftWorkerAttemptLimit)],
+            ['Execution', 'Disabled / Off; manual authorization required'],
+          ];
+          values.forEach(([title, value]) => {
+            const dt = document.createElement('dt'), dd = document.createElement('dd');
+            dt.textContent = title; dd.textContent = value;
+            details.append(dt, dd);
+          });
+          section.insertBefore(details, save ?? null);
+        }
+        wizard.append(section);
+      });
+      wizardForm.append(wizard);
+      const navigation = document.createElement('div');
+      navigation.className = 'sa-actions sa-wizard-actions';
+      if (teamWizardStep > 0) {
+        const back = document.createElement('button');
+        back.type = 'button'; back.dataset.saWizardBack = '';
+        back.textContent = 'Previous step';
+        navigation.append(back);
+      }
+      if (teamWizardStep < 4) {
+        const next = document.createElement('button');
+        next.type = 'button'; next.dataset.saWizardNext = '';
+        next.textContent = 'Next step';
+        navigation.append(next);
+      }
+      wizardForm.append(navigation);
+    }
     // Native reloads replace the entire workspace. Block stateful actions
     // until the snapshot arrives, but preserve the local-only new-Team draft
     // (example template and name) without granting any native authority.
@@ -1755,6 +1864,50 @@ let demandArchived = false;
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+
+    if (target.hasAttribute('data-sa-wizard-start')) {
+      if (loading || busy) return;
+      teamWizardStep = 0; error = ''; render();
+      host.querySelector<HTMLInputElement>('form[data-sa-form="create"] input[name="name"]')
+        ?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-wizard-cancel')) {
+      teamWizardStep = null; error = ''; render();
+      host.querySelector<HTMLButtonElement>('[data-sa-wizard-start]')
+        ?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-wizard-back') && teamWizardStep !== null &&
+        teamWizardStep > 0 && !busy && !loading) {
+      teamWizardStep = (teamWizardStep - 1) as typeof teamWizardStep;
+      error = ''; render();
+      host.querySelector<HTMLElement>('[data-sa-wizard-active]')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.hasAttribute('data-sa-wizard-next') && teamWizardStep !== null &&
+        teamWizardStep < 4 && !busy && !loading) {
+      if (teamWizardStep === 0 && (!draftPresetName.trim() ||
+          new TextEncoder().encode(draftPresetName.trim()).length > 120)) {
+        error = 'Enter a Team name of at most 120 bytes before continuing.';
+        render(); return;
+      }
+      if (teamWizardStep === 1) {
+        const ids = [draftCoordinatorBotId, ...draftWorkerBotIds, ...draftReviewerBotIds];
+        if (!draftCoordinatorBotId || draftWorkerBotIds.length < 1 ||
+            draftWorkerBotIds.length > 16 || draftReviewerBotIds.length > 8 ||
+            new Set(ids).size !== ids.length ||
+            ids.some(id => !bots.some(bot => bot.id === id && !bot.paused))) {
+          error = 'Choose one active Coordinator, 1 to 16 distinct active Workers ' +
+            'and up to eight distinct active Reviewers.';
+          render(); return;
+        }
+      }
+      teamWizardStep = (teamWizardStep + 1) as typeof teamWizardStep;
+      error = ''; render();
+      host.querySelector<HTMLElement>('[data-sa-wizard-active]')?.focus({preventScroll:true});
+      return;
+    }
     if (target.dataset.saWorkerMove) {
       if (busy || roleRoster?.orchestrationId !== selected || current()?.enabled) return;
       const index = workerOrder.indexOf(target.dataset.saWorkerMove);
@@ -3134,6 +3287,8 @@ let demandArchived = false;
       });
     }
     if (form.dataset.saForm === 'create') {
+      // Synthetic submit/Enter cannot bypass the guided review step.
+      if (teamWizardStep !== null && teamWizardStep !== 4) return;
       const workerBotIds=data.getAll('workers').map(String);
       const input = { name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
@@ -3167,6 +3322,7 @@ let demandArchived = false;
         draftPresetPurpose = ''; draftPresetStrategy = 'balanced';
         draftCoordinatorBotId = '';
         draftWorkerBotIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
+        teamWizardStep = null;
         selectedDemandWorkerId = ''; demandPreflight = null;
         workspaceView = 'runs'; await reloadCreatedTeam(created,roster);
       });

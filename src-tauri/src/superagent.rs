@@ -1193,16 +1193,25 @@ pub(crate) fn inspect_headless_status(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let observed_at = storage::now();
-    // A damaged or partially migrated Ticket can lose its Mandate. The
-    // recovery inbox already exposes such Tickets, but the detailed headless
-    // inspector must not fail just because the native grant is absent.
-    // Report the grant as missing; never synthesize an authorization.
+    // A damaged or partially migrated Ticket can lose its Mandate or retain
+    // invalid tool-grant JSON. Keep its recovery metadata observable without
+    // synthesizing permissions or trusting a malformed authorization.
     if let Some(ticket_id) = ticket_id {
         let mandate_exists: bool = store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
             [ticket_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if !mandate_exists {
+        let mandate_corrupt = if mandate_exists {
+            match mandate(&store, ticket_id) {
+                Ok(_) => false,
+                Err(error) if error == "SuperAgent mandate contains invalid tool authorization." =>
+                    true,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        if !mandate_exists || mandate_corrupt {
             // Keep the degraded status, assignment list, and effect count in
             // one read-only snapshot while another host may be recovering it.
             let read = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1222,7 +1231,8 @@ pub(crate) fn inspect_headless_status(
                 "unresolvedExternalEffects": unresolved,
                 "recovery": recovery,
                 "mandate": null,
-                "mandateMissing": true,
+                "mandateMissing": !mandate_exists,
+                "mandateCorrupt": mandate_corrupt,
                 "assignments": native_assignments.iter().map(|a| {
                     let (expired, remaining) = headless_assignment_budget(a, observed_at);
                     serde_json::json!({
@@ -1260,6 +1270,8 @@ pub(crate) fn inspect_headless_status(
                 "allowedSideEffects": snapshot.mandate.allowed_side_effects,
                 "allowedToolCount": snapshot.mandate.allowed_tools.len()
             },
+            "mandateMissing": false,
+            "mandateCorrupt": false,
             "assignments": snapshot.assignments.iter().map(|a| {
                 let (run_budget_expired, remaining_run_budget_ms) =
                     headless_assignment_budget(a, observed_at);
@@ -1316,10 +1328,15 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
         [&ticket.id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let mandate = if mandate_present {
-        Some(mandate(store, &ticket.id)?)
+    let (mandate, mandate_corrupt) = if mandate_present {
+        match mandate(store, &ticket.id) {
+            Ok(grant) => (Some(grant), false),
+            Err(error) if error == "SuperAgent mandate contains invalid tool authorization." =>
+                (None, true),
+            Err(error) => return Err(error),
+        }
     } else {
-        None
+        (None, false)
     };
     let consistent = if ticket.state == "running" {
         // One active native assignment is the current Ticket contract. A
@@ -1352,6 +1369,10 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "investigate_native_assignment_state"
     } else if ticket.state == "running" && expired_running > 0 {
         "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && mandate_corrupt {
+        // Invalid persisted grant JSON cannot be interpreted as a valid
+        // permission, and must not hide the Ticket from recovery inspection.
+        "investigate_invalid_native_mandate_before_retry"
     } else if ticket.state == "running" && mandate.is_none() {
         // The operator can quarantine the orphaned authority, but must not
         // infer that a detached serve host has stopped the live provider.
@@ -1376,6 +1397,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "await_fresh_task_bound_native_council"
     } else if ticket.state == "waiting_approval" {
         "decide_with_current_ticket_revision"
+    } else if mandate_corrupt {
+        "investigate_invalid_native_mandate_before_retry"
     } else if mandate.is_none() {
         "investigate_missing_native_mandate"
     } else if terminal {
@@ -1398,7 +1421,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // provider has stopped. Detached headless inspection must ask the
         // operator to verify the live host before uncertain-effect action.
         "requiresLiveHostVerification": ticket.state == "running" || running > 0 || pending > 0,
-        "mandateMissing": mandate.is_none(),
+        "mandateMissing": !mandate_present,
+        "mandateCorrupt": mandate_corrupt,
         "mandateRevoked": mandate.as_ref().map(|m| m.revoked),
         "mandateExpired": mandate.as_ref().map(|m| m.expires_at <= now),
         "terminal": terminal,
@@ -7068,6 +7092,66 @@ mod tests {
         assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state,
             "interrupted");
         assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn malformed_mandate_tools_remain_visible_in_headless_recovery_without_grant_or_replay() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private corrupted mandate task",
+            "headless-corrupt-mandate", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_tools='{invalid-json'
+             WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let audits_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        let entry = inbox["items"].as_array().unwrap().iter()
+            .find(|entry| entry["ticketId"] == ticket.id).unwrap();
+        assert_eq!(entry["recovery"]["mandateMissing"], false);
+        assert_eq!(entry["recovery"]["mandateCorrupt"], true);
+        assert_eq!(entry["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+        assert_eq!(entry["recovery"]["nextOperatorAction"],
+            "investigate_invalid_native_mandate_before_retry");
+        assert!(!inbox.to_string().contains("Private corrupted mandate task"));
+
+        let status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert!(status["mandate"].is_null());
+        assert_eq!(status["mandateMissing"], false);
+        assert_eq!(status["mandateCorrupt"], true);
+        assert_eq!(status["recovery"]["mandateCorrupt"], true);
+        assert_eq!(status["assignments"][0]["sessionId"], session);
+        assert_eq!(status["recovery"]["requiresLiveHostVerification"], true);
+        assert_eq!(status["observationalOnly"], true);
+        assert_eq!(status["automaticReplayAllowed"], false);
+        assert!(!status.to_string().contains("Private corrupted mandate task"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audits_before);
+
+        drop(store);
+        let again: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(again["mandateCorrupt"], true);
+        assert_eq!(again["recovery"]["nextOperatorAction"],
+            "investigate_invalid_native_mandate_before_retry");
     }
 
     #[test]

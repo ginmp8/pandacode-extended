@@ -490,6 +490,12 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
             .ok_or("child_council_revoked: native child team is unavailable.")?;
         let leaf = child.workers.iter().find(|worker| worker.session_id == leaf_id)
             .ok_or("child_council_revoked: leaf reviewer is missing from its native child team.")?;
+        // A provider may finish after root Pause while the child still shows
+        // this reviewer as running or stopped. Never revive a completed native
+        // session without the matching admitted child reviewer completion.
+        if session.status == "completed" && leaf.status != "completed" {
+            return Err("child_council_revoked: native leaf completed without a matching child reviewer result; start a fresh Council task.".into());
+        }
         let binding = leaf.reviewer_binding.as_ref()
             .ok_or("child_council_revoked: native reviewer grant is missing.")?;
         if !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()

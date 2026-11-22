@@ -6678,6 +6678,27 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
         save(&store, &mut root).unwrap();
         (serde_json::to_value(root).unwrap(), original_worktree)
     };
+    // A native provider may finish after root Pause while the child still has
+    // an unfinished reviewer snapshot. Resume must not revive that native run.
+    let original_native_status = {
+        let store = state.store.lock().unwrap();
+        let previous = store.session(&launch.sid).unwrap().status;
+        store.db.execute(
+            "UPDATE sessions SET status='completed' WHERE id=?1", [&launch.sid],
+        ).unwrap();
+        previous
+    };
+    let completed_denial = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(completed_denial.contains("native leaf completed"), "{completed_denial}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+        "a completed native leaf must not change the frozen root on Resume");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&launch.sid, original_native_status],
+        ).unwrap();
+    }
     // An absent native ownership row is invisible to a descendant-only scan.
     // Resume must deny this without changing the paused root or its cycle.
     let (leaf_parent, leaf_worker): (String, String) = {

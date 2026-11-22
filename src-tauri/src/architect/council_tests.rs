@@ -7547,6 +7547,49 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
 }
 
 #[test]
+fn native_task_admission_rejects_invalid_persisted_council_policy() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review this exact authorized task", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let artifact = "a".repeat(64);
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let original = team.config.council.clone();
+    team.config.council.as_mut().unwrap().target = 11.0;
+    save(&store, &mut team).unwrap();
+
+    let denied = council_requests::admit_native_task(
+        &store, &sid, &project, "invalid-policy-task", &artifact,
+    ).unwrap_err();
+    assert!(denied.contains("invalid native Council policy"), "{denied}");
+    let count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0, "invalid policy must never persist task authority");
+
+    let mut restored = load(&store, &sid).unwrap().unwrap();
+    restored.config.council = original;
+    save(&store, &mut restored).unwrap();
+    let admitted = council_requests::admit_native_task(
+        &store, &sid, &project, "valid-policy-task", &artifact,
+    ).unwrap();
+    assert_eq!(admitted.schema_version, 2);
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "valid-policy-task", &artifact, &admitted.request_id,
+    ).is_ok());
+}
+
+#[test]
 fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
     let (state, sid) = state_fixture();
     {

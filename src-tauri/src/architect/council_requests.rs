@@ -444,6 +444,11 @@ fn native_task_candidate(
     }
     let config = team.config.council
         .ok_or("council_task_denied: native Council is disabled.")?;
+    // Revalidate the persisted task policy at this trusted admission/read
+    // boundary. A malformed or downgraded Council policy must not mint a
+    // reusable task request even if the original root cycle is still active.
+    config.validate().map_err(|reason|
+        format!("council_task_denied: invalid native Council policy: {reason}"))?;
     // V2 binds the task's effective native permission mode and checkout branch
     // as well as its harness and project. A V1 request is deliberately stale
     // rather than silently inheriting a different execution authority.

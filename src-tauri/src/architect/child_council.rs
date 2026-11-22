@@ -1953,13 +1953,15 @@ pub(super) fn verified_s2_receipts(
 /// authority records remain durable even after leaf ownership is detached.
 /// Counting only active reservations would refund an entire wave on recovery.
 fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+    // Retired child sessions remain owned by the root after recovery.
+    // Never use their mutable task_description to decide whether already
+    // issued native reviewer grants count against the current cycle budget.
     let mut statement = store.db.prepare(
         "SELECT DISTINCT child.session_id FROM architect_workers AS child
-         JOIN sessions AS session ON session.id=child.session_id
-         WHERE child.parent_session_id=?1 AND session.task_description=?2",
+         WHERE child.parent_session_id=?1",
     ).map_err(|error| error.to_string())?;
     let children = statement.query_map(
-        params![&root.session_id, RESERVATION_DESCRIPTION],
+        [&root.session_id],
         |row| row.get::<_, String>(0),
     ).map_err(|error| error.to_string())?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -1967,13 +1969,20 @@ fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Resul
 
     let mut attempts = 0usize;
     for child_id in children {
-        let child = super::load(store, &child_id)?
-            .ok_or("child_council_stale: historical child admission state is missing.")?;
+        // Ordinary root workers have no task-owned child Council snapshot.
+        let Some(child) = super::load(store, &child_id)? else { continue };
         if child.council_since != root.council_since {
             continue;
         }
         if child.session_id != child_id || child.config.council.is_none() {
             return Err("child_council_stale: historical child Council identity changed.".into());
+        }
+        let description: String = store.db.query_row(
+            "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
+            [&child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if description != RESERVATION_DESCRIPTION {
+            return Err("child_council_stale: historical child task identity changed.".into());
         }
         let grants: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM architect_requests

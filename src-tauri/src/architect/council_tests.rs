@@ -6252,6 +6252,23 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
         .iter().map(|view| load(&store, &view.child_session_id).unwrap().unwrap().workers.len())
         .sum();
     assert_eq!(active_leaf_count, 4);
+    // A recovered child retains its root-owned native grant history. Changing
+    // the retired session's mutable description must not refund its attempts.
+    let old_description: String = store.db.query_row(
+        "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
+        [&old_child], |row| row.get(0),
+    ).unwrap();
+    store.db.execute(
+        "UPDATE sessions SET task_description='ordinary-chat' WHERE id=?1",
+        [&old_child],
+    ).unwrap();
+    let tamper_denial = child_council::require_total_attempt_capacity(&store, &root, 1)
+        .unwrap_err();
+    assert!(tamper_denial.contains("historical child task identity changed"), "{tamper_denial}");
+    store.db.execute(
+        "UPDATE sessions SET task_description=?2 WHERE id=?1",
+        rusqlite::params![&old_child, old_description],
+    ).unwrap();
     let issued_grants: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
          WHERE kind='reviewer_authority'

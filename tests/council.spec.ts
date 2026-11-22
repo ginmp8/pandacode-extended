@@ -131,6 +131,32 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
 
+test('Council inspector omits malformed native round data without interpreting it as HTML', async ({ page }) => {
+  const injectedRound = '1"><img src=x onerror="window.__councilInjected = true">';
+  const attempt = {
+    workerId: 'native-safe', name: 'Native valid reviewer', lens: 'Security',
+    round: 1, reviewerSource: 'direct_bot', status: 'completed', score: 9.1,
+    abandoned: false, provider: 'codex', model: 'default', attempt: 1,
+    createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1002,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, {
+    sessionId: 'native-task', mode: 'm2', cycleStartedAt: 1000, teamRevision: 2,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [attempt, { ...attempt, workerId: 'native-bad', name: 'Injected reviewer', round: injectedRound }],
+  });
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector.getByRole('region', { name: 'Review round 1' })).toContainText('Native valid reviewer');
+  await expect(inspector).toContainText('1 malformed native reviewer attempt(s) omitted');
+  await expect(inspector).not.toContainText('Injected reviewer');
+  await expect(inspector.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean((window as any).__councilInjected))).toBe(false);
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
 test('Council inspector refreshes an approved native snapshot without promoting stale approval', async ({ page }) => {
   const current = {
     sessionId: 'native-review-1', cycleStartedAt: 1000, teamRevision: 7,

@@ -61,11 +61,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   // seat. Display root reviewer activity separately from the task-owned
   // child reservations, including when M4 has no root reviewer attempts.
   const childReservations = Array.isArray(inspection.reservedChildren) ? inspection.reservedChildren : [];
+  // Native Rust serializes rounds as integers. Treat malformed/foreign projections
+  // as untrusted data before using round labels to construct HTML attributes.
+  const validAttempts = inspection.attempts.filter(attempt => Number.isSafeInteger(attempt.round) && attempt.round > 0);
+  const malformedRoundCount = inspection.attempts.length - validAttempts.length;
   const sourceBreakdown = nativeMode
     ? '<p class="council-native-mode">Native mode: ' + escape(nativeMode) +
       ' · Observed root reviewer attempts (not a passing quorum): ' +
-      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'direct_bot').length)) + ' direct bot, ' +
-      escape(String(inspection.attempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic' +
+      escape(String(validAttempts.filter(a => a.reviewerSource === 'direct_bot').length)) + ' direct bot, ' +
+      escape(String(validAttempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic' +
       ' · Task-owned child Council reservations: ' + escape(String(childReservations.length)) +
       ' (each may become at most one composite parent seat after native verification; reservations are not approvals)</p>'
     : '';
@@ -97,7 +101,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       'No automatic resolution or native approval is inferred.</p><ul>' +
       history.map(findingRow).join('') + '</ul></section>'
     : '';
-  const shown = inspection.attempts.slice(-32);
+  const shown = validAttempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria ?? [];
   // A configured target or evidence obligation is not a verified reviewer result.
@@ -349,7 +353,11 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           receiptHtml + escalationReceiptHtml + challengeReceiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';
-  const hidden = inspection.attempts.length - shown.length;
+  const hidden = validAttempts.length - shown.length;
+  const malformedRoundsHtml = malformedRoundCount > 0
+    ? '<p role="status">' + escape(String(malformedRoundCount)) +
+      ' malformed native reviewer attempt(s) omitted: invalid round identifier.</p>'
+    : '';
   const usage = inspection.usage;
   const usageHtml = usage
     ? '<p class="council-usage-totals">Native attempts: ' + escape(nonNegativeCount(usage.uniqueAttempts)) +
@@ -413,7 +421,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
+    (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childHtml + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

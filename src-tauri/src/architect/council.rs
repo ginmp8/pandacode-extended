@@ -682,7 +682,8 @@ fn usage_by_round_source(attempts: &[CouncilInspectionAttempt]) -> Vec<CouncilUs
     let mut seen = std::collections::HashSet::new();
     let mut groups = std::collections::BTreeMap::<(usize, &'static str), Vec<CouncilInspectionAttempt>>::new();
     for attempt in attempts {
-        if seen.insert(attempt.worker_id.as_str()) {
+        if attempt.round > 0 && !attempt.worker_id.trim().is_empty()
+            && seen.insert(attempt.worker_id.as_str()) {
             groups.entry((attempt.round, attempt.reviewer_source)).or_default().push(attempt.clone());
         }
     }
@@ -692,7 +693,10 @@ fn usage_by_round_source(attempts: &[CouncilInspectionAttempt]) -> Vec<CouncilUs
 }
 fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
     let mut ids = std::collections::HashSet::new();
-    let unique: Vec<_> = attempts.iter().filter(|attempt| ids.insert(attempt.worker_id.as_str())).collect();
+    let unique: Vec<_> = attempts.iter()
+        .filter(|attempt| attempt.round > 0 && !attempt.worker_id.trim().is_empty()
+            && ids.insert(attempt.worker_id.as_str()))
+        .collect();
     // Invalid child attempt durations are unknown, not measured work.
     // Keep actual zero-duration observations distinct from malformed negatives.
     let queue: Vec<i64> = unique.iter().filter_map(|attempt|

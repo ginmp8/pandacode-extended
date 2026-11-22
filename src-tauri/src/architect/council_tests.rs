@@ -390,6 +390,61 @@ fn native_composed_usage_ignores_invalid_child_duration_samples() {
     assert_eq!(unmeasured.settled_review_window_ms, None);
 }
 
+/// Malformed or replayed inspection rows cannot create anonymous reviewer
+/// usage. Actual zero-duration native observations must remain measurable.
+#[test]
+fn native_composed_usage_requires_a_seated_nonblank_reviewer_identity() {
+    let mut reviewer = seat("counted", 1, Some(9.5), SINCE + 1);
+    reviewer.council.as_mut().unwrap().started_at = SINCE + 2;
+    reviewer.updated_at = SINCE + 4;
+    let mut attempts = council::inspection(
+        &team_with(on(9.0, 3, 2), vec![reviewer]), false,
+    ).unwrap().attempts;
+    let valid = attempts.remove(0);
+    let mut missing_identity = valid.clone();
+    missing_identity.worker_id = " ".into();
+    missing_identity.reviewer_source = "nested_child";
+    missing_identity.queue_wait_ms = Some(700);
+    missing_identity.observed_span_ms = Some(800);
+    let mut missing_seat = valid.clone();
+    missing_seat.worker_id = "not-a-council-seat".into();
+    missing_seat.round = 0;
+    missing_seat.reviewer_source = "nested_child";
+    missing_seat.queue_wait_ms = Some(900);
+    missing_seat.observed_span_ms = Some(1000);
+    let mut measured_zero = valid.clone();
+    measured_zero.worker_id = "zero-duration-leaf".into();
+    measured_zero.round = 2;
+    measured_zero.reviewer_source = "nested_child";
+    measured_zero.started_at = SINCE + 3;
+    measured_zero.last_updated_at = SINCE + 3;
+    measured_zero.queue_wait_ms = Some(0);
+    measured_zero.observed_span_ms = Some(0);
+
+    let attempts = [valid, missing_identity, missing_seat, measured_zero];
+    let totals = council::composed_usage(&attempts, &[]);
+    assert_eq!(totals.unique_attempts, 2);
+    assert_eq!(totals.queue_measured_attempts, 2);
+    assert_eq!(totals.span_measured_attempts, 2);
+    assert_eq!(totals.cumulative_queue_wait_ms, Some(1));
+    assert_eq!(totals.cumulative_observed_span_ms, Some(2));
+    assert_eq!(totals.settled_review_window_ms, Some(2));
+    assert!(totals.token_count.is_none() && totals.cost_amount.is_none());
+
+    let groups = council::composed_usage_by_round_source(&attempts, &[]);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].round, 1);
+    assert_eq!(groups[0].reviewer_source, "automatic");
+    assert_eq!(groups[0].usage.unique_attempts, 1);
+    assert_eq!(groups[1].round, 2);
+    assert_eq!(groups[1].reviewer_source, "nested_child");
+    assert_eq!(groups[1].usage.unique_attempts, 1);
+    assert_eq!(groups[1].usage.cumulative_queue_wait_ms, Some(0));
+    assert_eq!(groups[1].usage.cumulative_observed_span_ms, Some(0));
+    assert_eq!(groups.iter().map(|group| group.usage.unique_attempts).sum::<usize>(),
+        totals.unique_attempts, "source groups cannot mint unnamed reviewer attempts");
+}
+
 #[test]
 fn native_root_usage_breakdown_counts_each_attempt_once_across_rounds() {
     let mut first = seat("same-id", 1, Some(9.2), SINCE + 1);

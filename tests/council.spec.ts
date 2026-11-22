@@ -194,7 +194,15 @@ test('keyboard refresh retains focus during a pending native Council read', asyn
   await expect(refresh).toBeEnabled();
   await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
   await inspector.locator('summary').click();
-  await expect(refresh).toBeDisabled();
+  await expect(inspector).not.toHaveAttribute('open');
+  // An HTML <details> disclosure hides its children from the accessibility
+  // tree; inspect the DOM control directly to verify the actual disabled state.
+  const collapsedRefresh = inspector.locator('.council-inspection-refresh');
+  await expect(collapsedRefresh).toBeDisabled();
+  await expect(collapsedRefresh).not.toHaveAttribute('aria-busy', 'true');
+  await inspector.locator('summary').click();
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(collapsedRefresh).toBeEnabled();
 });
 
 test('Council inspector does not present stale human acceptance as current approval', async ({ page }) => {

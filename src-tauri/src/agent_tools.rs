@@ -728,6 +728,8 @@ fn mutate_task(
 fn ensure_app_tool_permission(app: &tauri::AppHandle, session_id: &str) -> Result<()> {
     let state = app.state::<AppState>();
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    // A removed ordinary session must not be treated as an unowned task.
+    let _ = store.session(session_id)?;
     ensure_ambient_agent_tool_permission(&store, session_id)
 }
 
@@ -1005,6 +1007,8 @@ pub(crate) fn pending_ui_permission(
     if stopped.load(Ordering::SeqCst) {
         return Err("Task has stopped.".into());
     }
+    // A stale renderer callback must not regain authority after its session is gone.
+    let _ = store.session(session_id)?;
     ensure_ambient_agent_tool_permission(store, session_id)
 }
 

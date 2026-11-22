@@ -1520,6 +1520,27 @@ pub(crate) fn inspect_headless_effect_receipts(
     inspect_headless_effect_receipts_page(database_path, ticket_id, None, None, false)
 }
 
+/// An unresolved remote effect may still be in flight even after a detached
+/// operator marks its receipt uncertain. Inspect durable Ticket/Assignment
+/// state within the caller's read snapshot; this is a warning to verify the
+/// live host, never proof that a provider is running or has stopped.
+fn potentially_live_unresolved_tickets(
+    store: &Store, ticket_id: Option<&str>, orchestration_id: Option<&str>,
+) -> Result<i64> {
+    store.db.query_row(
+        "SELECT COUNT(DISTINCT e.ticket_id)
+         FROM sa_effect_receipts e
+         JOIN sa_tickets t ON t.id=e.ticket_id
+         WHERE e.state IN ('pending','uncertain')
+           AND (?1 IS NULL OR t.id=?1)
+           AND (?2 IS NULL OR t.orchestration_id=?2)
+           AND (t.state='running' OR EXISTS(
+             SELECT 1 FROM sa_assignments a
+             WHERE a.ticket_id=t.id AND a.state='running'))",
+        params![ticket_id, orchestration_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 /// Page native effect history without Store restart recovery or provider calls.
 pub(crate) fn inspect_headless_effect_receipts_page(
     database_path: &std::path::Path, ticket_id: &str,
@@ -1542,6 +1563,9 @@ pub(crate) fn inspect_headless_effect_receipts_page(
          FROM sa_effect_receipts WHERE ticket_id=?1",
         [ticket_id], |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
+    let potentially_live_unresolved = potentially_live_unresolved_tickets(
+        &store, Some(ticket_id), None,
+    )?;
     snapshot.commit().map_err(|e| e.to_string())?;
     let total_unresolved = pending_total + uncertain_total;
     serde_json::to_string_pretty(&serde_json::json!({
@@ -1554,7 +1578,8 @@ pub(crate) fn inspect_headless_effect_receipts_page(
         "totalUnresolved": total_unresolved,
         "pendingTotal": pending_total,
         "uncertainTotal": uncertain_total,
-        "requiresLiveHostVerification": pending_total > 0,
+        "potentiallyLiveUnresolvedTickets": potentially_live_unresolved,
+        "requiresLiveHostVerification": pending_total > 0 || potentially_live_unresolved > 0,
         "observationalOnly": true,
         "requiresIndependentRemoteReconciliation": total_unresolved > 0,
         "replayed": false
@@ -1637,13 +1662,17 @@ fn list_headless_unresolved_effects_scoped(
            AND (?1 IS NULL OR t.orchestration_id=?1)",
         [orchestration_id], |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(|e| e.to_string())?;
+    let potentially_live_unresolved = potentially_live_unresolved_tickets(
+        &store, None, orchestration_id,
+    )?;
     snapshot.commit().map_err(|e| e.to_string())?;
     let total = pending_total + uncertain_total;
     let mut result = serde_json::json!({
         "unresolvedTotal": total,
         "pendingTotal": pending_total,
         "uncertainTotal": uncertain_total,
-        "requiresLiveHostVerification": pending_total > 0,
+        "potentiallyLiveUnresolvedTickets": potentially_live_unresolved,
+        "requiresLiveHostVerification": pending_total > 0 || potentially_live_unresolved > 0,
         "pageLimit": 100,
         "items": items,
         "nextCursor": next.map(|(created_at,ticket_id,effect_key)| serde_json::json!({

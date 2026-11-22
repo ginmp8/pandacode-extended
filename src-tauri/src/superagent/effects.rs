@@ -784,7 +784,8 @@ mod tests{
             assert_eq!(result["unresolvedTotal"],104);
             assert_eq!(result["pendingTotal"],0);
             assert_eq!(result["uncertainTotal"],104);
-            assert_eq!(result["requiresLiveHostVerification"],false);
+            assert_eq!(result["requiresLiveHostVerification"],true);
+            assert_eq!(result["potentiallyLiveUnresolvedTickets"],1);
             assert_eq!(result["observationalOnly"],true);
             assert_eq!(result["automaticReplayAllowed"],false);
             assert!(!result.to_string().contains("OTHER PRIVATE OBJECTIVE"));
@@ -835,6 +836,74 @@ mod tests{
             [],|r|r.get(0),
         ).unwrap();
         assert_eq!(pending,3,"read-only scoped recovery cannot reconcile receipts");
+    }
+
+    #[test]
+    fn headless_pending_to_uncertain_quarantine_keeps_live_host_warning() {
+        let (store, ticket_id) = fixture();
+        let path = store.path.clone();
+        let team_id: String = store.db.query_row(
+            "SELECT orchestration_id FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        let revision: i64 = store.db.query_row(
+            "SELECT revision FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        let digest = "d".repeat(64);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:inflight',?2,'pending',?3,?3)",
+            params![&ticket_id,&digest,now],
+        ).unwrap();
+
+        // A detached operator can mark a pending outcome uncertain without
+        // stopping the still-active native Assignment or verifying the host.
+        let quarantine: serde_json::Value = serde_json::from_str(
+            &superagent::headless_quarantine_pending_effect(
+                &path, &ticket_id, revision, "github:inflight", &digest,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(quarantine["state"], "uncertain");
+        assert_eq!(quarantine["remoteResultVerified"], false);
+
+        let ticket: serde_json::Value = serde_json::from_str(
+            &superagent::inspect_headless_effect_receipts(&path, &ticket_id).unwrap(),
+        ).unwrap();
+        assert_eq!(ticket["pendingTotal"], 0);
+        assert_eq!(ticket["uncertainTotal"], 1);
+        assert_eq!(ticket["potentiallyLiveUnresolvedTickets"], 1);
+        assert_eq!(ticket["requiresLiveHostVerification"], true);
+        let global: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_unresolved_effects(&path, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(global["pendingTotal"], 0);
+        assert_eq!(global["potentiallyLiveUnresolvedTickets"], 1);
+        assert_eq!(global["requiresLiveHostVerification"], true);
+        let scoped: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_team_unresolved_effects(
+                &path, &team_id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(scoped["potentiallyLiveUnresolvedTickets"], 1);
+        assert_eq!(scoped["requiresLiveHostVerification"], true);
+        assert_eq!(scoped["automaticReplayAllowed"], false);
+        assert_eq!(scoped["observationalOnly"], true);
+
+        let repeated: serde_json::Value = serde_json::from_str(
+            &superagent::headless_quarantine_pending_effect(
+                &path, &ticket_id, revision, "github:inflight", &digest,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(repeated["changed"], false);
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='headless_effect_quarantined'",
+            [&ticket_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_count, 1, "quarantine must not duplicate audit");
     }
 
     #[test]
@@ -900,7 +969,8 @@ mod tests{
         assert_eq!(status["totalUnresolved"], 1);
         assert_eq!(status["pendingTotal"], 0);
         assert_eq!(status["uncertainTotal"], 1);
-        assert_eq!(status["requiresLiveHostVerification"], false);
+        assert_eq!(status["requiresLiveHostVerification"], true);
+        assert_eq!(status["potentiallyLiveUnresolvedTickets"], 1);
         assert_eq!(status["requiresIndependentRemoteReconciliation"], true);
         assert_eq!(status["observationalOnly"], true);
         assert_eq!(status["replayed"], false);

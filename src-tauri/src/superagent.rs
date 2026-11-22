@@ -1394,7 +1394,10 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "pendingExternalEffects": pending,
         "uncertainExternalEffects": uncertain,
         "requiresIndependentRemoteReconciliation": pending + uncertain > 0,
-        "requiresLiveHostVerification": running > 0 || pending > 0,
+        // A running Ticket with a detached/interrupted Assignment is not proof the
+        // provider has stopped. Detached headless inspection must ask the
+        // operator to verify the live host before uncertain-effect action.
+        "requiresLiveHostVerification": ticket.state == "running" || running > 0 || pending > 0,
         "mandateMissing": mandate.is_none(),
         "mandateRevoked": mandate.as_ref().map(|m| m.revoked),
         "mandateExpired": mandate.as_ref().map(|m| m.expires_at <= now),
@@ -6698,6 +6701,82 @@ mod tests {
         assert!(list_headless_recovery_inbox_page(
             &path, Some(0), Some(cursor_at), Some(cursor_id),
         ).is_err());
+    }
+
+    #[test]
+    fn headless_recovery_warns_when_running_ticket_loses_its_native_assignment() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private remote effect with detached provider",
+            "headless-detached-uncertain-effect", false,
+        ).unwrap();
+        assert!(launched);
+        let at = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:comment:detached',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'uncertain',?2,?2)",
+            params![&ticket.id,at],
+        ).unwrap();
+        // Model a crashed/detached native attempt: the durable Ticket is still
+        // running, but the Assignment no longer proves the provider is live.
+        // An uncertain remote effect could still have been dispatched.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+        let status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(status["state"], "running");
+        assert_eq!(status["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(status["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(status["recovery"]["requiresLiveHostVerification"], true);
+        assert_eq!(status["recovery"]["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(status["recovery"]["nextOperatorAction"],
+            "investigate_native_assignment_state");
+        assert_eq!(status["recovery"]["automaticReplayAllowed"], false);
+
+        let queue: serde_json::Value = serde_json::from_str(
+            &list_headless_unresolved_effects(&store.path, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(queue["potentiallyLiveUnresolvedTickets"], 1);
+        assert_eq!(queue["requiresLiveHostVerification"], true);
+        assert_eq!(queue["unresolvedTotal"], 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), before_audit, "read-only inspection must not mutate audit");
+
+        let path = store.path.clone();
+        drop(store);
+        let repeated: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(repeated["recovery"]["requiresLiveHostVerification"], true);
+        assert_eq!(repeated["recovery"]["automaticReplayAllowed"], false);
+        // Once the Ticket is no longer marked running and no Assignment is
+        // live, an uncertain receipt still requires independent remote
+        // reconciliation, but does not by itself attest a live provider.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE sa_tickets SET state='stopped' WHERE id=?1",
+            [&ticket.id]).unwrap();
+        drop(db);
+        let stopped: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(stopped["recovery"]["requiresLiveHostVerification"], false);
+        assert_eq!(stopped["recovery"]["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(stopped["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(stopped["recovery"]["automaticReplayAllowed"], false);
     }
 
     #[test]

@@ -2855,7 +2855,12 @@ pub(super) fn status_for_authenticated_children_s2(
         .map(|(worker, _)| worker.id.as_str()).collect();
     let first_sessions: std::collections::HashSet<&str> = in_round(team, 1)
         .map(|(worker, _)| worker.session_id.as_str()).collect();
-    let mut sessions = std::collections::HashSet::new();
+    // A root reviewer must never borrow a composite child's worker or session
+    // identity, even when each wave independently has the right headcount.
+    let mut occupied_workers: std::collections::HashSet<&str> = children.iter()
+        .map(|child| child.parent_worker_id.as_str()).collect();
+    let mut sessions: std::collections::HashSet<&str> = children.iter()
+        .map(|child| child.child_session_id.as_str()).collect();
     let mut direct = std::collections::HashSet::new();
     let mut automatic = 0usize;
     for (worker, seat) in second {
@@ -2866,6 +2871,7 @@ pub(super) fn status_for_authenticated_children_s2(
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
             || !score.is_finite() || score < config.target
             || first_ids.contains(worker.id.as_str())
+            || worker.id.is_empty() || !occupied_workers.insert(worker.id.as_str())
             || first_sessions.contains(worker.session_id.as_str())
             || worker.session_id.is_empty() || !sessions.insert(worker.session_id.as_str())
             || binding.validate(team, worker).is_err()
@@ -2983,8 +2989,12 @@ pub(super) fn status_for_authenticated_children_s3(
         .map(|(worker, _)| worker.id.as_str()).collect();
     let prior_sessions: std::collections::HashSet<&str> = in_round(team, 1)
         .map(|(worker, _)| worker.session_id.as_str()).collect();
-    let mut new_ids = std::collections::HashSet::new();
-    let mut new_sessions = std::collections::HashSet::new();
+    // Phase-two root challengers may not impersonate any phase-one child
+    // composite seat. Persisted second-wave identities are not extra votes.
+    let mut new_ids: std::collections::HashSet<&str> = children.iter()
+        .map(|child| child.parent_worker_id.as_str()).collect();
+    let mut new_sessions: std::collections::HashSet<&str> = children.iter()
+        .map(|child| child.child_session_id.as_str()).collect();
     let mut direct_bots = std::collections::HashSet::new();
     let mut automatic = 0usize;
     for (worker, seat) in second {

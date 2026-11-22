@@ -9468,6 +9468,26 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved),
         "the separate root and child waves must both pass the native S2 terminal gate");
+    let parent_seats = child_council::verified_parent_seats(&store, &saved).unwrap().unwrap();
+    let child_receipts = child_council::verified_s2_receipts(&store, &saved).unwrap().unwrap();
+    assert!(council::status_for_authenticated_children_s2(
+        &saved, &parent_seats, &child_receipts).is_some());
+    // A corrupted phase-two root alias cannot be counted as a fresh vote on
+    // top of the already authenticated child composite.
+    let mut reused_child_session = saved.clone();
+    reused_child_session.workers.iter_mut()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().session_id = parent_seats[0].child_session_id.clone();
+    assert!(council::status_for_authenticated_children_s2(
+        &reused_child_session, &parent_seats, &child_receipts).is_none(),
+        "S2 root reviewers cannot reuse a child Council session identity");
+    let mut reused_child_worker = saved.clone();
+    reused_child_worker.workers.iter_mut()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().id = parent_seats[0].parent_worker_id.clone();
+    assert!(council::status_for_authenticated_children_s2(
+        &reused_child_worker, &parent_seats, &child_receipts).is_none(),
+        "S2 root reviewers cannot reuse a child composite worker identity");
     // Even a fully verified second wave cannot conceal revocation of the
     // first root reviewer's authority after the terminal snapshot was saved.
     let first_root = saved.workers.iter()
@@ -10385,6 +10405,20 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
         let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
         assert!(council::status_for_authenticated_children_s3(
             &root, &parents, &challenges).is_some());
+        let mut reused_child_session = root.clone();
+        reused_child_session.workers.iter_mut()
+            .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+            .unwrap().session_id = parents[0].child_session_id.clone();
+        assert!(council::status_for_authenticated_children_s3(
+            &reused_child_session, &parents, &challenges).is_none(),
+            "S3 root challenge cannot reuse a child Council session identity");
+        let mut reused_child_worker = root.clone();
+        reused_child_worker.workers.iter_mut()
+            .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+            .unwrap().id = parents[0].parent_worker_id.clone();
+        assert!(council::status_for_authenticated_children_s3(
+            &reused_child_worker, &parents, &challenges).is_none(),
+            "S3 root challenge cannot reuse a child composite worker identity");
         let key = format!("native-council-child-s3-receipt:{}:security-child", root.council_since);
         store.db.execute(
             "DELETE FROM architect_requests

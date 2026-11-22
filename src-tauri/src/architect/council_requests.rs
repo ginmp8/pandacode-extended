@@ -681,10 +681,15 @@ pub(crate) fn active_native_task_for_checks(
         }
     }
     let Some(request) = selected else { return Ok(None) };
-    inspect_native_task(
+    // A previous task can be stale while the user's ordinary turn checks
+    // remain enabled. Never turn stale task evidence into a new receipt, but
+    // do not deny the original non-Council check merely for historical drift.
+    if inspect_native_task(
         store, session_id, &request.project_id, &request.assignment_key,
         &request.artifact_sha256, &request.request_id,
-    )?;
+    ).is_err() {
+        return Ok(None);
+    }
     Ok(Some(request))
 }
 

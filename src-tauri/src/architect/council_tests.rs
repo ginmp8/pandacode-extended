@@ -7744,6 +7744,8 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.objective.push_str(" changed");
     save(&store, &mut team).unwrap();
+    assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none(),
+        "stale native evidence must not break the user's ordinary project checks");
     assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err(),
         "a host check cannot be appended after task policy/objective drift");
     assert!(council_requests::inspect_native_task(

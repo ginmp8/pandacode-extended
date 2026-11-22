@@ -514,6 +514,12 @@ fn authenticated_issue_pull_resources(
     {
         return Err("Authenticated GitHub PR identity or base repository differs from the requested context.".into());
     }
+    // A contradictory optional base REST URL is not authoritative just
+    // because the numeric repository ID and display name happen to match.
+    if pull.pointer("/base/repo/url").is_some_and(|url|
+        !url.as_str().is_some_and(|value| value.eq_ignore_ascii_case(&repo_url))) {
+        return Err("Authenticated GitHub PR base repository URL contradicts its verified identity.".into());
+    }
     Ok(repository_id)
 }
 
@@ -6611,6 +6617,16 @@ mod tests {
         invalid_pr["html_url"]=serde_json::json!("https://github.com/other/repo/pull/99");
         assert!(authenticated_issue_pull_resources(
             "test/fixture","issue:42","pull:99",&repo,&issue,&invalid_pr).is_err());
+        invalid_pr=pull.clone();
+        invalid_pr["base"]["repo"]["url"]=serde_json::json!(
+            "https://api.github.com/repos/other/repo");
+        assert!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&issue,&invalid_pr).is_err());
+        invalid_pr=pull.clone();
+        invalid_pr["base"]["repo"]["url"]=serde_json::json!(
+            "https://api.github.com/repos/test/fixture");
+        assert_eq!(authenticated_issue_pull_resources(
+            "test/fixture","issue:42","pull:99",&repo,&issue,&invalid_pr).unwrap(),900);
         for (issue_key,pull_key) in [("issue:0","pull:99"),
             ("issue:42","pull:01"),("pull:42","issue:99"),
             ("issue:42","pull:100")] {

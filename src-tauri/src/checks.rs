@@ -4,6 +4,7 @@
 //! external tool; a failure goes back to the agent through the ordinary
 //! message queue, where the user can edit or cancel the repair request.
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{path::Path, process::Command, time::Duration};
 
 use crate::workspace::run_process;
@@ -46,14 +47,50 @@ pub(crate) fn plan(root: &Path) -> Option<Plan> {
 
 /// Runs the checkout's declared check and reports the outcome as data for the
 /// composer queue. A missing plan is a result, not an error.
+/// A host-executed observation only: never a reviewer score, Council pass,
+/// or proof that the whole source tree was reviewed. The SHA-256 covers
+/// just the manifest declaring this bounded, user-enabled check.
+fn manifest_sha256(root: &Path, plan: &Plan) -> Option<String> {
+    let name = match plan.name.as_str() {
+        "npm test" => "package.json",
+        "cargo check" => "Cargo.toml",
+        _ => return None,
+    };
+    std::fs::read(root.join(name))
+        .ok().map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
 pub(crate) fn turn_report(root: &Path) -> Value {
     let Some(plan) = plan(root) else {
         return json!({"checked": false, "reason": NO_PLAN});
     };
-    match run(root, &plan) {
-        Ok(report) => report,
-        // A check that cannot start (say, npm is missing) or finish in time is
-        // not the agent's doing: it is skipped, never reported as a failure.
+    report_for_plan(root, &plan)
+}
+
+/// Only the existing, explicitly enabled host path invokes this runner.
+/// A missing or changed check manifest cannot produce an execution receipt;
+/// failures are observed failures, not passing evidence.
+fn report_for_plan(root: &Path, plan: &Plan) -> Value {
+    let before = manifest_sha256(root, plan);
+    match run(root, plan) {
+        Ok(mut report) => {
+            if let (Some(a), Some(b)) = (before, manifest_sha256(root, plan)) {
+                if a == b {
+                    report["hostObservation"] = json!({
+                        "kind": "manifest_declared_check",
+                        "name": plan.name,
+                        "manifestSha256": a,
+                        "observedAt": crate::storage::now(),
+                        "passed": report["ok"] == true,
+                        "outputTruncated": report["truncated"] == true,
+                        "provenance": "native_host",
+                        "scope": "manifest_only_not_artifact_verification",
+                    });
+                }
+            }
+            report
+        }
+        // No started/completed process: no observed test/build evidence.
         Err(error) => json!({"checked": false, "reason": error}),
     }
 }
@@ -184,6 +221,49 @@ mod tests {
         let plan = Plan { name: "npm test".into(), program: "/nonexistent/pandacode-npm".into(), args: vec![] };
         let report = run(temp.path(), &plan).unwrap_err();
         assert!(report.contains("Could not start"), "{report}");
+    }
+
+    #[test]
+    fn native_host_evidence_requires_real_execution_and_unchanged_manifest() {
+        let temp = Scratch::new("native-host-evidence");
+        let root = temp.path();
+        fs::write(root.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        let runner = root.join("fake-npm");
+        let plan = Plan {
+            name: "npm test".into(),
+            program: runner.to_str().unwrap().into(),
+            args: vec![],
+        };
+        fake(&runner, "echo tests passed\nexit 0");
+        let passed = report_for_plan(root, &plan);
+        assert_eq!(passed["checked"], true);
+        assert_eq!(passed["hostObservation"]["passed"], true);
+        assert_eq!(passed["hostObservation"]["provenance"], "native_host");
+        assert_eq!(passed["hostObservation"]["manifestSha256"].as_str().unwrap().len(), 64);
+        assert_eq!(passed["hostObservation"]["scope"], "manifest_only_not_artifact_verification");
+
+        fake(&runner, "echo tests failed >&2\nexit 1");
+        let failed = report_for_plan(root, &plan);
+        assert_eq!(failed["checked"], true);
+        assert_eq!(failed["hostObservation"]["passed"], false);
+        assert_eq!(failed["ok"], false);
+
+        // A script that edits the manifest after starting is not proof that
+        // its original immutable input still identifies the finished check.
+        fake(&runner, "echo 'changed' > package.json\nexit 0");
+        let mutated = report_for_plan(root, &plan);
+        assert_eq!(mutated["checked"], true);
+        assert!(mutated.get("hostObservation").is_none());
+
+        // An executable that cannot even start never receives a receipt.
+        let unavailable = Plan {
+            name: "cargo check".into(), program: "/nonexistent/pandacode-cargo".into(),
+            args: vec![],
+        };
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"example\"").unwrap();
+        let missing = report_for_plan(root, &unavailable);
+        assert_eq!(missing["checked"], false);
+        assert!(missing.get("hostObservation").is_none());
     }
 
     #[test]

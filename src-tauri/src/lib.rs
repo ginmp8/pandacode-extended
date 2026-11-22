@@ -3812,7 +3812,14 @@ async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Resu
         .session(&session_id)?
         .project_id;
     let root = state.root(&project_id, Some(&session_id))?;
-    blocking(move || Ok(checks::turn_report(&root))).await
+    let mut report = blocking(move || Ok(checks::turn_report(&root))).await?;
+    // The existing user-enabled check belongs to the resolved native session.
+    // This observation cannot grant tools to a Council reviewer or attest a
+    // frozen artifact/cycle; that separate native C-2 gate remains mandatory.
+    if let Some(observation) = report.get_mut("hostObservation") {
+        observation["sessionId"] = serde_json::json!(session_id);
+    }
+    Ok(report)
 }
 #[tauri::command]
 async fn get_run_script_preview(

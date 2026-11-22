@@ -673,6 +673,9 @@ mod tests{
             pages+=1;
             assert!(pages<=3, "unresolved inbox cursor must advance");
             assert_eq!(response["unresolvedTotal"],205);
+            assert_eq!(response["pendingTotal"],1);
+            assert_eq!(response["uncertainTotal"],204);
+            assert_eq!(response["requiresLiveHostVerification"],true);
             assert_eq!(response["observationalOnly"],true);
             assert_eq!(response["automaticReplayAllowed"],false);
             assert_eq!(response["requiresIndependentRemoteReconciliation"],true);
@@ -779,6 +782,9 @@ mod tests{
             ).unwrap();
             assert_eq!(result["orchestrationId"],first_team);
             assert_eq!(result["unresolvedTotal"],104);
+            assert_eq!(result["pendingTotal"],0);
+            assert_eq!(result["uncertainTotal"],104);
+            assert_eq!(result["requiresLiveHostVerification"],false);
             assert_eq!(result["observationalOnly"],true);
             assert_eq!(result["automaticReplayAllowed"],false);
             assert!(!result.to_string().contains("OTHER PRIVATE OBJECTIVE"));
@@ -802,6 +808,9 @@ mod tests{
             ).unwrap(),
         ).unwrap();
         assert_eq!(other["unresolvedTotal"],3);
+        assert_eq!(other["pendingTotal"],3);
+        assert_eq!(other["uncertainTotal"],0);
+        assert_eq!(other["requiresLiveHostVerification"],true);
         assert_eq!(other["items"].as_array().unwrap().len(),3);
         assert_eq!(serde_json::from_str::<serde_json::Value>(
             &superagent::list_headless_unresolved_effects(&path,None,None,None).unwrap(),
@@ -835,6 +844,9 @@ mod tests{
             &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
         ).unwrap();
         assert_eq!(empty["requiresIndependentRemoteReconciliation"], false);
+        assert_eq!(empty["pendingTotal"], 0);
+        assert_eq!(empty["uncertainTotal"], 0);
+        assert_eq!(empty["requiresLiveHostVerification"], false);
         assert_eq!(empty["observationalOnly"], true);
         assert_eq!(empty["replayed"], false);
         store.db.execute(
@@ -847,11 +859,17 @@ mod tests{
         ).unwrap();
         assert_eq!(pending["requiresIndependentRemoteReconciliation"], true);
         assert_eq!(pending["receipts"][0]["state"], "pending");
+        assert_eq!(pending["pendingTotal"], 1);
+        assert_eq!(pending["uncertainTotal"], 0);
+        assert_eq!(pending["requiresLiveHostVerification"], true);
         acknowledge_applied(&store,&id,"github:issue:42",b"payload").unwrap();
         let applied: serde_json::Value = serde_json::from_str(
             &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
         ).unwrap();
         assert_eq!(applied["totalUnresolved"], 0);
+        assert_eq!(applied["pendingTotal"], 0);
+        assert_eq!(applied["uncertainTotal"], 0);
+        assert_eq!(applied["requiresLiveHostVerification"], false);
         assert_eq!(applied["requiresIndependentRemoteReconciliation"], false);
     }
 
@@ -880,6 +898,9 @@ mod tests{
         assert!(status["receipts"].as_array().unwrap().iter()
             .all(|receipt| receipt["state"] == "applied"));
         assert_eq!(status["totalUnresolved"], 1);
+        assert_eq!(status["pendingTotal"], 0);
+        assert_eq!(status["uncertainTotal"], 1);
+        assert_eq!(status["requiresLiveHostVerification"], false);
         assert_eq!(status["requiresIndependentRemoteReconciliation"], true);
         assert_eq!(status["observationalOnly"], true);
         assert_eq!(status["replayed"], false);
@@ -892,6 +913,59 @@ mod tests{
         assert_eq!(after_restart["totalUnresolved"], 1);
         assert_eq!(after_restart["requiresIndependentRemoteReconciliation"], true);
         assert_eq!(unresolved_count(&reopened, &id).unwrap(), 1);
+    }
+
+    #[test]
+    fn headless_receipt_snapshot_stays_consistent_during_remote_reconciliation() {
+        let (store, id) = fixture();
+        let path = store.path.clone();
+        // The writer must be opened before pending receipts are inserted: a
+        // new normal Store::open after insertion would run restart recovery.
+        let writer = Store::open(&path).unwrap();
+        for index in 0..32 {
+            let payload = format!("private-reconciliation-{index}");
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'pending',?4,?4)",
+                params![&id, format!("race:{index:03}"),
+                    format!("{:x}", Sha256::digest(payload.as_bytes())), 10_000 + index],
+            ).unwrap();
+        }
+        let writer_id = id.clone();
+        let reconciler = std::thread::spawn(move || {
+            for index in 0..32 {
+                let payload = format!("private-reconciliation-{index}");
+                acknowledge_applied(&writer, &writer_id,
+                    &format!("race:{index:03}"), payload.as_bytes()).unwrap();
+                std::thread::yield_now();
+            }
+        });
+        for _ in 0..64 {
+            let status: serde_json::Value = serde_json::from_str(
+                &superagent::inspect_headless_effect_receipts_page(
+                    &path, &id, None, None, true,
+                ).unwrap(),
+            ).unwrap();
+            let pending = status["pendingTotal"].as_i64().unwrap();
+            let uncertain = status["uncertainTotal"].as_i64().unwrap();
+            assert_eq!(status["totalUnresolved"], pending + uncertain);
+            assert_eq!(status["receipts"].as_array().unwrap().len() as i64,
+                pending + uncertain, "page and counts must share a SQLite snapshot");
+            assert_eq!(status["requiresLiveHostVerification"], pending > 0);
+            assert_eq!(status["observationalOnly"], true);
+            assert_eq!(status["replayed"], false);
+            std::thread::yield_now();
+        }
+        reconciler.join().unwrap();
+        let final_status: serde_json::Value = serde_json::from_str(
+            &superagent::inspect_headless_effect_receipts_page(
+                &path, &id, None, None, true,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(final_status["totalUnresolved"], 0);
+        assert!(final_status["receipts"].as_array().unwrap().is_empty());
+        assert_eq!(final_status["requiresLiveHostVerification"], false);
     }
 
     #[test]

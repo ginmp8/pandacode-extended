@@ -1517,10 +1517,21 @@ pub(crate) fn inspect_headless_effect_receipts_page(
         return Err("Effect receipt cursor requires both timestamp and key.".into());
     }
     let store = Store::open_read_only(database_path)?;
+    // A live serve process may reconcile an effect between the page read and
+    // its counter. Keep both observations on one SQLite snapshot rather than
+    // claiming that an unresolved receipt has no pending remote work.
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let (receipts, next_cursor) = effects::receipt_history_page(
         &store, ticket_id, 100, before_created_at.zip(before_key), unresolved_only,
     )?;
-    let total_unresolved = effects::unresolved_count(&store, ticket_id)?;
+    let (pending_total, uncertain_total): (i64, i64) = store.db.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END),0)
+         FROM sa_effect_receipts WHERE ticket_id=?1",
+        [ticket_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    snapshot.commit().map_err(|e| e.to_string())?;
+    let total_unresolved = pending_total + uncertain_total;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket_id,
         "receipts": receipts,
@@ -1529,6 +1540,9 @@ pub(crate) fn inspect_headless_effect_receipts_page(
         })),
         "filter": if unresolved_only { "unresolved" } else { "all" },
         "totalUnresolved": total_unresolved,
+        "pendingTotal": pending_total,
+        "uncertainTotal": uncertain_total,
+        "requiresLiveHostVerification": pending_total > 0,
         "observationalOnly": true,
         "requiresIndependentRemoteReconciliation": total_unresolved > 0,
         "replayed": false
@@ -1581,16 +1595,22 @@ fn list_headless_unresolved_effects_scoped(
         )?,
         None => effects::unresolved_effects_page(&store, 100, before)?,
     };
-    let total: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sa_effect_receipts e
+    let (pending_total, uncertain_total): (i64, i64) = store.db.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN e.state='pending' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN e.state='uncertain' THEN 1 ELSE 0 END),0)
+         FROM sa_effect_receipts e
          JOIN sa_tickets t ON t.id=e.ticket_id
          WHERE e.state IN ('pending','uncertain')
            AND (?1 IS NULL OR t.orchestration_id=?1)",
-        [orchestration_id], |r| r.get(0),
+        [orchestration_id], |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(|e| e.to_string())?;
     snapshot.commit().map_err(|e| e.to_string())?;
+    let total = pending_total + uncertain_total;
     let mut result = serde_json::json!({
         "unresolvedTotal": total,
+        "pendingTotal": pending_total,
+        "uncertainTotal": uncertain_total,
+        "requiresLiveHostVerification": pending_total > 0,
         "pageLimit": 100,
         "items": items,
         "nextCursor": next.map(|(created_at,ticket_id,effect_key)| serde_json::json!({

@@ -16,6 +16,18 @@ const TAIL_BYTES: usize = 4000;
 
 const NO_PLAN: &str = "This project declares no fast check (no npm test script and no Cargo.toml).";
 
+/// User-enabled project checks must not run in task-owned Architect workers
+/// or Council child/reviewer sessions. No reviewer is granted shell tools.
+pub(crate) fn eligible_turn_check_project(
+    store: &crate::storage::Store, session_id: &str,
+) -> crate::Result<String> {
+    let session = store.session(session_id)?;
+    if crate::architect::parent_of(store, session_id)?.is_some() {
+        return Err("reviewer_policy_denied: task-owned Architect workers cannot run project checks.".into());
+    }
+    Ok(session.project_id)
+}
+
 /// One fast check a checkout declares through its own manifests.
 pub(crate) struct Plan {
     pub name: String,
@@ -264,6 +276,32 @@ mod tests {
         let missing = report_for_plan(root, &unavailable);
         assert_eq!(missing["checked"], false);
         assert!(missing.get("hostObservation").is_none());
+    }
+
+    #[test]
+    fn native_turn_checks_deny_task_owned_child_and_leaf_sessions() {
+        let temp = Scratch::new("task-owned-check-denial");
+        let store = crate::storage::Store::open(&temp.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(temp.path()).unwrap();
+        let root = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        let child = store.create_session(&project.id, "codex", "default", "plan").unwrap();
+        let leaf = store.create_session(&project.id, "codex", "default", "plan").unwrap();
+        assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id);
+        for (parent, worker, session) in [
+            (&root.id, "child-coordinator", &child.id),
+            (&child.id, "read-only-leaf", &leaf.id),
+        ] {
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                rusqlite::params![parent, worker, session],
+            ).unwrap();
+        }
+        for session in [&child.id, &leaf.id] {
+            let denied = eligible_turn_check_project(&store, session).unwrap_err();
+            assert!(denied.contains("reviewer_policy_denied"), "{denied}");
+        }
+        assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id,
+            "ordinary user-owned tasks retain their existing check behavior");
     }
 
     #[test]

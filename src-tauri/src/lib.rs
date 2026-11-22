@@ -3805,12 +3805,10 @@ async fn get_run_script(
 /// clean turn. Bounded; no plan is a result, not an error.
 #[tauri::command]
 async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value> {
-    let project_id = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .session(&session_id)?
-        .project_id;
+    let project_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        checks::eligible_turn_check_project(&store, &session_id)?
+    };
     let root = state.root(&project_id, Some(&session_id))?;
     let mut report = blocking(move || Ok(checks::turn_report(&root))).await?;
     // The existing user-enabled check belongs to the resolved native session.

@@ -3167,7 +3167,13 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
       routes: unknown[]
     }}).saMemberActivityEvidence().routes.length);
   expect(blocked).toBe(1, 'Stale native links cannot dispatch chat navigation');
-  expect(evidence.seen.filter(call=>call.command==='superagent_member_assignment_chat_link'))
+  // page.evaluate returns a snapshot: re-read the command log after the denied
+  // second click so the assertion cannot accidentally inspect stale evidence.
+  const refreshedEvidence = await page.evaluate(() =>
+    (window as unknown as {saMemberActivityEvidence:()=>{
+      seen:Array<{command:string;args?:Record<string,unknown>}>;
+    }}).saMemberActivityEvidence());
+  expect(refreshedEvidence.seen.filter(call=>call.command==='superagent_member_assignment_chat_link'))
     .toHaveLength(2);
   expect(evidence.seen.filter(call=>call.command==='superagent_member_activity_page'))
     .toHaveLength(2);
@@ -4195,7 +4201,9 @@ test('Team directory activation uses native CAS without selecting or executing o
   await expect(host.getByRole('alertdialog')).toContainText('grants no tools or automatic tasks');
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(disable()).toBeVisible();
-  await expect(host.getByRole('region',{name:'Selected orchestration'}))
+  // The Teams workspace renders the selected Team as its overview;
+  // 'Selected orchestration' is the separate Runs inspector.
+  await expect(host.getByRole('region',{name:'Team overview'}))
     .toContainText('Routine Team');
   await disable().click();
   await expect(host.getByRole('alertdialog')).toContainText('Already applied external changes cannot be undone');

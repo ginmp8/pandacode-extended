@@ -735,12 +735,20 @@ pub struct SourceIntegrity {
     pub history_gap_occurrences: i64,
     pub history_gap_verified_at: Option<i64>,
     pub history_gap_verified_sequence: Option<i64>,
+    /// Mirrors native periodic source selection; not proof of successful delivery.
+    pub background_selected: bool,
     pub next_action: &'static str,
     pub observational_only: bool,
 }
 
 fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceIntegrity> {
     let selected = source(store, source_id)?;
+    let team_enabled: i64 = store.db.query_row(
+        "SELECT enabled FROM sa_orchestrations WHERE id=?1",
+        [&selected.orchestration_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let background_selected = team_enabled == 1 && selected.mode == "observe"
+        && selected.event_kind != "check_run.completed";
     let repository_id: Option<i64> = store.db.query_row(
         "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
         [source_id], |row| row.get(0),
@@ -781,6 +789,8 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "investigate_unverified_github_history"
     } else if selected.mode == "off" {
         "source_off_no_poll"
+    } else if selected.event_kind == "check_run.completed" {
+        "explicit_check_run_id_required"
     } else { "explicit_observe_available" };
     Ok(SourceIntegrity {
         source_id:selected.id, repository:selected.repository, repository_id, actor_id,
@@ -793,7 +803,7 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         max_receipt_sequence, cursor_consistent, receipt_capacity_reached,
         history_gap_cursor, history_gap_detected_at, history_gap_reason,
         history_gap_occurrences, history_gap_verified_at, history_gap_verified_sequence,
-        next_action, observational_only:true,
+        background_selected, next_action, observational_only:true,
     })
 }
 
@@ -4148,12 +4158,49 @@ mod tests {
         assert_eq!(status.next_action, "source_off_no_poll");
         let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
         assert_eq!(inspect_source_integrity(&store, &active.id).unwrap().next_action,
-            "explicit_observe_available");
+            "explicit_check_run_id_required");
+        assert!(!inspect_source_integrity(&store, &active.id).unwrap().background_selected);
         let json = headless_inspect_source_integrity(&path, &active.id).unwrap();
         assert!(json.contains("local_check_run_observation_count"));
         assert!(json.contains("observationalOnly"));
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn source_health_matches_periodic_observe_selection_across_policy_and_restart() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+
+        // Manual Observe can be requested for a disabled Team, but periodic
+        // polling is inactive until both Team and source are enabled.
+        assert!(!inspect_source_integrity(&store, &active.id).unwrap().background_selected);
+        assert!(next_observe_subscription_sources(&store, None).unwrap().is_empty());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        assert!(inspect_source_integrity(&store, &active.id).unwrap().background_selected);
+        assert_eq!(next_observe_subscription_sources(&store, None).unwrap().len(), 1);
+        let health: serde_json::Value = serde_json::from_str(
+            &headless_inspect_source_integrity(&path, &active.id).unwrap(),
+        ).unwrap();
+        assert_eq!(health["backgroundSelected"], serde_json::json!(true));
+
+        let revoked = set_mode(&store, &active.id, active.policy_revision, "off").unwrap();
+        assert!(!inspect_source_integrity(&store, &revoked.id).unwrap().background_selected);
+        assert!(next_observe_subscription_sources(&store, None).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let persisted = inspect_source_integrity(&reopened, &revoked.id).unwrap();
+        assert!(!persisted.background_selected);
+        assert_eq!(persisted.next_action, "source_off_no_poll");
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

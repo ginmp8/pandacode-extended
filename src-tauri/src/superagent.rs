@@ -1562,6 +1562,24 @@ pub(crate) fn inspect_headless_effect_receipts_page(
 }
 
 
+/// An older or externally damaged database may contain an unresolved
+/// external-effect receipt whose durable Ticket is missing. Foreign keys
+/// prevent new orphans but cannot retroactively fix existing corruption.
+/// Global recovery must not silently report an empty queue in that state.
+/// Team-scoped reads can continue: an orphan has no trustworthy Team owner.
+fn require_global_effect_reconciliation_integrity(store: &Store) -> Result<()> {
+    let orphaned: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts e
+         WHERE e.state IN ('pending','uncertain')
+           AND NOT EXISTS(SELECT 1 FROM sa_tickets t WHERE t.id=e.ticket_id))",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if orphaned {
+        return Err("Unresolved external effect receipt has no durable Ticket; global recovery requires operator database investigation.".into());
+    }
+    Ok(())
+}
+
 /// Inspect every unresolved effect across Tickets, rather than relying on
 /// a bounded per-Ticket view or confusing a missing first-page item with safety.
 /// Read-only snapshots do not start recovery or contact the remote provider.
@@ -1601,6 +1619,9 @@ fn list_headless_unresolved_effects_scoped(
     };
     let store = Store::open_read_only(database_path)?;
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if orchestration_id.is_none() {
+        require_global_effect_reconciliation_integrity(&store)?;
+    }
     let (items, next) = match orchestration_id {
         Some(team) => effects::unresolved_effects_page_for_team(
             &store, 100, before, Some(team),
@@ -1814,6 +1835,9 @@ fn list_headless_recovery_inbox_page_scoped(
         configuration(&store, id)?;
     }
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if orchestration_id.is_none() {
+        require_global_effect_reconciliation_integrity(&store)?;
+    }
     let observed_at = storage::now();
     let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
     let ids: Vec<(String, i64, i64)> = {
@@ -6642,6 +6666,57 @@ mod tests {
         assert!(list_headless_recovery_inbox_page(
             &path, Some(0), Some(cursor_at), Some(cursor_id),
         ).is_err());
+    }
+
+    #[test]
+    fn global_headless_recovery_does_not_hide_orphaned_unresolved_effects() {
+        let store = fixture();
+        let team = enabled(&store);
+        let normal: serde_json::Value = serde_json::from_str(
+            &list_headless_unresolved_effects(&store.path, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(normal["unresolvedTotal"], 0);
+
+        // Simulate an old or externally damaged database. Runtime foreign
+        // keys prohibit this insert, but reopening cannot repair old rows.
+        store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES('orphaned-ticket','github:unknown',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'pending',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+
+        let error = list_headless_unresolved_effects(
+            &store.path, None, None, None,
+        ).unwrap_err();
+        assert!(error.contains("no durable Ticket"), "{error}");
+        assert!(list_headless_recovery_inbox(&store.path)
+            .unwrap_err().contains("no durable Ticket"));
+        // A corrupt global receipt must not block valid scoped inspection or
+        // expose its orphaned identity to an unrelated Team.
+        let scoped: serde_json::Value = serde_json::from_str(
+            &list_headless_team_unresolved_effects(
+                &store.path, &team.id, None, None, None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(scoped["unresolvedTotal"], 0);
+        assert!(!scoped.to_string().contains("orphaned-ticket"));
+        let state: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id='orphaned-ticket'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "pending", "inspection must not reconcile or replay a receipt");
+
+        let path = store.path.clone();
+        drop(store);
+        assert!(list_headless_unresolved_effects(&path, None, None, None)
+            .unwrap_err().contains("no durable Ticket"));
+        assert!(list_headless_recovery_inbox(&path)
+            .unwrap_err().contains("no durable Ticket"));
     }
 
     #[test]

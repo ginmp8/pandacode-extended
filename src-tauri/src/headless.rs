@@ -32,6 +32,7 @@ enum Command {
     InspectOrchestrations,
     CreateOrchestration { config_file: PathBuf },
     ListTickets,
+    ListTicketsPage { before_created_at: Option<i64>, before_id: Option<String> },
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListTeamMemberActivity { orchestration_id: String, bot_id: String,
         before_created_at: Option<i64>, before_assignment_id: Option<String> },
@@ -494,6 +495,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent task listing failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTicketsPage { before_created_at, before_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_tasks_page(
+                        &dir.join("kingcode.sqlite3"), *before_created_at, before_id.as_deref(),
+                    ));
+                match result {
+                    Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent paged Ticket listing failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -999,7 +1014,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ImportOrchestrations { .. }
         | Command::ExportOrchestrations { .. }
         | Command::InspectOrchestrations | Command::CreateOrchestration { .. }
-        | Command::ListTickets | Command::ListTicketActivity { .. }
+        | Command::ListTickets | Command::ListTicketsPage { .. } | Command::ListTicketActivity { .. }
         | Command::ListTeamMemberActivity { .. } | Command::ListReviewInbox { .. } | Command::ListTeamReviewInbox { .. }
         | Command::ListRecoveryInbox { .. } | Command::ListTeamRecoveryInbox { .. }
         | Command::ListUnresolvedEffects { .. }
@@ -1422,6 +1437,21 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             }
             "--list-tickets" => {
                 command = Command::ListTickets;
+                ops += 1;
+            }
+            "--list-tickets-page" => {
+                let (before_created_at, before_id) =
+                    if args.get(index + 1).map(String::as_str) == Some("--before") {
+                        let at = args.get(index + 2).and_then(|s| s.parse::<i64>().ok())
+                            .filter(|at| *at > 0)
+                            .ok_or("--before needs a positive Ticket creation timestamp.")?;
+                        let id = args.get(index + 3)
+                            .ok_or("--before needs a Ticket creation timestamp and Ticket ID.")?;
+                        validate_ticket_id(id)?;
+                        index += 3;
+                        (Some(at),Some(id.clone()))
+                    } else { (None,None) };
+                command = Command::ListTicketsPage { before_created_at, before_id };
                 ops += 1;
             }
             "--list-ticket-activity" => {
@@ -2478,7 +2508,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2507,7 +2537,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                           No provider, task grant, GitHub Auto or effect is started.
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
-  --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-tickets         Legacy first 200 redacted native SuperAgent Tickets (JSON array).
+  --list-tickets-page [--before <created-ms> <ticket-id>]
+                         Inspect every Ticket through stable creation-order pages
+                         (200 per page, JSON nextCursor). Read-only; no recovery.
   --list-ticket-activity <id> [--before <audit-id>]
                           Page 100 redacted native Ticket audit events by immutable ID.
                           Event details remain private; never replay or recover; exit.
@@ -2727,6 +2760,20 @@ mod tests {
             assert!(serde_json::from_str::<HeadlessTeamCreateDocument>(unsafe_json).is_err());
         }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-tickets-page"), Ok(Command::ListTicketsPage {
+            before_created_at: None, before_id: None,
+        }));
+        assert_eq!(parsed("--list-tickets-page --before 123 ticket_3"), Ok(Command::ListTicketsPage {
+            before_created_at: Some(123), before_id: Some("ticket_3".into()),
+        }));
+        for invalid in [
+            "--list-tickets-page --before", "--list-tickets-page --before 123",
+            "--list-tickets-page --before 0 ticket_3",
+            "--list-tickets-page --before -1 ticket_3",
+            "--list-tickets-page --before nope ticket_3",
+            "--list-tickets-page --before 123 ../escape",
+            "--list-tickets-page --stop-ticket ticket_3",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--list-ticket-activity ticket_123"), Ok(Command::ListTicketActivity {
             ticket_id:"ticket_123".into(), before_id:None,
         }));

@@ -1990,6 +1990,73 @@ pub(crate) fn list_headless_tasks(database_path: &std::path::Path) -> Result<Str
     serde_json::to_string_pretty(&tickets).map_err(|e| e.to_string())
 }
 
+
+/// A complete read-only Ticket index across more than 200 native records.
+/// Preserve the legacy --list-tickets array. Keysets use immutable creation
+/// identity; recovery and concurrent state updates cannot reorder unseen rows.
+pub(crate) fn list_headless_tasks_page(
+    database_path: &std::path::Path, before_created_at: Option<i64>,
+    before_id: Option<&str>,
+) -> Result<String> {
+    match (before_created_at, before_id) {
+        (None, None) => {}
+        (Some(at), Some(id))
+            if at > 0 && !id.is_empty() && id.len() <= 128
+                && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')) => {}
+        _ => return Err("Invalid Ticket index cursor: supply positive creation time and bounded Ticket ID.".into()),
+    }
+    let store = Store::open_read_only(database_path)?;
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if let Some((at, id)) = before_created_at.zip(before_id) {
+        let anchored: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1 AND created_at=?2)",
+            params![id, at], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !anchored {
+            return Err("Ticket index cursor no longer matches a persisted Ticket.".into());
+        }
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.state,t.revision,t.active_assignment_id,
+                t.created_at,t.updated_at,
+                (SELECT COUNT(*) FROM sa_effect_receipts r
+                 WHERE r.ticket_id=t.id AND r.state!='applied')
+         FROM sa_tickets t
+         WHERE ?1 IS NULL OR t.created_at<?1 OR (t.created_at=?1 AND t.id<?2)
+         ORDER BY t.created_at DESC,t.id DESC LIMIT 201",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![before_created_at,before_id], |r| Ok(serde_json::json!({
+        "ticketId": r.get::<_, String>(0)?,
+        "orchestrationId": r.get::<_, String>(1)?,
+        "state": r.get::<_, String>(2)?,
+        "revision": r.get::<_, i64>(3)?,
+        "activeAssignmentId": r.get::<_, Option<String>>(4)?,
+        "createdAt": r.get::<_, i64>(5)?,
+        "updatedAt": r.get::<_, i64>(6)?,
+        "unresolvedExternalEffects": r.get::<_, i64>(7)?,
+    }))).map_err(|e| e.to_string())?;
+    let mut tickets = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let may_have_more = tickets.len() > 200;
+    tickets.truncate(200);
+    let next_cursor = if may_have_more {
+        tickets.last().map(|item| serde_json::json!({
+            "createdAt": item["createdAt"],
+            "ticketId": item["ticketId"]
+        }))
+    } else { None };
+    drop(stmt);
+    snapshot.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "items": tickets,
+        "pageLimit": 200,
+        "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
+        "observationalOnly": true,
+        "automaticRecoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Open the live database for one explicitly requested Ticket transition.
 /// Store::open is intentionally unsuitable here: its restart recovery would
 /// interrupt healthy sessions owned by a concurrently running serve process.
@@ -9237,6 +9304,70 @@ mod tests {
         assert!(!listed.contains("Private task objective"));
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, before.revision);
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+    }
+
+
+    #[test]
+    fn headless_ticket_index_pages_all_tickets_after_mutable_state_changes_without_recovery() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Indexed headless Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205 {
+            let id = format!("index-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE INDEX OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,'blocked',1000,2000)",
+                params![id,team.id,team.project_id,team.policy_revision],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        let first_raw = list_headless_tasks_page(&path,None,None).unwrap();
+        let first:serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(),200);
+        assert_eq!(first["mayHaveMore"],true);
+        assert_eq!(first["observationalOnly"],true);
+        assert_eq!(first["automaticRecoveryPerformed"],false);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &list_headless_tasks(&path).unwrap(),
+        ).unwrap().as_array().unwrap().len(),200);
+        let cursor_at = first["nextCursor"]["createdAt"].as_i64().unwrap();
+        let cursor_id = first["nextCursor"]["ticketId"].as_str().unwrap();
+        // Mutable state updates must not omit unseen Tickets from the index.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='failed',updated_at=999999
+             WHERE id='index-001'", [],
+        ).unwrap();
+        let second_raw = list_headless_tasks_page(
+            &path,Some(cursor_at),Some(cursor_id),
+        ).unwrap();
+        let second:serde_json::Value = serde_json::from_str(&second_raw).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(),5);
+        assert_eq!(second["mayHaveMore"],false);
+        assert!(second["nextCursor"].is_null());
+        let ids:std::collections::HashSet<_> = first["items"].as_array().unwrap()
+            .iter().chain(second["items"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids.len(),205);
+        for secret in ["PRIVATE INDEX OBJECTIVE","local-user","request_key","authorizationId"] {
+            assert!(!first_raw.contains(secret) && !second_raw.contains(secret));
+        }
+        for (at, id) in [
+            (Some(1000),None), (None,Some("index-001")),
+            (Some(0),Some("index-001")), (Some(999),Some("index-001")),
+            (Some(1000),Some("index-missing")), (Some(1000),Some("../escape")),
+        ] {
+            assert!(list_headless_tasks_page(&path,at,id).is_err());
+        }
+        drop(store);
+        let check = Store::open_read_only(&path).unwrap();
+        assert_eq!(check.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(),205);
     }
 
     #[test]

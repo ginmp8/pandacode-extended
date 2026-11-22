@@ -638,6 +638,8 @@ The one-shot CLI commands above retain their explicit, exit-after-poll behavior.
 
 ```sh
 pandacode serve --list-tickets
+pandacode serve --list-tickets-page
+pandacode serve --list-tickets-page --before <created-at-ms> <ticket-id>
 pandacode serve --list-ticket-activity <ticket-id>
 pandacode serve --list-ticket-activity <ticket-id> --before <audit-id>
 pandacode serve --list-team-member-activity <team-id> <bot-id>
@@ -653,6 +655,14 @@ pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
 pandacode serve --stop-ticket <ticket-id>
 pandacode serve --stop-ticket-at-revision <ticket-id> <expected-revision>
 ```
+
+The legacy `--list-tickets` command retains its original 200-item JSON array
+for existing clients. `--list-tickets-page` returns `items`, `nextCursor`,
+and `mayHaveMore`; follow the cursor while more pages exist. This read-only
+creation-order index remains stable if a Ticket's mutable state or update
+time changes between pages. Each page is a fresh SQLite snapshot, so re-read
+the current Ticket before making any revision-guarded operational decision.
+Neither command initiates recovery, authorization, provider dispatch or replay.
 
 The Ticket activity command pages a durable audit stream in descending event-ID order
 (100 entries per page). Use the response's `nextCursor` with `--before` while

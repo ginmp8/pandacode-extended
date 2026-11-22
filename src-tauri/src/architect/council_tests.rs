@@ -8437,6 +8437,12 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     let composite = council::status_for_authenticated_children(&root, &complete_roster)
         .expect("two authenticated child Councils satisfy the M4 S1 root quorum");
     assert_eq!(composite.state, "passed");
+    // A composite seat is bound to the child's stricter frozen target,
+    // not merely the lower root Council threshold.
+    let mut below_child_target = complete_roster.clone();
+    below_child_target[0].lowest_score = 9.1;
+    assert!(council::status_for_authenticated_children(&root, &below_child_target).is_none(),
+        "a child scored below its 9.5 target cannot approve a 9.0 root Council");
     assert_eq!(authenticated_hierarchical_status(&store, &root)
         .as_ref().map(|status| status.state.as_str()), Some("passed"));
     let mut live_projection = root.clone();
@@ -9782,6 +9788,23 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     let child_receipts = child_council::verified_s2_receipts(&store, &saved).unwrap().unwrap();
     assert!(council::status_for_authenticated_children_s2(
         &saved, &parent_seats, &child_receipts).is_some());
+    // Defense in depth: even if a caller supplies a shaped receipt, the
+    // native S2 terminal gate must preserve the frozen leaf quorum and target.
+    let mut short_wave = child_receipts.clone();
+    short_wave[0].leaf_worker_ids.pop();
+    assert!(council::status_for_authenticated_children_s2(
+        &saved, &parent_seats, &short_wave).is_none(),
+        "a two-seat child must not accept one second-wave leaf");
+    let mut extra_wave = child_receipts.clone();
+    extra_wave[0].leaf_worker_ids.push("phantom-leaf".into());
+    assert!(council::status_for_authenticated_children_s2(
+        &saved, &parent_seats, &extra_wave).is_none(),
+        "a child cannot gain an extra unissued S2 reviewer");
+    let mut below_child_target = child_receipts.clone();
+    below_child_target[0].lowest_score = 9.2;
+    assert!(council::status_for_authenticated_children_s2(
+        &saved, &parent_seats, &below_child_target).is_none(),
+        "a 9.2 child second wave cannot pass its stricter 9.5 target");
     // A corrupted phase-two root alias cannot be counted as a fresh vote on
     // top of the already authenticated child composite.
     let mut reused_child_session = saved.clone();

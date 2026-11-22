@@ -2568,7 +2568,7 @@ pub(super) fn status_for_authenticated_children(
                         && same_lens(&proof.lens, &criterion.lens)
                         && !proof.leaf_worker_ids.is_empty()
                         && proof.lowest_score.is_finite()
-                        && proof.lowest_score >= criterion.target.max(config.target)
+                        && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
                 })
             })
         })
@@ -2580,16 +2580,17 @@ pub(super) fn status_for_authenticated_children(
     let mut bot_ids = std::collections::HashSet::new();
     let mut lowest = f64::INFINITY;
     for child in children {
+        let choice = config.nested_bot_reviewers.iter()
+            .find(|choice| choice.bot_id == child.bot_id)?;
         if child.root_session_id != team.session_id
             || child.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
-            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == child.bot_id)
             || child.parent_worker_id.is_empty()
             || child.child_session_id.is_empty()
             || !worker_ids.insert(child.parent_worker_id.as_str())
             || !session_ids.insert(child.child_session_id.as_str())
             || !bot_ids.insert(child.bot_id.as_str())
             || !child.lowest_score.is_finite()
-            || child.lowest_score < config.target
+            || child.lowest_score < config.target.max(choice.child_target)
         {
             return None;
         }
@@ -2738,14 +2739,15 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
     let mut child_bots = std::collections::HashSet::new();
     let mut lowest = f64::INFINITY;
     for child in children {
+        let choice = config.nested_bot_reviewers.iter()
+            .find(|choice| choice.bot_id == child.bot_id)?;
         if child.root_session_id != team.session_id
             || child.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
-            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == child.bot_id)
             || !child_bots.insert(child.bot_id.as_str())
             || child.parent_worker_id.is_empty() || child.child_session_id.is_empty()
             || !identities.insert(child.parent_worker_id.as_str())
             || !sessions.insert(child.child_session_id.as_str())
-            || !child.lowest_score.is_finite() || child.lowest_score < config.target
+            || !child.lowest_score.is_finite() || child.lowest_score < config.target.max(choice.child_target)
             || config.criteria.iter().filter(|criterion| criterion.required)
                 .any(|criterion| criterion.evidence_required
                     || !child.criterion_evidence.iter().any(|proof| {
@@ -2753,7 +2755,7 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
                             && same_lens(&proof.lens, &criterion.lens)
                             && !proof.leaf_worker_ids.is_empty()
                             && proof.lowest_score.is_finite()
-                            && proof.lowest_score >= criterion.target.max(config.target)
+                            && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
                     }))
         {
             return None;
@@ -2828,6 +2830,8 @@ pub(super) fn status_for_authenticated_children_s2(
     let mut bots = std::collections::HashSet::new();
     let mut leaf_ids = std::collections::HashSet::new();
     for receipt in second_children {
+        let choice = config.nested_bot_reviewers.iter()
+            .find(|choice| choice.bot_id == receipt.bot_id)?;
         let parent = children.iter().find(|seat| seat.bot_id == receipt.bot_id
             && seat.child_session_id == receipt.child_session_id
             && seat.root_cycle_id == receipt.root_cycle_id
@@ -2835,9 +2839,9 @@ pub(super) fn status_for_authenticated_children_s2(
             && seat.policy_sha256 == receipt.policy_sha256)?;
         if parent.parent_worker_id.is_empty()
             || !bots.insert(receipt.bot_id.as_str())
-            || receipt.leaf_worker_ids.len() < MIN_REVIEWERS
+            || receipt.leaf_worker_ids.len() != choice.child_reviewers
             || !receipt.lowest_score.is_finite()
-            || receipt.lowest_score < config.target
+            || receipt.lowest_score < config.target.max(choice.child_target)
             || receipt.leaf_worker_ids.iter().any(|id|
                 id.is_empty() || !leaf_ids.insert(id.as_str()))
         {
@@ -2850,7 +2854,7 @@ pub(super) fn status_for_authenticated_children_s2(
                     && proof.leaf_worker_ids.iter().all(|id|
                         receipt.leaf_worker_ids.contains(id))
                     && proof.lowest_score.is_finite()
-                    && proof.lowest_score >= config.target.max(criterion.target))
+                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
             {
                 return None;
             }
@@ -2980,7 +2984,7 @@ pub(super) fn status_for_authenticated_children_s3(
                     && proof.leaf_worker_ids.iter().all(|id|
                         second.leaf_worker_ids.contains(id))
                     && proof.lowest_score.is_finite()
-                    && proof.lowest_score >= config.target.max(criterion.target))
+                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
             {
                 return None;
             }

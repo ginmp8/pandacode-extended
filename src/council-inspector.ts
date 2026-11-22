@@ -463,13 +463,15 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
           .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
       }
       shownScope = nextScope;
-    }).catch(reason => {
+    }).catch(() => {
       if (serial !== current || !details.open || !details.isConnected) return;
       shownScope = null;
       body.replaceChildren();
       const error = document.createElement('p');
       error.setAttribute('role', 'alert');
-      error.textContent = 'Could not inspect this Council: ' + (reason instanceof Error ? reason.message : String(reason));
+      // Native/provider errors can contain private paths or Channel data. Do not
+      // render untrusted exception details in a shared read-only inspector.
+      error.textContent = 'Could not inspect this Council. Check task access and retry.';
       body.append(error);
     }).finally(() => {
       if (serial === current) {

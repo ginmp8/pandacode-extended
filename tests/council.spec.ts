@@ -1250,14 +1250,24 @@ test('Council inspector never promotes an unverified terminal hint', async ({ pa
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
-test('Council inspector denial remains accessible on narrow screens', async ({ page }) => {
+test('Council inspector safely redacts private native denial details and remains accessible on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });
-  await open(page, '/?council', { architect_council_inspect: 'task scope denied' });
+  const privateDetail = '/private/channels/finance/unrelated-direct-message';
+  await open(page, '/?council', { architect_council_inspect: 'task scope denied: ' + privateDetail });
   await button(page).click();
   const inspector = panel(page).locator('.council-inspection');
   await inspector.locator('summary').focus();
   await page.keyboard.press('Enter');
-  await expect(inspector.getByRole('alert')).toHaveText('Could not inspect this Council: task scope denied');
+  const alert = inspector.getByRole('alert');
+  await expect(alert).toHaveText('Could not inspect this Council. Check task access and retry.');
+  await expect(inspector).not.toContainText(privateDetail);
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeEnabled();
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(alert).toHaveText('Could not inspect this Council. Check task access and retry.');
+  await expect(inspector).not.toContainText(privateDetail);
+  await expect(refresh).toBeEnabled();
   const bounds = await panel(page).boundingBox();
   expect(bounds).not.toBeNull();
   expect(bounds!.x).toBeGreaterThanOrEqual(0);

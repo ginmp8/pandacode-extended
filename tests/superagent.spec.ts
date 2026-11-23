@@ -2793,6 +2793,85 @@ test('native Task timeline orders durable audit and assignment records and opens
     /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
 });
 
+test('native operator WorkItem cancellation is confirmed, revision-bound and non-dispatching', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-work-item-cancel-test';document.body.appendChild(host);
+    const commands:string[]=[];
+    const cancelCalls:Array<Record<string,unknown>>=[];
+    let revision=3;
+    let state:'planned'|'cancelled'='planned';
+    (window as unknown as {workItemCancelEvidence:()=>unknown}).workItemCancelEvidence =
+      ()=>({commands,cancelCalls,revision,state});
+    const planned=()=>({
+      id:'item-one',ticketId:'ticket',requestKey:'plan-one',parentId:null,
+      summary:'Retain the immutable plan',state,createdAt:1800000000100,
+    });
+    const ticket=()=>({
+      id:'ticket',orchestrationId:'team',objective:'Inspect an operator plan',
+      state:'blocked',revision,evidence:null,
+    });
+    mountSuperagent(host,async (command,args) => {
+      commands.push(command);
+      if(command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Operator Plan Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:true,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets') return [ticket()] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket:ticket(),
+        mandate:{actor:'local-user',authorizationId:'native-user-issued',
+          policyRevision:1,projectId:'project',expiresAt:1900000000000,
+          revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],
+        workItems:[planned()],truncatedWorkItems:false,
+        timeline:[{at:1800000000100,key:'work-item:item-one',
+          label:'Operator-planned WorkItem',detail:'Retain the immutable plan',
+          assignmentId:null}],
+      } as never;
+      if(command==='superagent_cancel_work_item') {
+        const request=args as Record<string,unknown>;
+        cancelCalls.push(request);
+        if(request.ticketId!=='ticket' || request.itemId!=='item-one' ||
+            request.expectedRevision!==revision || typeof request.requestKey!=='string') {
+          throw Error('Invalid revision-bound native cancellation');
+        }
+        revision+=1;state='cancelled';
+        return planned() as never;
+      }
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-work-item-cancel-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const plans=host.getByRole('region',{name:'Operator-planned WorkItems'});
+  await expect(plans).toContainText('Retain the immutable plan');
+  await plans.getByRole('button',{name:'Cancel planned WorkItem'}).click();
+  await expect(host.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toContainText('No Worker will be dispatched');
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(plans).toContainText('cancelled');
+  await expect(plans.getByRole('button',{name:'Cancel planned WorkItem'})).toHaveCount(0);
+  const result=await page.evaluate(() =>
+    (window as unknown as {workItemCancelEvidence:()=> {
+      commands:string[];cancelCalls:Array<Record<string,unknown>>;
+      revision:number;state:string;
+    }}).workItemCancelEvidence());
+  expect(result.cancelCalls).toHaveLength(1);
+  expect(result.cancelCalls[0].expectedRevision).toBe(3);
+  expect(result.revision).toBe(4);
+  expect(result.state).toBe('cancelled');
+  expect(result.commands.some(command =>
+    /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
+});
+
 test('native effect receipt inspection is lazy, task-scoped and cannot dispatch', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

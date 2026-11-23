@@ -414,6 +414,10 @@ pub struct NativeTaskHostCheckReceipt {
     pub artifact_correlation_sha256: String,
     pub check_name: String,
     pub manifest_sha256: String,
+    /// A bounded source/config snapshot measured by the native host on both
+    /// sides of execution. Not a verified full-tree or approved artifact SHA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_sha256: Option<String>,
     pub observed_at: i64,
     pub check_passed: bool,
     pub output_truncated: bool,
@@ -652,6 +656,9 @@ fn native_host_check_is_current(
         && receipt.manifest_sha256.len() == 64
         && receipt.manifest_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         && receipt.observed_at > 0
+        && receipt.source_snapshot_sha256.as_ref().is_none_or(|hash|
+            hash.len() == 64 && hash.bytes().all(|b|
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
 }
 
 /// Observe an already-admitted non-Channel root task before invoking the
@@ -723,10 +730,17 @@ pub(crate) fn record_native_host_check(
         .ok_or("council_task_denied: native check result is missing.")?;
     let output_truncated = observed["outputTruncated"].as_bool()
         .ok_or("council_task_denied: native output status is missing.")?;
+    let source_snapshot_sha256 = match observed["scope"].as_str() {
+        Some("manifest_only_not_artifact_verification")
+            if observed.get("sourceSnapshotSha256").is_none() => None,
+        Some("bounded_source_snapshot_not_full_artifact_verification") =>
+            Some(observed["sourceSnapshotSha256"].as_str()
+                .ok_or("council_task_denied: missing native source snapshot.")?.to_owned()),
+        _ => return Err("council_task_denied: native check scope is inconsistent.".into()),
+    };
     if report["checked"] != true
         || report["ok"] != check_passed
         || observed["kind"] != "manifest_declared_check"
-        || observed["scope"] != "manifest_only_not_artifact_verification"
         || observed["provenance"] != "native_host"
     {
         return Err("council_task_denied: native check provenance is inconsistent.".into());
@@ -740,7 +754,7 @@ pub(crate) fn record_native_host_check(
         task_scope_sha256: request.task_scope_sha256.clone(),
         artifact_correlation_sha256: request.artifact_sha256.clone(),
         check_name: check_name.to_owned(),
-        manifest_sha256: manifest_sha256.to_owned(),
+        manifest_sha256: manifest_sha256.to_owned(), source_snapshot_sha256,
         observed_at, check_passed, output_truncated,
     };
     if !native_host_check_is_current(&receipt, request) {

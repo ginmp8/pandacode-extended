@@ -3812,7 +3812,12 @@ async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Resu
         (project_id, task_request)
     };
     let root = state.root(&project_id, Some(&session_id))?;
-    let mut report = blocking(move || Ok(checks::turn_report(&root))).await?;
+    let has_native_task = task_request.is_some();
+    let mut report = blocking(move || Ok(if has_native_task {
+        checks::turn_report_for_native_task(&root)
+    } else {
+        checks::turn_report(&root)
+    })).await?;
     // A check is not native task proof unless its original Council request
     // still has identical live authority after the process has finished.
     {

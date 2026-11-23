@@ -7917,6 +7917,30 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     forged = observed.clone();
     forged["hostObservation"]["manifestSha256"] = json!("invalid-digest");
     assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err());
+    let mut bounded = observed.clone();
+    bounded["hostObservation"]["scope"] =
+        json!("bounded_source_snapshot_not_full_artifact_verification");
+    bounded["hostObservation"]["sourceSnapshotSha256"] = json!("b".repeat(64));
+    let bounded_receipt = council_requests::record_native_host_check(
+        &store, &request, &bounded,
+    ).unwrap();
+    assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    let saved = council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(saved.host_checks.len(), 2);
+    assert_eq!(saved.host_checks[1], bounded_receipt);
+    let mut missing_hash = bounded.clone();
+    missing_hash["hostObservation"].as_object_mut().unwrap().remove("sourceSnapshotSha256");
+    assert!(council_requests::record_native_host_check(&store, &request, &missing_hash).is_err());
+    let mut invalid_hash = bounded.clone();
+    invalid_hash["hostObservation"]["sourceSnapshotSha256"] = json!("not-a-hash");
+    assert!(council_requests::record_native_host_check(&store, &request, &invalid_hash).is_err());
+    let mut scope_downgrade = bounded.clone();
+    scope_downgrade["hostObservation"]["scope"] = json!("manifest_only_not_artifact_verification");
+    assert!(council_requests::record_native_host_check(&store, &request, &scope_downgrade).is_err());
+    assert!(!saved.native.verified_pass,
+        "a stable bounded source snapshot does not replace independent Council reviewers");
 
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.objective.push_str(" changed");

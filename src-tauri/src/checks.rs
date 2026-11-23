@@ -5,7 +5,7 @@
 //! message queue, where the user can edit or cancel the repair request.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::{Path, PathBuf}, process::Command, time::Duration};
 
 use crate::workspace::run_process;
 
@@ -15,6 +15,78 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 const TAIL_BYTES: usize = 4000;
 
 const NO_PLAN: &str = "This project declares no fast check (no npm test script and no Cargo.toml).";
+
+/// A bounded, deterministic snapshot of local code/configuration inputs, not
+/// an assertion that every artifact or generated dependency was examined.
+const MAX_SOURCE_ENTRIES: usize = 20_000;
+const MAX_SOURCE_FILES: usize = 8_192;
+const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SOURCE_DEPTH: usize = 16;
+
+fn source_snapshot_sha256(root: &Path) -> Option<String> {
+    fn eligible_file(path: &Path) -> bool {
+        matches!(path.extension().and_then(|ext| ext.to_str()), Some(
+            "rs" | "cs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" |
+            "py" | "go" | "java" | "kt" | "kts" | "swift" | "sql" |
+            "toml" | "json" | "yaml" | "yml" | "lock" |
+            "html" | "css" | "scss" | "sh" | "ps1" | "xml"
+        )) || path.file_name().and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "Dockerfile" | "Makefile" | "Gemfile"))
+    }
+
+    fn collect(
+        dir: &Path, files: &mut Vec<(PathBuf, u64)>, entries_seen: &mut usize,
+        bytes: &mut u64, depth: usize,
+    ) -> Option<()> {
+        if depth > MAX_SOURCE_DEPTH { return None; }
+        let mut entries = std::fs::read_dir(dir).ok()?
+            .collect::<std::io::Result<Vec<_>>>().ok()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            *entries_seen = entries_seen.checked_add(1)?;
+            if *entries_seen > MAX_SOURCE_ENTRIES { return None; }
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if matches!(name,
+                ".git" | "node_modules" | "target" | "dist" | "build" |
+                "coverage" | "vendor" | ".venv" | ".next" | ".turbo" |
+                ".cache" | ".vite-cache" | "out"
+            ) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            // Never follow links outside the authorized checkout.
+            if metadata.file_type().is_symlink() { return None; }
+            if metadata.is_dir() {
+                collect(&path, files, entries_seen, bytes, depth + 1)?;
+            } else if metadata.is_file() && eligible_file(&path) {
+                *bytes = bytes.checked_add(metadata.len())?;
+                if *bytes > MAX_SOURCE_BYTES || files.len() >= MAX_SOURCE_FILES {
+                    return None;
+                }
+                files.push((path, metadata.len()));
+            }
+        }
+        Some(())
+    }
+
+    let (mut files, mut count, mut bytes) = (Vec::new(), 0, 0);
+    collect(root, &mut files, &mut count, &mut bytes, 0)?;
+    if files.is_empty() { return None; }
+    let mut sha = Sha256::new();
+    sha.update(b"pandacode:bounded-source-snapshot:v1");
+    for (path, original_size) in files {
+        let relative = path.strip_prefix(root).ok()?.to_str()?;
+        let data = std::fs::read(&path).ok()?;
+        if data.len() as u64 != original_size { return None; }
+        sha.update((relative.len() as u64).to_le_bytes());
+        sha.update(relative.as_bytes());
+        sha.update(original_size.to_le_bytes());
+        sha.update(&data);
+    }
+    Some(format!("{:x}", sha.finalize()))
+}
 
 /// User-enabled project checks must not run in task-owned Architect workers
 /// or Council child/reviewer sessions. No reviewer is granted shell tools.
@@ -98,15 +170,44 @@ pub(crate) fn turn_report(root: &Path) -> Value {
     report_for_plan(root, &plan)
 }
 
+/// Only admitted native Council tasks pay for a bounded source snapshot.
+/// Ordinary turn checks retain their existing manifest-only behavior.
+pub(crate) fn turn_report_for_native_task(root: &Path) -> Value {
+    let Some(plan) = plan(root) else {
+        return json!({"checked": false, "reason": NO_PLAN});
+    };
+    report_for_plan_inner(root, &plan, true)
+}
+
 /// Only the existing, explicitly enabled host path invokes this runner.
 /// A missing or changed check manifest cannot produce an execution receipt;
 /// failures are observed failures, not passing evidence.
 fn report_for_plan(root: &Path, plan: &Plan) -> Value {
+    report_for_plan_inner(root, plan, false)
+}
+
+fn report_for_plan_inner(root: &Path, plan: &Plan, snapshot_sources: bool) -> Value {
     let before = manifest_sha256(root, plan);
+    let source_before = snapshot_sources.then(|| source_snapshot_sha256(root));
     match run(root, plan) {
         Ok(mut report) => {
             if let (Some(a), Some(b)) = (before, manifest_sha256(root, plan)) {
                 if a == b {
+                    // A missing, oversized, linked or concurrently mutated source
+                    // snapshot is explicitly NOT a verified native task receipt.
+                    let source = if snapshot_sources {
+                        match (source_before.flatten(), source_snapshot_sha256(root)) {
+                            (Some(before), Some(after)) if before == after => Some(before),
+                            _ => return report,
+                        }
+                    } else {
+                        None
+                    };
+                    let scope = if snapshot_sources {
+                        "bounded_source_snapshot_not_full_artifact_verification"
+                    } else {
+                        "manifest_only_not_artifact_verification"
+                    };
                     report["hostObservation"] = json!({
                         "kind": "manifest_declared_check",
                         "name": plan.name,
@@ -115,8 +216,11 @@ fn report_for_plan(root: &Path, plan: &Plan) -> Value {
                         "passed": report["ok"] == true,
                         "outputTruncated": report["truncated"] == true,
                         "provenance": "native_host",
-                        "scope": "manifest_only_not_artifact_verification",
+                        "scope": scope,
                     });
+                    if let Some(source) = source {
+                        report["hostObservation"]["sourceSnapshotSha256"] = json!(source);
+                    }
                 }
             }
             report
@@ -295,6 +399,48 @@ mod tests {
         let missing = report_for_plan(root, &unavailable);
         assert_eq!(missing["checked"], false);
         assert!(missing.get("hostObservation").is_none());
+    }
+
+    #[test]
+    fn native_task_check_requires_a_stable_bounded_source_snapshot() {
+        let temp = Scratch::new("native-task-source");
+        let root = temp.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        fs::write(root.join("src/app.ts"), "export const value = 1;").unwrap();
+        let runner = root.join("fake-npm");
+        let plan = Plan {
+            name: "npm test".into(), program: runner.to_str().unwrap().into(), args: vec![],
+        };
+        fake(&runner, "echo tests passed\nexit 0");
+        let first = report_for_plan_inner(root, &plan, true);
+        assert_eq!(first["checked"], true);
+        assert_eq!(first["hostObservation"]["passed"], true);
+        assert_eq!(first["hostObservation"]["scope"],
+            "bounded_source_snapshot_not_full_artifact_verification");
+        let original = first["hostObservation"]["sourceSnapshotSha256"].as_str().unwrap().to_owned();
+        assert_eq!(original.len(), 64);
+        let repeated = report_for_plan_inner(root, &plan, true);
+        assert_eq!(repeated["hostObservation"]["sourceSnapshotSha256"], original);
+
+        // The process completed, but it changed what was under review.
+        fake(&runner, "echo 'export const value = 2;' > src/app.ts\nexit 0");
+        let mutated = report_for_plan_inner(root, &plan, true);
+        assert_eq!(mutated["checked"], true);
+        assert!(mutated.get("hostObservation").is_none(),
+            "a passing process cannot certify a changed source snapshot");
+        fake(&runner, "exit 0");
+        let after_change = report_for_plan_inner(root, &plan, true);
+        assert_ne!(after_change["hostObservation"]["sourceSnapshotSha256"], original);
+
+        // A symlink would make the file scope ambiguous; deny this stronger
+        // receipt without breaking the ordinary manifest-declared check.
+        std::os::unix::fs::symlink(root.join("src/app.ts"), root.join("src/alias.ts")).unwrap();
+        let linked = report_for_plan_inner(root, &plan, true);
+        assert_eq!(linked["checked"], true);
+        assert!(linked.get("hostObservation").is_none());
+        assert_eq!(report_for_plan(root, &plan)["hostObservation"]["scope"],
+            "manifest_only_not_artifact_verification");
     }
 
     #[test]

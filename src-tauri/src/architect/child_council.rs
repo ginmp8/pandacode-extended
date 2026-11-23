@@ -1977,8 +1977,8 @@ pub(super) fn verified_s2_receipts(
 /// Counting only active reservations would refund an entire wave on recovery.
 fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Result<usize> {
     // Retired child sessions remain owned by the root after recovery.
-    // Never use their mutable task_description to decide whether already
-    // issued native reviewer grants count against the current cycle budget.
+    // Never use a mutable description or TeamSnapshot cycle to refund an
+    // already issued native reviewer grant.
     let mut statement = store.db.prepare(
         "SELECT DISTINCT child.session_id FROM architect_workers AS child
          WHERE child.parent_session_id=?1",
@@ -1992,9 +1992,41 @@ fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Resul
 
     let mut attempts = 0usize;
     for child_id in children {
-        // Ordinary root workers have no task-owned child Council snapshot.
-        let Some(child) = super::load(store, &child_id)? else { continue };
+        // Ordinary root workers have no task-owned child Council snapshot
+        // and no child-scoped native reviewer grants.
+        let grants: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='reviewer_authority'",
+            [&child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        let Some(child) = super::load(store, &child_id)? else {
+            if grants != 0 {
+                return Err("child_council_stale: historical child Council state is missing.".into());
+            }
+            continue;
+        };
         if child.council_since != root.council_since {
+            // A different legitimate cycle is excluded, but an issued grant
+            // still pinned to this cycle exposes a tampered retired snapshot.
+            if grants > 0 {
+                let expected_cycle = format!("{child_id}:{}", root.council_since);
+                let mut issued = store.db.prepare(
+                    "SELECT content FROM architect_requests
+                     WHERE parent_session_id=?1 AND kind='reviewer_authority'",
+                ).map_err(|error| error.to_string())?;
+                let entries = issued.query_map([&child_id], |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())?;
+                for raw in entries {
+                    let raw = raw.map_err(|error| error.to_string())?;
+                    let grant: serde_json::Value = serde_json::from_str(&raw)
+                        .map_err(|_| "child_council_stale: malformed historical reviewer authority.")?;
+                    if grant.get("councilCycleId").and_then(|id| id.as_str())
+                        == Some(expected_cycle.as_str())
+                    {
+                        return Err("child_council_stale: historical child Council cycle changed.".into());
+                    }
+                }
+            }
             continue;
         }
         if child.session_id != child_id || child.config.council.is_none() {
@@ -2007,11 +2039,6 @@ fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Resul
         if description != RESERVATION_DESCRIPTION {
             return Err("child_council_stale: historical child task identity changed.".into());
         }
-        let grants: i64 = store.db.query_row(
-            "SELECT COUNT(*) FROM architect_requests
-             WHERE parent_session_id=?1 AND kind='reviewer_authority'",
-            [&child_id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
         let recorded = usize::try_from(grants)
             .map_err(|_| "child_council_stale: invalid historical leaf grant count.")?;
         // Neither a removed snapshot entry nor a deleted authority row may

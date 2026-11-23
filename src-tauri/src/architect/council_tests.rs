@@ -6336,6 +6336,28 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
         "UPDATE sessions SET task_description=?2 WHERE id=?1",
         rusqlite::params![&old_child, old_description],
     ).unwrap();
+    // Retired reviewer grants are pinned to the original child cycle; a
+    // changed historical snapshot must never refund those native attempts.
+    let mut retired = load(&store, &old_child).unwrap().unwrap();
+    assert_eq!(retired.council_since, old_cycle);
+    retired.council_since = old_cycle.saturating_sub(1);
+    save(&store, &mut retired).unwrap();
+    let cycle_denial = child_council::require_total_attempt_capacity(&store, &root, 1)
+        .unwrap_err();
+    assert!(cycle_denial.contains("historical child Council cycle changed"), "{cycle_denial}");
+    retired.council_since = old_cycle;
+    save(&store, &mut retired).unwrap();
+
+    // Native root ownership persists after recovery. Losing the retired
+    // TeamSnapshot must also fail closed instead of erasing reviewer usage.
+    store.db.execute(
+        "DELETE FROM architect_teams WHERE session_id=?1", [&old_child],
+    ).unwrap();
+    let missing_denial = child_council::require_total_attempt_capacity(&store, &root, 1)
+        .unwrap_err();
+    assert!(missing_denial.contains("historical child Council state is missing"), "{missing_denial}");
+    save(&store, &mut retired).unwrap();
+
     let issued_grants: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
          WHERE kind='reviewer_authority'

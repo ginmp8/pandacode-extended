@@ -611,6 +611,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         if !matches!(old.status.as_str(), "interrupted" | "error") && !stale_paused_child {
             continue;
         }
+        // A paused root snapshot is not proof that its child coordinator's
+        // native provider has stopped. Never replace an active coordinator,
+        // even when every leaf appears stopped after root Pause.
+        if matches!(old.status.as_str(), "running" | "waiting") {
+            return Err("child_council_recovery_denied: child coordinator native session remains active.".into());
+        }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)
             .map_err(|_| "child_council_recovery_denied: malformed reservation.")?;
         let child_config = child_config(config, choice)?;

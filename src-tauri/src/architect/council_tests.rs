@@ -6325,6 +6325,33 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
             [&old_leaves[1]],
         ).unwrap();
     }
+    // A stale paused child team does not prove that its native coordinator
+    // provider has stopped. Neither running nor waiting may be replaced,
+    // even though the two child reviewer sessions have already stopped.
+    for live_status in ["running", "waiting"] {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&old_child, live_status],
+        ).unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+        assert!(denied.contains("child coordinator native session remains active"), "{denied}");
+        let reservation: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &old_child], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reservation, old_child,
+            "denied recovery must not replace the original child coordinator");
+        assert_eq!(serde_json::to_value(&root).unwrap(), frozen_root,
+            "denied recovery must not mutate the root Council cycle");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child]).unwrap();
+    }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root);

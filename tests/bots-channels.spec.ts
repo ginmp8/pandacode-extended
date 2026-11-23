@@ -474,7 +474,7 @@ test.describe('shared bot channels', () => {
     };
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/switch\\s*\\(command\\)\\s*\\{/,
+      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
         'if (command === "bot_shared_channel_council_inspect") return ' +
         '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(own) + '); switch (command) {');
       await route.fulfill({ response, body });

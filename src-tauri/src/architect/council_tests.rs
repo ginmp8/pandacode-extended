@@ -2735,6 +2735,13 @@ Council score: 9.4/10"#),
             skill_ids: Vec::new(),
         });
         reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        // The native report must have the same durable session ownership as
+        // the issued grant; a TeamSnapshot alone is not an authority link.
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+             VALUES(?1,?2,?3)",
+            rusqlite::params![&sid, &reviewer.id, &session.id],
+        ).unwrap();
         reviewer.reviewer_binding = Some(binding);
         store.message(&session.id, "assistant", report).unwrap();
         team.workers.push(reviewer);
@@ -7238,7 +7245,7 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     ));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("state.sqlite");
-    let (sid, launch) = {
+    let (sid, launch, sibling_launch) = {
         let store = Store::open(&path).unwrap();
         let project = store.add_project(&directory).unwrap();
         let session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
@@ -7276,6 +7283,12 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
         ).unwrap();
         assert_eq!(result["completed"], false);
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        // Start a reviewer in the second child as well, so reopening SQLite
+        // must revoke both independently owned child sessions and callbacks.
+        let sibling_launch = (0..3)
+            .filter_map(|_| next_action_state(&state, &mut |_| {}).unwrap())
+            .find(|candidate| candidate.admission.parent != launch.admission.parent)
+            .expect("the second native child must have an independently launched reviewer");
         {
             let store = state.store.lock().unwrap();
             assert_eq!(
@@ -7283,32 +7296,42 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
                 Some(session.id.as_str())
             );
             child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
-            // Represent a crash with all three native sessions still active.
-            for id in [&session.id, &launch.admission.parent, &launch.sid] {
+            child_council::authorize_leaf(&store, &sibling_launch.sid, &sibling_launch.admission).unwrap();
+            assert_ne!(launch.admission.parent, sibling_launch.admission.parent);
+            // Represent a crash with both child coordinators and their
+            // independent native reviewers still active.
+            for id in [&session.id, &launch.admission.parent, &launch.sid,
+                &sibling_launch.admission.parent, &sibling_launch.sid] {
                 store.db.execute(
                     "UPDATE sessions SET status='running' WHERE id=?1", [id],
                 ).unwrap();
             }
         }
-        (session.id, launch)
+        (session.id, launch, sibling_launch)
     };
     let reopened = Store::open(&path).unwrap();
     let root = load(&reopened, &sid).unwrap().unwrap();
     let child = load(&reopened, &launch.admission.parent).unwrap().unwrap();
+    let sibling_child = load(&reopened, &sibling_launch.admission.parent).unwrap().unwrap();
     assert_eq!(root.status, "interrupted");
     assert_eq!(child.status, "interrupted");
-    for id in [&sid, &launch.admission.parent, &launch.sid] {
+    assert_eq!(sibling_child.status, "interrupted");
+    for id in [&sid, &launch.admission.parent, &launch.sid,
+        &sibling_launch.admission.parent, &sibling_launch.sid] {
         assert_eq!(reopened.session(id).unwrap().status, "interrupted");
     }
-    assert!(child_council::authorize_leaf(
-        &reopened, &launch.sid, &launch.admission
-    ).unwrap_err().contains("child_council_revoked"));
+    for old_launch in [&launch, &sibling_launch] {
+        assert!(child_council::authorize_leaf(
+            &reopened, &old_launch.sid, &old_launch.admission
+        ).unwrap_err().contains("child_council_revoked"));
+    }
     let denied_launch = child_council::next_leaf_launch(
         &reopened, &std::collections::HashMap::new(), &root,
     ).err().expect("interrupted root must not dispatch a child leaf");
     assert!(denied_launch.contains("child_council_revoked"), "{denied_launch}");
     let before_root = serde_json::to_value(&root).unwrap();
     let before_child = serde_json::to_value(&child).unwrap();
+    let before_sibling = serde_json::to_value(&sibling_child).unwrap();
     let state = AppState {
         store: Arc::new(std::sync::Mutex::new(reopened)),
         agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -7317,9 +7340,11 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     };
     let error = control_state(&state, &sid, "resume").unwrap_err();
     assert!(error.contains("child_council_revoked"), "{error}");
-    completed_state(
-        &state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {},
-    );
+    for old_launch in [&launch, &sibling_launch] {
+        completed_state(
+            &state, &old_launch.sid, Some(&old_launch.admission), true, false, &mut |_| {},
+        );
+    }
     {
         let store = state.store.lock().unwrap();
         assert_eq!(
@@ -7329,6 +7354,10 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
         assert_eq!(
             serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
             before_child, "replayed callback must not mutate a restarted child"
+        );
+        assert_eq!(
+            serde_json::to_value(load(&store, &sibling_launch.admission.parent).unwrap().unwrap()).unwrap(),
+            before_sibling, "a second interrupted child cannot accept a late callback"
         );
     }
     // A new user objective is not a Resume: restart recovery must allocate
@@ -7348,6 +7377,7 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
                 rusqlite::params![sid, key], |row| row.get(0),
             ).unwrap();
             assert_ne!(child_session, launch.admission.parent);
+            assert_ne!(child_session, sibling_launch.admission.parent);
             let new_child = load(&store, &child_session).unwrap().unwrap();
             assert_eq!(new_child.status, "blocked");
             assert!(new_child.workers.is_empty());
@@ -7357,9 +7387,16 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
             before_child, "a fresh task cannot revive a previous child"
         );
+        assert_eq!(
+            serde_json::to_value(load(&store, &sibling_launch.admission.parent).unwrap().unwrap()).unwrap(),
+            before_sibling, "a fresh cycle cannot revive a sibling's interrupted child"
+        );
         assert!(child_council::authorize_leaf(
             &store, &launch.sid, &launch.admission,
         ).is_err(), "a revoked leaf must not enter a fresh Council cycle");
+        assert!(child_council::authorize_leaf(
+            &store, &sibling_launch.sid, &sibling_launch.admission,
+        ).is_err(), "a second child's revoked reviewer cannot enter a fresh Council cycle");
     }
     assert!(start_state(
         &state, &sid, "Concurrent objective", None, None,

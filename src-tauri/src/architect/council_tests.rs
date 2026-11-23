@@ -8043,6 +8043,55 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert!(!saved.native.verified_pass,
         "a stable bounded source snapshot does not replace independent Council reviewers");
 
+    // Physical storage replay must not turn one real host execution into
+    // several independent observations, including after the Council task
+    // was already admitted. This is inspection-only; no fake command runs.
+    let key = "native-council-task:host-check-task";
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1
+         AND worker_id=?1 AND key=?2 AND kind='council_native_task'",
+        rusqlite::params![&sid, key], |row| row.get(0),
+    ).unwrap();
+    let persist = |content: &str| {
+        store.db.execute(
+            "UPDATE architect_requests SET content=?3
+             WHERE parent_session_id=?1 AND worker_id=?1
+               AND key=?2 AND kind='council_native_task'",
+            rusqlite::params![&sid, key, content],
+        ).unwrap();
+    };
+    let mut replay: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let duplicate = replay["hostChecks"][0].clone();
+    replay["hostChecks"].as_array_mut().unwrap().push(duplicate);
+    persist(&replay.to_string());
+    let replay_error = council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap_err();
+    assert!(replay_error.contains("replayed provenance"), "{replay_error}");
+    assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none(),
+        "replayed host evidence cannot become an eligible future check task");
+
+    // An imported/corrupt row cannot bypass the maximum retained receipts
+    // by adding unique-looking observation IDs directly to storage.
+    let mut overflow: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let template = overflow["hostChecks"][0].clone();
+    for index in 2..17 {
+        let mut copy = template.clone();
+        copy["observationId"] = json!(format!("forged-observation-{index}"));
+        overflow["hostChecks"].as_array_mut().unwrap().push(copy);
+    }
+    persist(&overflow.to_string());
+    let capacity_error = council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap_err();
+    assert!(capacity_error.contains("bounded capacity"), "{capacity_error}");
+
+    persist(&original);
+    assert_eq!(council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap().host_checks, vec![receipt, bounded_receipt],
+        "restoring the exact native check history must restore read-only inspection");
+
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.objective.push_str(" changed");
     save(&store, &mut team).unwrap();

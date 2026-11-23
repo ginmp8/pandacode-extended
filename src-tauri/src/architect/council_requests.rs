@@ -632,9 +632,18 @@ pub(crate) fn inspect_native_task(
     if format!("{}:{}", session_id, native.cycle_started_at) != current.cycle_id {
         return Err("council_task_stale: native Council cycle changed.".into());
     }
+    // Native host observations are immutable executions, not reusable votes.
+    // A corrupt/restored record must not multiply one execution into many
+    // apparent checks or bypass the same 16-observation admission ceiling.
+    if record.host_checks.len() > 16 {
+        return Err("council_task_denied: native host check ledger exceeds its bounded capacity.".into());
+    }
+    let mut seen_observations = std::collections::HashSet::new();
     for check in &record.host_checks {
-        if !native_host_check_is_current(check, &current) {
-            return Err("council_task_stale: stored native host check has invalid task provenance.".into());
+        if !native_host_check_is_current(check, &current)
+            || !seen_observations.insert(check.observation_id.as_str())
+        {
+            return Err("council_task_stale: stored native host check has invalid or replayed provenance.".into());
         }
     }
     Ok(NativeTaskCouncilInspection { request: current, native, host_checks: record.host_checks })

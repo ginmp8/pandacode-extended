@@ -3244,7 +3244,7 @@ pub(crate) fn headless_unlink_thread(
 pub(crate) fn headless_linked_activity(path: &std::path::Path, ticket_id: &str, limit: i64)
     -> Result<String>
 {
-    let store = super::open_headless_transition_store(path)?;
+    let store = Store::open_read_only(path)?;
     serde_json::to_string_pretty(&linked_decisions(&store, ticket_id, limit)?)
         .map_err(|e| e.to_string())
 }
@@ -7177,6 +7177,56 @@ mod tests {
         assert_eq!(linked_decisions(&reopened, "one", 50).unwrap().len(), 1);
         assert!(link_thread(&reopened, &issue.id, "two", "issue:42").is_err());
         assert!(linked_decisions(&reopened, "two", 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn headless_linked_activity_is_read_only_ticket_scoped_and_restart_durable() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "headless-linked-one", "orch");
+        insert_manual_ticket(&store, "headless-linked-other", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &active.id, "headless-linked-one", "issue:42").unwrap();
+        observe(&store, &event("headless-linked-receipt", &active, 1)).unwrap();
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
+        ).unwrap();
+        let original: serde_json::Value = serde_json::from_str(
+            &headless_linked_activity(&path, "headless-linked-one", 20).unwrap(),
+        ).unwrap();
+        assert_eq!(original.as_array().unwrap().len(), 1);
+        assert_eq!(original[0]["deliveryId"], "headless-linked-receipt");
+        let page: serde_json::Value = serde_json::from_str(
+            &headless_linked_activity_page(&path, "headless-linked-one", 20, None).unwrap(),
+        ).unwrap();
+        assert_eq!(original, page["decisions"], "Legacy array and native page must agree");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &headless_linked_activity(&path, "headless-linked-other", 20).unwrap(),
+        ).unwrap(), serde_json::json!([]));
+        assert!(headless_linked_activity(&path, "missing-ticket", 20).is_err());
+
+        // Headless inspection uses an actual SQLite read-only connection, not
+        // the detached operator's write-capable transition adapter.
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert!(read_only.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unexpected_inspection_write','should_be_denied',?2)",
+            params!["headless-linked-one", storage::now()],
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), audit_before);
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        drop(read_only);
+        drop(store);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &headless_linked_activity(&path, "headless-linked-one", 20).unwrap(),
+        ).unwrap(), original);
     }
 
     #[test]

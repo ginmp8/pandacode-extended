@@ -1767,6 +1767,8 @@ pub(super) fn verified_parent_seats(
     let artifact_pinned = root_artifact_revision(store, root, false)?;
     let mut workers = HashSet::new();
     let mut sessions = HashSet::new();
+    let mut leaf_worker_ids = HashSet::new();
+    let mut leaf_session_ids = HashSet::new();
     let mut bots = HashSet::new();
     let mut ready = true;
     let mut seats = Vec::with_capacity(config.nested_bot_reviewers.len());
@@ -1777,6 +1779,22 @@ pub(super) fn verified_parent_seats(
             .ok_or("child_council_stale: required child Council is missing.")?;
         if !artifact_pinned && (child.status != "blocked" || !child.workers.is_empty()) {
             return Err("child_council_stale: root artifact revision pin is missing.".into());
+        }
+        // Reviewer independence spans sibling children and root reviewers.
+        // A restored S1 composite cannot count a leaf session twice.
+        for leaf in &child.workers {
+            if leaf.id.is_empty() || leaf.session_id.is_empty() {
+                ready = false;
+                continue;
+            }
+            if leaf.council.is_none()
+                || !leaf_worker_ids.insert(leaf.id.clone())
+                || !leaf_session_ids.insert(leaf.session_id.clone())
+                || root.workers.iter().any(|worker|
+                    worker.id == leaf.id || worker.session_id == leaf.session_id)
+            {
+                return Err("child_council_stale: duplicate native root/child leaf reviewer identity or session.".into());
+            }
         }
         let Some(seat) = parent_seat(store, root, &record, &child, false)? else {
             ready = false;

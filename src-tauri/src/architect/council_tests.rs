@@ -10611,6 +10611,22 @@ fn nested_m4_parallel_task_receipt_requires_both_child_council_callbacks() {
         &artifact, &request.request_id,
     ).unwrap(), terminal,
         "M4: restoring the original native session revalidates the same receipt");
+
+    // A corrupted second child's saved leaf must not count as another
+    // independent reviewer after the native root already settled.
+    let first_child = load(&store, &children[0].child_session_id).unwrap().unwrap();
+    let mut sibling = load(&store, &children[1].child_session_id).unwrap().unwrap();
+    sibling.workers[0].session_id = first_child.workers[0].session_id.clone();
+    save(&store, &mut sibling).unwrap();
+    let denied = child_council::verified_parent_seats(&store, &root).unwrap_err();
+    assert!(denied.contains("duplicate native root/child leaf reviewer identity or session"),
+        "S1 sibling leaf replay must be rejected before composite approval: {denied}");
+    assert!(!verified_council_pass(&store, &root),
+        "S1 cannot pass when two children share a reviewer session");
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-parallel-task",
+        &artifact, &request.request_id,
+    ).is_err(), "a corrupted sibling leaf must revoke native terminal proof");
 }
 
 #[test]

@@ -190,10 +190,12 @@ let demandArchived = false;
   let memberActivityItems: MemberActivityItem[] = [];
   let memberActivityCounts: Pick<MemberActivityPage, 'assignmentCount' | 'demandCount' | 'attentionDemandCount'> | null = null;
   let memberActivityHasMore = false, memberActivityCursor: MemberActivityCursor | null = null;
+  let memberActivityDemandFilter = '';
   const clearMemberActivity = () => {
     memberActivityTeamId = ''; memberActivityBotId = '';
     memberActivityItems = []; memberActivityCounts = null;
     memberActivityHasMore = false; memberActivityCursor = null;
+    memberActivityDemandFilter = '';
   };
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -294,10 +296,11 @@ let demandArchived = false;
   // Require a native Team+bot match on EVERY page before exposing chat routes.
   // A reused bot ID cannot make another Team's assignments visible.
   const fetchMemberActivity = async (
-    teamId: string, botId: string, before?: MemberActivityCursor,
+    teamId: string, botId: string, before?: MemberActivityCursor, demandId?: string,
   ): Promise<MemberActivityPage> => {
     const page = await call<MemberActivityPage>('superagent_member_activity_page', {
       orchestrationId: teamId, botId, limit: 25, ...(before ? {before} : {}),
+      ...(demandId ? {demandId} : {}),
     });
     const ids = new Set<string>();
     const ordered = (older: MemberActivityCursor, newer: MemberActivityCursor): boolean =>
@@ -313,6 +316,7 @@ let demandArchived = false;
         typeof page.hasMore !== 'boolean' ||
         page.items.some((entry, index) => {
           if (!entry || entry.orchestrationId !== teamId || entry.botId !== botId ||
+              (demandId && entry.ticketId !== demandId) ||
               typeof entry.ticketId !== 'string' || !entry.ticketId ||
               typeof entry.assignmentId !== 'string' || !entry.assignmentId ||
               typeof entry.sessionId !== 'string' || !entry.sessionId ||
@@ -1028,6 +1032,11 @@ let demandArchived = false;
             '(entire recorded Team history)'
           : 'Loading native member summary') + '</p>' +
         '<button type="button" data-sa-member-clear>Close activity</button>' +
+        (memberActivityDemandFilter
+          ? '<p>Showing Demand ' + safe(memberActivityDemandFilter) +
+            ' (native filtered history).</p>' +
+            '<button type="button" data-sa-member-filter-demand="">Show all Team activity</button>'
+          : '<p>Showing all recorded Team Demands.</p>') +
         '<ol aria-label="Member assignment history">' +
         (memberActivityItems.map(item =>
           '<li>Demand ' + safe(item.ticketId) + ' · ' + safe(item.role) +
@@ -1039,6 +1048,9 @@ let demandArchived = false;
           ' <button type="button" data-sa-member-open-demand="' + safe(item.assignmentId) +
           '" aria-label="Open demand for assignment ' + safe(item.assignmentId) +
           '">Open demand</button>' +
+          ' <button type="button" data-sa-member-filter-demand="' + safe(item.ticketId) +
+          '" aria-label="Filter activity to Demand ' + safe(item.ticketId) +
+          '">Only this Demand</button>' +
           (item.chatAvailable && openAssignmentChat
             ? ' <button type="button" data-sa-member-open-chat="' + safe(item.assignmentId) +
               '" aria-label="Open chat for assignment ' + safe(item.assignmentId) + '">Open chat</button>'
@@ -2562,7 +2574,8 @@ let demandArchived = false;
       const before = memberActivityCursor;
       if (!teamId || teamId !== selected || !botId || !memberActivityHasMore || !before) return;
       void work(async () => {
-        const page = await fetchMemberActivity(teamId, botId, before);
+        const page = await fetchMemberActivity(teamId, botId, before,
+          memberActivityDemandFilter || undefined);
         if (selected !== teamId || memberActivityBotId !== botId) return;
         const seen = new Set(memberActivityItems.map(item => item.assignmentId));
         if (page.items.some(item => seen.has(item.assignmentId))) {
@@ -2572,6 +2585,26 @@ let demandArchived = false;
         memberActivityCounts = {
           assignmentCount: page.assignmentCount,
           demandCount: page.demandCount,
+          attentionDemandCount: page.attentionDemandCount,
+        };
+        memberActivityHasMore = page.hasMore;
+        memberActivityCursor = page.nextCursor;
+      });
+      return;
+    }
+
+    if (target.hasAttribute('data-sa-member-filter-demand')) {
+      const teamId = memberActivityTeamId, botId = memberActivityBotId;
+      const demandId = target.dataset.saMemberFilterDemand || '';
+      if (!teamId || teamId !== selected || !botId ||
+          (demandId && !memberActivityItems.some(item => item.ticketId === demandId))) return;
+      void work(async () => {
+        const page = await fetchMemberActivity(teamId, botId, undefined, demandId || undefined);
+        if (selected !== teamId || memberActivityBotId !== botId) return;
+        memberActivityDemandFilter = demandId;
+        memberActivityItems = page.items;
+        memberActivityCounts = {
+          assignmentCount: page.assignmentCount, demandCount: page.demandCount,
           attentionDemandCount: page.attentionDemandCount,
         };
         memberActivityHasMore = page.hasMore;

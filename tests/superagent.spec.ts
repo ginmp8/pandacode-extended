@@ -3255,6 +3255,15 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
       } as never;
       if (command==='superagent_member_activity_page') {
         if (args?.orchestrationId!=='team') throw Error('wrong Team requested');
+        if (args?.demandId==='ticket-old') return {
+          orchestrationId:'team',botId:'worker',items:[{
+            assignmentId:'a-old',ticketId:'ticket-old',orchestrationId:'team',
+            botId:'worker',sessionId:'real-session',role:'worker',attempt:1,
+            assignmentState:'finished',ticketState:'waiting_approval',createdAt:499,updatedAt:499,
+            hasResult:true,chatAvailable:true
+          }],assignmentCount:1,demandCount:1,attentionDemandCount:0,
+          hasMore:false,nextCursor:null
+        } as never;
         if (args?.botId==='lead') return {
           orchestrationId:'unrelated-team',botId:'lead',items:[{
             assignmentId:'foreign',ticketId:'foreign-ticket',orchestrationId:'unrelated-team',
@@ -3329,6 +3338,11 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await expect(host.getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
   await activity.getByRole('button',{name:'Older activity'}).click();
   await expect(activity).toContainText('ticket-old');
+  await activity.getByRole('button',{name:'Filter activity to Demand ticket-old'}).click();
+  await expect(activity).toContainText('Showing Demand ticket-old (native filtered history).');
+  await expect(activity).not.toContainText('ticket-new');
+  await expect(activity.locator('.sa-member-summary')).toContainText(
+    '1 assignments · 1 demands · 0 needs attention');
   await activity.getByRole('button',{name:'Open chat for assignment a-old'}).click();
   await expect.poll(async () => page.evaluate(() => {
     const evidence=(window as unknown as {saMemberActivityEvidence:()=>{
@@ -3363,7 +3377,9 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   expect(refreshedEvidence.seen.filter(call=>call.command==='superagent_member_assignment_chat_link'))
     .toHaveLength(2);
   expect(evidence.seen.filter(call=>call.command==='superagent_member_activity_page'))
-    .toHaveLength(2);
+    .toHaveLength(3);
+  expect(evidence.seen.some(call=>call.command==='superagent_member_activity_page' &&
+    call.args?.demandId==='ticket-old')).toBe(true);
   expect(evidence.seen.some(call => /submit|dispatch|accept|grant|enable|reserve/.test(call.command)))
     .toBe(false);
   await roles.getByRole('button',{name:'View activity for Lead'}).click();

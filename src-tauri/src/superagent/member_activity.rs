@@ -57,6 +57,14 @@ pub(super) fn page(
     before: Option<MemberActivityCursor>,
     limit: i64,
 ) -> Result<MemberActivityPage> {
+    page_for_demand(store, orchestration_id, bot_id, before, limit, None)
+}
+
+/// Read-only native Demand filter applied before keyset pagination.
+fn page_for_demand(
+    store: &Store, orchestration_id: &str, bot_id: &str,
+    before: Option<MemberActivityCursor>, limit: i64, demand_id: Option<&str>,
+) -> Result<MemberActivityPage> {
     if !(1..=100).contains(&limit) {
         return Err("Team member activity page size must be between 1 and 100.".into());
     }
@@ -73,6 +81,20 @@ pub(super) fn page(
         }
     }
     configuration(store, orchestration_id)?;
+    if let Some(demand_id) = demand_id {
+        if demand_id.is_empty() || demand_id.len() > 128 ||
+            !demand_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err("Invalid Team member Demand filter.".into());
+        }
+        let owned: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_assignments a
+              JOIN sa_tickets t ON t.id=a.ticket_id
+              WHERE t.id=?1 AND t.orchestration_id=?2 AND a.bot_id=?3)",
+            params![demand_id, orchestration_id, bot_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !owned { return Err("Demand filter does not belong to this Team and bot.".into()); }
+    }
     let (assignment_count, demand_count, attention_demand_count): (i64, i64, i64) =
         store.db.query_row(
             "SELECT COUNT(*), COUNT(DISTINCT t.id),
@@ -80,8 +102,9 @@ pub(super) fn page(
                         ('blocked','failed','interrupted','inconclusive')
                         THEN t.id END)
              FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
-             WHERE t.orchestration_id=?1 AND a.bot_id=?2",
-            params![orchestration_id, bot_id],
+             WHERE t.orchestration_id=?1 AND a.bot_id=?2
+               AND (?3 IS NULL OR t.id=?3)",
+            params![orchestration_id, bot_id, demand_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).map_err(|e| e.to_string())?;
     if let Some(cursor) = &before {
@@ -92,8 +115,9 @@ pub(super) fn page(
             "SELECT EXISTS(SELECT 1 FROM sa_assignments a
              JOIN sa_tickets t ON t.id=a.ticket_id
              WHERE t.orchestration_id=?1 AND a.bot_id=?2
-               AND a.id=?3 AND a.created_at=?4)",
-            params![orchestration_id, bot_id, &cursor.assignment_id, cursor.created_at],
+               AND a.id=?3 AND a.created_at=?4
+               AND (?5 IS NULL OR t.id=?5))",
+            params![orchestration_id, bot_id, &cursor.assignment_id, cursor.created_at, demand_id],
             |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if !owned {
@@ -113,12 +137,13 @@ pub(super) fn page(
                 ) THEN 'coordinator' ELSE 'worker' END
          FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
          WHERE t.orchestration_id=?1 AND a.bot_id=?2
-           AND (?3 IS NULL OR a.created_at<?3 OR
-                (a.created_at=?3 AND a.id<?4))
-         ORDER BY a.created_at DESC,a.id DESC LIMIT ?5"
+           AND (?3 IS NULL OR t.id=?3)
+           AND (?4 IS NULL OR a.created_at<?4 OR
+                (a.created_at=?4 AND a.id<?5))
+         ORDER BY a.created_at DESC,a.id DESC LIMIT ?6"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(
-        params![orchestration_id, bot_id, cursor_at, cursor_id, limit + 1],
+        params![orchestration_id, bot_id, demand_id, cursor_at, cursor_id, limit + 1],
         |row| Ok(MemberActivityItem {
             assignment_id: row.get(0)?,
             ticket_id: row.get(1)?,
@@ -238,10 +263,12 @@ pub async fn superagent_member_activity_page(
     bot_id: String,
     before: Option<MemberActivityCursor>,
     limit: Option<i64>,
+    demand_id: Option<String>,
 ) -> Result<MemberActivityPage> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    page(&store, &orchestration_id, &bot_id, before, limit.unwrap_or(25))
+    page_for_demand(&store, &orchestration_id, &bot_id, before,
+        limit.unwrap_or(25), demand_id.as_deref())
 }
 
 
@@ -288,6 +315,18 @@ mod tests {
         assert!(launched);
         let activity = page(&store, &team.id, "worker", None, 25).unwrap();
         assert_eq!(activity.items.len(), 1);
+        let selected = page_for_demand(
+            &store, &team.id, "worker", None, 25, Some(&ticket.id),
+        ).unwrap();
+        assert_eq!(selected.assignment_count, 1);
+        assert_eq!(selected.demand_count, 1);
+        assert_eq!(selected.items[0].ticket_id, ticket.id);
+        assert!(page_for_demand(&store, &other.id, "other-worker", None, 25,
+            Some(&ticket.id)).is_err(), "Cross-Team Demand filter must fail closed");
+        assert!(page_for_demand(&store, &team.id, "coordinator", None, 25,
+            Some(&ticket.id)).is_err(), "Another bot may not borrow Demand activity");
+        assert!(page_for_demand(&store, &team.id, "worker", None, 25,
+            Some("invalid/foreign")).is_err(), "Malformed filter must fail closed");
         assert_eq!(activity.assignment_count, 1);
         assert_eq!(activity.demand_count, 1);
         assert_eq!(activity.attention_demand_count, 0);
@@ -307,6 +346,9 @@ mod tests {
         assert_eq!(roundtrip.assignment_id, cursor.assignment_id);
         assert!(page(&store, &team.id, "worker", Some(cursor.clone()), 25)
             .unwrap().items.is_empty());
+        assert!(page_for_demand(
+            &store, &team.id, "worker", Some(cursor.clone()), 25, Some(&ticket.id),
+        ).unwrap().items.is_empty(), "Filtered cursor must preserve Demand scope");
         assert!(page(&store, &team.id, "coordinator", Some(cursor.clone()), 25)
             .is_err(), "A different bot cannot borrow a real assignment cursor");
         assert!(page(&store, &other.id, "other-worker", Some(cursor.clone()), 25)

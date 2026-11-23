@@ -31,6 +31,7 @@ enum Command {
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     CreateOrchestration { config_file: PathBuf },
+    DuplicateOrchestration { source_id: String, expected_revision: i64, name: String },
     ListTickets,
     ListTicketsPage { before_created_at: Option<i64>, before_id: Option<String> },
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
@@ -937,6 +938,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
                 | Command::RenameOrchestration { .. }
+                | Command::DuplicateOrchestration { .. }
                 | Command::SetTeamStrategy { .. }
                 | Command::SetTeamRoster { .. }
                 | Command::SetTeamAttemptLimit { .. });
@@ -978,6 +980,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                             Command::EnableOrchestration { orchestration_id, expected_revision } =>
                                 crate::superagent::headless_enable_orchestration(
                                     &database, orchestration_id, *expected_revision,
+                                ),
+                            Command::DuplicateOrchestration { source_id, expected_revision, name } =>
+                                crate::superagent::headless_duplicate_orchestration(
+                                    &database, source_id, *expected_revision, name,
                                 ),
                             Command::RenameOrchestration { orchestration_id, expected_revision, name } =>
                                 crate::superagent::headless_rename_orchestration(
@@ -1065,6 +1071,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
         | Command::RenameOrchestration { .. }
+        | Command::DuplicateOrchestration { .. }
         | Command::SetTeamStrategy { .. }
         | Command::SetTeamRoster { .. }
         | Command::SetTeamAttemptLimit { .. } => {
@@ -2259,6 +2266,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--duplicate-orchestration" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--duplicate-orchestration needs a source Team ID, policy revision and new name.")?;
+                validate_orchestration_id(source_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--duplicate-orchestration needs an expected source policy revision.")?;
+                let name = args.get(index + 3)
+                    .ok_or("--duplicate-orchestration needs a quoted new Team name.")?;
+                if name.is_empty() || name.trim() != name || name.starts_with("--")
+                    || name.len()>120 || name.chars().any(char::is_control) {
+                    return Err("Provide a bounded Team name (quote names with spaces).".into());
+                }
+                command = Command::DuplicateOrchestration {
+                    source_id: source_id.clone(),
+                    expected_revision: parse_team_revision(revision)?,
+                    name: name.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--rename-orchestration" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or_else(|| format!("--rename-orchestration needs a Team ID, revision and new name.\\n\\n{}", help()))?;
@@ -2549,7 +2576,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2717,6 +2744,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --enable-orchestration <id> <revision>
                          Explicitly enable a valid Team for future manual Demands;
                          no provider, Ticket or grant starts automatically.
+  --duplicate-orchestration <id> <revision> <new-name>
+                         Clone native roles, retry policy and strategy into an Off Team.
+                         Never copy Tickets, source subscriptions or task grants.
   --rename-orchestration <id> <revision> <name>
                          Explicit local, revision-guarded Team rename only while disabled
                          and all Tickets/effects are settled; does not change bots, roles
@@ -2777,6 +2807,23 @@ mod tests {
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--duplicate-orchestration team_123 2 Copy"),
+            Ok(Command::DuplicateOrchestration {
+                source_id: "team_123".into(), expected_revision: 2,
+                name: "Copy".into(),
+            }));
+        for invalid in [
+            "--duplicate-orchestration",
+            "--duplicate-orchestration team_123",
+            "--duplicate-orchestration team_123 2",
+            "--duplicate-orchestration ../unsafe 2 Copy",
+            "--duplicate-orchestration team_123 nope Copy",
+            "--duplicate-orchestration team_123 0 Copy",
+            "--duplicate-orchestration team_123 2 --stop-ticket",
+            "--duplicate-orchestration team_123 2 Copy --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--create-orchestration team.json"),
             Ok(Command::CreateOrchestration { config_file: PathBuf::from("team.json") }));
         for invalid in [
@@ -3646,12 +3693,14 @@ mod tests {
             "--disable-orchestration team_123 0",
             "--enable-orchestration team_123 0",
             "--rename-orchestration team_123 0 Renamed",
+            "--duplicate-orchestration team_123 0 Copy",
             "--set-team-roster team_123 0 roster.json",
             "--set-team-attempt-limit team_123 0 2",
             "--set-team-strategy team_123 0 balanced purpose.txt",
             "--disable-orchestration team_123 -1",
             "--enable-orchestration team_123 -1",
             "--rename-orchestration team_123 -1 Renamed",
+            "--duplicate-orchestration team_123 -1 Copy",
             "--set-team-roster team_123 -1 roster.json",
             "--set-team-attempt-limit team_123 -1 2",
             "--set-team-strategy team_123 -1 balanced purpose.txt",
@@ -3721,6 +3770,7 @@ mod tests {
             "--disable-orchestration",
             "--enable-orchestration",
             "--rename-orchestration",
+            "--duplicate-orchestration",
             "--set-team-strategy",
             "--sync-bots",
             "xvfb-run",

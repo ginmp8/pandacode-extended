@@ -2266,6 +2266,34 @@ pub(crate) fn headless_create_orchestration(
     })).map_err(|e| e.to_string())
 }
 
+/// Duplicate a reusable Team through the desktop's atomic, revision-guarded
+/// roster and strategy transaction, without running startup recovery against
+/// an active headless host. The new Team is always Off and carries no Tickets,
+/// source subscriptions, Council results, grants or provider sessions.
+pub(crate) fn headless_duplicate_orchestration(
+    database_path: &std::path::Path, source_id: &str,
+    expected_revision: i64, name: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let created = roster::duplicate_with_roster(
+        &store, source_id, expected_revision, name.to_owned(),
+    )?;
+    let saved = roster::read(&store, &created.id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": created.id,
+        "enabled": created.enabled,
+        "policyRevision": created.policy_revision,
+        "workerCount": saved.worker_bot_ids.len(),
+        "reviewerCount": saved.reviewer_bot_ids.len(),
+        "maxWorkerAttempts": saved.max_worker_attempts,
+        "strategy": saved.strategy,
+        "purposeConfigured": !saved.purpose.is_empty(),
+        "sourceSubscriptionsCopied": false,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local headless Team rename uses the same desktop CAS and guard
 /// without startup recovery. This never changes bot identities, roles, grants
 /// or the historical Ticket snapshot; an active Team is always rejected.
@@ -11571,6 +11599,85 @@ mod tests {
         let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).unwrap();
         assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
         assert_eq!(get_ticket(&store,"review-history").unwrap().state,"completed");
+    }
+
+    #[test]
+    fn headless_duplicate_team_preserves_native_roles_and_strategy_without_authority() {
+        let store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('secondary','Secondary','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let source = roster::create_with_attempt_policy_and_strategy(
+            &store,
+            NewOrchestration {
+                name: "Reusable source".into(),
+                coordinator_bot_id: "router".into(),
+                worker_bot_id: "worker".into(),
+            },
+            Some(roster::RosterInput {
+                worker_bot_ids: vec!["worker".into(), "secondary".into()],
+                reviewer_bot_ids: Vec::new(),
+            }),
+            3, "Private security purpose", "security_critical",
+        ).unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |row| row.get(0),
+        ).unwrap();
+        assert!(headless_duplicate_orchestration(
+            &store.path, &source.id, source.policy_revision + 1, "Stale copy",
+        ).is_err(), "stale source must not be copied");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), before);
+
+        let output = headless_duplicate_orchestration(
+            &store.path, &source.id, source.policy_revision, "Portable Team copy",
+        ).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let clone_id = receipt["orchestrationId"].as_str().unwrap();
+        assert_ne!(clone_id, source.id);
+        assert_eq!(receipt["enabled"], false);
+        assert_eq!(receipt["policyRevision"], 1);
+        assert_eq!(receipt["workerCount"], 2);
+        assert_eq!(receipt["reviewerCount"], 0);
+        assert_eq!(receipt["maxWorkerAttempts"], 3);
+        assert_eq!(receipt["strategy"], "security_critical");
+        assert_eq!(receipt["purposeConfigured"], true);
+        assert_eq!(receipt["sourceSubscriptionsCopied"], false);
+        assert_eq!(receipt["grantIssued"], false);
+        assert_eq!(receipt["providerDispatched"], false);
+        assert!(!output.contains("Private security purpose"),
+            "Headless receipt must not disclose the saved Team purpose");
+        let clone = roster::read(&store, clone_id).unwrap();
+        assert_eq!(clone.coordinator_bot_id, source.coordinator_bot_id);
+        assert_eq!(clone.worker_bot_ids, vec!["worker", "secondary"]);
+        assert_eq!(clone.max_worker_attempts, 3);
+        assert_eq!(clone.purpose, "Private security purpose");
+        assert_eq!(clone.strategy, "security_critical");
+        assert!(!configuration(&store, clone_id).unwrap().enabled);
+        for table in ["sa_tickets", "sa_event_sources"] {
+            let query = format!(
+                "SELECT COUNT(*) FROM {table} WHERE orchestration_id=?1",
+            );
+            assert_eq!(store.db.query_row(&query, [clone_id], |row|
+                row.get::<_,i64>(0)).unwrap(), 0);
+        }
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row|
+            row.get::<_,i64>(0)).unwrap(), 0);
+        assert!(headless_duplicate_orchestration(
+            &store.path, &source.id, source.policy_revision, "Portable Team copy",
+        ).is_err(), "duplicate name must not create a second Team");
+
+        let read = Store::open_read_only(&store.path).unwrap();
+        let durable = roster::read(&read, clone_id).unwrap();
+        assert_eq!(durable.worker_bot_ids, clone.worker_bot_ids);
+        assert_eq!(durable.strategy, "security_critical");
+        assert!(!configuration(&read, clone_id).unwrap().enabled);
+        assert_eq!(roster::read(&read, &source.id).unwrap().policy_revision,
+            source.policy_revision, "source policy must not change");
     }
 
     #[test]

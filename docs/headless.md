@@ -957,6 +957,26 @@ pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New
 
 The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
 
+### Headless duplication of a reusable Team (native, disabled)
+
+A trusted local operator can create another scenario-specific SuperAgent Team
+from the same versioned configuration used by the desktop Duplicate action:
+
+```sh
+pandacode serve --duplicate-orchestration <source-team-id> <expected-policy-revision> "Economy copy"
+```
+
+The source Team may be enabled, but its exact native policy revision must still
+match. The new Team is always **Off**. Its ordered configured Workers, optional
+Reviewers, retry limit, purpose and strategy are cloned atomically, using
+existing bot identities. Existing Demands, Tickets, native sessions, grants,
+Council cycles, source subscriptions and external-effect receipts are **not**
+copied. No bot, tool permission, provider launch or GitHub Auto action is created.
+An outdated source revision, invalid member or duplicate Team name fails
+without creating a partial Team. Output reports redacted Team identity,
+configuration counts and explicit false authorization flags, never the private
+purpose text. This local action does not run startup recovery on an active host.
+
 ### Headless Team creation (native, disabled)
 
 A trusted local operator can create a reusable Team from **existing local bots**

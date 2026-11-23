@@ -1441,6 +1441,23 @@ pub(crate) fn inspect_headless_demand_preflight(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let status = manual_preflight(&store, orchestration_id, objective, coordinated, false)?;
+    format_headless_demand_preflight(status, objective)
+}
+
+/// Read-only preflight for one explicitly selected native Team Worker.
+/// Live provider occupancy is unknown and admission must recheck all guards.
+pub(crate) fn inspect_headless_worker_demand_preflight(
+    database_path: &std::path::Path, orchestration_id: &str,
+    worker_bot_id: &str, objective: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let status = manual_preflight_worker(
+        &store, orchestration_id, objective, worker_bot_id, false,
+    )?;
+    format_headless_demand_preflight(status, objective)
+}
+
+fn format_headless_demand_preflight(status: ManualPreflight, objective: &str) -> Result<String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": status.orchestration_id,
         "policyRevision": status.policy_revision,
@@ -6599,6 +6616,69 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0)
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_selected_worker_preflight_is_roster_scoped_and_never_admits() {
+        let store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('second','Second Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Headless multi-worker preflight".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let roles = roster::set(&store, &cfg.id, cfg.policy_revision, &roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "second".into()],
+            reviewer_bot_ids: vec![],
+        }).unwrap();
+        let enabled = change_enabled(&store, &cfg.id, roles.policy_revision, true).unwrap();
+        let objective = "Private task objective that must not appear in preflight JSON";
+        let receipt: serde_json::Value = serde_json::from_str(
+            &inspect_headless_worker_demand_preflight(
+                &store.path, &cfg.id, "second", objective,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["selectedRole"], "worker");
+        assert_eq!(receipt["selectedBotId"], "second");
+        assert_eq!(receipt["policyRevision"], enabled.policy_revision);
+        assert_eq!(receipt["eligibleAtSnapshot"], true);
+        assert_eq!(receipt["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(receipt["mandateIssued"], false);
+        assert_eq!(receipt["providerDispatched"], false);
+        assert_eq!(receipt["allowedTools"], serde_json::json!([]));
+        assert_eq!(receipt["allowedSideEffects"], false);
+        assert_eq!(receipt["objectiveBytes"], objective.len());
+        assert!(!receipt.to_string().contains(objective));
+        assert!(inspect_headless_worker_demand_preflight(
+            &store.path, &cfg.id, "router", objective,
+        ).is_err());
+        assert!(inspect_headless_worker_demand_preflight(
+            &store.path, &cfg.id, "missing", objective,
+        ).is_err());
+        assert!(inspect_headless_worker_demand_preflight(
+            &store.path, &cfg.id, "second", " ",
+        ).is_err());
+        let off = change_enabled(&store, &cfg.id, enabled.policy_revision, false).unwrap();
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_worker_demand_preflight(
+                &store.path, &cfg.id, "second", objective,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(disabled["policyRevision"], off.policy_revision);
+        assert_eq!(disabled["eligibleAtSnapshot"], false);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        for table in ["sa_tickets", "sa_mandates", "sa_assignments", "sa_audit"] {
+            let count: i64 = reopened.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "headless preflight must not mutate {table}");
+        }
     }
 
     #[test]

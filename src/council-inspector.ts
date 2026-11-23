@@ -485,7 +485,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     void Promise.resolve().then(read).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
       const nextScope = scopeOf(result);
-      if (result && boundSessionId && result.sessionId !== boundSessionId) {
+      if (result && (nextScope === null || (boundSessionId !== null && result.sessionId !== boundSessionId))) {
         // A stale/cross-task response is not safe to render, even if it carries
         // a seemingly verified pass. Keep the original binding for a retry.
         shownScope = null;
@@ -496,7 +496,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
         body.append(error);
         return;
       }
-      if (!boundSessionId && nextScope !== null) boundSessionId = result!.sessionId;
+      if (!boundSessionId && nextScope !== null) boundSessionId = result?.sessionId ?? null;
       body.innerHTML = councilInspectionHtml(result);
       // The reservation and the root task/revision must still match. A new
       // artifact revision must not inherit an earlier review's open drill-down.

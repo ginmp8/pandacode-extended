@@ -313,6 +313,13 @@ test.describe('shared bot channels', () => {
       sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 9,
       status: { state: 'passed', round: 1, lowest: 9.7, target: 9, stale: false },
       verifiedPass: false, criteria: [],
+      reportedFindings: [{
+        schemaVersion: 1, id: 'channel:report:1', cycleId: 'channel-root:1000',
+        round: 1, workerId: 'a', reportMessageId: 11, lens: 'Security',
+        severity: 'high', category: 'authorization', title: 'Channel finding',
+        explanation: 'Unverified reviewer report', artifactRevision: 'revision-9',
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+      }],
       reservedChildren: [{ botId: 'security-child', childSessionId: 'channel-child-one',
         rootCycleId: 'channel-root:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
       attempts: [{
@@ -373,6 +380,18 @@ test.describe('shared bot channels', () => {
     await refresh.click();
     await expect(refresh).toBeEnabled();
     await expect(child).toHaveAttribute('open', '');
+    // The Channel and direct chat use the same task-scoped reviewer findings
+    // disclosure: a native update must not lose keyboard focus on the same revision.
+    const reviewer = dialog.locator('.council-reviewer-findings[data-council-reviewer-key]');
+    const reviewerSummary = reviewer.locator(':scope > summary');
+    await reviewerSummary.focus();
+    await page.keyboard.press('Enter');
+    await reviewerSummary.focus();
+    await details.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+    await expect(reviewerSummary).toBeFocused();
+    await expect(reviewer).toHaveAttribute('open', '');
+    await expect(reviewer).toContainText('Channel finding');
+
     // Even with the same channel delivery and child reservation, a newer native
     // artifact revision must not reopen the earlier revision's drill-down.
     await page.evaluate(next => { (window as any).__channelCouncilInspectorOverride = next; }, {

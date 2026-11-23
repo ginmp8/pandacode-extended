@@ -1156,6 +1156,67 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+
+test('Council inspector keeps focused reviewer findings only for the same native attempt and revision', async ({ page }) => {
+  const attempt = {
+    workerId: 'security-worker', name: 'Security reviewer', lens: 'Security', round: 1,
+    reviewerSource: 'direct_bot', status: 'completed', score: 7.5, abandoned: false,
+    provider: 'codex', model: 'native', attempt: 1, createdAt: 1000,
+    startedAt: 1001, lastUpdatedAt: 1010, tokenCount: null,
+    costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  const finding = {
+    schemaVersion: 1, id: 'report:1', cycleId: 'task:1000', round: 1,
+    workerId: 'security-worker', reportMessageId: 22, lens: 'Security',
+    severity: 'high', category: 'authorization', title: 'Missing guard',
+    explanation: 'Reviewer-reported claim only', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  };
+  const inspection = {
+    sessionId: 'task', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'fixing', round: 1, lowest: 7.5, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [attempt], reportedFindings: [finding],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').first().click();
+  const reviewer = inspector.locator('.council-reviewer-findings[data-council-reviewer-key]');
+  const reviewerSummary = reviewer.locator(':scope > summary');
+  await reviewerSummary.focus();
+  await page.keyboard.press('Enter');
+  await expect(reviewer).toHaveAttribute('open', '');
+  await reviewerSummary.focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(reviewerSummary).toBeFocused();
+  await expect(reviewer).toHaveAttribute('open', '');
+  await expect(reviewer).toContainText('Missing guard');
+
+  // A replacement native reviewer attempt cannot inherit the old disclosure.
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, attempts: [{ ...attempt, attempt: 2 }],
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector.locator('.council-reviewer-findings')).not.toHaveAttribute('open', '');
+
+  // Even with a matching reviewer identity, a new artifact revision resets focus and disclosure.
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, teamRevision: 8,
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await reviewerSummary.focus();
+  await page.keyboard.press('Enter');
+  await reviewerSummary.focus();
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, teamRevision: 9,
+  });
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeFocused();
+  await expect(reviewer).not.toHaveAttribute('open', '');
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

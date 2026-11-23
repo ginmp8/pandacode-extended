@@ -158,8 +158,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       const observed = observedDuration('Queue', a.queueWaitMs) + ' · ' +
         observedDuration('Observed span (last update)', a.observedSpanMs);
       const attributed = reported.filter(f => f.workerId === a.workerId && f.round === a.round);
+      // Reviewer report drill-downs need a stable attempt identity; a display
+      // name alone can be reused by another worker or review wave.
+      const reviewerKey = typeof a.workerId === 'string' && a.workerId.length > 0
+        && Number.isSafeInteger(a.attempt) && a.attempt > 0
+        ? JSON.stringify([a.round, a.workerId, a.attempt]) : null;
       const drilldown = attributed.length
-        ? '<details class="council-reviewer-findings"><summary>' +
+        ? '<details class="council-reviewer-findings"' +
+          (reviewerKey ? ' data-council-reviewer-key="' + escape(reviewerKey) + '"' : '') +
+          '><summary>' +
           escape(String(attributed.length)) + ' reviewer-reported finding(s) (unverified)</summary><ul>' +
           attributed.map(findingRow).join('') + '</ul></details>'
         : '';
@@ -456,15 +463,19 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     refresh.setAttribute('aria-disabled', 'true');
     refresh.setAttribute('aria-busy', 'true');
     const priorScope = shownScope;
-    // Native updates can arrive while keyboard focus is on a child disclosure.
-    // Move focus to a stable control before replacing its summary, then restore
-    // it only if the authenticated task/cycle/revision is unchanged.
+    // Native updates can replace either a child Council or reviewer findings
+    // disclosure while keyboard focus is on its summary. Retain that focus and
+    // the user's drill-down only within the same task/cycle/artifact revision.
     const active = document.activeElement;
     const focusedChildKey = active instanceof HTMLElement && active.matches('.council-child-reservations details[data-council-child-key] > summary')
       ? active.closest<HTMLDetailsElement>('details[data-council-child-key]')?.dataset.councilChildKey : undefined;
-    if (focusedChildKey) refresh.focus({ preventScroll: true });
+    const focusedReviewerKey = active instanceof HTMLElement && active.matches('.council-reviewer-findings[data-council-reviewer-key] > summary')
+      ? active.closest<HTMLDetailsElement>('details[data-council-reviewer-key]')?.dataset.councilReviewerKey : undefined;
+    if (focusedChildKey || focusedReviewerKey) refresh.focus({ preventScroll: true });
     const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
       .map(child => child.dataset.councilChildKey));
+    const expandedReviewers = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-reviewer-findings[data-council-reviewer-key][open]'))
+      .map(reviewer => reviewer.dataset.councilReviewerKey));
     body.textContent = 'Loading native Council result…';
     // A synchronous read failure must also fail closed and release the button.
     void Promise.resolve().then(read).then(result => {
@@ -476,11 +487,16 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       if (priorScope !== null && priorScope === nextScope) {
         body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]')
           .forEach(child => { if (expandedChildren.has(child.dataset.councilChildKey)) child.open = true; });
+        body.querySelectorAll<HTMLDetailsElement>('.council-reviewer-findings[data-council-reviewer-key]')
+          .forEach(reviewer => { if (expandedReviewers.has(reviewer.dataset.councilReviewerKey)) reviewer.open = true; });
         // Do not steal focus if the user navigated elsewhere during the read.
-        if (focusedChildKey && document.activeElement === refresh) {
-          const child = Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]'))
-            .find(item => item.dataset.councilChildKey === focusedChildKey);
-          child?.querySelector<HTMLElement>(':scope > summary')?.focus({ preventScroll: true });
+        if ((focusedChildKey || focusedReviewerKey) && document.activeElement === refresh) {
+          const disclosure = focusedChildKey
+            ? Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key]'))
+              .find(item => item.dataset.councilChildKey === focusedChildKey)
+            : Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-reviewer-findings[data-council-reviewer-key]'))
+              .find(item => item.dataset.councilReviewerKey === focusedReviewerKey);
+          disclosure?.querySelector<HTMLElement>(':scope > summary')?.focus({ preventScroll: true });
         }
       }
       shownScope = nextScope;

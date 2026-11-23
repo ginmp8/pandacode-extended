@@ -7105,11 +7105,18 @@ mod tests {
         assert!(launched);
         let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         let path = store.path.clone();
+        // The schema rejects syntactically invalid JSON. A valid JSON object
+        // is still an invalid tool-name list and must deny native admission
+        // without weakening the SQLite constraint or hiding the Ticket.
         store.db.execute(
-            "UPDATE sa_mandates SET allowed_tools='{invalid-json'
+            "UPDATE sa_mandates SET allowed_tools='{}'
              WHERE ticket_id=?1",
             [&ticket.id],
         ).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(crate::agent_tools::ensure_ambient_agent_tool_permission(
+            &store, &session,
+        ).is_err());
         let audits_before: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
             [&ticket.id], |row| row.get(0),

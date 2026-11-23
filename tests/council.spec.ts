@@ -382,6 +382,73 @@ test('the native Council inspector rejects foreign task responses before exposin
   await expect(unbound.getByRole('alert')).toHaveCount(0);
 });
 
+test('Council inspector rejects cross-task and malformed finding claims without hiding valid history', async ({ page }) => {
+  const finding = (cycleId: string, title: string) => ({
+    schemaVersion: 1, id: title, cycleId, round: 1, workerId: 'security',
+    reportMessageId: 11, lens: 'Security', severity: 'high', category: 'privacy',
+    title, explanation: 'Reviewer claim', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  });
+  const own = finding('task:1000', 'Own current finding');
+  const history = finding('task:800', 'Own earlier-cycle finding');
+  const foreign = finding('another-task:2000', 'Private foreign task finding');
+  const foreignHistory = finding('another-task:800', 'Foreign historical claim');
+  const malformed = { ...own, id: 'bad-severity', title: 'Malformed claim', severity: null };
+  const inspection = {
+    sessionId: 'task', mode: 'm2', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'task', cycleId: 'task:1000',
+      teamRevision: 7, round: 1, lowest: 9.8 },
+    criteria: [], attempts: [], reservedChildren: [],
+    reportedFindings: [own, foreign, malformed],
+    historicalReportedFindings: [history, foreignHistory],
+    findingTriage: { reported: 3, highPriorityClaims: 3, unverifiedClaims: 3 },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const direct = panel(page).locator('.council-inspection');
+  await expect(direct).toContainText('Own current finding');
+  await expect(direct).toContainText('Own earlier-cycle finding');
+  await expect(direct.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
+  await expect(direct).not.toContainText('Private foreign task finding');
+  await expect(direct).not.toContainText('Foreign historical claim');
+  await expect(direct).not.toContainText('Malformed claim');
+  await expect(direct).not.toContainText('Verified native pass');
+  await expect(direct.locator('.council-finding-triage')).toHaveCount(0);
+
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__embeddedScopeInspection = snapshot;
+    const host = document.createElement('div');
+    host.id = 'embedded-scope-council';
+    document.body.append(host);
+    const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'task');
+    host.append(detail);
+    detail.open = true;
+  }, inspection);
+  const embedded = page.locator('#embedded-scope-council .council-inspection');
+  await expect(embedded.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
+  await expect(embedded).not.toContainText('Private foreign task finding');
+  await expect(embedded).not.toContainText('Verified native pass');
+
+  const clean = { ...inspection, reportedFindings: [own],
+    historicalReportedFindings: [history],
+    findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 } };
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+    (window as any).__embeddedScopeInspection = snapshot;
+  }, clean);
+  await direct.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(direct).toContainText('Verified native pass');
+  await expect(embedded).toContainText('Verified native pass');
+  await expect(direct).toContainText('Own earlier-cycle finding');
+  await expect(direct.getByRole('alert')).toHaveCount(0);
+  await expect(embedded.getByRole('alert')).toHaveCount(0);
+});
+
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {
     sessionId: 'task', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,

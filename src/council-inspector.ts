@@ -27,9 +27,41 @@ function validUsageGroup(group: CouncilUsageGroup, includeChild: boolean): boole
     && group.usage != null && typeof group.usage === 'object';
 }
 
+/** Keep malformed/foreign-cycle reports out of the shared task inspector. */
+function validTaskFinding(
+  f: CouncilReportedFinding, sessionId: string | null, cycleStartedAt: number, history: boolean,
+): boolean {
+  if (f == null || f.schemaVersion !== 1
+    || typeof f.id !== 'string' || !f.id
+    || typeof f.workerId !== 'string' || !f.workerId
+    || typeof f.cycleId !== 'string'
+    || !Number.isSafeInteger(f.round) || f.round <= 0
+    || !(['critical', 'high', 'medium', 'low', 'info'] as string[]).includes(f.severity)
+    || typeof f.title !== 'string' || typeof f.category !== 'string'
+    || typeof f.lens !== 'string' || typeof f.explanation !== 'string') return false;
+  if (!sessionId) return true; // Legacy projections may omit the native task identity.
+  const prefix = sessionId + ':';
+  if (!f.cycleId.startsWith(prefix)) return false;
+  const suffix = f.cycleId.slice(prefix.length);
+  if (!/^\d+$/.test(suffix)) return false;
+  const since = Number(suffix);
+  return Number.isSafeInteger(since) && since > 0
+    && (history ? since <= cycleStartedAt : since === cycleStartedAt);
+}
+
 /** Safe read-only native projection, reusable without the task orchestrator. */
 export function councilInspectionHtml(inspection: CouncilInspection | null): string {
   if (!inspection) return '<p>No task-owned Council is available.</p>';
+  // Current claims are bound to this root cycle. Historical claims may have
+  // an older cycle, but must still belong to the same native root task.
+  const sessionId = typeof inspection.sessionId === 'string' && inspection.sessionId.trim()
+    ? inspection.sessionId : null;
+  const currentInputs = Array.isArray(inspection.reportedFindings) ? inspection.reportedFindings : [];
+  const historyInputs = Array.isArray(inspection.historicalReportedFindings) ? inspection.historicalReportedFindings : [];
+  const currentFindings = currentInputs.filter(f => validTaskFinding(f, sessionId, inspection.cycleStartedAt, false));
+  const historyFindings = historyInputs.filter(f => validTaskFinding(f, sessionId, inspection.cycleStartedAt, true));
+  const omittedFindingCount = currentInputs.length + historyInputs.length
+    - currentFindings.length - historyFindings.length;
   // Display-only hints are not approval. Require a matching native completion
   // for this exact session/cycle, revision, round and minimum score.
   const proof = inspection.verifiedCompletion;
@@ -40,10 +72,10 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && proof.teamRevision === inspection.teamRevision
     && proof.round === inspection.status.round
     && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
-    && proof.lowest >= inspection.status.target;
+    && proof.lowest >= inspection.status.target && omittedFindingCount === 0;
   // A historical user exception is not authorization for a newer revision.
   // The read-only presenter must never promote stale acceptance to a current gate.
-  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale
+  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0
     ? 'Accepted by user (not a native pass)'
     : verified ? 'Verified native pass' : 'Native pass not verified';
   const modeLabels: Record<CouncilInspection['mode'], string> = {
@@ -81,7 +113,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' · Task-owned child Council reservations: ' + escape(String(childReservations.length)) +
       ' (each may become at most one composite parent seat after native verification; reservations are not approvals)</p>'
     : '';
-  const reported = (inspection.reportedFindings ?? []).slice(-32);
+  const reported = currentFindings.slice(-32);
   const findingRow = (f: CouncilReportedFinding): string =>
     '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
     '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
@@ -94,14 +126,14 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   // A truncated visual finding window cannot establish native total counts.
   const triage = inspection.findingTriage;
   const counts = triage && [triage.reported, triage.highPriorityClaims, triage.unverifiedClaims];
-  const findingTriageHtml = counts && counts.every(value => Number.isSafeInteger(value) && value >= 0) &&
+  const findingTriageHtml = omittedFindingCount === 0 && counts && counts.every(value => Number.isSafeInteger(value) && value >= 0) &&
     triage!.highPriorityClaims <= triage!.reported && triage!.unverifiedClaims <= triage!.reported
     ? '<p class="council-finding-triage">Native current-cycle reviewer claims: ' +
       escape(String(triage!.reported)) + ' · Critical/high reported: ' +
       escape(String(triage!.highPriorityClaims)) + ' · Independently unverified: ' +
       escape(String(triage!.unverifiedClaims)) + ' (not a verified defect or Council pass)</p>'
     : '';
-  const history = (inspection.historicalReportedFindings ?? []).slice(-32);
+  const history = historyFindings.slice(-32);
   const historicalHtml = history.length
     ? '<section aria-label="Earlier reviewer-reported findings" class="council-historical-findings">' +
       '<h4>Earlier reviewer reports (unverified history)</h4>' +
@@ -109,6 +141,9 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       'No automatic resolution or native approval is inferred.</p><ul>' +
       history.map(findingRow).join('') + '</ul></section>'
     : '';
+  const findingScopeWarning = omittedFindingCount > 0
+    ? '<p role="alert">' + escape(String(omittedFindingCount)) +
+      ' malformed or foreign-cycle reviewer finding(s) omitted; native claim totals and approval are not verified.</p>' : '';
   const shown = validAttempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria ?? [];
@@ -444,7 +479,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childHtml + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
+    (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

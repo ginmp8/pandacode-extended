@@ -2468,12 +2468,15 @@ fn s3_phase_one_conflicts_and_untrusted_scores_cannot_admit_a_challenge_or_finis
     writable.workers[0].read_only = false;
     let mut changed = baseline.clone();
     changed.workers[0].files.push("unexpected-write.txt".into());
+    let mut out_of_range = baseline.clone();
+    out_of_range.workers[0].council.as_mut().unwrap().score = Some(10.1);
     for (case, invalid) in [
         ("unresolved contradiction", conflict),
         ("scored abandoned reviewer", abandoned),
         ("failed reviewer with a retained score", failed),
         ("writable reviewer", writable),
         ("reviewer with changed files", changed),
+        ("out-of-range phase-one score", out_of_range),
     ] {
         assert_ne!(council::status(&invalid).unwrap().state, "dispatch",
             "{case} must not advertise an authorized S3 challenge");
@@ -2500,6 +2503,12 @@ fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass(
             second_a, second_b,
         ]);
         assert_eq!(council::status(&team).unwrap().state, "passed", "{strategy:?} baseline");
+        for index in [0, 2] {
+            let mut over_range = team.clone();
+            over_range.workers[index].council.as_mut().unwrap().score = Some(10.1);
+            assert_ne!(council::status(&over_range).unwrap().state, "passed",
+                "{strategy:?} must not approve a 10.1 score in either native wave");
+        }
         for index in [0, 2] {
             let mut changed = team.clone();
             changed.workers[index].files.push("unexpected-reviewer-write.rs".into());
@@ -9637,6 +9646,10 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
         &store, &sid, &project, "nested-m5-s3-native", &artifact,
         &request.request_id,
     ).unwrap(), terminal);
+    assert_native_task_root_liveness(
+        &store, &sid, &project, "nested-m5-s3-native",
+        &artifact, &request.request_id, &terminal,
+    );
     let root_reviewers = root.workers.iter().filter(|worker| worker.council.is_some())
         .collect::<Vec<_>>();
     assert_eq!(root_reviewers.len(), 2);
@@ -9672,6 +9685,36 @@ fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
     assert_nested_m5_root_and_child_callbacks(council::CouncilExecutionStrategy::Escalated);
 }
 
+
+/// A cached task result must cease to be live approval when its real root
+/// session is paused or interrupted, regardless of the still-passing team snapshot.
+fn assert_native_task_root_liveness(
+    store: &crate::storage::Store, sid: &str, project: &str,
+    assignment: &str, artifact: &str, request_id: &str,
+    expected: &council_requests::NativeTaskCouncilReceipt,
+) {
+    let original_status = store.session(sid).unwrap().status;
+    for revoked in ["paused", "stopped", "interrupted", "error"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![sid, revoked],
+        ).unwrap();
+        let projection = council_inspection_state(store, sid).unwrap().unwrap();
+        assert!(!projection.verified_pass,
+            "{assignment}: {revoked} root session must revoke live Council approval");
+        assert!(council_requests::read_native_terminal(
+            store, sid, project, assignment, artifact, request_id,
+        ).is_err(), "{assignment}: {revoked} root cannot replay terminal proof");
+    }
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![sid, original_status],
+    ).unwrap();
+    assert_eq!(council_requests::read_native_terminal(
+        store, sid, project, assignment, artifact, request_id,
+    ).unwrap(), expected.clone(),
+        "{assignment}: restoring the original native scope must revalidate the same receipt");
+}
 
 /// Exercise direct-bot and automatic-root seats alongside a real child Council.
 /// Native reviewer callbacks and task-owned child receipts must both settle
@@ -9799,6 +9842,9 @@ fn run_nested_mixed_root_callbacks(
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, assignment, &artifact, &task.request_id,
     ).unwrap(), terminal);
+    assert_native_task_root_liveness(
+        &store, &sid, &project, assignment, &artifact, &task.request_id, &terminal,
+    );
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(inspected.usage.unique_attempts, if include_automatic { 2 } else { 1 });
     assert_eq!(inspected.composed_usage.unwrap().unique_attempts,
@@ -10436,6 +10482,10 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         receipt.phase_one_receipt_sha256.len() == 64
             && receipt.phase_two.leaf_worker_ids.len() == 2
             && receipt.phase_two.lowest_score >= 9.5));
+    assert_native_task_root_liveness(
+        &store, &sid, &project, "nested-m4-s3-native",
+        &artifact, &request.request_id, &terminal,
+    );
     let leaves = child_council::inspect(&store, &root).unwrap().into_iter()
         .flat_map(|child| child.leaf_attempts.into_iter().map(|leaf| leaf.worker_id))
         .collect::<Vec<_>>();
@@ -11018,6 +11068,9 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
             &store, &sid, &project, assignment, &artifact, &request.request_id,
         ).unwrap(), terminal);
 
+        assert_native_task_root_liveness(
+            &store, &sid, &project, assignment, &artifact, &request.request_id, &terminal,
+        );
         let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
         assert!(council::status_for_authenticated_children_s3(
             &root, &parents, &challenges).is_some());

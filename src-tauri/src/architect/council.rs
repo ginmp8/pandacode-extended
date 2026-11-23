@@ -2017,11 +2017,14 @@ fn verdict(team: &TeamSnapshot) -> Option<(String, bool)> {
 fn independent_review_attempts(team: &TeamSnapshot, through_round: usize) -> bool {
     let mut reviewer_ids = std::collections::HashSet::new();
     let mut session_ids = std::collections::HashSet::new();
-    (1..=through_round).flat_map(|round| in_round(team, round)).all(|(worker, _)| {
+    (1..=through_round).flat_map(|round| in_round(team, round)).all(|(worker, seat)| {
         // A retired or unscored attempt still needs a real native session
         // identity. An empty ID must not bypass cross-wave replay checks.
         !worker.id.is_empty() && reviewer_ids.insert(worker.id.as_str())
             && !worker.session_id.is_empty() && session_ids.insert(worker.session_id.as_str())
+            // A persisted out-of-range score is not native Council proof,
+            // even if another seat supplies a valid passing minimum.
+            && seat.score.is_none_or(valid_composed_score)
     })
 }
 

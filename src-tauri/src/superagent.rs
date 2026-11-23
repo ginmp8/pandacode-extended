@@ -5189,11 +5189,27 @@ fn admit_desktop_manual_request(
     store: &mut Store, active: &[String], config_id: &str, objective: &str,
     request_key: &str, coordinate: bool, selected_worker_id: Option<&str>,
 ) -> Result<(Ticket, bool, Option<String>)> {
+    admit_desktop_manual_request_with_pause(
+        store, active, config_id, objective, request_key, coordinate,
+        selected_worker_id, crate::feature_controls::get().bots_paused,
+    )
+}
+
+/// A paused operator can inspect an existing durable admission receipt without
+/// launching another provider. Fresh Demands still require current authorization.
+fn admit_desktop_manual_request_with_pause(
+    store: &mut Store, active: &[String], config_id: &str, objective: &str,
+    request_key: &str, coordinate: bool, selected_worker_id: Option<&str>,
+    bots_paused: bool,
+) -> Result<(Ticket, bool, Option<String>)> {
     let previously_admitted: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets
                        WHERE orchestration_id=?1 AND request_key=?2)",
         params![config_id, request_key], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
+    if bots_paused && !previously_admitted {
+        return Err("Bots are paused; no new SuperAgent dispatch is allowed.".into());
+    }
     let options = ManualAdmissionOptions {
         coordinate, headless_staging: false, selected_worker_id,
     };
@@ -5223,9 +5239,6 @@ pub async fn superagent_submit_to_worker(
     objective:String,request_key:String,worker_bot_id:String,
 )->Result<Ticket> {
     require_main_window(&window)?;
-    if crate::feature_controls::get().bots_paused {
-        return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
-    }
     let (ticket, launch, selected) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
@@ -5257,9 +5270,6 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
     orchestration_id: String, objective: String, request_key: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    if crate::feature_controls::get().bots_paused {
-        return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
-    }
     let (ticket, launch, worker_id) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
@@ -5498,9 +5508,6 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
     orchestration_id: String, objective: String, request_key: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    if crate::feature_controls::get().bots_paused {
-        return Err("Bots are paused; coordinated dispatch is denied.".into());
-    }
     let (ticket, launch, coordinator_id) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
@@ -12404,6 +12411,50 @@ mod tests {
             assert_eq!(tickets, 1);
             assert_eq!(assignments, 1);
             assert!(mandate(&store, &original.id).unwrap().allowed_tools.is_empty());
+        }
+    }
+
+    #[test]
+    fn paused_desktop_idempotency_replays_receipts_but_never_admits_new_work() {
+        // This exercises the real desktop admission path without mutating
+        // global pause state shared with concurrent Rust tests.
+        for (coordinate, selected_worker_id) in [
+            (false, None), (true, None), (false, Some("worker")),
+        ] {
+            let mut store = fixture();
+            let team = enabled(&store);
+            let (initial, dispatched, _) = admit_desktop_manual_request_with_pause(
+                &mut store, &[], &team.id, "Existing task", "paused-desktop-key",
+                coordinate, selected_worker_id, false,
+            ).unwrap();
+            assert!(dispatched);
+            let (replayed, launch, recipient) = admit_desktop_manual_request_with_pause(
+                &mut store, &["unavailable-runtime".into()],
+                &team.id, "Existing task", "paused-desktop-key",
+                coordinate, selected_worker_id, true,
+            ).unwrap();
+            assert_eq!(replayed.id, initial.id);
+            assert!(!launch);
+            assert!(recipient.is_none());
+            assert!(admit_desktop_manual_request_with_pause(
+                &mut store, &[], &team.id, "Unauthorized new task",
+                "new-paused-desktop-key", coordinate, selected_worker_id, true,
+            ).unwrap_err().contains("paused"));
+            assert!(admit_desktop_manual_request_with_pause(
+                &mut store, &[], &team.id, "Changed original scope",
+                "paused-desktop-key", coordinate, selected_worker_id, true,
+            ).is_err());
+            assert!(admit_desktop_manual_request_with_pause(
+                &mut store, &[], &team.id, "Existing task",
+                "paused-desktop-key", !coordinate, selected_worker_id, true,
+            ).is_err());
+            let ticket_count: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+                [&team.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(ticket_count, 1);
+            assert_eq!(assignments(&store, &initial.id, 20).unwrap().len(), 1);
+            assert!(mandate(&store, &initial.id).unwrap().allowed_tools.is_empty());
         }
     }
 

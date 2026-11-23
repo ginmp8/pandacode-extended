@@ -8088,7 +8088,8 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             "manifestSha256": "a".repeat(64),
             "observedAt": storage::now(), "passed": true,
             "outputTruncated": false, "provenance": "native_host",
-            "scope": "manifest_only_not_artifact_verification"
+            "scope": "bounded_source_snapshot_not_full_artifact_verification",
+            "sourceSnapshotSha256": "b".repeat(64)
         }
     });
     let receipt = council_requests::record_native_host_check(&store, &request, &observed).unwrap();
@@ -8097,6 +8098,8 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert_eq!(receipt.artifact_correlation_sha256, artifact);
     assert!(receipt.check_passed);
     assert_eq!(receipt.check_name, "cargo check");
+    assert_eq!(receipt.schema_version, 2);
+    assert_eq!(receipt.source_snapshot_sha256.as_deref(), Some("b".repeat(64).as_str()));
     let inspected = council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap();
@@ -8115,11 +8118,11 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     let mut bounded = observed.clone();
     bounded["hostObservation"]["scope"] =
         json!("bounded_source_snapshot_not_full_artifact_verification");
-    bounded["hostObservation"]["sourceSnapshotSha256"] = json!("b".repeat(64));
+    bounded["hostObservation"]["sourceSnapshotSha256"] = json!("c".repeat(64));
     let bounded_receipt = council_requests::record_native_host_check(
         &store, &request, &bounded,
     ).unwrap();
-    assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some("c".repeat(64).as_str()));
     let saved = council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap();
@@ -8133,7 +8136,10 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert!(council_requests::record_native_host_check(&store, &request, &invalid_hash).is_err());
     let mut scope_downgrade = bounded.clone();
     scope_downgrade["hostObservation"]["scope"] = json!("manifest_only_not_artifact_verification");
-    assert!(council_requests::record_native_host_check(&store, &request, &scope_downgrade).is_err());
+    scope_downgrade["hostObservation"].as_object_mut().unwrap().remove("sourceSnapshotSha256");
+    assert!(council_requests::record_native_host_check(&store, &request, &scope_downgrade)
+        .unwrap_err().contains("native check scope is inconsistent"),
+        "new task-bound host receipts must never downgrade to manifest-only proof");
     assert!(!saved.native.verified_pass,
         "a stable bounded source snapshot does not replace independent Council reviewers");
 
@@ -8154,6 +8160,20 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             rusqlite::params![&sid, key, content],
         ).unwrap();
     };
+    // Historical V1 manifest-only checks remain inspectable, but cannot be
+    // minted as new V2 evidence or converted into an independent review.
+    let mut historical: serde_json::Value = serde_json::from_str(&original).unwrap();
+    historical["hostChecks"][0]["schemaVersion"] = json!(1);
+    historical["hostChecks"][0].as_object_mut().unwrap().remove("sourceSnapshotSha256");
+    persist(&historical.to_string());
+    let old_view = council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(old_view.host_checks[0].schema_version, 1);
+    assert!(old_view.host_checks[0].source_snapshot_sha256.is_none());
+    assert!(!old_view.native.verified_pass);
+    persist(&original);
+
     let mut replay: serde_json::Value = serde_json::from_str(&original).unwrap();
     let duplicate = replay["hostChecks"][0].clone();
     replay["hostChecks"].as_array_mut().unwrap().push(duplicate);
@@ -9009,8 +9029,12 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     duplicate.id = inspected[0].authenticated_parent_seat.as_ref().unwrap()
         .parent_worker_id.clone();
     conflicting_root.workers.push(duplicate);
-    assert!(child_council::verified_parent_seats(&store, &conflicting_root)
-        .unwrap_err().contains("conflicting root composite seat identity"));
+    let denied = child_council::verified_parent_seats(&store, &conflicting_root).unwrap_err();
+    assert!(denied.contains("conflicting root composite seat identity")
+            || denied.contains("root artifact revision changed"),
+        "forged native root reviewer cannot bypass composite authority: {denied}");
+    assert!(!verified_council_pass(&store, &conflicting_root),
+        "forged root identity cannot create a passing Council");
 
     // SQL persistence is not an authority source for undeclared third seats.
     let phantom_key = format!("native-council-parent-seat:{}:ghost", root.council_since);
@@ -10619,7 +10643,8 @@ fn nested_m4_parallel_task_receipt_requires_both_child_council_callbacks() {
     sibling.workers[0].session_id = first_child.workers[0].session_id.clone();
     save(&store, &mut sibling).unwrap();
     let denied = child_council::verified_parent_seats(&store, &root).unwrap_err();
-    assert!(denied.contains("duplicate native root/child leaf reviewer identity or session"),
+    assert!(denied.contains("duplicate native root/child leaf reviewer identity or session")
+            || denied.contains("native leaf identity no longer matches issued ownership"),
         "S1 sibling leaf replay must be rejected before composite approval: {denied}");
     assert!(!verified_council_pass(&store, &root),
         "S1 cannot pass when two children share a reviewer session");

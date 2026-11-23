@@ -399,8 +399,10 @@ pub struct NativeTaskCouncilInspection {
 }
 
 /// A native host's completed manifest-declared check, correlated to an
-/// admitted Council task. The artifact SHA is a caller-supplied correlation,
-/// NOT a host-verified source tree or a Council approval.
+/// admitted Council task. V2 requires a bounded source snapshot; legacy V1
+/// manifest-only observations remain visible as historical, weaker evidence.
+/// The artifact SHA is a caller-supplied correlation, NOT a host-verified
+/// complete source tree or a Council approval.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeTaskHostCheckReceipt {
@@ -653,7 +655,7 @@ pub(crate) fn inspect_native_task(
 fn native_host_check_is_current(
     receipt: &NativeTaskHostCheckReceipt, request: &NativeTaskCouncilRequest,
 ) -> bool {
-    receipt.schema_version == 1
+    matches!(receipt.schema_version, 1 | 2)
         && !receipt.observation_id.trim().is_empty()
         && receipt.request_id == request.request_id
         && receipt.session_id == request.session_id
@@ -665,6 +667,7 @@ fn native_host_check_is_current(
         && receipt.manifest_sha256.len() == 64
         && receipt.manifest_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         && receipt.observed_at > 0
+        && (receipt.schema_version == 1 || receipt.source_snapshot_sha256.is_some())
         && receipt.source_snapshot_sha256.as_ref().is_none_or(|hash|
             hash.len() == 64 && hash.bytes().all(|b|
                 b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
@@ -740,8 +743,6 @@ pub(crate) fn record_native_host_check(
     let output_truncated = observed["outputTruncated"].as_bool()
         .ok_or("council_task_denied: native output status is missing.")?;
     let source_snapshot_sha256 = match observed["scope"].as_str() {
-        Some("manifest_only_not_artifact_verification")
-            if observed.get("sourceSnapshotSha256").is_none() => None,
         Some("bounded_source_snapshot_not_full_artifact_verification") =>
             Some(observed["sourceSnapshotSha256"].as_str()
                 .ok_or("council_task_denied: missing native source snapshot.")?.to_owned()),
@@ -755,7 +756,7 @@ pub(crate) fn record_native_host_check(
         return Err("council_task_denied: native check provenance is inconsistent.".into());
     }
     let receipt = NativeTaskHostCheckReceipt {
-        schema_version: 1, observation_id: storage::id(),
+        schema_version: 2, observation_id: storage::id(),
         request_id: request.request_id.clone(),
         session_id: request.session_id.clone(),
         cycle_id: request.cycle_id.clone(),

@@ -2322,6 +2322,11 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
             &reviewer.model, reviewer.council.as_ref().unwrap(),
         );
         reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+             VALUES(?1,?2,?3)",
+            rusqlite::params![&sid, &reviewer.id, &worker_session.id],
+        ).unwrap();
         reviewer.reviewer_binding = Some(binding);
         store.message(&worker_session.id, "assistant", report).unwrap();
         sessions.push(worker_session.id);
@@ -2336,6 +2341,38 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
     assert!(!payload.contains("9.4"));
     assert!(!payload.contains("9.5"));
     assert!(council::phase_one_challenge_handoff(&store, &team, 1, None).unwrap().is_none());
+    // A recorded reviewer grant cannot be redirected to a different same-project
+    // session, even when the foreign session reports the identical score.
+    let foreign = store.create_session(&parent.project_id, "codex", "test-model", "plan").unwrap();
+    store.message(&foreign.id, "assistant", reports[0]).unwrap();
+    let mut redirected = team.clone();
+    redirected.workers[0].session_id = foreign.id;
+    assert!(council::phase_one_challenge_handoff(&store, &redirected, 2, None)
+        .unwrap_err().contains("unlinked native reviewer session"),
+        "S3 must never reveal a same-project foreign session's private findings");
+    // Archiving the legitimate reviewer also revokes its historical handoff,
+    // even when the scored TeamSnapshot and native grant were not updated.
+    store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&sessions[0]]).unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None)
+        .unwrap_err().contains("revoked"),
+        "an archived native review may not seed another Council phase");
+    store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", [&sessions[0]]).unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None).is_ok());
+    // Removing the durable owner link must invalidate the report regardless
+    // of the old valid authorization record or unchanged score.
+    store.db.execute(
+        "DELETE FROM architect_workers WHERE parent_session_id=?1
+         AND worker_id=?2 AND session_id=?3",
+        rusqlite::params![&sid, &team.workers[0].id, &sessions[0]],
+    ).unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None)
+        .unwrap_err().contains("unlinked native reviewer session"));
+    store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+         VALUES(?1,?2,?3)",
+        rusqlite::params![&sid, &team.workers[0].id, &sessions[0]],
+    ).unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None).is_ok());
     // Even with persisted passing scores, abandoned or writable work cannot
     // become a phase-two challenge handoff. A conflicting first-phase report
     // must be resolved before fresh reviewers consume its findings.

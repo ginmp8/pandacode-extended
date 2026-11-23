@@ -2241,6 +2241,18 @@ pub(super) fn phase_one_challenge_handoff(
             .ok_or("S3 challenge handoff requires frozen native reviewer authority.")?;
         binding.validate(team, worker)?;
         super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        // A grant for one Council seat does not authorize reading an arbitrary
+        // session's private report. Check the durable native owner link before
+        // constructing the challenge handoff, including after a restart.
+        let native_owner: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers
+             WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",
+            params![&team.session_id, &worker.id, &worker.session_id],
+            |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if native_owner != 1 || store.session(&worker.session_id)?.archived {
+            return Err("S3 challenge handoff denied: revoked or unlinked native reviewer session.".into());
+        }
         // The adversarial handoff must cover the *entire* native report. A
         // suffix-only read could silently drop early findings while keeping
         // the score at the end, misleading a fresh phase-two challenger.

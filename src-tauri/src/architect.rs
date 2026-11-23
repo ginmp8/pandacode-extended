@@ -723,6 +723,36 @@ fn native_reviewer_authority_rounds(
     }
 }
 
+/**
+ * A recorded reviewer grant and a scored message are not sufficient when the
+ * native worker-to-session owner link was revoked or the session archived.
+ * Recheck the durable owner at the terminal/inspection boundary after restart.
+ */
+fn native_root_reviewer_session_is_current(
+    store: &Store, parent_session_id: &str, worker: &Worker,
+) -> bool {
+    if worker.id.is_empty() || worker.session_id.is_empty() {
+        return false;
+    }
+    let owners: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_workers WHERE session_id=?1",
+        [&worker.session_id], |row| row.get(0),
+    ).unwrap_or(0);
+    if owners != 1 {
+        return false;
+    }
+    let linked: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_workers
+         WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",
+        params![parent_session_id, &worker.id, &worker.session_id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    linked == 1 && store.session(&worker.session_id).is_ok_and(|session| {
+        !session.archived
+            && !matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped")
+    })
+}
+
 fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
     let mode = config.mode();
@@ -766,6 +796,7 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
             let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
             if binding.validate(team, worker).is_err()
                 || reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_err()
+                || !native_root_reviewer_session_is_current(store, &team.session_id, worker)
             {
                 return false;
             }
@@ -821,6 +852,7 @@ fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) 
                     && binding.roster_bot_ids == config.reviewer_bot_ids
                     && binding.required_reviewers == Some(config.needed())
                     && binding.validate(team, worker).is_ok()
+                    && native_root_reviewer_session_is_current(store, &team.session_id, worker)
                     && reviewer_security::validate_recorded_authority(
                         store, &team.session_id, binding,
                     ).is_ok()

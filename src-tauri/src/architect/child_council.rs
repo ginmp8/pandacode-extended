@@ -2311,6 +2311,7 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
             || !sessions.insert(worker.session_id.as_str())
             || binding.validate(root, worker).is_err()
             || reviewer_security::validate_recorded_authority(store, &root.session_id, binding).is_err()
+            || !super::native_root_reviewer_session_is_current(store, &root.session_id, worker)
         {
             return false;
         }

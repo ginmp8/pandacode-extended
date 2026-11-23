@@ -29,7 +29,8 @@ fn source_snapshot_sha256(root: &Path) -> Option<String> {
             "rs" | "cs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" |
             "py" | "go" | "java" | "kt" | "kts" | "swift" | "sql" |
             "toml" | "json" | "yaml" | "yml" | "lock" |
-            "html" | "css" | "scss" | "sh" | "ps1" | "xml"
+            "html" | "css" | "scss" | "sh" | "ps1" | "xml" |
+            "md" | "mdx"
         )) || path.file_name().and_then(|name| name.to_str())
             .is_some_and(|name| matches!(name, "Dockerfile" | "Makefile" | "Gemfile"))
     }
@@ -412,7 +413,8 @@ mod tests {
         let plan = Plan {
             name: "npm test".into(), program: runner.to_str().unwrap().into(), args: vec![],
         };
-        fake(&runner, "echo tests passed\nexit 0");
+        fake(&runner,
+            "if [ -f mutate-source ]; then echo 'export const value = 2;' > src/app.ts; fi\necho tests passed\nexit 0");
         let first = report_for_plan_inner(root, &plan, true);
         assert_eq!(first["checked"], true);
         assert_eq!(first["hostObservation"]["passed"], true);
@@ -424,12 +426,12 @@ mod tests {
         assert_eq!(repeated["hostObservation"]["sourceSnapshotSha256"], original);
 
         // The process completed, but it changed what was under review.
-        fake(&runner, "echo 'export const value = 2;' > src/app.ts\nexit 0");
+        fs::write(root.join("mutate-source"), "yes").unwrap();
         let mutated = report_for_plan_inner(root, &plan, true);
-        assert_eq!(mutated["checked"], true);
+        assert_eq!(mutated["checked"], true, "{mutated}");
         assert!(mutated.get("hostObservation").is_none(),
             "a passing process cannot certify a changed source snapshot");
-        fake(&runner, "exit 0");
+        fs::remove_file(root.join("mutate-source")).unwrap();
         let after_change = report_for_plan_inner(root, &plan, true);
         assert_ne!(after_change["hostObservation"]["sourceSnapshotSha256"], original);
 
@@ -441,6 +443,32 @@ mod tests {
         assert!(linked.get("hostObservation").is_none());
         assert_eq!(report_for_plan(root, &plan)["hostObservation"]["scope"],
             "manifest_only_not_artifact_verification");
+    }
+
+    #[test]
+    fn native_task_check_never_certifies_changed_review_documentation() {
+        let temp = Scratch::new("native-document-snapshot");
+        let root = temp.path();
+        fs::write(root.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        fs::write(root.join("README.md"), "Original requirements").unwrap();
+        let runner = root.join("fake-npm");
+        fake(&runner,
+            "if [ -f mutate-document ]; then echo 'Replaced requirements' > README.md; fi\necho checked\nexit 0");
+        let plan = Plan {
+            name: "npm test".into(), program: runner.to_str().unwrap().into(), args: vec![],
+        };
+        let original = report_for_plan_inner(root, &plan, true);
+        assert_eq!(original["hostObservation"]["passed"], true);
+        let original_hash = original["hostObservation"]["sourceSnapshotSha256"].as_str().unwrap();
+        fs::write(root.join("mutate-document"), "yes").unwrap();
+        let changed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(changed["checked"], true, "{changed}");
+        assert!(changed.get("hostObservation").is_none(),
+            "a changed review document must invalidate the host's bounded source receipt");
+        fs::remove_file(root.join("mutate-document")).unwrap();
+        let refreshed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(refreshed["hostObservation"]["passed"], true);
+        assert_ne!(refreshed["hostObservation"]["sourceSnapshotSha256"], original_hash);
     }
 
     #[test]

@@ -7,6 +7,18 @@ use council::{finish_refusal, parse_score, CouncilConfig, CouncilSeat};
 
 const SINCE: i64 = 1000;
 
+// Native authority records do not create the worker's durable session owner.
+// Regression fixtures must establish both independent facts explicitly.
+fn link_native_root_reviewers(store: &Store, parent_session_id: &str, workers: &[Worker]) {
+    for worker in workers {
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+             VALUES(?1,?2,?3)",
+            rusqlite::params![parent_session_id, &worker.id, &worker.session_id],
+        ).unwrap();
+    }
+}
+
 
 #[test]
 fn council_reported_findings_are_bounded_untrusted_claims_not_native_evidence() {
@@ -3602,6 +3614,7 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     team.workers = vec![direct, automatic];
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "the in-memory gate alone is not a persisted authority receipt");
+    link_native_root_reviewers(&store, &sid, &team.workers);
     assert!(!mixed_native_authority_current(&store, &team),
         "plausible scored workers cannot approve without native grants");
     let mut projected = team.clone();
@@ -3706,6 +3719,7 @@ fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof(
         team.workers.push(worker);
     }
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    link_native_root_reviewers(&store, &sid, &team.workers);
     team.council_status = council::status(&team);
     assert!(!selected_direct_native_authority_current(&store, &team),
         "model scores cannot replace a recorded native M2 reviewer grant");
@@ -3878,6 +3892,7 @@ fn forced_m3_root_rechecks_both_authenticated_native_rounds() {
         team.workers.extend([direct, automatic]);
     }
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    link_native_root_reviewers(&store, &sid, &team.workers);
     for worker in &team.workers {
         reviewer_security::record_native_authority(
             &store, &sid, worker.reviewer_binding.as_ref().unwrap(),
@@ -4036,6 +4051,7 @@ fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
         "an M3 source-less first phase must not advertise S3 challenge admission");
     assert!(council::round_for(&first_phase, first_phase.config.council.as_ref().unwrap(), None).is_err(),
         "a malformed M3 source roster must not admit another S3 reviewer");
+    link_native_root_reviewers(&store, &sid, &team.workers);
     for worker in &team.workers {
         reviewer_security::record_native_authority(
             &store, &sid, worker.reviewer_binding.as_ref().unwrap(),

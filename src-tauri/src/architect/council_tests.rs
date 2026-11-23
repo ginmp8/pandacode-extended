@@ -7566,6 +7566,22 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     assert_eq!(pending["completed"], false);
+    // Reserving a new Architect objective does not start its native provider.
+    // After Store::open the root session remains interrupted until a fresh
+    // provider run is admitted. Verify that a TeamSnapshot alone cannot grant
+    // fresh child review authority, then model that real native admission.
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.session(&sid).unwrap().status, "interrupted");
+        let fresh_root = load(&store, &sid).unwrap().unwrap();
+        let denied = child_council::next_leaf_launch(
+            &store, &std::collections::HashMap::new(), &fresh_root,
+        ).err().expect("an interrupted native root must deny child launch");
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+        store.db.execute(
+            "UPDATE sessions SET status='running' WHERE id=?1", [&sid],
+        ).unwrap();
+    }
     let fresh_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     assert_ne!(fresh_launch.admission.parent, launch.admission.parent);
     assert_ne!(fresh_launch.admission.parent, sibling_launch.admission.parent);

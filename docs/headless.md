@@ -196,6 +196,28 @@ does **not** stop a live provider, assert any remote result, or authorize a
 retry. A running serve host must observe the revoked task and cancel its provider
 handle; independently reconcile any uncertain remote effect first.
 
+### Archive or restore a settled Demand headlessly
+
+The trusted local operator can hide a settled Demand from the active board
+without deleting its Ticket, Assignment history, evidence or audit. Read the
+current Ticket revision, then explicitly archive or restore that exact revision:
+
+```sh
+pandacode serve --inspect-ticket <ticket-id>
+pandacode serve --archive-demand <ticket-id> <expected-revision>
+pandacode serve --restore-demand <ticket-id> <new-revision>
+```
+
+Both commands call the same native revision-guarded transition as Desktop.
+Running or otherwise unsettled Demands cannot be archived; a running Assignment
+or pending/uncertain external effect also blocks archival. Repeated requests
+at the same current revision are idempotent, while stale revisions fail.
+The CLI opens the existing database without running startup recovery and
+returns redacted Ticket identity, state, revision and archive status. No
+provider session is started or stopped, no remote action is replayed, and
+archival is not a substitute for stopping an active Demand or reconciling
+uncertain effects.
+
 ### Quarantine a terminal Ticket's orphaned assignment
 
 The read-only recovery inbox may find a terminal Ticket with a stranded native

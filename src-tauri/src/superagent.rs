@@ -2469,6 +2469,27 @@ pub(crate) fn headless_stop_ticket_at_revision(
     headless_stopped_ticket_status(&store, &ticket)
 }
 
+/// CLI and Desktop share one revision-guarded visibility transition. This
+/// never removes a Ticket, cancels a provider, replays an effect, or issues
+/// authorization; only settled Demands without unresolved receipts qualify.
+pub(crate) fn headless_change_demand_archive(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+    archived: bool,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let ticket = change_demand_archive(&store, ticket_id, expected_revision, archived)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "orchestrationId": ticket.orchestration_id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "archived": archived,
+        "providerDispatched": false,
+        "grantIssued": false,
+        "externalEffectReplayed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local-operator quarantine for one exact pending effect receipt.
 /// An unknown provider outcome is never interpreted as failure or success.
 /// CAS on Ticket revision and the stored payload digest prevents a stale
@@ -5713,6 +5734,53 @@ mod tests {
         assert_eq!(list_tickets(&store,&team.id,20).unwrap().len(),1);
     }
 
+
+    #[test]
+    fn headless_demand_archive_reuses_native_cas_without_erasing_history() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (created, _) = admit(&mut store, &team.id,
+            "Headless archive preserves historical evidence", "headless-archive", false).unwrap();
+        let path = store.path.clone();
+        let ticket_id = created.id.clone();
+        assert!(headless_change_demand_archive(&path, &ticket_id,
+            created.revision, true).is_err(), "running Demand cannot be archived");
+        let (stopped, _) = stop(&store, &ticket_id).unwrap();
+        drop(store);
+        let archive = headless_change_demand_archive(&path, &ticket_id,
+            stopped.revision, true).unwrap();
+        let archive: serde_json::Value = serde_json::from_str(&archive).unwrap();
+        let revision = archive["revision"].as_i64().unwrap();
+        assert_eq!(revision, stopped.revision + 1);
+        assert_eq!(archive["archived"], true);
+        assert_eq!(archive["state"], "stopped");
+        assert_eq!(archive["providerDispatched"], false);
+        assert_eq!(archive["grantIssued"], false);
+        assert_eq!(archive["externalEffectReplayed"], false);
+        assert!(headless_change_demand_archive(&path, &ticket_id,
+            stopped.revision, false).is_err(), "stale restore must not mutate history");
+        let repeated = headless_change_demand_archive(&path, &ticket_id,
+            revision, true).unwrap();
+        let repeated: serde_json::Value = serde_json::from_str(&repeated).unwrap();
+        assert_eq!(repeated["revision"], revision);
+        let readonly = Store::open_read_only(&path).unwrap();
+        assert!(list_tickets(&readonly, &team.id, 20).unwrap().is_empty());
+        assert_eq!(history(&readonly, &ticket_id, 200).unwrap().iter()
+            .filter(|entry| entry.kind == "demand_archived").count(), 1);
+        drop(readonly);
+        let restored = headless_change_demand_archive(&path, &ticket_id,
+            revision, false).unwrap();
+        let restored: serde_json::Value = serde_json::from_str(&restored).unwrap();
+        assert_eq!(restored["revision"], revision + 1);
+        assert_eq!(restored["archived"], false);
+        let readonly = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_tickets(&readonly, &team.id, 20).unwrap().len(), 1);
+        assert_eq!(get_ticket(&readonly, &ticket_id).unwrap().state, "stopped");
+        let activity = history(&readonly, &ticket_id, 200).unwrap();
+        assert_eq!(activity.iter().filter(|entry| entry.kind == "demand_archived").count(), 1);
+        assert_eq!(activity.iter().filter(|entry| entry.kind == "demand_restored").count(), 1);
+        assert!(!assignments(&readonly, &ticket_id, 20).unwrap().is_empty());
+    }
 
     #[test]
     fn native_team_member_activity_is_scoped_keyset_paginated_and_restart_safe() {

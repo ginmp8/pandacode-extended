@@ -90,6 +90,10 @@ interface AdmittedTeamProfile {
 interface TaskTimelineEntry {
   at: number; key: string; label: string; detail: string; assignmentId: string | null;
 }
+interface PlannedWorkItem {
+  id:string; ticketId:string; requestKey:string; parentId:string|null;
+  summary:string; state:'planned'; createdAt:number;
+}
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   admittedProfile?: AdmittedTeamProfile | null;
@@ -97,7 +101,9 @@ interface TicketDetails {
   currentTeamPolicyRevision?: number;
   teamPolicyChangedSinceAdmission?: boolean;
   attemptInsights?: AssignmentInsight[];
-  activity: Activity[]; timeline?: TaskTimelineEntry[]; council?: CouncilObservation | null;
+  activity: Activity[]; timeline?: TaskTimelineEntry[];
+  workItems?: PlannedWorkItem[]; truncatedWorkItems?: boolean;
+  council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
 }
@@ -115,6 +121,7 @@ interface RunGraphNode {
 interface RunGraphEdge { from: string; to: string; relation: string }
 interface RunGraph {
   ticketId: string; ticketRevision: number; truncatedAttempts: boolean;
+  truncatedWorkItems?: boolean;
   nodes: RunGraphNode[]; edges: RunGraphEdge[];
 }
 interface SourceDecision {
@@ -148,6 +155,7 @@ export function mountSuperagent(
   host: HTMLElement, call: Call, openAssignmentChat?: OpenNativeAssignmentChat,
 ): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
+  let pendingWorkItem: {ticketId:string;summary:string;parentId:string|null;key:string}|null=null;
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
 let demandArchived = false;
@@ -488,11 +496,23 @@ let demandArchived = false;
     // same SQLite transaction. Never infer provider effects or child Tickets
     // from free-form audit text; older native audit pages remain append-only.
     const nativeTimeline = ticketDetails?.timeline;
+    const plannedWorkItems = ticketDetails?.workItems ?? [];
+    const validWorkItems = Array.isArray(plannedWorkItems) && plannedWorkItems.length <= 100 &&
+      plannedWorkItems.every(item => item &&
+        item.ticketId === ticketDetails?.ticket.id &&
+        typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id) &&
+        typeof item.summary === 'string' && item.summary.length > 0 && item.summary.length <= 1000 &&
+        item.state === 'planned' &&
+        (item.parentId === null || plannedWorkItems.some(parent =>
+          parent.id === item.parentId && parent.ticketId === item.ticketId)));
+    const plannedWorkItemIds = new Set(validWorkItems ? plannedWorkItems.map(item=>item.id) : []);
     const knownAssignmentIds = new Set(ticketDetails?.assignments.map(item => item.id) ?? []);
     const validTimeline = Array.isArray(nativeTimeline) &&
       nativeTimeline.length <= 600 && nativeTimeline.every((entry, index) =>
         entry && Number.isSafeInteger(entry.at) && entry.at > 0 &&
-        typeof entry.key === 'string' && /^(audit:|assignment-start:|assignment-update:)/.test(entry.key) &&
+        typeof entry.key === 'string' && (/^(audit:|assignment-start:|assignment-update:)/.test(entry.key) ||
+          (validWorkItems && entry.key.startsWith('work-item:') &&
+            plannedWorkItemIds.has(entry.key.slice('work-item:'.length)))) &&
         typeof entry.label === 'string' && typeof entry.detail === 'string' &&
         (entry.assignmentId === null ||
           (typeof entry.assignmentId === 'string' && knownAssignmentIds.has(entry.assignmentId))) &&
@@ -514,9 +534,9 @@ let demandArchived = false;
         left.at - right.at || left.key.localeCompare(right.key));
     }
     const taskTimelineContent = '<section class="sa-task-timeline" role="region" aria-label="Task timeline">' +
-      '<h5>Task timeline</h5><p>Chronological native root-Ticket audit and assignment records only. ' +
-      'An assignment or provider message is not proof of a file change, test pass, Council verdict ' +
-      'or completed child Task. Older audit events appear after explicitly loading their page.</p>' +
+      '<h5>Task timeline</h5><p>Chronological native Ticket audit, assignment and operator-planned WorkItem records. ' +
+      'Planned WorkItems are not dispatched, executed or completed child Tasks; no provider text proves ' +
+      'a file change, test pass or Council verdict. Older audit events require explicit page loading.</p>' +
       '<ol>' + (taskTimeline.map(entry =>
         '<li><time>' + safe(activityTime(entry.at)) + '</time> · <strong>' +
         safe(entry.label) + '</strong> · ' + safe(entry.detail) +
@@ -606,6 +626,24 @@ let demandArchived = false;
               safe(member.assignedSkillIds?.join(', ') || 'none') + '</li>').join('') + '</ol>'
           : '<p>Legacy or inconsistent admission snapshot unavailable; no role, model or Skill provenance inferred.</p>') +
         '</section>' +
+        '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
+        '<h5>Planned WorkItems</h5><p>Native, durable operator plans only; no automatic Worker dispatch, ' +
+        'task completion, permission grant or Council result.</p>' +
+        (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
+          safe(item.summary) + '</strong> · planned' +
+          (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
+          '</li>').join('') || '<li>No operator-planned WorkItems.</li>') + '</ol>' :
+          '<p>WorkItem snapshot inconsistent; reload before planning.</p>') +
+        (ticketDetails.truncatedWorkItems ? '<p>Only the first 100 plans are shown.</p>' : '') +
+        (validWorkItems && ['blocked','queued'].includes(ticketDetails.ticket.state)
+          ? '<form data-sa-form="plan-work-item"><label>New planned work item' +
+            '<input type="text" name="summary" maxlength="1000" required ' +
+            'placeholder="Describe a discrete task"></label>' +
+            '<label>Parent work item<select name="parentId"><option value="">Demand root</option>' +
+            plannedWorkItems.map(item => '<option value="' + safe(item.id) + '">' +
+              safe(item.summary) + '</option>').join('') + '</select></label>' +
+            '<button type="submit">Save plan without dispatch</button></form>' : '') +
+        '</section>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
@@ -626,6 +664,7 @@ let demandArchived = false;
               (node.botId ? ' · Bot ' + safe(botName(node.botId)) : '') +
               (node.active ? ' · Active native assignment' : '') +
               '<small>' + (node.kind === 'ticket' ? 'Root Ticket' :
+                node.kind === 'work_item' ? 'Operator plan only · not dispatched' :
                 runGraph!.edges.find(edge => edge.to === node.id)?.relation === 'owns_attempt'
                   ? 'Ticket owns attempt' : 'Ticket awaits decision') +
               '</small>' +
@@ -637,7 +676,9 @@ let demandArchived = false;
                   'Inspect graph attempt ' + node.attempt + '</button>' : '') +
               '</li>').join('') || '<li>No durable nodes.</li>') +
             '</ol>' + (runGraph.truncatedAttempts
-              ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
+              ? '<p>Only the latest 50 attempts are shown.</p>' : '') +
+              (runGraph.truncatedWorkItems
+                ? '<p>Only the first 100 WorkItems are shown.</p>' : '') :
             '<p>Graph not loaded.</p>') + '</section>' +
         '<section class="sa-effect-receipts" role="region" aria-label="Native effect receipts">' +
         '<h5>External effect receipts</h5><p>Read-only native identity and state. ' +
@@ -3359,6 +3400,38 @@ let demandArchived = false;
         });
         await refreshTicketDetails();
         feedback='PR associated as operator context only; GitHub relationship is not verified.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'plan-work-item') {
+      const detail=ticketDetails;
+      const ticketId=inspectedTicket;
+      const summary=String(data.get('summary') ?? '').trim();
+      const parentId=String(data.get('parentId') ?? '') || null;
+      if (!detail || ticketId!==detail.ticket.id || detail.ticket.orchestrationId!==selected ||
+          !['blocked','queued'].includes(detail.ticket.state) ||
+          !summary || summary.length>1000 || /[\x00-\x1F\x7F]/.test(summary) ||
+          (parentId!==null && !detail.workItems?.some(item=>item.id===parentId))) return;
+      if (!pendingWorkItem || pendingWorkItem.ticketId!==ticketId ||
+          pendingWorkItem.summary!==summary || pendingWorkItem.parentId!==parentId) {
+        pendingWorkItem={ticketId,summary,parentId,key:crypto.randomUUID()};
+      }
+      const request=pendingWorkItem;
+      void work(async () => {
+        const item=await call<PlannedWorkItem>('superagent_plan_work_item',{
+          ticketId,expectedRevision:detail.ticket.revision,
+          requestKey:request.key,summary,parentId,
+        });
+        if (item.ticketId!==ticketId || item.requestKey!==request.key ||
+            item.summary!==summary || item.parentId!==parentId ||
+            item.state!=='planned') {
+          throw new Error('Native WorkItem acknowledgement is inconsistent.');
+        }
+        await refreshTicketDetails();
+        // An uncertain reload must preserve the original request key for
+        // idempotent replay instead of creating a duplicate native WorkItem.
+        pendingWorkItem=null;
+        feedback='WorkItem plan saved. No Worker was dispatched or authorized.';
       });
       return;
     }

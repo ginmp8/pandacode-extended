@@ -4481,6 +4481,7 @@ pub fn run() {
                 superagent::member_activity::superagent_member_activity_page,
                 superagent::member_activity::superagent_member_assignment_chat_link,
                 superagent::superagent_snapshot,
+                superagent::superagent_plan_work_item,
                 superagent::superagent_graph,
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,

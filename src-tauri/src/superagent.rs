@@ -10,6 +10,7 @@ pub(crate) mod events;
 pub(crate) mod council_adapter;
 pub mod member_activity;
 pub mod effects;
+pub mod work_items;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -882,8 +883,8 @@ pub struct TaskTimelineEntry {
     pub assignment_id: Option<String>,
 }
 
-fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment]) -> Vec<TaskTimelineEntry> {
-    let mut events = Vec::with_capacity(activity.len() + attempts.len() * 2);
+fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment], work_items: &[work_items::WorkItem]) -> Vec<TaskTimelineEntry> {
+    let mut events = Vec::with_capacity(activity.len() + attempts.len() * 2 + work_items.len());
     for event in activity {
         if event.at > 0 {
             events.push(TaskTimelineEntry {
@@ -911,6 +912,17 @@ fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment]) -> Vec<TaskTi
                 key: format!("assignment-update:{}", attempt.id),
                 label: format!("Native assignment state: {}", attempt.state),
                 detail: format!("Attempt {} · Bot {}", attempt.attempt, attempt.bot_id),
+                assignment_id: None,
+            });
+        }
+    }
+    for item in work_items {
+        if item.created_at > 0 {
+            events.push(TaskTimelineEntry {
+                at: item.created_at,
+                key: format!("work-item:{}", item.id),
+                label: "Operator-planned WorkItem".into(),
+                detail: item.summary.clone(),
                 assignment_id: None,
             });
         }
@@ -985,6 +997,9 @@ pub struct TaskSnapshot {
     pub activity: Vec<AuditEntry>,
     /// Native chronological root-Ticket timeline (no inferred child or provider effects).
     pub timeline: Vec<TaskTimelineEntry>,
+    /// Operator-authored plans only: these are not dispatched or completed tasks.
+    pub work_items: Vec<work_items::WorkItem>,
+    pub truncated_work_items: bool,
     /// Historical task-effective bot profiles, not permission or execution proof.
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1044,7 +1059,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         "native_recheck_required"
     };
     let native_history = history(store, ticket_id, limit)?;
-    let timeline = task_timeline(&native_history, &native_assignments);
+    let (work_items, truncated_work_items) = work_items::list(store, ticket_id, 100)?;
+    let timeline = task_timeline(&native_history, &native_assignments, &work_items);
     let result = TaskSnapshot {
         current_team_policy_revision,
         team_policy_changed_since_admission,
@@ -1057,6 +1073,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         attempt_insights,
         activity: native_history,
         timeline,
+        work_items,
+        truncated_work_items,
         admitted_profile: roster::ticket_profile(store, ticket_id)?,
         admitted_strategy: roster::ticket_strategy(store, ticket_id)?,
     };
@@ -1094,6 +1112,7 @@ pub struct RunGraph {
     pub ticket_id: String,
     pub ticket_revision: i64,
     pub truncated_attempts: bool,
+    pub truncated_work_items: bool,
     pub nodes: Vec<RunGraphNode>,
     pub edges: Vec<RunGraphEdge>,
 }
@@ -1125,6 +1144,25 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
             from: root_id.clone(), to: id, relation: "owns_attempt".into(),
         });
     }
+    // A planned WorkItem is an explicit operator-authored node, not an
+    // assignment or a delegation to a provider. All parents were validated
+    // and pinned to the same Ticket at insertion.
+    for item in &snapshot.work_items {
+        nodes.push(RunGraphNode {
+            id: format!("work-item:{}", item.id), kind: "work_item".into(),
+            state: item.state.clone(), label: item.summary.clone(),
+            bot_id: None, attempt: None, active: false,
+        });
+    }
+    for item in &snapshot.work_items {
+        let parent = item.parent_id.as_ref().map(|id| format!("work-item:{id}"))
+            .filter(|id| nodes.iter().any(|node| node.id == *id))
+            .unwrap_or_else(|| root_id.clone());
+        edges.push(RunGraphEdge {
+            from: parent, to: format!("work-item:{}", item.id),
+            relation: "operator_planned".into(),
+        });
+    }
     if ticket.state == "waiting_approval" || ticket.state == "waiting_review" {
         let id = format!("decision:{}", ticket.id);
         nodes.push(RunGraphNode {
@@ -1142,6 +1180,7 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
     Ok(RunGraph {
         ticket_id: ticket.id, ticket_revision: ticket.revision,
         truncated_attempts: snapshot.assignments.len() > 50,
+        truncated_work_items: snapshot.truncated_work_items,
         nodes, edges,
     })
 }
@@ -5204,6 +5243,20 @@ pub async fn superagent_graph(
     run_graph(&store, &ticket_id)
 }
 
+/// Trusted Desktop-only task planning. Planning never launches a provider,
+/// assigns a Worker, authorizes a tool, or bypasses native approval.
+#[tauri::command]
+pub async fn superagent_plan_work_item(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: i64, request_key: String,
+    summary: String, parent_id: Option<String>,
+) -> Result<work_items::WorkItem> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    work_items::plan(&store,&ticket_id,expected_revision,&request_key,
+        &summary,parent_id.as_deref())
+}
+
 #[tauri::command]
 pub async fn superagent_snapshot(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -5738,6 +5791,98 @@ pub async fn superagent_restore_demand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_work_items_are_ticket_scoped_idempotent_and_restart_safe() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,launch)=admit_role_with_staging(
+            &mut store,&team.id,"Operator plan without provider",
+            "plan-work-items",false,false,true,
+        ).unwrap();
+        assert!(!launch);
+        assert_eq!(ticket.state,"blocked");
+        let original_assignments=assignments(&store,&ticket.id,100).unwrap().len();
+        let root=work_items::plan(&store,&ticket.id,ticket.revision,
+            "plan-root","Implement native task graph",None).unwrap();
+        assert_eq!(root.ticket_id,ticket.id);
+        assert_eq!(root.state,"planned");
+        assert_eq!(work_items::plan(&store,&ticket.id,ticket.revision,
+            "plan-root","Implement native task graph",None).unwrap().id,root.id,
+            "replay must not create another plan or increment Ticket revision");
+        let first=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(first.revision,ticket.revision+1);
+        assert!(work_items::plan(&store,&ticket.id,first.revision,
+            "plan-root","Change scope on replay",None).is_err());
+        assert!(work_items::plan(&store,&ticket.id,ticket.revision,
+            "plan-stale","Stale operator revision",None).is_err());
+        let child=work_items::plan(&store,&ticket.id,first.revision,
+            "plan-child","Add stable graph links",Some(&root.id)).unwrap();
+        assert_eq!(child.parent_id.as_deref(),Some(root.id.as_str()));
+        let second=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(second.revision,first.revision+1);
+        let snap=ticket_snapshot(&store,&ticket.id,50).unwrap();
+        assert_eq!(snap.work_items.len(),2);
+        assert!(snap.timeline.iter().any(|event|event.key==format!("work-item:{}",root.id)));
+        let graph=run_graph(&store,&ticket.id).unwrap();
+        assert!(graph.edges.iter().any(|edge|
+            edge.from==format!("work-item:{}",root.id)
+            && edge.to==format!("work-item:{}",child.id)
+            && edge.relation=="operator_planned"));
+        assert_eq!(assignments(&store,&ticket.id,100).unwrap().len(),original_assignments);
+        assert!(!mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+        assert!(mandate(&store,&ticket.id).unwrap().allowed_tools.is_empty());
+        let (other,_) = admit_role_with_staging(
+            &mut store,&team.id,"Other Demand","plan-other",
+            false,false,true,
+        ).unwrap();
+        assert!(work_items::plan(&store,&other.id,other.revision,
+            "foreign-parent","Must not link",Some(&root.id)).is_err());
+        assert_eq!(get_ticket(&store,&other.id).unwrap().revision,other.revision);
+        // SQL writers cannot bypass the same-Demand parent trigger.
+        assert!(store.db.execute(
+            "INSERT INTO sa_work_items(id,ticket_id,request_key,parent_id,summary,state,actor,created_at)
+             VALUES('cross-parent',?1,'cross-parent',?2,'cross','planned','local-user',?3)",
+            params![&other.id,&root.id,storage::now()],
+        ).is_err());
+        assert_eq!(work_items::list(&store,&other.id,100).unwrap().0.len(),0);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        let persisted=ticket_snapshot(&reopened,&ticket.id,50).unwrap();
+        assert_eq!(persisted.work_items.len(),2);
+        assert!(persisted.work_items.iter().any(|item|item.id==child.id));
+        assert_eq!(work_items::plan(&reopened,&ticket.id,ticket.revision,
+            "plan-root","Implement native task graph",None).unwrap().id,root.id);
+    }
+
+    #[test]
+    fn work_item_planning_never_reenters_active_or_uncertain_demands() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (running,launched)=admit(&mut store,&team.id,
+            "Active native Worker","plan-active",false).unwrap();
+        assert!(launched);
+        assert!(work_items::plan(&store,&running.id,running.revision,
+            "active-plan","Cannot plan during provider execution",None).is_err());
+        assert_eq!(get_ticket(&store,&running.id).unwrap().revision,running.revision);
+        let (stopped,_) = stop(&store,&running.id).unwrap();
+        assert!(work_items::plan(&store,&stopped.id,stopped.revision,
+            "stopped-plan","Terminal task",None).is_err());
+        let (staged,_) = admit_role_with_staging(
+            &mut store,&team.id,"Inspect uncertain effects",
+            "plan-uncertain",false,false,true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'pending-test','digest','uncertain',?2,?2)",
+            params![&staged.id,storage::now()],
+        ).unwrap();
+        assert!(work_items::plan(&store,&staged.id,staged.revision,
+            "uncertain-plan","Unreconciled effect",None).is_err());
+        assert_eq!(get_ticket(&store,&staged.id).unwrap().revision,staged.revision);
+        assert!(work_items::list(&store,&staged.id,100).unwrap().0.is_empty());
+    }
 
     #[test]
     fn archived_demand_keeps_native_evidence_and_recovery_safe() {

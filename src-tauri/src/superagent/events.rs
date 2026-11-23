@@ -523,8 +523,22 @@ fn authenticated_issue_pull_resources(
     Ok(repository_id)
 }
 
+/// Require a stable immutable repository identity across all authenticated
+/// Issue/PR resource reads before allowing a native Ticket association.
+fn authenticated_issue_pull_resources_stable(
+    repository: &str, issue_key: &str, pull_key: &str,
+    before: &serde_json::Value, issue: &serde_json::Value,
+    pull: &serde_json::Value, after: &serde_json::Value,
+) -> Result<u64> {
+    let id = authenticated_issue_pull_resources(
+        repository, issue_key, pull_key, before, issue, pull,
+    )?;
+    require_same_authenticated_repository(repository, id, after)?;
+    Ok(id)
+}
+
 /// Authenticated read-only gh API calls; recheck the immutable user identity
-/// after every provider response and before any local association is written.
+/// and repository identity after resource reads, before any local link write.
 fn fetch_authenticated_issue_pull_resources(
     repository: &str, issue_key: &str, pull_key: &str,
 ) -> Result<u64> {
@@ -551,8 +565,11 @@ fn fetch_authenticated_issue_pull_resources(
     let pull = crate::github::json(&crate::github::run_gh(
         &root, &["api", &pull_endpoint], crate::github::TIMEOUT,
     )?)?;
-    let id = authenticated_issue_pull_resources(
-        repository, issue_key, pull_key, &repo, &issue, &pull,
+    let current_repo = crate::github::json(&crate::github::run_gh(
+        &root, &["api", &repo_endpoint], crate::github::TIMEOUT,
+    )?)?;
+    let id = authenticated_issue_pull_resources_stable(
+        repository, issue_key, pull_key, &repo, &issue, &pull, &current_repo,
     )?;
     recheck_authenticated_operator(&root, &login, operator_id)?;
     Ok(id)
@@ -2735,6 +2752,7 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
             return Err("PR head changed while fetching Checks; retry explicitly.".into());
         }
     }
+    recheck_authenticated_repository(&root, repository, repository_id)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, pull, listing, repository_id))
 }
@@ -2793,6 +2811,7 @@ fn fetch_authenticated_check_run(
     let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
     let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
     let verified = crate::github::json(&output)?;
+    recheck_authenticated_repository(&root, repository, repository_id)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, verified, repository_id))
 }
@@ -6757,6 +6776,62 @@ mod tests {
             assert!(authenticated_issue_pull_resources(
                 "test/fixture",issue_key,pull_key,&repo,&issue,&pull).is_err());
         }
+    }
+
+    #[test]
+    fn issue_pr_association_denies_repository_replacement_without_link_or_grant() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        let issue_source = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let pull_source = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "pull_request.opened",
+        ).unwrap();
+        link_thread(&store, &issue_source.id, "ticket-one", "issue:42").unwrap();
+        let tx = store.db.unchecked_transaction().unwrap();
+        pin_authenticated_repository_identity(&tx, &issue_source.id, 900).unwrap();
+        tx.commit().unwrap();
+        let original = serde_json::json!({"full_name":"test/fixture","id":900});
+        let replaced = serde_json::json!({"full_name":"test/fixture","id":901});
+        let issue = serde_json::json!({
+            "id":42,"number":42,
+            "repository_url":"https://api.github.com/repos/test/fixture",
+            "html_url":"https://github.com/test/fixture/issues/42"
+        });
+        let pull = serde_json::json!({
+            "id":99,"number":99,
+            "base":{"repo":{"id":900,"full_name":"test/fixture"}},
+            "html_url":"https://github.com/test/fixture/pull/99"
+        });
+        assert!(authenticated_issue_pull_resources_stable(
+            "test/fixture", "issue:42", "pull:99",
+            &original, &issue, &pull, &replaced,
+        ).is_err());
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&pull_source.id], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+        let id = authenticated_issue_pull_resources_stable(
+            "test/fixture", "issue:42", "pull:99",
+            &original, &issue, &pull, &original,
+        ).unwrap();
+        assert_eq!(id, 900);
+        link_issue_to_pull_scoped(
+            &store, &pull_source.id, "ticket-one", "issue:42", "pull:99",
+            Some(("test/fixture", pull_source.policy_revision, id)),
+        ).unwrap();
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 2);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened, "ticket-one").unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

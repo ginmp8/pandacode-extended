@@ -5189,9 +5189,12 @@ fn admit_desktop_manual_request(
     store: &mut Store, active: &[String], config_id: &str, objective: &str,
     request_key: &str, coordinate: bool, selected_worker_id: Option<&str>,
 ) -> Result<(Ticket, bool, Option<String>)> {
+    let options = ManualAdmissionOptions {
+        coordinate, headless_staging: false, selected_worker_id,
+    };
     admit_desktop_manual_request_with_pause(
-        store, active, config_id, objective, request_key, coordinate,
-        selected_worker_id, crate::feature_controls::get().bots_paused,
+        store, active, config_id, objective, request_key,
+        options, crate::feature_controls::get().bots_paused,
     )
 }
 
@@ -5199,8 +5202,7 @@ fn admit_desktop_manual_request(
 /// launching another provider. Fresh Demands still require current authorization.
 fn admit_desktop_manual_request_with_pause(
     store: &mut Store, active: &[String], config_id: &str, objective: &str,
-    request_key: &str, coordinate: bool, selected_worker_id: Option<&str>,
-    bots_paused: bool,
+    request_key: &str, options: ManualAdmissionOptions<'_>, bots_paused: bool,
 ) -> Result<(Ticket, bool, Option<String>)> {
     let previously_admitted: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets
@@ -5210,9 +5212,8 @@ fn admit_desktop_manual_request_with_pause(
     if bots_paused && !previously_admitted {
         return Err("Bots are paused; no new SuperAgent dispatch is allowed.".into());
     }
-    let options = ManualAdmissionOptions {
-        coordinate, headless_staging: false, selected_worker_id,
-    };
+    let coordinate = options.coordinate;
+    let selected_worker_id = options.selected_worker_id;
     if previously_admitted {
         let (ticket, launch) = admit_role_with_staging_member(
             store, config_id, objective, request_key, false, options,
@@ -12423,30 +12424,33 @@ mod tests {
         ] {
             let mut store = fixture();
             let team = enabled(&store);
+            let options = |coordinated| ManualAdmissionOptions {
+                coordinate: coordinated, headless_staging: false, selected_worker_id,
+            };
             let (initial, dispatched, _) = admit_desktop_manual_request_with_pause(
                 &mut store, &[], &team.id, "Existing task", "paused-desktop-key",
-                coordinate, selected_worker_id, false,
+                options(coordinate), false,
             ).unwrap();
             assert!(dispatched);
             let (replayed, launch, recipient) = admit_desktop_manual_request_with_pause(
                 &mut store, &["unavailable-runtime".into()],
                 &team.id, "Existing task", "paused-desktop-key",
-                coordinate, selected_worker_id, true,
+                options(coordinate), true,
             ).unwrap();
             assert_eq!(replayed.id, initial.id);
             assert!(!launch);
             assert!(recipient.is_none());
             assert!(admit_desktop_manual_request_with_pause(
                 &mut store, &[], &team.id, "Unauthorized new task",
-                "new-paused-desktop-key", coordinate, selected_worker_id, true,
+                "new-paused-desktop-key", options(coordinate), true,
             ).unwrap_err().contains("paused"));
             assert!(admit_desktop_manual_request_with_pause(
                 &mut store, &[], &team.id, "Changed original scope",
-                "paused-desktop-key", coordinate, selected_worker_id, true,
+                "paused-desktop-key", options(coordinate), true,
             ).is_err());
             assert!(admit_desktop_manual_request_with_pause(
                 &mut store, &[], &team.id, "Existing task",
-                "paused-desktop-key", !coordinate, selected_worker_id, true,
+                "paused-desktop-key", options(!coordinate), true,
             ).is_err());
             let ticket_count: i64 = store.db.query_row(
                 "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",

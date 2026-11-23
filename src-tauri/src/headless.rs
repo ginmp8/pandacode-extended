@@ -1105,6 +1105,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
         | Command::ObserveCheckRun { .. } | Command::ObserveLinkedPrChecks { .. }
         | Command::QueueDemand { .. } | Command::QueueSelectedWorkerDemand { .. }
+        | Command::PlanWorkItem { .. } | Command::CancelPlannedWorkItem { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
         | Command::ArchiveDemand { .. } | Command::RestoreDemand { .. }

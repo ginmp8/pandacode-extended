@@ -2644,6 +2644,82 @@ test('native-backed attempt inspector shows recorded sessions and run budgets wi
 });
 
 
+test('native Task timeline orders durable audit and assignment records and opens the exact chat', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-task-timeline-test';
+    document.body.appendChild(host);
+    const commands: string[] = [];
+    const routes: unknown[] = [];
+    (window as unknown as {
+      taskTimelineEvidence: () => {commands:string[];routes:unknown[]};
+    }).taskTimelineEvidence = () => ({commands, routes});
+    mountSuperagent(host, async command => {
+      commands.push(command);
+      if (command === 'bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [{
+        id:'team',name:'Timeline Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:true,policyRevision:1,
+      }] as never;
+      if (command === 'superagent_tickets') return [{
+        id:'ticket',orchestrationId:'team',objective:'Verify actual attempts',
+        state:'running',revision:4,evidence:null,
+      }] as never;
+      if (command === 'superagent_source_thread_links') return [] as never;
+      if (command === 'superagent_snapshot') return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'Verify actual attempts',
+          state:'running',revision:4,evidence:null},
+        mandate:{actor:'operator',authorizationId:'user-issued',policyRevision:1,
+          projectId:'project',expiresAt:1900000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[
+          {id:'attempt-1',botId:'worker',sessionId:'session-one',
+            state:'failed',attempt:1,createdAt:1800000000100,updatedAt:1800000000400},
+          {id:'attempt-2',botId:'worker',sessionId:'session-two',
+            state:'running',attempt:2,createdAt:1800000000500,updatedAt:1800000000900},
+        ],
+        activity:[
+          {id:12,kind:'admitted',detail:'Operator admitted a read-only task',at:1800000000300},
+          {id:13,kind:'callback_rejected',detail:'Stale callback denied',at:1800000000750},
+        ],
+      } as never;
+      throw Error('Unexpected command: ' + command);
+    }, async route => { routes.push(route); });
+  });
+  const host = page.locator('#sa-task-timeline-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const timeline = host.getByRole('region',{name:'Task timeline'});
+  const rows = timeline.locator('ol > li');
+  await expect(rows).toHaveCount(6);
+  const texts = await rows.allTextContents();
+  expect(texts[0]).toContain('Assignment 1 recorded');
+  expect(texts[1]).toContain('admitted');
+  expect(texts[2]).toContain('Native assignment state: failed');
+  expect(texts[3]).toContain('Assignment 2 recorded');
+  expect(texts[4]).toContain('callback_rejected');
+  expect(texts[5]).toContain('Native assignment state: running');
+  await expect(timeline).toContainText('not proof of a file change');
+  await timeline.getByRole('button',{name:'Inspect timeline attempt 2'}).click();
+  const inspector = host.getByRole('region',{name:'Native assignment inspector'});
+  await expect(inspector).toContainText('session-two');
+  await inspector.getByRole('button',{name:'Open native chat'}).click();
+  const evidence = await page.evaluate(() =>
+    (window as unknown as {
+      taskTimelineEvidence: () => {commands:string[];routes:unknown[]};
+    }).taskTimelineEvidence());
+  expect(evidence.routes).toEqual([{
+    teamId:'team',ticketId:'ticket',assignmentId:'attempt-2',
+    botId:'worker',sessionId:'session-two',
+  }]);
+  expect(evidence.commands.some(command =>
+    /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
+});
+
 test('native effect receipt inspection is lazy, task-scoped and cannot dispatch', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

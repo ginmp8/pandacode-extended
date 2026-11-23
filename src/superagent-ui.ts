@@ -477,6 +477,55 @@ let demandArchived = false;
               safe(entry.kind) + ' · ' + safe(entry.detail) + ' · Event ' + entry.id +
               '</li>').join('')) +
         (!activity.length ? '<li>No matching native events.</li>' : '') + '</ol>';
+    // Native root-Ticket audit and assignment timestamps are independently
+    // persisted. Display them together without inferring provider tool activity,
+    // review success, child Tickets, or side-effect application.
+    const taskTimeline: Array<{
+      at: number; key: string; label: string; detail: string; assignmentId?: string;
+    }> = [];
+    for (const event of activityTrail) {
+      if (Number.isSafeInteger(event.at) && event.at > 0) {
+        taskTimeline.push({
+          at: event.at, key: 'audit:' + event.id, label: event.kind,
+          detail: event.detail,
+        });
+      }
+    }
+    for (const assignment of ticketDetails?.assignments ?? []) {
+      const started = assignment.createdAt ?? 0;
+      const updated = assignment.updatedAt ?? 0;
+      if (Number.isSafeInteger(started) && started > 0) {
+        taskTimeline.push({
+          at: started, key: 'assignment-start:' + assignment.id,
+          label: 'Assignment ' + assignment.attempt + ' recorded',
+          detail: 'Bot ' + botName(assignment.botId) +
+            ' · Session ' + assignment.sessionId,
+          assignmentId: assignment.id,
+        });
+      }
+      if (Number.isSafeInteger(updated) && updated > started && updated > 0) {
+        taskTimeline.push({
+          at: updated, key: 'assignment-update:' + assignment.id,
+          label: 'Native assignment state: ' + assignment.state,
+          detail: 'Attempt ' + assignment.attempt + ' · Bot ' + botName(assignment.botId),
+        });
+      }
+    }
+    taskTimeline.sort((left, right) =>
+      left.at - right.at || left.key.localeCompare(right.key));
+    const taskTimelineContent = '<section class="sa-task-timeline" role="region" aria-label="Task timeline">' +
+      '<h5>Task timeline</h5><p>Chronological native root-Ticket audit and assignment records only. ' +
+      'An assignment or provider message is not proof of a file change, test pass, Council verdict ' +
+      'or completed child Task. Older audit events appear after explicitly loading their page.</p>' +
+      '<ol>' + (taskTimeline.map(entry =>
+        '<li><time>' + safe(activityTime(entry.at)) + '</time> · <strong>' +
+        safe(entry.label) + '</strong> · ' + safe(entry.detail) +
+        (entry.assignmentId
+          ? ' <button type="button" data-sa-inspect-assignment="' +
+            safe(entry.assignmentId) + '">Inspect timeline attempt ' +
+            safe(ticketDetails?.assignments.find(item => item.id === entry.assignmentId)?.attempt) +
+            '</button>' : '') + '</li>').join('') ||
+        '<li>No recorded native Task events or assignments.</li>') + '</ol></section>';
     const attempt = ticketDetails?.assignments.find(item => item.id === inspectedAssignmentId);
     const insight = ticketDetails?.attemptInsights?.find(item => item.assignmentId === inspectedAssignmentId);
     const attemptDetails = attempt
@@ -600,6 +649,7 @@ let demandArchived = false;
             '</code> · Updated ' + safe(activityTime(item.updatedAt)) + '</li>').join('') ||
             '<li>No native external effect receipts for this Ticket.</li>') + '</ol>' :
             '<p>Receipts not loaded.</p>') + '</section>' +
+        taskTimelineContent +
         '<h5>Native activity</h5>' +
         '<nav class="sa-activity-tabs" aria-label="Activity display">' +
         (['all','compact','json'] as const).map(mode =>

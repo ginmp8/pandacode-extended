@@ -884,7 +884,7 @@ pub struct TaskTimelineEntry {
 }
 
 fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment], work_items: &[work_items::WorkItem]) -> Vec<TaskTimelineEntry> {
-    let mut events = Vec::with_capacity(activity.len() + attempts.len() * 2 + work_items.len());
+    let mut events = Vec::with_capacity(activity.len() + attempts.len() * 2 + work_items.len() * 2);
     for event in activity {
         if event.at > 0 {
             events.push(TaskTimelineEntry {
@@ -922,6 +922,15 @@ fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment], work_items: &
                 at: item.created_at,
                 key: format!("work-item:{}", item.id),
                 label: "Operator-planned WorkItem".into(),
+                detail: item.summary.clone(),
+                assignment_id: None,
+            });
+        }
+        if let Some(cancelled_at) = item.cancelled_at.filter(|at| *at > 0) {
+            events.push(TaskTimelineEntry {
+                at: cancelled_at,
+                key: format!("work-item-cancel:{}", item.id),
+                label: "Operator-cancelled WorkItem".into(),
                 detail: item.summary.clone(),
                 assignment_id: None,
             });
@@ -5932,11 +5941,15 @@ mod tests {
         let cancelled_child=work_items::cancel(&store,&ticket.id,second.revision,
             &child.id,"cancel-child-once").unwrap();
         assert_eq!(cancelled_child.state,"cancelled");
+        assert!(cancelled_child.cancelled_at.is_some_and(|at|at>0));
         let third=get_ticket(&store,&ticket.id).unwrap();
         assert_eq!(third.revision,second.revision+1);
-        assert_eq!(work_items::cancel(&store,&ticket.id,second.revision,
-            &child.id,"cancel-child-once").unwrap().state,"cancelled",
+        let replay_child=work_items::cancel(&store,&ticket.id,second.revision,
+            &child.id,"cancel-child-once").unwrap();
+        assert_eq!(replay_child.state,"cancelled",
             "duplicate identity is a read-only receipt, not a second cancellation");
+        assert_eq!(replay_child.cancelled_at,cancelled_child.cancelled_at,
+            "replay must retain the original cancellation timestamp");
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,third.revision);
         assert!(work_items::cancel(&store,&ticket.id,third.revision,
             &child.id,"cancel-child-different-key").is_err());
@@ -5949,7 +5962,15 @@ mod tests {
         assert_eq!(fourth.revision,third.revision+1);
         let snapshot=ticket_snapshot(&store,&ticket.id,50).unwrap();
         assert_eq!(snapshot.work_items.len(),2);
-        assert!(snapshot.work_items.iter().all(|item|item.state=="cancelled"));
+        assert!(snapshot.work_items.iter().all(|item|
+            item.state=="cancelled" && item.cancelled_at.is_some_and(|at|at>0)));
+        assert!(snapshot.timeline.iter().any(|event|
+            event.key==format!("work-item-cancel:{}",child.id) &&
+            Some(event.at)==cancelled_child.cancelled_at &&
+            event.label=="Operator-cancelled WorkItem" && event.assignment_id.is_none()));
+        assert!(snapshot.timeline.iter().any(|event|
+            event.key==format!("work-item:{}",child.id) &&
+            event.label=="Operator-planned WorkItem"));
         let graph=run_graph(&store,&ticket.id).unwrap();
         assert!(graph.nodes.iter().any(|node|
             node.id==format!("work-item:{}",root.id) && node.state=="cancelled"));
@@ -5961,6 +5982,9 @@ mod tests {
         let reopened=Store::open_read_only(&path).unwrap();
         let persisted=ticket_snapshot(&reopened,&ticket.id,50).unwrap();
         assert!(persisted.work_items.iter().all(|item|item.state=="cancelled"));
+        assert!(persisted.timeline.iter().any(|event|
+            event.key==format!("work-item-cancel:{}",child.id) &&
+            Some(event.at)==cancelled_child.cancelled_at));
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().revision,fourth.revision);
         assert_eq!(work_items::cancel(&reopened,&ticket.id,second.revision,
             &child.id,"cancel-child-once").unwrap().state,"cancelled");

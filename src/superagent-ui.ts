@@ -92,7 +92,7 @@ interface TaskTimelineEntry {
 }
 interface PlannedWorkItem {
   id:string; ticketId:string; requestKey:string; parentId:string|null;
-  summary:string; state:'planned'|'cancelled'; createdAt:number;
+  summary:string; state:'planned'|'cancelled'; createdAt:number; cancelledAt:number|null;
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
@@ -504,16 +504,22 @@ let demandArchived = false;
         typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id) &&
         typeof item.summary === 'string' && item.summary.length > 0 && item.summary.length <= 1000 &&
         (item.state === 'planned' || item.state === 'cancelled') &&
+        (item.state === 'planned' ? item.cancelledAt === null :
+          Number.isSafeInteger(item.cancelledAt) && (item.cancelledAt ?? 0) > 0) &&
         (item.parentId === null || plannedWorkItems.some(parent =>
           parent.id === item.parentId && parent.ticketId === item.ticketId)));
     const plannedWorkItemIds = new Set(validWorkItems ? plannedWorkItems.map(item=>item.id) : []);
     const knownAssignmentIds = new Set(ticketDetails?.assignments.map(item => item.id) ?? []);
     const validTimeline = Array.isArray(nativeTimeline) &&
-      nativeTimeline.length <= 600 && nativeTimeline.every((entry, index) =>
+      nativeTimeline.length <= 800 && nativeTimeline.every((entry, index) =>
         entry && Number.isSafeInteger(entry.at) && entry.at > 0 &&
         typeof entry.key === 'string' && (/^(audit:|assignment-start:|assignment-update:)/.test(entry.key) ||
           (validWorkItems && entry.key.startsWith('work-item:') &&
-            plannedWorkItemIds.has(entry.key.slice('work-item:'.length)))) &&
+            plannedWorkItemIds.has(entry.key.slice('work-item:'.length))) ||
+          (validWorkItems && entry.key.startsWith('work-item-cancel:') &&
+            plannedWorkItems.some(item =>
+              item.id === entry.key.slice('work-item-cancel:'.length) &&
+              item.state === 'cancelled' && item.cancelledAt === entry.at)))) &&
         typeof entry.label === 'string' && typeof entry.detail === 'string' &&
         (entry.assignmentId === null ||
           (typeof entry.assignmentId === 'string' && knownAssignmentIds.has(entry.assignmentId))) &&
@@ -632,6 +638,7 @@ let demandArchived = false;
         'task completion, permission grant or Council result.</p>' +
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
           safe(item.summary) + '</strong> · ' + safe(item.state) +
+          (item.state==='cancelled' ? ' · Cancelled ' + safe(activityTime(item.cancelledAt ?? undefined)) : '') +
           (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
           (item.state==='planned' && ['blocked','queued'].includes(ticketDetails?.ticket.state ?? '')
             && !ticketDetails?.truncatedWorkItems &&

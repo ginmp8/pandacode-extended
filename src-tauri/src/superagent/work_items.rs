@@ -65,13 +65,15 @@ pub struct WorkItem {
     pub summary: String,
     pub state: String,
     pub created_at: i64,
+    /// Durable native cancellation receipt, separate from the immutable plan.
+    pub cancelled_at: Option<i64>,
 }
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
     Ok(WorkItem {
         id:row.get(0)?,ticket_id:row.get(1)?,request_key:row.get(2)?,
         parent_id:row.get(3)?,summary:row.get(4)?,state:row.get(5)?,
-        created_at:row.get(6)?,
+        created_at:row.get(6)?,cancelled_at:row.get(7)?,
     })
 }
 
@@ -81,7 +83,7 @@ pub(super) fn list(store:&Store,ticket_id:&str,limit:i64)->Result<(Vec<WorkItem>
     }
     let mut statement=store.db.prepare(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at
+                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.ticket_id=?1 ORDER BY w.created_at,w.id LIMIT ?2",
     ).map_err(|e|e.to_string())?;
@@ -116,7 +118,7 @@ pub(super) fn plan(
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let previous=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at
+                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.ticket_id=?1 AND w.request_key=?2",
         params![ticket_id,request_key],from_row,
@@ -177,7 +179,7 @@ pub(super) fn plan(
     tx.commit().map_err(|e|e.to_string())?;
     store.db.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at
+                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.id=?1",
         [&id],from_row,
@@ -202,12 +204,12 @@ pub(super) fn cancel(
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let previous:Option<(WorkItem,Option<String>)>=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,
+                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at,
                 c.request_key
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.id=?1 AND w.ticket_id=?2",
         params![item_id,ticket_id],
-        |row|Ok((from_row(row)?,row.get(7)?)),
+        |row|Ok((from_row(row)?,row.get(8)?)),
     ).optional().map_err(|e|e.to_string())?;
     let (item,prior_key)=previous.ok_or("WorkItem does not belong to this Demand.")?;
     if item.state=="cancelled" {
@@ -253,7 +255,7 @@ pub(super) fn cancel(
             now],
     ).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
-    Ok(WorkItem{state:"cancelled".into(),..item})
+    Ok(WorkItem{state:"cancelled".into(),cancelled_at:Some(now),..item})
 }
 
 

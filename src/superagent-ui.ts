@@ -2505,10 +2505,31 @@ let demandArchived = false;
       return;
     }
     if (target.hasAttribute('data-sa-role-load')) {
-      if (selected) void work(async () => {
-        roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
-        workerOrder=[...roleRoster.workerBotIds];
-        reviewerDraft=[...roleRoster.reviewerBotIds];
+      const team = current();
+      if (team && !busy && !loading) void work(async () => {
+        // A roster read is not an authorization grant. Reject a stale or
+        // cross-Team native projection before exposing any selectable bot IDs.
+        roleRoster = null; workerOrder = []; reviewerDraft = [];
+        const roster = await call<TeamRoster>('superagent_roster',{orchestrationId:team.id});
+        const members = roster && Array.isArray(roster.workerBotIds) &&
+          Array.isArray(roster.reviewerBotIds)
+          ? [roster.coordinatorBotId,...roster.workerBotIds,...roster.reviewerBotIds] : [];
+        if (selected !== team.id || current()?.policyRevision !== team.policyRevision ||
+            !roster || roster.orchestrationId !== team.id ||
+            roster.policyRevision !== team.policyRevision ||
+            roster.coordinatorBotId !== team.coordinatorBotId ||
+            !Array.isArray(roster.workerBotIds) || !Array.isArray(roster.reviewerBotIds) ||
+            roster.workerBotIds.length < 1 || roster.workerBotIds.length > 16 ||
+            roster.reviewerBotIds.length > 8 ||
+            (typeof team.workerCount === 'number' && roster.workerBotIds.length !== team.workerCount) ||
+            (typeof team.reviewerCount === 'number' && roster.reviewerBotIds.length !== team.reviewerCount) ||
+            members.some(id => typeof id !== 'string' || !id) ||
+            new Set(members).size !== members.length) {
+          throw new Error('Native Team roster identity, revision or members changed. Refresh this Team before selecting a Worker.');
+        }
+        roleRoster = roster;
+        workerOrder = [...roster.workerBotIds];
+        reviewerDraft = [...roster.reviewerBotIds];
       });
       return;
     }

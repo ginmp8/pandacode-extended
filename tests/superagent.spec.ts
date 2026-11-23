@@ -156,6 +156,8 @@ test('explicit secondary Worker selection uses native preflight and read-only ta
   // Choosing a different Team must never carry an old Worker selection forward,
   // even when that same bot is a valid member of both native rosters.
   await host.locator('[data-sa-select="another-team"]').click();
+  // Details opens the Team workspace; reopen Runs before inspecting its roster.
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'Load configured Workers'}).click();
   await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toHaveValue('');
   await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
@@ -616,6 +618,61 @@ test('native policy blocker prevents edits hidden by the paginated Ticket view',
   await expect(host.getByRole('button',{name:'Save Worker attempt budget'})).toBeEnabled();
 });
 
+test('native Worker roster rejects foreign and stale Team policies before exposing selections', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-roster-integrity-test';
+    document.body.appendChild(host);
+    const state = {revision: 2, teamId: 'another-team'};
+    (window as unknown as {saRosterIntegrity: typeof state}).saRosterIntegrity = state;
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker-a',name:'Worker A',paused:false},
+        {id:'worker-b',name:'Worker B',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [{
+        id:'team',name:'Team',coordinatorBotId:'coordinator',
+        workerBotId:'worker-a',workerCount:2,reviewerCount:0,
+        enabled:true,policyRevision:2,
+      }] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_roster') return {
+        orchestrationId:state.teamId,policyRevision:state.revision,
+        coordinatorBotId:'coordinator',workerBotIds:['worker-a','worker-b'],
+        reviewerBotIds:[],maxWorkerAttempts:2,purpose:'',strategy:'balanced',
+        executionReady:false,
+      } as never;
+      throw Error('Unexpected command '+command);
+    });
+  });
+  const host = page.locator('#sa-roster-integrity-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const load = host.getByRole('button',{name:'Load configured Workers'});
+  await load.click();
+  await expect(host.getByRole('alert')).toContainText('Native Team roster identity');
+  await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toHaveCount(0);
+  await page.evaluate(() => {
+    const state = (window as unknown as {saRosterIntegrity: {revision:number;teamId:string}})
+      .saRosterIntegrity;
+    state.teamId = 'team';
+    state.revision = 3;
+  });
+  await load.click();
+  await expect(host.getByRole('alert')).toContainText('Native Team roster identity');
+  await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toHaveCount(0);
+  await page.evaluate(() => {
+    (window as unknown as {saRosterIntegrity: {revision:number;teamId:string}})
+      .saRosterIntegrity.revision = 2;
+  });
+  await load.click();
+  await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toBeVisible();
+  await expect(host.getByRole('combobox',{name:'Worker for this Demand'})).toHaveValue('');
+});
+
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -651,7 +708,9 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   const row=dialog.locator('.sa-tickets li',{hasText:'Inspect a disposable fixture'});
   await expect(row).toContainText('running');
   await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('1 tasks · 1 running · 0 blocked');
-  await row.getByRole('button',{name:'View evidence'}).click();
+  // Native admission pins and expands the acknowledged Ticket automatically.
+  const toggle=row.getByRole('button',{name:'View evidence'});
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
   const details=dialog.getByRole('region',{name:'Ticket evidence'});
   await expect(details).toContainText('Ticket ID');
   await expect(details).toContainText('local-user');
@@ -1328,7 +1387,7 @@ test('Ticket activity offers native All, Compact and JSON views without invented
   await expect(details.locator('.sa-audit-json')).not.toContainText('turn_settled');
   await modes.getByRole('button',{name:'All'}).click();
   await expect(details.locator('.sa-audit-list li')).toHaveCount(1);
-  await expect(details.getByText('Manual native grant',{exact:false})).toBeVisible();
+  await expect(details.locator('.sa-audit-list li').first()).toContainText('Manual native grant');
 });
 
 test('Off source never polls GitHub and Observe only records authenticated native decisions',async ({page})=>{

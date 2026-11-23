@@ -2982,6 +2982,36 @@ pub async fn superagent_source_link_issue_pull(
     link_issue_to_pull(&store,&source_id,&ticket_id,&issue_key,&pull_key)
 }
 
+/// Verify GitHub identities without holding the SQLite mutex during network IO.
+/// This attests object existence, not that the PR resolves the Issue. No
+/// provider admission or external write may originate from this command.
+#[tauri::command]
+pub async fn superagent_source_verify_link_issue_pull(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, ticket_id: String, issue_key: String, pull_key: String,
+) -> Result<SourceThreadLink> {
+    require_main_window(&window)?;
+    let (repository, expected_revision) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        verified_issue_pull_preflight(
+            &store, &source_id, &ticket_id, &issue_key, &pull_key,
+        )?
+    };
+    let (requested_repo, requested_issue, requested_pull) = (
+        repository.clone(), issue_key.clone(), pull_key.clone(),
+    );
+    let repository_id = tauri::async_runtime::spawn_blocking(move || {
+        fetch_authenticated_issue_pull_resources(
+            &requested_repo, &requested_issue, &requested_pull,
+        )
+    }).await.map_err(|e| format!("Authenticated GitHub verification interrupted: {e}"))??;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    link_issue_to_pull_scoped(
+        &store, &source_id, &ticket_id, &issue_key, &pull_key,
+        Some((&repository, expected_revision, repository_id)),
+    )
+}
+
 /// Authenticated Observe receipts associated with an explicit, same-Team
 /// source-thread link. This is context metadata only: no work admission,
 /// policy changes, private GitHub content or inferred source authority.
@@ -3130,41 +3160,52 @@ pub(crate) fn headless_link_issue_pull(
     })).map_err(|e| e.to_string())
 }
 
+/// Validate source, Ticket and operator-linked Issue before authenticated
+/// network IO. The final transaction rechecks policy and repository identity.
+fn verified_issue_pull_preflight(
+    store: &Store, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str,
+) -> Result<(String, i64)> {
+    if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
+        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:")
+    {
+        return Err("Verified association requires exact issue:123 and pull:123 keys.".into());
+    }
+    let src = source(store, source_id)?;
+    let ticket = super::get_ticket(store, ticket_id)?;
+    if ticket.orchestration_id != src.orchestration_id
+        || matches!(ticket.state.as_str(),
+            "completed" | "stopped" | "failed" | "interrupted" | "inconclusive")
+    {
+        return Err("Ticket is terminal or outside the source Team.".into());
+    }
+    let linked: bool = store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_source_thread_links l
+            JOIN sa_event_sources s ON s.id=l.source_id
+            WHERE l.ticket_id=?1 AND l.subject_key=?2
+              AND s.orchestration_id=?3 AND s.repository=?4 COLLATE NOCASE
+        )",
+        params![ticket_id,issue_key,&src.orchestration_id,&src.repository],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !linked {
+        return Err("Verified PR association requires an existing operator-linked Issue.".into());
+    }
+    Ok((src.repository, src.policy_revision))
+}
+
 /// Native local-user command: authenticated GitHub object existence/identity,
 /// then an explicit local Issue/PR context link. No inferred task authority.
 pub(crate) fn headless_verify_link_issue_pull(
     path: &std::path::Path, source_id: &str, ticket_id: &str,
     issue_key: &str, pull_key: &str,
 ) -> Result<String> {
-    if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
-        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:")
-    {
-        return Err("Verified association requires exact issue:123 and pull:123 keys.".into());
-    }
     let (repository, expected_revision) = {
         let store = Store::open_read_only(path)?;
-        let src = source(&store, source_id)?;
-        let ticket = super::get_ticket(&store, ticket_id)?;
-        if ticket.orchestration_id != src.orchestration_id
-            || matches!(ticket.state.as_str(),
-                "completed" | "stopped" | "failed" | "interrupted" | "inconclusive")
-        {
-            return Err("Ticket is terminal or outside the source Team.".into());
-        }
-        let linked: bool = store.db.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sa_source_thread_links l
-                JOIN sa_event_sources s ON s.id=l.source_id
-                WHERE l.ticket_id=?1 AND l.subject_key=?2
-                  AND s.orchestration_id=?3 AND s.repository=?4 COLLATE NOCASE
-            )",
-            params![ticket_id,issue_key,&src.orchestration_id,&src.repository],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-        if !linked {
-            return Err("Verified PR association requires an existing operator-linked Issue.".into());
-        }
-        (src.repository, src.policy_revision)
+        verified_issue_pull_preflight(
+            &store, source_id, ticket_id, issue_key, pull_key,
+        )?
     };
     // No SQLite writer lock across network IO. The exact revision and numeric
     // repository identity are checked again in the final local transaction.
@@ -6977,6 +7018,55 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
             [&pull.id],|row|row.get::<_,i64>(0)).unwrap(),900);
+    }
+
+    #[test]
+    fn verified_issue_pull_preflight_blocks_unlinked_tickets_and_in_flight_policy_drift() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        insert_manual_ticket(&store, "ticket-two", "orch");
+        let src = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "issues.opened",
+        ).unwrap();
+        assert!(verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).is_err());
+        link_thread(&store, &src.id, "ticket-one", "issue:42").unwrap();
+        let (repo, initial_revision) = verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).unwrap();
+        assert_eq!(repo, "test/fixture");
+        assert!(verified_issue_pull_preflight(
+            &store, &src.id, "ticket-two", "issue:42", "pull:99",
+        ).is_err());
+        assert!(verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:00",
+        ).is_err());
+        set_mode(&store, &src.id, initial_revision, "observe").unwrap();
+        // A successful GitHub read racing local policy revocation cannot
+        // persist a repository identity or a context association.
+        assert!(link_issue_to_pull_scoped(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+            Some((&repo, initial_revision, 900)),
+        ).is_err());
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&src.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let (repo, revision) = verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).unwrap();
+        link_issue_to_pull_scoped(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+            Some((&repo, revision, 900)),
+        ).unwrap();
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&restarted, "ticket-one").unwrap().len(), 2);
+        assert_eq!(restarted.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

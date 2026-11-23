@@ -1204,9 +1204,17 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
           subjectKey:'pull:77',createdAt:Date.now()};
         links.push(link);return link as never;
       }
+      if(command==='superagent_source_verify_link_issue_pull'){
+        if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one'||
+            args.issueKey!=='issue:42'||args.pullKey!=='pull:78'||
+            !links.some(link=>link.subjectKey===args.issueKey))throw Error('Invalid verification scope');
+        const link={sourceId:'source-one',ticketId:'ticket-one',repository:'test/fixture',
+          subjectKey:'pull:78',createdAt:Date.now()};
+        links.push(link);return link as never;
+      }
       if(command==='superagent_source_unlink_thread'){
         if(args?.sourceId!=='source-one' || args.ticketId!=='ticket-one' ||
-            !['issue:42','pull:77'].includes(String(args.subjectKey))) throw Error('Wrong unlink scope');
+            !['issue:42','pull:77','pull:78'].includes(String(args.subjectKey))) throw Error('Wrong unlink scope');
         const index=links.findIndex(link=>link.sourceId===args.sourceId &&
           link.ticketId===args.ticketId && link.subjectKey===args.subjectKey);
         if(index<0) throw Error('Missing native link');
@@ -1237,6 +1245,14 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await host.getByRole('button',{name:'Associate PR with linked issue (context only)'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('pull:77');
   await expect(host.locator('.sa-feedback[role="status"]')).toContainText('GitHub relationship is not verified');
+  await host.getByRole('checkbox',{
+    name:'Verify Issue and PR objects with signed-in GitHub before associating',
+  }).check();
+  await host.getByRole('textbox',{name:'Exact PR thread key'}).fill('pull:78');
+  await host.getByRole('button',{name:'Associate PR with linked issue (context only)'}).click();
+  await expect(host.locator('.sa-linked-threads')).toContainText('pull:78');
+  await expect(host.locator('.sa-feedback[role="status"]')).toContainText(
+    'objects verified; relationship remains operator asserted');
   await expect(host.getByRole('button',{name:'Unlink test/fixture / issue:42'})).toBeVisible();
   await host.getByRole('button',{name:'Unlink test/fixture / issue:42'}).click();
   await expect(host.getByText('Unlink this exact GitHub source thread?',{exact:false})).toBeVisible();
@@ -1244,11 +1260,13 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await expect(host.locator('.sa-linked-threads')).toContainText('pull:77');
   await host.getByRole('button',{name:'Unlink test/fixture / pull:77'}).click();
   await host.getByRole('button',{name:'Confirm'}).click();
+  await host.getByRole('button',{name:'Unlink test/fixture / pull:78'}).click();
+  await host.getByRole('button',{name:'Confirm'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('No threads linked.');
   await host.getByRole('button',{name:'Load linked source decisions'}).click();
   await expect(activity).toContainText('No authenticated Observe decisions match linked threads.');
   await expect.poll(()=>page.evaluate(
-    ()=>(window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount())).toBe(2);
+    ()=>(window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount())).toBe(3);
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);

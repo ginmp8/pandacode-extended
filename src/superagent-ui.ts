@@ -633,8 +633,8 @@ let demandArchived = false;
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
           safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
-          (item.state==='planned' && ['blocked','queued'].includes(ticketDetails.ticket.state)
-            && !ticketDetails.truncatedWorkItems &&
+          (item.state==='planned' && ['blocked','queued'].includes(ticketDetails?.ticket.state ?? '')
+            && !ticketDetails?.truncatedWorkItems &&
             !plannedWorkItems.some(child=>child.parentId===item.id && child.state==='planned')
               ? ' <button type="button" data-sa-cancel-work-item="' + safe(item.id) +
                 '">Cancel planned WorkItem</button>'
@@ -747,14 +747,17 @@ let demandArchived = false;
             '<button type="submit">Link thread (context only)</button></form>'
           : '<p>Load event sources below before linking a thread.</p>') +
         (sourcesLoaded && threadLinks.some(link => link.subjectKey.startsWith('issue:'))
-          ? '<form data-sa-form="issue-pull-link"><p>Operator-asserted PR association; ' +
-            'not GitHub-verified and not a permission grant.</p>' +
+          ? '<form data-sa-form="issue-pull-link"><p>PR association is operator asserted. ' +
+            'Optional authenticated verification checks both GitHub objects, not their ' +
+            'relationship and never grants task authority.</p>' +
             '<label>Linked issue<select name="issueLink" required>' +
             threadLinks.filter(link => link.subjectKey.startsWith('issue:')).map(link =>
               '<option value="' + safe(link.sourceId + '|' + link.subjectKey) + '">' +
               safe(link.repository) + ' / ' + safe(link.subjectKey) + '</option>').join('') +
             '</select></label><label>Exact PR thread key<input name="pullKey" required ' +
             'maxlength="24" placeholder="pull:123"></label>' +
+            '<label><input type="checkbox" name="verifyGitHub">' +
+            'Verify Issue and PR objects with signed-in GitHub before associating</label>' +
             '<button type="submit">Associate PR with linked issue (context only)</button></form>'
           : '') +
         (ticketDetails.council
@@ -3439,12 +3442,17 @@ let demandArchived = false;
         link.sourceId+'|'+link.subjectKey===selectedLink);
       const pullKey=String(data.get('pullKey') ?? '').trim();
       if (!ticketId || !issueLink || !/^pull:[1-9][0-9]{0,11}$/.test(pullKey)) return;
+      const verifyGitHub = data.get('verifyGitHub') === 'on';
       void work(async () => {
-        await call('superagent_source_link_issue_pull',{
+        await call(verifyGitHub
+          ? 'superagent_source_verify_link_issue_pull'
+          : 'superagent_source_link_issue_pull',{
           sourceId:issueLink.sourceId,ticketId,issueKey:issueLink.subjectKey,pullKey,
         });
         await refreshTicketDetails();
-        feedback='PR associated as operator context only; GitHub relationship is not verified.';
+        feedback=verifyGitHub
+          ? 'GitHub Issue and PR objects verified; relationship remains operator asserted. No task or grant created.'
+          : 'PR associated as operator context only; GitHub relationship is not verified.';
       });
       return;
     }

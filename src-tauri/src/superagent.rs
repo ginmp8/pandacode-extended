@@ -4790,7 +4790,7 @@ fn change_enabled(
         let unsettled: bool = store.db.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM sa_tickets t
-                JOIN sa_mandates m ON m.ticket_id=t.id
+                LEFT JOIN sa_mandates m ON m.ticket_id=t.id
                 WHERE t.orchestration_id=?1
                   AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')
                   AND (m.revoked=0 OR t.state<>'blocked'
@@ -12099,6 +12099,47 @@ mod tests {
         // Once repaired, repeated Off is genuinely idempotent.
         let same = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
         assert_eq!(same.policy_revision, repaired.policy_revision);
+    }
+
+    #[test]
+    fn repeated_headless_off_quarantines_running_ticket_with_missing_mandate() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Recover missing mandate", "off-missing-mandate", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // Simulate a legacy/interrupted disable that persisted Off and lost
+        // the Mandate, without settling the running Ticket or Assignment.
+        // There is deliberately no pending effect receipt to trigger repair.
+        store.db.execute("DELETE FROM sa_mandates WHERE ticket_id=?1", [&ticket.id]).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1", [&team.id],
+        ).unwrap();
+
+        let response: serde_json::Value = serde_json::from_str(
+            &headless_disable_orchestration(&store.path, &team.id, team.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(response["enabled"], false);
+        assert_eq!(response["policyRevision"], team.policy_revision + 1);
+        let recovered = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(recovered.state, "interrupted");
+        assert!(recovered.active_assignment_id.is_none());
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(history(&store, &ticket.id, 20).unwrap().iter()
+            .any(|entry| entry.kind == "orchestration_disabled"));
+        assert!(!on_run_finished(&store, &session, true, "late provider success").unwrap());
+
+        // A repaired, already-Off Team remains idempotent and restart-safe.
+        let same = change_enabled(&store, &team.id, team.policy_revision + 1, false).unwrap();
+        assert_eq!(same.policy_revision, team.policy_revision + 1);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "interrupted");
     }
 
     #[test]

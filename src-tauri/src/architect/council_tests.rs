@@ -7556,6 +7556,45 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             &store, &sibling_launch.sid, &sibling_launch.admission,
         ).is_err(), "a second child's revoked reviewer cannot enter a fresh Council cycle");
     }
+    // Fresh child admissions must remain isolated from both old providers.
+    // A delayed callback arriving after a new root cycle starts is not a
+    // completion for any fresh leaf, even if its former child owner remains
+    // in the durable native ownership history.
+    let (pending, _) = dispatch_state(
+        &state, &sid, fresh.generation, "pandacode_finish_team",
+        json!({"summary":"Start the fresh native Council after restart"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let fresh_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert_ne!(fresh_launch.admission.parent, launch.admission.parent);
+    assert_ne!(fresh_launch.admission.parent, sibling_launch.admission.parent);
+    let root_before_late_callbacks = serde_json::to_value(saved(&state, &sid)).unwrap();
+    let child_before_late_callbacks = {
+        let store = state.store.lock().unwrap();
+        serde_json::to_value(
+            load(&store, &fresh_launch.admission.parent).unwrap().unwrap()
+        ).unwrap()
+    };
+    for old_launch in [&launch, &sibling_launch] {
+        completed_state(
+            &state, &old_launch.sid, Some(&old_launch.admission), true, false,
+            &mut |_| {},
+        );
+    }
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(),
+        root_before_late_callbacks,
+        "late callbacks from both old children must not mutate the new root Council");
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(serde_json::to_value(
+            load(&store, &fresh_launch.admission.parent).unwrap().unwrap()
+        ).unwrap(), child_before_late_callbacks,
+            "late old-child callbacks cannot settle a fresh child");
+        child_council::authorize_leaf(
+            &store, &fresh_launch.sid, &fresh_launch.admission,
+        ).unwrap();
+    }
     assert!(start_state(
         &state, &sid, "Concurrent objective", None, None,
     ).is_err(), "a fresh task cannot be started twice while active");

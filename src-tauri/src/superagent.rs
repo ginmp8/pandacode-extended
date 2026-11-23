@@ -5154,6 +5154,41 @@ pub async fn superagent_preflight_worker(
     manual_preflight_worker(&store,&orchestration_id,&objective,&worker.id,busy)
 }
 
+/// Check the durable request key before consulting transient provider state.
+/// A repeated manual Demand is an inspection receipt, never another dispatch.
+/// The native admission routine still verifies objective, role, Worker identity
+/// and dispatch mode for the existing key.
+fn admit_desktop_manual_request(
+    store: &mut Store, active: &[String], config_id: &str, objective: &str,
+    request_key: &str, coordinate: bool, selected_worker_id: Option<&str>,
+) -> Result<(Ticket, bool, Option<String>)> {
+    let previously_admitted: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets
+                       WHERE orchestration_id=?1 AND request_key=?2)",
+        params![config_id, request_key], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let options = ManualAdmissionOptions {
+        coordinate, headless_staging: false, selected_worker_id,
+    };
+    if previously_admitted {
+        let (ticket, launch) = admit_role_with_staging_member(
+            store, config_id, objective, request_key, false, options,
+        )?;
+        debug_assert!(!launch, "A durable request-key replay must never dispatch");
+        return Ok((ticket, false, None));
+    }
+    let cfg = configuration(store, config_id)?;
+    let candidate_id = if coordinate { cfg.coordinator_bot_id.as_str() }
+        else { selected_worker_id.unwrap_or(cfg.worker_bot_id.as_str()) };
+    // New work still checks transient sessions, native leases, roster and
+    // policy before inserting a Ticket or admitting an Assignment.
+    let busy = active_manual_conflict(store, active, candidate_id, &cfg.project_id)?;
+    let (ticket, launch) = admit_role_with_staging_member(
+        store, config_id, objective, request_key, busy, options,
+    )?;
+    Ok((ticket, launch, launch.then(|| candidate_id.to_owned())))
+}
+
 #[tauri::command]
 pub async fn superagent_submit_to_worker(
     window:tauri::WebviewWindow,app:tauri::AppHandle,
@@ -5164,26 +5199,17 @@ pub async fn superagent_submit_to_worker(
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
     }
-    let (ticket,launch,selected)={
-        let active:Vec<String>=state.agents.lock().map_err(|e|e.to_string())?
+    let (ticket, launch, selected) = {
+        let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
-        let mut store=state.store.lock().map_err(|e|e.to_string())?;
-        let config=configuration(&store,&orchestration_id)?;
-        // Do not resolve live membership before the native idempotency check:
-        // an unavailable former member cannot relaunch an existing Demand,
-        // but its exact request key must remain inspectable without dispatch.
-        let busy=active_manual_conflict(&store,&active,&worker_bot_id,&config.project_id)?;
-        // Deduplication must run before occupied-worker rejection. The native
-        // admission boundary rechecks role, policy, lease and authorization for
-        // new Tickets; a repeated request key returns its existing Ticket
-        // without ever delivering a second provider packet.
-        let (ticket,launch)=admit_role_with_staging_member(
-            &mut store,&orchestration_id,&objective,&request_key,busy,
-            ManualAdmissionOptions { coordinate:false, headless_staging:false, selected_worker_id:Some(&worker_bot_id) },
-        )?;
-        (ticket,launch,worker_bot_id)
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        admit_desktop_manual_request(
+            &mut store, &active, &orchestration_id, &objective, &request_key,
+            false, Some(&worker_bot_id),
+        )?
     };
-    if !launch {return Ok(ticket);}
+    if !launch { return Ok(ticket); }
+    let selected = selected.ok_or("Native Worker admission has no dispatch recipient.")?;
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id:selected,channel_id:CHANNEL.into(),thread:ticket.id.clone(),
         sender_id:"local-user".into(),sender_name:"Manual task".into(),
@@ -5208,15 +5234,16 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
         return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
     }
     let (ticket, launch, worker_id) = {
-        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
+        let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
-        let mut store=state.store.lock().map_err(|e|e.to_string())?;
-        let cfg=configuration(&store,&orchestration_id)?;
-        let busy=active_manual_conflict(&store,&active,&cfg.worker_bot_id,&cfg.project_id)?;
-        let (ticket,launch)=admit(&mut store,&orchestration_id,&objective,&request_key,busy)?;
-        (ticket,launch,cfg.worker_bot_id)
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        admit_desktop_manual_request(
+            &mut store, &active, &orchestration_id, &objective, &request_key,
+            false, None,
+        )?
     };
     if !launch { return Ok(ticket); }
+    let worker_id = worker_id.ok_or("Native Worker admission has no dispatch recipient.")?;
     let delivered=bots::gateway::deliver(
         &app,
         bots::gateway::Inbound {
@@ -5447,16 +5474,17 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; coordinated dispatch is denied.".into());
     }
-    let (ticket,launch,coordinator_id) = {
-        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
+    let (ticket, launch, coordinator_id) = {
+        let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let cfg = configuration(&store, &orchestration_id)?;
-        let busy = active_manual_conflict(&store,&active,&cfg.coordinator_bot_id,&cfg.project_id)?;
-        let (ticket,launch) = admit_role(&mut store,&orchestration_id,&objective,&request_key,busy,true)?;
-        (ticket,launch,cfg.coordinator_bot_id)
+        admit_desktop_manual_request(
+            &mut store, &active, &orchestration_id, &objective, &request_key,
+            true, None,
+        )?
     };
     if !launch { return Ok(ticket); }
+    let coordinator_id = coordinator_id.ok_or("Native Coordinator admission has no dispatch recipient.")?;
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: coordinator_id,
         channel_id: CHANNEL.into(),
@@ -12292,6 +12320,64 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(worker_attempts, 0, "no unsupported Worker may be admitted");
+    }
+
+    #[test]
+    fn desktop_manual_replay_skips_unavailable_runtime_without_new_assignment() {
+        for (coordinate, selected_worker_id) in [
+            (false, None), (true, None), (false, Some("worker")),
+        ] {
+            let mut store = fixture();
+            let team = enabled(&store);
+            let (original, launched, recipient) = admit_desktop_manual_request(
+                &mut store, &[], &team.id, "Read source", "stable-manual-key",
+                coordinate, selected_worker_id,
+            ).unwrap();
+            assert!(launched);
+            assert_eq!(recipient.as_deref(), Some(if coordinate { "router" } else { "worker" }));
+            let missing_runtime = vec!["removed-provider-session".to_owned()];
+            assert!(active_manual_conflict(
+                &store, &missing_runtime,
+                if coordinate { "router" } else { "worker" }, &team.project_id,
+            ).unwrap_err().contains("unavailable"));
+
+            let (replayed, relaunched, recipient) = admit_desktop_manual_request(
+                &mut store, &missing_runtime, &team.id, "Read source",
+                "stable-manual-key", coordinate, selected_worker_id,
+            ).unwrap();
+            assert_eq!(replayed.id, original.id);
+            assert!(!relaunched);
+            assert!(recipient.is_none());
+            assert!(admit_desktop_manual_request(
+                &mut store, &missing_runtime, &team.id, "Different objective",
+                "stable-manual-key", coordinate, selected_worker_id,
+            ).is_err());
+            assert!(admit_desktop_manual_request(
+                &mut store, &missing_runtime, &team.id, "Read source",
+                "stable-manual-key", !coordinate, selected_worker_id,
+            ).is_err());
+            if !coordinate {
+                assert!(admit_desktop_manual_request(
+                    &mut store, &missing_runtime, &team.id, "Read source",
+                    "stable-manual-key", false, Some("router"),
+                ).is_err());
+            }
+            assert!(admit_desktop_manual_request(
+                &mut store, &missing_runtime, &team.id, "Another Demand",
+                "different-request-key", coordinate, selected_worker_id,
+            ).is_err());
+            let tickets: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+                [&team.id], |row| row.get(0),
+            ).unwrap();
+            let assignments: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+                [&original.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(tickets, 1);
+            assert_eq!(assignments, 1);
+            assert!(mandate(&store, &original.id).unwrap().allowed_tools.is_empty());
+        }
     }
 
     #[test]

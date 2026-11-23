@@ -302,6 +302,65 @@ test('Council inspector does not present stale human acceptance as current appro
   await expect(inspector).not.toContainText('Verified native pass');
 });
 
+
+test('the native Council inspector rejects foreign task responses before exposing evidence in direct or embedded views', async ({ page }) => {
+  const own = {
+    sessionId: 'task', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [], reservedChildren: [],
+  };
+  const foreign = {
+    ...own, sessionId: 'foreign-task', cycleStartedAt: 2000, teamRevision: 9,
+    status: { state: 'passed', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'foreign-task', cycleId: 'foreign-task:2000',
+      teamRevision: 9, round: 1, lowest: 9.9 },
+    reportedFindings: [{ schemaVersion: 1, id: 'private:1', cycleId: 'foreign-task:2000',
+      round: 1, workerId: 'private-worker', reportMessageId: 11, lens: 'Security',
+      severity: 'high', category: 'privacy', title: 'Foreign private finding',
+      explanation: 'Another task must never render this finding', artifactRevision: 'other-revision',
+      verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, own);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator(':scope > summary').click();
+  await expect(inspector).toContainText('Native pass not verified');
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, foreign);
+  await refresh.click();
+  await expect(inspector.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(inspector).not.toContainText('Foreign private finding');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, own);
+  await refresh.click();
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector.getByRole('alert')).toHaveCount(0);
+
+  // An embedded native task consumer uses the same read-only presenter and
+  // cannot switch its root task by swapping a result after the first read.
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__embeddedCouncil = snapshot;
+    const host = document.createElement('div');
+    host.id = 'embedded-native-council';
+    document.body.append(host);
+    const detail = createCouncilInspector(async () => (window as any).__embeddedCouncil);
+    host.append(detail);
+    detail.open = true;
+  }, own);
+  const embedded = page.locator('#embedded-native-council .council-inspection');
+  await expect(embedded).toContainText('Native pass not verified');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, foreign);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embedded.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(embedded).not.toContainText('Foreign private finding');
+  await expect(embedded).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, own);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embedded).toContainText('Native pass not verified');
+});
+
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {
     sessionId: 'task', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,

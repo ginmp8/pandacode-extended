@@ -453,6 +453,66 @@ test.describe('shared bot channels', () => {
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveCount(0);
   });
 
+
+  test('Channel native inspection never replaces its bound delivery with a foreign root result', async ({ page }) => {
+    const own = {
+      sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 7,
+      status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+      verifiedPass: false, criteria: [], attempts: [], reservedChildren: [],
+    };
+    const foreign = {
+      ...own, sessionId: 'other-channel-root', cycleStartedAt: 2000,
+      status: { state: 'passed', round: 1, lowest: 9.9, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: { sessionId: 'other-channel-root', cycleId: 'other-channel-root:2000',
+        teamRevision: 7, round: 1, lowest: 9.9 },
+      reportedFindings: [{ schemaVersion: 1, id: 'private:1', cycleId: 'other-channel-root:2000',
+        round: 1, workerId: 'private', reportMessageId: 4, lens: 'Security',
+        severity: 'high', category: 'privacy', title: 'Other Channel secret finding',
+        explanation: 'Another delivery', artifactRevision: 'other-revision',
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false }],
+    };
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/switch\\s*\\(command\\)\\s*\\{/,
+        'if (command === "bot_shared_channel_council_inspect") return ' +
+        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(own) + '); switch (command) {');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await expect(page.locator('.conversation-pane.channel-thread .bc-history')).toBeVisible();
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = sharedChannelThreadHtml({
+        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{ id: 'delivery-one', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: { cycleId: 'cycle-one', sessionId: 'channel-root', state: 'Reviewing',
+            round: 1, target: 9, lowest: null, artifactRevision: 'artifact', reviewers: [] } }],
+      }, []);
+      const assignment = wrapper.querySelector('.bc-assigned');
+      const history = document.querySelector('.bc-history');
+      if (!assignment || !history) throw new Error('Channel fixture is missing');
+      history.append(assignment);
+    });
+    await page.getByRole('button', { name: 'Inspect Council evidence' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Council inspection' });
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    const refresh = dialog.getByRole('button', { name: 'Refresh native evidence' });
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, foreign);
+    await refresh.click();
+    await expect(dialog.getByRole('alert')).toContainText('Council evidence does not match this task');
+    await expect(dialog).not.toContainText('Other Channel secret finding');
+    await expect(dialog).not.toContainText('Verified native pass');
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, own);
+    await refresh.click();
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  });
+
   test('bot collaboration: narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 320, height: 640 });

@@ -432,7 +432,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */
-export function createCouncilInspector(read: () => Promise<CouncilInspection | null>): HTMLElement {
+export function createCouncilInspector(read: () => Promise<CouncilInspection | null>, expectedSessionId?: string): HTMLElement {
   const details = document.createElement('details');
   details.className = 'council-inspection';
   details.setAttribute('aria-label', 'Council results');
@@ -452,6 +452,10 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       && Number.isSafeInteger(snapshot.cycleStartedAt) && Number.isSafeInteger(snapshot.teamRevision)
       ? JSON.stringify([snapshot.sessionId, snapshot.cycleStartedAt, snapshot.teamRevision]) : null;
   let shownScope: string | null = null;
+  // One embedded inspector is bound to one native root task, not whichever
+  // unrelated result a later read happens to return. Channels bind on their
+  // first authorized native inspection; direct chats already know the task ID.
+  let boundSessionId: string | null = expectedSessionId?.trim() || null;
   let serial = 0;
   let loading = false;
   const load = () => {
@@ -480,8 +484,20 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     // A synchronous read failure must also fail closed and release the button.
     void Promise.resolve().then(read).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
-      body.innerHTML = councilInspectionHtml(result);
       const nextScope = scopeOf(result);
+      if (result && boundSessionId && result.sessionId !== boundSessionId) {
+        // A stale/cross-task response is not safe to render, even if it carries
+        // a seemingly verified pass. Keep the original binding for a retry.
+        shownScope = null;
+        body.replaceChildren();
+        const error = document.createElement('p');
+        error.setAttribute('role', 'alert');
+        error.textContent = 'Council evidence does not match this task. Check access and retry.';
+        body.append(error);
+        return;
+      }
+      if (!boundSessionId && nextScope !== null) boundSessionId = result!.sessionId;
+      body.innerHTML = councilInspectionHtml(result);
       // The reservation and the root task/revision must still match. A new
       // artifact revision must not inherit an earlier review's open drill-down.
       if (priorScope !== null && priorScope === nextScope) {

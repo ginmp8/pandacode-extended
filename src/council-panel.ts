@@ -555,7 +555,7 @@ export function createCouncil(host: CouncilHost) {
       );
       panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
       if (shownConfig(sessionId)) {
-        const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }));
+        const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }), sessionId);
         panel!.querySelector<HTMLElement>('.council-foot')!.before(inspection);
         inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
       }

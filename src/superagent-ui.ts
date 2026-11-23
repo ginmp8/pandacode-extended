@@ -516,9 +516,9 @@ let demandArchived = false;
         typeof entry.key === 'string' && (/^(audit:|assignment-start:|assignment-update:)/.test(entry.key) ||
           (validWorkItems && entry.key.startsWith('work-item:') &&
             plannedWorkItemIds.has(entry.key.slice('work-item:'.length))) ||
-          (validWorkItems && entry.key.startsWith('work-item-cancel:') &&
+          (validWorkItems && entry.key.startsWith('work-item:~cancel:') &&
             plannedWorkItems.some(item =>
-              item.id === entry.key.slice('work-item-cancel:'.length) &&
+              item.id === entry.key.slice('work-item:~cancel:'.length) &&
               item.state === 'cancelled' && item.cancelledAt === entry.at))) &&
         typeof entry.label === 'string' && typeof entry.detail === 'string' &&
         (entry.assignmentId === null ||

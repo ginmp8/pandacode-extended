@@ -926,10 +926,11 @@ fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment], work_items: &
                 assignment_id: None,
             });
         }
+        // The ~ suffix sorts after every valid WorkItem ID when timestamps tie.
         if let Some(cancelled_at) = item.cancelled_at.filter(|at| *at > 0) {
             events.push(TaskTimelineEntry {
                 at: cancelled_at,
-                key: format!("work-item-cancel:{}", item.id),
+                key: format!("work-item:~cancel:{}", item.id),
                 label: "Operator-cancelled WorkItem".into(),
                 detail: item.summary.clone(),
                 assignment_id: None,
@@ -5950,6 +5951,12 @@ mod tests {
             "duplicate identity is a read-only receipt, not a second cancellation");
         assert_eq!(replay_child.cancelled_at,cancelled_child.cancelled_at,
             "replay must retain the original cancellation timestamp");
+        let mut tied=cancelled_child.clone();
+        tied.created_at=tied.cancelled_at.unwrap();
+        let tied_events=task_timeline(&[],&[],&[tied]);
+        assert_eq!(tied_events.len(),2);
+        assert_eq!(tied_events[0].key,format!("work-item:{}",child.id));
+        assert_eq!(tied_events[1].key,format!("work-item:~cancel:{}",child.id));
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,third.revision);
         assert!(work_items::cancel(&store,&ticket.id,third.revision,
             &child.id,"cancel-child-different-key").is_err());
@@ -5965,7 +5972,7 @@ mod tests {
         assert!(snapshot.work_items.iter().all(|item|
             item.state=="cancelled" && item.cancelled_at.is_some_and(|at|at>0)));
         assert!(snapshot.timeline.iter().any(|event|
-            event.key==format!("work-item-cancel:{}",child.id) &&
+            event.key==format!("work-item:~cancel:{}",child.id) &&
             Some(event.at)==cancelled_child.cancelled_at &&
             event.label=="Operator-cancelled WorkItem" && event.assignment_id.is_none()));
         assert!(snapshot.timeline.iter().any(|event|
@@ -5983,7 +5990,7 @@ mod tests {
         let persisted=ticket_snapshot(&reopened,&ticket.id,50).unwrap();
         assert!(persisted.work_items.iter().all(|item|item.state=="cancelled"));
         assert!(persisted.timeline.iter().any(|event|
-            event.key==format!("work-item-cancel:{}",child.id) &&
+            event.key==format!("work-item:~cancel:{}",child.id) &&
             Some(event.at)==cancelled_child.cancelled_at));
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().revision,fourth.revision);
         assert_eq!(work_items::cancel(&reopened,&ticket.id,second.revision,

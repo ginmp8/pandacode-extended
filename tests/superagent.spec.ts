@@ -2854,7 +2854,7 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
           {at:1800000000100,key:'work-item:item-one',
             label:'Operator-planned WorkItem',detail:'Retain the immutable plan',
             assignmentId:null},
-          ...(cancelledAt ? [{at:cancelledAt,key:'work-item-cancel:item-one',
+          ...(cancelledAt ? [{at:cancelledAt,key:'work-item:~cancel:item-one',
             label:'Operator-cancelled WorkItem',detail:'Retain the immutable plan',
             assignmentId:null}] : []),
         ],
@@ -2866,7 +2866,7 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
             request.expectedRevision!==revision || typeof request.requestKey!=='string') {
           throw Error('Invalid revision-bound native cancellation');
         }
-        revision+=1;state='cancelled';cancelledAt=1800000000200;
+        revision+=1;state='cancelled';cancelledAt=1800000000100;
         return planned() as never;
       }
       throw Error('Unexpected command: '+command);

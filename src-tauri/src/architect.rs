@@ -753,6 +753,23 @@ fn native_root_reviewer_session_is_current(
     })
 }
 
+/// Native S2/S3 waves must not reuse a completed root reviewer's worker or
+/// session as a fresh independent callback. This is a verifier only: it never
+/// allocates seats, synthesizes votes or changes the legacy M1 path.
+fn distinct_root_review_waves(team: &TeamSnapshot, rounds: &[usize]) -> bool {
+    let mut workers = std::collections::HashSet::new();
+    let mut sessions = std::collections::HashSet::new();
+    team.workers.iter().filter(|worker| {
+        worker.created_at >= team.council_since && !worker.abandoned
+            && worker.council.as_ref().is_some_and(|seat|
+                rounds.contains(&seat.round) && seat.score.is_some())
+    }).all(|worker| {
+        !worker.id.is_empty() && !worker.session_id.is_empty()
+            && workers.insert(worker.id.as_str())
+            && sessions.insert(worker.session_id.as_str())
+    })
+}
+
 fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
     let mode = config.mode();
@@ -775,6 +792,7 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
         };
         (rounds, config.reviewer_bot_ids.len() + config.automatic_reviewers)
     };
+    if !distinct_root_review_waves(team, &rounds) { return false; }
     rounds.into_iter().all(|round| {
         if mode == "m3" && !council::m3_sources_match(team, config, round) {
             return false;
@@ -828,6 +846,7 @@ fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) 
         return false;
     }
     let rounds = native_reviewer_authority_rounds(config.strategy, status.round);
+    if !distinct_root_review_waves(team, &rounds) { return false; }
     rounds.into_iter().all(|round| {
         let eligible = team.workers.iter().filter(|worker| {
             worker.created_at >= team.council_since && !worker.abandoned

@@ -21,6 +21,28 @@ fn link_native_root_reviewers(store: &Store, parent_session_id: &str, workers: &
 
 
 #[test]
+fn native_composed_root_waves_require_fresh_worker_and_session_identities() {
+    let mut team = team_with(on(9.0, 3, 0), vec![
+        seat("wave-one", 1, Some(9.6), SINCE + 1),
+        seat("wave-two", 2, Some(9.7), SINCE + 2),
+    ]);
+    assert!(distinct_root_review_waves(&team, &[1, 2]));
+    // Reusing a session with a different worker ID is not a new callback.
+    team.workers[1].session_id = team.workers[0].session_id.clone();
+    assert!(!distinct_root_review_waves(&team, &[1, 2]));
+    team.workers[1].session_id = "task-wave-two".into();
+    // Nor can the same worker ID be counted in two strategy phases.
+    team.workers[1].id = team.workers[0].id.clone();
+    assert!(!distinct_root_review_waves(&team, &[1, 2]));
+    team.workers[1].id = "wave-two".into();
+    assert!(distinct_root_review_waves(&team, &[1, 2]));
+    // A revoked, abandoned score is not an independently counted callback.
+    team.workers[1].abandoned = true;
+    assert!(distinct_root_review_waves(&team, &[1, 2]));
+}
+
+
+#[test]
 fn council_reported_findings_are_bounded_untrusted_claims_not_native_evidence() {
     let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"authorization\",\"title\":\"Missing check\",\"explanation\":\"A route lacks an authorization guard\"},{\"severity\":\"low\",\"category\":\"tests\",\"title\":\"Missing negative test\",\"explanation\":\"Add a denied-path regression\"}]\nCouncil score: 6/10";
     assert_eq!(council::parse_reported_findings(report).len(), 2);
@@ -7560,12 +7582,6 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     // A delayed callback arriving after a new root cycle starts is not a
     // completion for any fresh leaf, even if its former child owner remains
     // in the durable native ownership history.
-    let (pending, _) = dispatch_state(
-        &state, &sid, fresh.generation, "pandacode_finish_team",
-        json!({"summary":"Start the fresh native Council after restart"}),
-        &std::sync::atomic::AtomicBool::new(false),
-    ).unwrap();
-    assert_eq!(pending["completed"], false);
     // Reserving a new Architect objective does not start its native provider.
     // After Store::open the root session remains interrupted until a fresh
     // provider run is admitted. Verify that a TeamSnapshot alone cannot grant
@@ -7582,6 +7598,12 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             "UPDATE sessions SET status='running' WHERE id=?1", [&sid],
         ).unwrap();
     }
+    let (pending, _) = dispatch_state(
+        &state, &sid, fresh.generation, "pandacode_finish_team",
+        json!({"summary":"Start the fresh native Council after restart"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
     let fresh_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     assert_ne!(fresh_launch.admission.parent, launch.admission.parent);
     assert_ne!(fresh_launch.admission.parent, sibling_launch.admission.parent);

@@ -408,9 +408,30 @@ test.describe('shared bot channels', () => {
       .toHaveAttribute('data-delivery-id', 'delivery-one');
     await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))
       .not.toHaveAttribute('data-session-id', /.+/);
+    // The inspection belongs to its original Channel delivery even after
+    // navigating back to the ordinary conversation. A later notification from
+    // that Channel must revoke a cached pass; other Channels must not.
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
+    await refresh.click();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    await page.evaluate(() => {
+      const back = document.querySelector<HTMLButtonElement>('[data-action="close-shared-channel"]');
+      if (!back) throw new Error('Channel back navigation is unavailable');
+      back.click();
+    });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveCount(0);
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'other-channel' }));
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    await page.evaluate(next => {
+      (window as any).__channelCouncilInspectorOverride = next;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    }, { ...inspection, teamRevision: 12, status: { ...inspection.status, state: 'reviewing', stale: true } });
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toHaveCount(0);
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
-    await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toHaveCount(0);
   });
 
   test('bot collaboration: narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {

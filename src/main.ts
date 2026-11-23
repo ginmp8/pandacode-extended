@@ -7685,16 +7685,18 @@ async function boot(): Promise<void> {
   run(subscribe('bots-changed', () => run((async () => { botProjectsLoad = reloadBotProjects(); await botProjectsLoad; botsView?.refresh(); })())).then(() => undefined));
   run(subscribe('bot-shared-channel-changed', event => {
     run(reloadBotProjects(false));
-    if (!state.sharedChannelId || (event?.channelId && event.channelId !== state.sharedChannelId)) return;
-    // A read-only Council inspection can outlive the Channel message that
-    // opened it. Do not leave a cached native pass visible after this Channel
-    // changes: refresh the same authenticated delivery, not a DOM session ID.
+    // The read-only inspector remains bound to its original authenticated
+    // delivery even when the user navigates away from the source Channel.
+    // Never treat the currently selected Channel as inspection authority.
     const dialog = document.querySelector<HTMLDialogElement>('#dialog.bc-council-inspector-dialog[open]');
     const host = dialog?.querySelector<HTMLElement>('.bc-council-inspector-host');
-    if (host?.dataset.channelId === state.sharedChannelId) {
+    const inspectedChannel = host?.dataset.channelId;
+    if (inspectedChannel && (!event?.channelId || event.channelId === inspectedChannel)) {
       host.querySelector('.council-inspection')?.dispatchEvent(new Event('council-evidence-invalidated'));
     }
-    void refreshSharedChannel();
+    if (state.sharedChannelId && (!event?.channelId || event.channelId === state.sharedChannelId)) {
+      void refreshSharedChannel();
+    }
   }).then(() => undefined));
   run(subscribe('bot-messages-changed', () => {
     botThreadMetaLoaded.clear();

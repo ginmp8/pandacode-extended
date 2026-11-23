@@ -8773,23 +8773,35 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     assert_eq!(pending["completed"], false);
+    let mut checked_child_sessions = std::collections::HashSet::new();
+    let mut unassigned_denied = 0;
     for _ in 0..4 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-        let (worker_id, attempt, generation) = {
+        let (worker_id, attempt, generation, assigned) = {
             let store = state.store.lock().unwrap();
             let child = load(&store, &launch.admission.parent).unwrap().unwrap();
             let worker = child.workers.iter()
                 .find(|worker| worker.session_id == launch.sid).unwrap();
-            (worker.id.clone(), worker.attempt, child.generation)
+            let assigned = worker.council.as_ref().is_some_and(|seat|
+                council::same_lens(&seat.lens, "File SHA-256: proof.txt"));
+            (worker.id.clone(), worker.attempt, child.generation, assigned)
         };
         let actor = coordination::Actor::Worker { id: worker_id, attempt };
-        let (check, changed) = reviewer_skill_evidence::dispatch_state(
+        let receipt = reviewer_skill_evidence::dispatch_state(
             &state, &launch.admission.parent, generation, &actor,
             "pandacode_reviewer_file_verify",
             json!({"criterionId":"child-file-proof"}),
-        ).unwrap();
-        assert_eq!(check["nativeFileDigestVerified"], true);
-        assert!(changed.is_some(), "a host check must record native evidence");
+        );
+        if assigned {
+            let (check, changed) = receipt.unwrap();
+            assert_eq!(check["nativeFileDigestVerified"], true);
+            assert!(changed.is_some(), "a host check must record native evidence");
+            checked_child_sessions.insert(launch.admission.parent.clone());
+        } else {
+            assert!(receipt.unwrap_err().contains("criterion is not assigned to this reviewer"),
+                "an unrelated read-only leaf must not borrow its sibling's criterion authority");
+            unassigned_denied += 1;
+        }
         {
             let store = state.store.lock().unwrap();
             store.message(&launch.sid, "assistant",
@@ -8800,6 +8812,9 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
             true, false, &mut |_| {},
         );
     }
+    assert_eq!(checked_child_sessions.len(), 2,
+        "each isolated child must have its own current native host-verified criterion");
+    assert!(unassigned_denied > 0, "the test must exercise a rejected unassigned leaf");
     let (settled, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
         json!({"summary":"Native child file checks passed"}),

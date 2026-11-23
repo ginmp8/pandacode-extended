@@ -310,6 +310,19 @@ fn require_unsettled_root_on_resume(store: &Store, root: &TeamSnapshot) -> Resul
     Ok(())
 }
 
+// An idle local agent registry is not proof that a root reviewer has stopped.
+// A paused or interrupted hierarchical root must not recover or resume child
+// grants while an independently running native root worker can still report.
+fn require_stopped_native_root_workers(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    for worker in &root.workers {
+        let native = store.session(&worker.session_id)?;
+        if matches!(native.status.as_str(), "running" | "waiting") {
+            return Err("child_council_revoked: native root worker session remains active; stop it before resuming or recovering child Councils.".into());
+        }
+    }
+    Ok(())
+}
+
 // Resume must not overtake a native leaf provider that is still running after
 // root Pause or interruption. Worker snapshots and an empty local agent map
 // cannot establish that a remote reviewer process has stopped.
@@ -336,6 +349,7 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
     require_unsettled_root_on_resume(store, root)?;
+    require_stopped_native_root_workers(store, root)?;
     require_stopped_native_leaves_on_resume(store, root)?;
     // Restart preflight must not adopt an unselected child reservation from
     // this immutable cycle. Per-choice validation alone misses foreign rows.
@@ -379,6 +393,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
     require_unsettled_root_on_resume(store, root)?;
+    require_stopped_native_root_workers(store, root)?;
     require_stopped_native_leaves_on_resume(store, root)?;
     let root_session = store.session(&root.session_id)?;
     // A paused root must not silently adopt an extra or duplicated native
@@ -584,6 +599,8 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
     if matches!(parent.status.as_str(), "running" | "waiting") {
         return Err("child_council_recovery_denied: native root session is still active.".into());
     }
+    require_stopped_native_root_workers(store, root)
+        .map_err(|reason| format!("child_council_recovery_denied: {reason}"))?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let mut recovered = 0;

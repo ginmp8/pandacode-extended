@@ -5888,6 +5888,100 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
 
 
 #[test]
+fn nested_recovery_and_resume_deny_live_native_root_workers_before_replacing_children() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["root-worker-security", "root-worker-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["root-worker-security", "root-worker-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Verify native root reviewer exit before child recovery", None, None,
+    ).unwrap();
+    let (old_child, root_reviewer_session) = {
+        let store = state.store.lock().unwrap();
+        let old_child = child_council::inspect(&store, &started).unwrap()[0]
+            .child_session_id.clone();
+        let project = store.session(&sid).unwrap().project_id;
+        let native = store.create_session(&project, "codex", "default", "plan").unwrap();
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+             VALUES(?1,'root-native-reviewer',?2)",
+            rusqlite::params![&sid, &native.id],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut reviewer = worker("root-native-reviewer", "stopped", &[], &[]);
+        reviewer.session_id = native.id.clone();
+        root.workers.push(reviewer);
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child],
+        ).unwrap();
+        (old_child, native.id)
+    };
+    let frozen_root = serde_json::to_value(saved(&state, &sid)).unwrap();
+    for native_status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&root_reviewer_session, native_status],
+            ).unwrap();
+        }
+        for action in ["resume", "recover"] {
+            let denied = control_state(&state, &sid, action).unwrap_err();
+            assert!(denied.contains("native root worker session remains active"), "{denied}");
+            assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root,
+                "denied {action} must not change the root Council cycle");
+            let store = state.store.lock().unwrap();
+            let reserved: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests
+                 WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, &old_child], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(reserved, 1, "denied recovery must preserve the original child seat");
+            assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        }
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='idle' WHERE id=?1",
+            [&root_reviewer_session],
+        ).unwrap();
+    }
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root);
+    let store = state.store.lock().unwrap();
+    let replaced: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+        rusqlite::params![&sid, &old_child], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(replaced, 0, "recovery must replace only the interrupted child");
+    assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+}
+
+#[test]
 fn user_accepted_root_council_cannot_recover_interrupted_child_reservations() {
     let (state, sid) = state_fixture();
     {

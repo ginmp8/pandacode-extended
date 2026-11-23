@@ -92,7 +92,7 @@ interface TaskTimelineEntry {
 }
 interface PlannedWorkItem {
   id:string; ticketId:string; requestKey:string; parentId:string|null;
-  summary:string; state:'planned'; createdAt:number;
+  summary:string; state:'planned'|'cancelled'; createdAt:number;
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
@@ -156,6 +156,7 @@ export function mountSuperagent(
 ): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let pendingWorkItem: {ticketId:string;summary:string;parentId:string|null;key:string}|null=null;
+  let pendingCancelWorkItem: {ticketId:string;itemId:string;key:string}|null=null;
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
 let demandArchived = false;
@@ -502,7 +503,7 @@ let demandArchived = false;
         item.ticketId === ticketDetails?.ticket.id &&
         typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id) &&
         typeof item.summary === 'string' && item.summary.length > 0 && item.summary.length <= 1000 &&
-        item.state === 'planned' &&
+        (item.state === 'planned' || item.state === 'cancelled') &&
         (item.parentId === null || plannedWorkItems.some(parent =>
           parent.id === item.parentId && parent.ticketId === item.ticketId)));
     const plannedWorkItemIds = new Set(validWorkItems ? plannedWorkItems.map(item=>item.id) : []);
@@ -630,8 +631,16 @@ let demandArchived = false;
         '<h5>Planned WorkItems</h5><p>Native, durable operator plans only; no automatic Worker dispatch, ' +
         'task completion, permission grant or Council result.</p>' +
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
-          safe(item.summary) + '</strong> · planned' +
+          safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
+          (item.state==='planned' && ['blocked','queued'].includes(ticketDetails.ticket.state)
+            && !ticketDetails.truncatedWorkItems &&
+            !plannedWorkItems.some(child=>child.parentId===item.id && child.state==='planned')
+              ? ' <button type="button" data-sa-cancel-work-item="' + safe(item.id) +
+                '">Cancel planned WorkItem</button>'
+              : item.state==='planned' &&
+                plannedWorkItems.some(child=>child.parentId===item.id && child.state==='planned')
+                  ? ' · Cancel child plans first' : '') +
           '</li>').join('') || '<li>No operator-planned WorkItems.</li>') + '</ol>' :
           '<p>WorkItem snapshot inconsistent; reload before planning.</p>') +
         (ticketDetails.truncatedWorkItems ? '<p>Only the first 100 plans are shown.</p>' : '') +
@@ -640,8 +649,9 @@ let demandArchived = false;
             '<input type="text" name="summary" maxlength="1000" required ' +
             'placeholder="Describe a discrete task"></label>' +
             '<label>Parent work item<select name="parentId"><option value="">Demand root</option>' +
-            plannedWorkItems.map(item => '<option value="' + safe(item.id) + '">' +
-              safe(item.summary) + '</option>').join('') + '</select></label>' +
+            plannedWorkItems.filter(item=>item.state==='planned').map(item =>
+              '<option value="' + safe(item.id) + '">' + safe(item.summary) +
+              '</option>').join('') + '</select></label>' +
             '<button type="submit">Save plan without dispatch</button></form>' : '') +
         '</section>' +
         '<h5>Assignment attempts</h5><ul>' +
@@ -3124,6 +3134,41 @@ let demandArchived = false;
         feedback = result.created.length + ' presets imported; ' + result.unchanged.length +
           ' unchanged.' + (result.backupPath ? ' Recovery snapshot: ' + result.backupPath : '');
       }); return;
+    }
+    if (target.dataset.saCancelWorkItem) {
+      const detail=ticketDetails;
+      const ticketId=inspectedTicket;
+      const itemId=target.dataset.saCancelWorkItem;
+      const item=detail?.workItems?.find(value=>value.id===itemId);
+      if (!detail || ticketId!==detail.ticket.id ||
+          detail.ticket.orchestrationId!==selected ||
+          !['blocked','queued'].includes(detail.ticket.state) ||
+          detail.truncatedWorkItems || item?.state!=='planned' ||
+          detail.workItems?.some(child=>child.parentId===itemId && child.state==='planned')) return;
+      if (!pendingCancelWorkItem || pendingCancelWorkItem.ticketId!==ticketId ||
+          pendingCancelWorkItem.itemId!==itemId) {
+        pendingCancelWorkItem={ticketId,itemId,key:crypto.randomUUID()};
+      }
+      const pending=pendingCancelWorkItem;
+      ask('Cancel planned WorkItem ' + item.summary +
+        '? Its original plan and audit history will remain. No Worker will be dispatched.',async()=>{
+        if (pendingCancelWorkItem!==pending || ticketDetails!==detail ||
+            inspectedTicket!==ticketId || selected!==detail.ticket.orchestrationId) {
+          throw new Error('Demand changed before WorkItem cancellation confirmation.');
+        }
+        const cancelled=await call<PlannedWorkItem>('superagent_cancel_work_item',{
+          ticketId,expectedRevision:detail.ticket.revision,itemId,requestKey:pending.key,
+        });
+        if (cancelled.id!==itemId || cancelled.ticketId!==ticketId ||
+            cancelled.state!=='cancelled') {
+          throw new Error('Native WorkItem cancellation acknowledgement is inconsistent.');
+        }
+        // Preserve the idempotency key if authoritative reload fails after mutation.
+        await refreshTicketDetails();
+        pendingCancelWorkItem=null;
+        feedback='Planned WorkItem cancelled. Audit and lineage retained; no provider dispatched.';
+      });
+      return;
     }
     if (target.dataset.saAccept) {
       const t = tickets.find(item => item.id === target.dataset.saAccept);

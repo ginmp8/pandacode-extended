@@ -5257,6 +5257,18 @@ pub async fn superagent_plan_work_item(
         &summary,parent_id.as_deref())
 }
 
+/// Trusted Desktop-only cancellation of an unexecuted operator plan.
+/// This is revision-guarded native metadata, never a provider stop or effect.
+#[tauri::command]
+pub async fn superagent_cancel_work_item(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: i64, item_id: String, request_key: String,
+) -> Result<work_items::WorkItem> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e| e.to_string())?;
+    work_items::cancel(&store,&ticket_id,expected_revision,&item_id,&request_key)
+}
+
 #[tauri::command]
 pub async fn superagent_snapshot(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -5882,6 +5894,76 @@ mod tests {
             "uncertain-plan","Unreconciled effect",None).is_err());
         assert_eq!(get_ticket(&store,&staged.id).unwrap().revision,staged.revision);
         assert!(work_items::list(&store,&staged.id,100).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn operator_cancelled_work_items_preserve_lineage_and_reject_stale_or_foreign_calls() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,launched)=admit_role_with_staging(
+            &mut store,&team.id,"Cancelable operator plan",
+            "cancel-work-items",false,false,true,
+        ).unwrap();
+        assert!(!launched);
+        let root=work_items::plan(&store,&ticket.id,ticket.revision,
+            "cancel-root","Plan migration",None).unwrap();
+        let first=get_ticket(&store,&ticket.id).unwrap();
+        let child=work_items::plan(&store,&ticket.id,first.revision,
+            "cancel-child","Plan verification",Some(&root.id)).unwrap();
+        let second=get_ticket(&store,&ticket.id).unwrap();
+        assert!(work_items::cancel(&store,&ticket.id,second.revision,
+            &root.id,"cancel-parent-early").is_err(),
+            "active child plans must be cancelled before their parent");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,second.revision);
+        assert!(work_items::cancel(&store,&ticket.id,second.revision+1,
+            &child.id,"cancel-stale").is_err());
+        let (other,_) = admit_role_with_staging(
+            &mut store,&team.id,"Foreign operator Demand",
+            "cancel-other",false,false,true,
+        ).unwrap();
+        assert!(work_items::cancel(&store,&other.id,other.revision,
+            &child.id,"foreign-cancel").is_err());
+        assert!(store.db.execute(
+            "INSERT INTO sa_work_item_cancellations(item_id,ticket_id,request_key,cancelled_at)
+             VALUES(?1,?2,'foreign-sql-cancel',?3)",
+            params![&child.id,&other.id,storage::now()],
+        ).is_err(),"direct SQL cannot bind another Demand's WorkItem");
+        assert_eq!(get_ticket(&store,&other.id).unwrap().revision,other.revision);
+        let cancelled_child=work_items::cancel(&store,&ticket.id,second.revision,
+            &child.id,"cancel-child-once").unwrap();
+        assert_eq!(cancelled_child.state,"cancelled");
+        let third=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(third.revision,second.revision+1);
+        assert_eq!(work_items::cancel(&store,&ticket.id,second.revision,
+            &child.id,"cancel-child-once").unwrap().state,"cancelled",
+            "duplicate identity is a read-only receipt, not a second cancellation");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,third.revision);
+        assert!(work_items::cancel(&store,&ticket.id,third.revision,
+            &child.id,"cancel-child-different-key").is_err());
+        assert!(work_items::plan(&store,&ticket.id,third.revision,
+            "child-of-cancelled","Invalid plan",Some(&child.id)).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,third.revision);
+        assert_eq!(work_items::cancel(&store,&ticket.id,third.revision,
+            &root.id,"cancel-root-once").unwrap().state,"cancelled");
+        let fourth=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(fourth.revision,third.revision+1);
+        let snapshot=ticket_snapshot(&store,&ticket.id,50).unwrap();
+        assert_eq!(snapshot.work_items.len(),2);
+        assert!(snapshot.work_items.iter().all(|item|item.state=="cancelled"));
+        let graph=run_graph(&store,&ticket.id).unwrap();
+        assert!(graph.nodes.iter().any(|node|
+            node.id==format!("work-item:{}",root.id) && node.state=="cancelled"));
+        assert!(snapshot.activity.iter().filter(|event|
+            event.kind=="work_item_cancelled").count()==2);
+        assert!(assignments(&store,&ticket.id,100).unwrap().is_empty());
+        assert!(!mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+        let path=store.path.clone();drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persisted=ticket_snapshot(&reopened,&ticket.id,50).unwrap();
+        assert!(persisted.work_items.iter().all(|item|item.state=="cancelled"));
+        assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().revision,fourth.revision);
+        assert_eq!(work_items::cancel(&reopened,&ticket.id,second.revision,
+            &child.id,"cancel-child-once").unwrap().state,"cancelled");
     }
 
     #[test]

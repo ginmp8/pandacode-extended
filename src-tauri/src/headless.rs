@@ -70,6 +70,7 @@ enum Command {
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
     PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
+    PreflightWorkerDemand { orchestration_id: String, worker_bot_id: String, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
     CreateSource { orchestration_id: String, repository: String, actor_filter: String, event_kind: String },
     ListTeamSources { orchestration_id: String },
@@ -451,6 +452,26 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(preflight) => { println!("{preflight}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent Demand preflight failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::PreflightWorkerDemand {
+                orchestration_id, worker_bot_id, objective_file,
+            } = &command {
+                // Read-only explicit member preflight; not an admission or a grant.
+                // The live host must recheck occupancy and native policy later.
+                let result = (|| -> Result<String, String> {
+                    let objective = read_bounded_objective(objective_file)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::inspect_headless_worker_demand_preflight(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id, &objective,
+                    )
+                })();
+                match result {
+                    Ok(preflight) => { println!("{preflight}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Worker Demand preflight failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -1022,7 +1043,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
-        | Command::PreflightDemand { .. }
+        | Command::PreflightDemand { .. } | Command::PreflightWorkerDemand { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::ListTicketSourceLinks { .. }
         | Command::InspectSourceHealth { .. }
@@ -1762,6 +1783,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 }
                 command = Command::PreflightDemand {
                     orchestration_id: orchestration_id.clone(), coordinated,
+                    objective_file: PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--preflight-worker-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--preflight-worker-demand needs Team ID, Worker ID and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let worker_bot_id = args.get(index + 2)
+                    .ok_or("--preflight-worker-demand needs a configured Worker bot ID.")?;
+                validate_member_identity(worker_bot_id)?;
+                let path = args.get(index + 3)
+                    .ok_or("--preflight-worker-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::PreflightWorkerDemand {
+                    orchestration_id: orchestration_id.clone(),
+                    worker_bot_id: worker_bot_id.clone(),
                     objective_file: PathBuf::from(path),
                 };
                 ops += 1;
@@ -2508,7 +2549,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2581,6 +2622,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --preflight-demand <team-id> <direct|coordinated> <objective-file>
                          Validate the exact bounded UTF-8 objective against native manual policy.
                          Prints no objective, issues no Mandate, creates no Ticket, launches no provider.
+                         Detached occupancy is unknown; actual admission must recheck.
+  --preflight-worker-demand <team-id> <worker-bot-id> <objective-file>
+                         Check one configured Worker against native multi-member policy.
+                         Read-only; no Ticket, Mandate or provider launch.
                          Detached occupancy is unknown; actual admission must recheck.
   --inspect-source-health <id>
                          Inspect native source cursor, stored receipts and policy without
@@ -3194,6 +3239,25 @@ mod tests {
             "--preflight-demand team_123 auto /tmp/objective.txt",
             "--preflight-demand team_123 direct --stop-ticket",
             "--preflight-demand team_123 direct /tmp/objective.txt --stop-ticket ticket_1",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            parsed("--preflight-worker-demand team_123 second /tmp/objective.txt"),
+            Ok(Command::PreflightWorkerDemand {
+                orchestration_id: "team_123".into(),
+                worker_bot_id: "second".into(),
+                objective_file: PathBuf::from("/tmp/objective.txt"),
+            })
+        );
+        for invalid in [
+            "--preflight-worker-demand",
+            "--preflight-worker-demand team_123",
+            "--preflight-worker-demand team_123 second",
+            "--preflight-worker-demand ../other second /tmp/objective.txt",
+            "--preflight-worker-demand team_123 ../second /tmp/objective.txt",
+            "--preflight-worker-demand team_123 second --stop-ticket",
+            "--preflight-worker-demand team_123 second /tmp/objective.txt --stop-ticket ticket",
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }

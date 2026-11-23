@@ -320,6 +320,28 @@ fn require_stopped_native_root_workers(store: &Store, root: &TeamSnapshot) -> Re
             return Err("child_council_revoked: native root worker session remains active; stop it before resuming or recovering child Councils.".into());
         }
     }
+    // Persisted native ownership can outlive an Architect TeamSnapshot after a
+    // crash. Do not conclude that every root reviewer stopped merely because
+    // the snapshot omitted a still-active, independently issued worker.
+    // Child coordinator sessions have their own stricter recovery checks.
+    let untracked_active: i64 = store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM architect_workers AS owned
+            JOIN sessions AS native ON native.id=owned.session_id
+            WHERE owned.parent_session_id=?1
+              AND native.status IN ('running','waiting')
+              AND NOT EXISTS (
+                  SELECT 1 FROM architect_requests AS child
+                  WHERE child.parent_session_id=owned.parent_session_id
+                    AND child.kind='council_child'
+                    AND child.worker_id=owned.session_id
+              )
+        )",
+        [&root.session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if untracked_active != 0 {
+        return Err("child_council_revoked: untracked native root worker session remains active; stop it before resuming or recovering child Councils.".into());
+    }
     Ok(())
 }
 

@@ -5824,6 +5824,54 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
         store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
             [&sibling_child]).unwrap();
     }
+    // A native reviewer can be running even when its persisted worker row has
+    // fallen out of the mutable root TeamSnapshot. Neither explicit recovery
+    // nor ordinary Resume may replace child grants while that worker is live.
+    let untracked_native = {
+        let store = state.store.lock().unwrap();
+        let parent = store.session(&sid).unwrap();
+        let native = store.create_session(&parent.project_id, "codex", "default", "plan").unwrap();
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+             VALUES(?1,'untracked-root-reviewer',?2)",
+            rusqlite::params![&sid, &native.id],
+        ).unwrap();
+        native.id
+    };
+    for status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&untracked_native, status],
+            ).unwrap();
+        }
+        for action in ["resume", "recover"] {
+            let denied = control_state(&state, &sid, action).unwrap_err();
+            assert!(denied.contains("untracked native root worker session remains active"),
+                "{action}: {denied}");
+            assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root,
+                "{action} must not mutate the paused Council while a native worker is live");
+            let store = state.store.lock().unwrap();
+            let reserved: String = store.db.query_row(
+                "SELECT worker_id FROM architect_requests
+                 WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, &old_child], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(reserved, old_child, "denied recovery must retain the original child grant");
+        }
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&untracked_native],
+        ).unwrap();
+        store.db.execute(
+            "DELETE FROM architect_workers WHERE parent_session_id=?1 AND session_id=?2",
+            rusqlite::params![&sid, &untracked_native],
+        ).unwrap();
+    }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");

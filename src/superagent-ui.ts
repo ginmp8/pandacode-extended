@@ -519,7 +519,7 @@ let demandArchived = false;
           (validWorkItems && entry.key.startsWith('work-item-cancel:') &&
             plannedWorkItems.some(item =>
               item.id === entry.key.slice('work-item-cancel:'.length) &&
-              item.state === 'cancelled' && item.cancelledAt === entry.at)))) &&
+              item.state === 'cancelled' && item.cancelledAt === entry.at))) &&
         typeof entry.label === 'string' && typeof entry.detail === 'string' &&
         (entry.assignmentId === null ||
           (typeof entry.assignmentId === 'string' && knownAssignmentIds.has(entry.assignmentId))) &&

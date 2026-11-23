@@ -2821,11 +2821,12 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
     const cancelCalls:Array<Record<string,unknown>>=[];
     let revision=3;
     let state:'planned'|'cancelled'='planned';
+    let cancelledAt:number|null=null;
     (window as unknown as {workItemCancelEvidence:()=>unknown}).workItemCancelEvidence =
       ()=>({commands,cancelCalls,revision,state});
     const planned=()=>({
       id:'item-one',ticketId:'ticket',requestKey:'plan-one',parentId:null,
-      summary:'Retain the immutable plan',state,createdAt:1800000000100,
+      summary:'Retain the immutable plan',state,createdAt:1800000000100,cancelledAt,
     });
     const ticket=()=>({
       id:'ticket',orchestrationId:'team',objective:'Inspect an operator plan',
@@ -2849,9 +2850,14 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
           revoked:false,allowedTools:[],allowedSideEffects:false},
         assignments:[],activity:[],
         workItems:[planned()],truncatedWorkItems:false,
-        timeline:[{at:1800000000100,key:'work-item:item-one',
-          label:'Operator-planned WorkItem',detail:'Retain the immutable plan',
-          assignmentId:null}],
+        timeline:[
+          {at:1800000000100,key:'work-item:item-one',
+            label:'Operator-planned WorkItem',detail:'Retain the immutable plan',
+            assignmentId:null},
+          ...(cancelledAt ? [{at:cancelledAt,key:'work-item-cancel:item-one',
+            label:'Operator-cancelled WorkItem',detail:'Retain the immutable plan',
+            assignmentId:null}] : []),
+        ],
       } as never;
       if(command==='superagent_cancel_work_item') {
         const request=args as Record<string,unknown>;
@@ -2860,7 +2866,7 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
             request.expectedRevision!==revision || typeof request.requestKey!=='string') {
           throw Error('Invalid revision-bound native cancellation');
         }
-        revision+=1;state='cancelled';
+        revision+=1;state='cancelled';cancelledAt=1800000000200;
         return planned() as never;
       }
       throw Error('Unexpected command: '+command);
@@ -2876,6 +2882,9 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
     .toContainText('No Worker will be dispatched');
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(plans).toContainText('cancelled');
+  await expect(plans).toContainText('Cancelled');
+  await expect(host.getByRole('region',{name:'Task timeline'}))
+    .toContainText('Operator-cancelled WorkItem');
   await expect(plans.getByRole('button',{name:'Cancel planned WorkItem'})).toHaveCount(0);
   const result=await page.evaluate(() =>
     (window as unknown as {workItemCancelEvidence:()=> {

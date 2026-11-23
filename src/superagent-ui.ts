@@ -2680,7 +2680,7 @@ let demandArchived = false;
       const assigning = target.hasAttribute('data-sa-assign-team');
       const attentionOnly = target.hasAttribute('data-sa-attention-team');
       const loadScopedDemands = assigning || attentionOnly;
-      workspaceView = 'runs';
+      workspaceView = loadScopedDemands ? 'runs' : 'teams';
       if (loadScopedDemands) {
         // Choose this Team's durable Demand scope; never infer admission.
         demandTeamFilter = next; demandProjectFilter = '';

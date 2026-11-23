@@ -3461,6 +3461,7 @@ fn manual_preflight_worker(
 
 /// Native manual request with a stable dedup key. A blocked request remains
 /// auditable and must be explicitly retried; no background inference or launch.
+#[cfg(test)]
 fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool) -> Result<(Ticket, bool)> {
     admit_role(store, config_id, objective, request_key, busy, false)
 }
@@ -3468,6 +3469,7 @@ fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str,
 /// A coordinated manual request first reserves a native, read-only session for
 /// the existing coordinator bot. Its output is advice, not a grant or a task
 /// completion; the selected worker is admitted only by a separate native action.
+#[cfg(test)]
 fn admit_role(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool,
@@ -3477,6 +3479,7 @@ fn admit_role(
 
 // A detached operator can stage a blocked Ticket but cannot reserve a provider
 // session. This preserves the existing manual admission API and its tests.
+#[cfg(test)]
 fn admit_role_with_staging(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,

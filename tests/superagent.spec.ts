@@ -34,6 +34,16 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.locator('.sa-list .sa-last-activity')).not.toContainText('Unavailable');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  // Selecting Team Details must reveal persisted Team configuration, not
+  // silently keep the Demand/Run inspector. The two views are independent.
+  await dialog.locator('.sa-directory .sa-item')
+    .getByRole('button',{name:'Details'}).click();
+  await expect(dialog.getByRole('region',{name:'Team overview'}))
+    .toContainText('Software Development');
+  await expect(dialog.getByRole('region',{name:'Selected orchestration'})).toHaveCount(0);
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(dialog.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Software Development');
   await dialog.getByRole('button',{name:'Portable configuration'}).click();
   await dialog.getByRole('button',{name:'Export'}).click();
   const text=dialog.getByRole('textbox',{name:'Companion manifest JSON'});
@@ -824,7 +834,7 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await host.locator('.sa-directory .sa-item').filter({hasText:'Second preset'})
     .getByRole('button',{name:'Details'}).click();
   await expect(host.getByRole('alert')).toContainText('Native ticket read failed');
-  await expect(host.getByRole('heading', {name:'Second preset'})).toBeVisible();
+  await expect(host.getByRole('region',{name:'Team overview'})).toContainText('Second preset');
   await expect(host.getByText('First preset ticket')).toHaveCount(0);
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
 });

@@ -2773,7 +2773,7 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
 /// A later conflicting replay, source revocation or exhausted receipt capacity
 /// rolls back earlier receipts and their cursor/audit entries in this batch.
 fn observe_linked_pr_check_batch(
-    store: &Store, selected: &EventSource, source_id: &str,
+    store: &Store, selected: &EventSource,
     ticket_id: &str, pull_key: &str,
     runs: &[(i64, serde_json::Value)], signed_in: &str, repository_id: u64,
 ) -> Result<(usize, usize)> {
@@ -2781,7 +2781,7 @@ fn observe_linked_pr_check_batch(
         return Err("Linked PR Check batch exceeds the native limit.".into());
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let current = linked_pr_check_source(store, source_id, ticket_id, pull_key)?;
+    let current = linked_pr_check_source(store, &selected.id, ticket_id, pull_key)?;
     if current.policy_revision != selected.policy_revision {
         return Err("Linked PR Check source policy changed during authenticated fetch.".into());
     }
@@ -2811,7 +2811,7 @@ pub(crate) fn headless_observe_linked_pr_checks(
         &selected, repository_id, pull_key, &pull, &listing,
     )?;
     let (observed, duplicates) = observe_linked_pr_check_batch(
-        &store, &selected, source_id, ticket_id, pull_key,
+        &store, &selected, ticket_id, pull_key,
         &runs, &signed_in, repository_id,
     )?;
     serde_json::to_string_pretty(&serde_json::json!({
@@ -5803,8 +5803,16 @@ mod tests {
         let mut conflict = previous.clone();
         conflict["conclusion"] = serde_json::json!("failure");
         let rejected = vec![(90, first.clone()), (91, conflict)];
+        // A caller cannot substitute an unrelated source identity during
+        // an already-linked, authenticated Check Run observation batch.
+        let wrong_source = EventSource { id: "foreign-source".into(), ..active.clone() };
         assert!(observe_linked_pr_check_batch(
-            &store, &active, &active.id, "batch-ticket", "pull:42",
+            &store, &wrong_source, "batch-ticket", "pull:42",
+            &rejected, "local-operator", 900,
+        ).is_err());
+        assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
+        assert!(observe_linked_pr_check_batch(
+            &store, &active, "batch-ticket", "pull:42",
             &rejected, "local-operator", 900,
         ).is_err());
         assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
@@ -5813,7 +5821,7 @@ mod tests {
 
         let valid = vec![(90, first), (91, previous)];
         assert_eq!(observe_linked_pr_check_batch(
-            &store, &active, &active.id, "batch-ticket", "pull:42",
+            &store, &active, "batch-ticket", "pull:42",
             &valid, "local-operator", 900,
         ).unwrap(), (1, 1));
         assert_eq!(source(&store, &active.id).unwrap().last_sequence, 2);

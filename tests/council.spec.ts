@@ -606,6 +606,63 @@ test('Council inspector does not present invalid native reviewer scores or usage
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
 
+test('native Council inspector rejects malformed usage sources and rounds without hiding valid root and child observations', async ({ page }) => {
+  const usage = {
+    uniqueAttempts: 1, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+    cumulativeQueueWaitMs: 30, cumulativeObservedSpanMs: 100,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  const malformedRound = '1"><img src=x onerror="window.__groupInjected=true">';
+  const inspection = {
+    sessionId: 'scoped-group-task', mode: 'm7', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    reservedChildren: [{ botId: 'security-bot', childSessionId: 'child-group',
+      rootCycleId: 'scoped-group-task:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
+    usageByRoundSource: [
+      { round: 1, reviewerSource: 'direct_bot', usage },
+      { round: malformedRound, reviewerSource: 'automatic', usage },
+      { round: 1, reviewerSource: 'nested_child', usage }, // A child is not a root reviewer.
+      { round: 1, reviewerSource: 'automatic', usage: null },
+    ],
+    composedUsageByRoundSource: [
+      { round: 1, reviewerSource: 'nested_child', usage },
+      { round: 0, reviewerSource: 'direct_bot', usage },
+      { round: 1, reviewerSource: '<img src=x>', usage },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const root = inspector.getByRole('region', { name: 'Root usage by round and source' });
+  const composed = inspector.getByRole('region', { name: 'Root and child usage by round and source' });
+  await expect(root.locator('li')).toHaveCount(1);
+  await expect(root.locator('li')).toContainText('Round 1 · direct bot · Native attempts 1');
+  await expect(root).toContainText('3 malformed root usage group(s) omitted');
+  await expect(composed.locator('li')).toHaveCount(1);
+  await expect(composed.locator('li')).toContainText('Round 1 · nested child · Native attempts 1');
+  await expect(composed).toContainText('2 malformed composed usage group(s) omitted');
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean((window as any).__groupInjected))).toBe(false);
+  // The shared native renderer must preserve the same fail-closed display when
+  // embedded for another authorized task consumer, not just in the modal.
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const host = document.createElement('div');
+    host.id = 'embedded-group-inspector';
+    document.body.append(host);
+    const view = createCouncilInspector(async () => snapshot, 'scoped-group-task');
+    host.append(view);
+    view.open = true;
+  }, inspection);
+  const embedded = page.locator('#embedded-group-inspector .council-inspection');
+  await expect(embedded).toContainText('3 malformed root usage group(s) omitted');
+  await expect(embedded).toContainText('2 malformed composed usage group(s) omitted');
+  await expect(embedded.locator('img')).toHaveCount(0);
+});
+
 test('Council inspector rejects invalid root, child and composed metering but preserves real zero observations', async ({ page }) => {
   const invalid = {
     uniqueAttempts: -3, queueMeasuredAttempts: -2, spanMeasuredAttempts: -1,
@@ -618,7 +675,7 @@ test('Council inspector rejects invalid root, child and composed metering but pr
     verifiedPass: false, criteria: [], attempts: [],
     usage: invalid, composedUsage: invalid,
     usageByRoundSource: [{ round: 1, reviewerSource: 'automatic', usage: invalid }],
-    composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_bot', usage: invalid }],
+    composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_child', usage: invalid }],
     reservedChildren: [{
       botId: 'security-child', childSessionId: 'child-usage', rootCycleId: 'task:1000',
       requiredLeafReviewers: 2, status: 'reviewing', observedLeafUsage: invalid,

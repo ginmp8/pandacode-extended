@@ -1,5 +1,5 @@
 import { escape } from './dom';
-import type { CouncilCriteriaSource, CouncilExecutionStrategy, CouncilInspection, CouncilReportedFinding } from './architect-types';
+import type { CouncilCriteriaSource, CouncilExecutionStrategy, CouncilInspection, CouncilReportedFinding, CouncilUsageGroup } from './architect-types';
 
 /** Native durations describe app-observed lifecycle only, not token or provider billing time. */
 function observedDuration(label: string, ms: number | null | undefined): string {
@@ -17,6 +17,14 @@ function observedProviderCost(amount: number | null | undefined, currency: strin
   return typeof amount === 'number' && Number.isFinite(amount) && amount >= 0
     && typeof currency === 'string' && currency.trim().length > 0
     ? amount + ' ' + currency : 'unknown';
+}
+
+/** An invalid native usage group must not produce a claimed source or round. */
+function validUsageGroup(group: CouncilUsageGroup, includeChild: boolean): boolean {
+  return group != null && Number.isSafeInteger(group.round) && group.round > 0
+    && (group.reviewerSource === 'automatic' || group.reviewerSource === 'direct_bot'
+      || (includeChild && group.reviewerSource === 'nested_child'))
+    && group.usage != null && typeof group.usage === 'object';
 }
 
 /** Safe read-only native projection, reusable without the task orchestrator. */
@@ -391,11 +399,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' · Cost ' + escape(observedProviderCost(composed.costAmount, composed.costCurrency)) +
       ' · Child reservations and parent composite seats excluded.</p>'
     : '';
-  const groups = inspection.usageByRoundSource ?? [];
-  const groupHtml = groups.length
+  const rootGroupInputs = Array.isArray(inspection.usageByRoundSource) ? inspection.usageByRoundSource : [];
+  const groups = rootGroupInputs.filter(group => validUsageGroup(group, false));
+  const omittedRootGroups = rootGroupInputs.length - groups.length;
+  const groupHtml = groups.length || omittedRootGroups
     ? '<section aria-label="Root usage by round and source" class="council-usage-breakdown">' +
       '<h4>Root-observed usage by round and reviewer source</h4>' +
-      '<p>Each native attempt is counted once across these groups. Child reservations are excluded; provider tokens and cost remain unknown without receipts.</p><ul>' +
+      '<p>Each valid native attempt is counted once across these groups. Child reservations are excluded; provider tokens and cost remain unknown without receipts.</p>' +
+      (omittedRootGroups ? '<p role="status">' + omittedRootGroups +
+        ' malformed root usage group(s) omitted; this summary does not prove review completion.</p>' : '') + '<ul>' +
       groups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +
         escape(group.reviewerSource.replace('_', ' ')) +
         ' · Native attempts ' + escape(nonNegativeCount(group.usage.uniqueAttempts)) +
@@ -406,11 +418,15 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +
       '</ul></section>'
     : '';
-  const allGroups = inspection.composedUsageByRoundSource ?? [];
-  const allGroupsHtml = children.length && allGroups.length
+  const composedGroupInputs = Array.isArray(inspection.composedUsageByRoundSource) ? inspection.composedUsageByRoundSource : [];
+  const allGroups = composedGroupInputs.filter(group => validUsageGroup(group, true));
+  const omittedComposedGroups = composedGroupInputs.length - allGroups.length;
+  const allGroupsHtml = children.length && (allGroups.length || omittedComposedGroups)
     ? '<section aria-label="Root and child usage by round and source" class="council-usage-breakdown">' +
       '<h4>Root and child native usage by round and source</h4>' +
-      '<p>Each admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p><ul>' +
+      '<p>Each valid admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p>' +
+      (omittedComposedGroups ? '<p role="status">' + omittedComposedGroups +
+        ' malformed composed usage group(s) omitted; this summary does not prove review completion.</p>' : '') + '<ul>' +
       allGroups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +
         escape(group.reviewerSource.replace('_', ' ')) +
         ' · Native attempts ' + escape(nonNegativeCount(group.usage.uniqueAttempts)) +

@@ -9031,7 +9031,8 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     conflicting_root.workers.push(duplicate);
     let denied = child_council::verified_parent_seats(&store, &conflicting_root).unwrap_err();
     assert!(denied.contains("conflicting root composite seat identity")
-            || denied.contains("root artifact revision changed"),
+            || denied.contains("root artifact revision changed")
+            || denied.contains("duplicate native root/child leaf reviewer identity or session"),
         "forged native root reviewer cannot bypass composite authority: {denied}");
     assert!(!verified_council_pass(&store, &conflicting_root),
         "forged root identity cannot create a passing Council");

@@ -1191,3 +1191,27 @@ continues to create a blocked manual Ticket without automatically executing it.
 ### GitHub Observe history diagnostics
 
 Inspect an enabled source using `--inspect-source-health <source-id>` after a bounded GitHub Events poll fails. Source health now includes a durable `historyGapCursor`, `historyGapReason` (`cursor_missing` or `window_unverified`), `historyGapDetectedAt` and `historyGapOccurrences` when a previously stored event cursor could not be verified within the authenticated, bounded feed. These observations are diagnostic, not proof of which events were missed; the warning remains after restart and source mode changes until a separately verified reconciliation is available. No cursor is rewound, no missing events are invented, and no Auto work or effects are admitted. Transient authentication, network and provider-order failures are not classified as a history gap.
+
+
+### Headless planned WorkItems (operator-only)
+
+The existing native WorkItem transaction is available to a trusted local headless
+operator; these commands do not start a Worker or grant tools. First create a
+manual Demand using `--queue-demand`, then inspect its Ticket revision:
+
+```sh
+pandacode serve --inspect-ticket <ticket-id>
+pandacode serve --plan-work-item <ticket-id> <revision> <request-key> <summary-file>
+pandacode serve --plan-work-item <ticket-id> <revision> <child-key> <summary-file> --parent-work-item <work-item-id>
+pandacode serve --cancel-planned-work-item <ticket-id> <revision> <work-item-id> <cancel-key>
+```
+
+The summary is read from a private local UTF-8 file (maximum 1000 bytes)
+rather than shell arguments. Commands apply the same native Ticket revision
+compare-and-swap, idempotency, ancestry, archive and unresolved-effect guards
+as Desktop. Replay with the same request key is read-only; a different payload
+or cancellation key is denied. Cancel active children before a parent.
+The returned JSON includes native Ticket revision and WorkItem identity,
+but never implies execution, authorization, a Council verdict or a remote
+effect. The administrative database connection does not run startup recovery
+against a concurrently running PandaCode host.

@@ -81,6 +81,10 @@ enum Command {
     ObserveCheckRun { source_id: String, check_run_id: i64 },
     ObserveLinkedPrChecks { source_id: String, ticket_id: String, pull_key: String },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
+    PlanWorkItem { ticket_id: String, expected_revision: i64, request_key: String,
+        summary_file: PathBuf, parent_id: Option<String> },
+    CancelPlannedWorkItem { ticket_id: String, expected_revision: i64,
+        item_id: String, request_key: String },
     QueueSelectedWorkerDemand { orchestration_id: String, worker_bot_id: String, request_key: String, objective_file: PathBuf },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
@@ -114,6 +118,23 @@ fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
     let objective = std::str::from_utf8(&bytes)
         .map_err(|_| "Objective file must contain UTF-8 text.")?;
     Ok(objective.to_owned())
+}
+
+/// WorkItem summaries are private local files, never CLI text or grants.
+fn read_bounded_work_item_summary(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file=std::fs::File::open(path)
+        .map_err(|_| "Cannot open local WorkItem summary file.".to_owned())?;
+    let mut bytes=Vec::new();
+    file.take(1001).read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read bounded WorkItem summary.".to_owned())?;
+    if bytes.len()>1000 { return Err("WorkItem summary exceeds 1000 UTF-8 bytes.".into()); }
+    let text=std::str::from_utf8(&bytes)
+        .map_err(|_| "WorkItem summary must be UTF-8.".to_owned())?;
+    if text.trim().is_empty() || text.chars().any(char::is_control) {
+        return Err("WorkItem summary must be nonempty and contain no control characters.".into());
+    }
+    Ok(text.to_owned())
 }
 
 /// Read a complete, bounded local Team role-selection document. Bot identifiers
@@ -930,7 +951,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let native_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                Command::PlanWorkItem { .. } | Command::CancelPlannedWorkItem { .. }
+                | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
                 | Command::ArchiveDemand { .. } | Command::RestoreDemand { .. }
                 | Command::QuarantineDetachedTicket { .. }
@@ -951,6 +973,17 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::PlanWorkItem { ticket_id, expected_revision, request_key, summary_file, parent_id } => {
+                                let summary=read_bounded_work_item_summary(summary_file)?;
+                                crate::superagent::work_items::headless_plan(
+                                    &database,ticket_id,*expected_revision,request_key,
+                                    &summary,parent_id.as_deref(),
+                                )
+                            }
+                            Command::CancelPlannedWorkItem { ticket_id, expected_revision, item_id, request_key } =>
+                                crate::superagent::work_items::headless_cancel(
+                                    &database,ticket_id,*expected_revision,item_id,request_key,
+                                ),
                             Command::AcceptTicket { ticket_id, expected_revision } =>
                                 crate::superagent::headless_accept_ticket(&database, ticket_id, *expected_revision),
                             Command::RejectTicket { ticket_id, expected_revision, reason } =>
@@ -2379,6 +2412,45 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 4;
             }
+            "--plan-work-item" => {
+                let ticket_id=args.get(index+1).ok_or("--plan-work-item needs Ticket ID, revision, key and summary file.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision=args.get(index+2).ok_or("--plan-work-item needs a Ticket revision.")?;
+                let key=args.get(index+3).ok_or("--plan-work-item needs an idempotency key.")?;
+                validate_work_item_key(key)?;
+                let file=args.get(index+4).ok_or("--plan-work-item needs a local summary file.")?;
+                if file.is_empty() || file.starts_with("--") {
+                    return Err("Provide a local WorkItem summary file path.".into());
+                }
+                let mut parent_id=None;
+                index+=4;
+                if args.get(index+1).map(String::as_str)==Some("--parent-work-item") {
+                    let parent=args.get(index+2).ok_or("--parent-work-item needs an exact WorkItem ID.")?;
+                    validate_ticket_id(parent)?;
+                    parent_id=Some(parent.clone());
+                    index+=2;
+                }
+                command=Command::PlanWorkItem {
+                    ticket_id:ticket_id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                    request_key:key.clone(),summary_file:PathBuf::from(file),parent_id,
+                };
+                ops+=1;
+            }
+            "--cancel-planned-work-item" => {
+                let ticket_id=args.get(index+1).ok_or("--cancel-planned-work-item needs Ticket ID, revision, WorkItem ID and key.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision=args.get(index+2).ok_or("--cancel-planned-work-item needs a Ticket revision.")?;
+                let item_id=args.get(index+3).ok_or("--cancel-planned-work-item needs a WorkItem ID.")?;
+                validate_ticket_id(item_id)?;
+                let key=args.get(index+4).ok_or("--cancel-planned-work-item needs an idempotency key.")?;
+                validate_work_item_key(key)?;
+                command=Command::CancelPlannedWorkItem {
+                    ticket_id:ticket_id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                    item_id:item_id.clone(),request_key:key.clone(),
+                };
+                ops+=1;
+                index+=4;
+            }
             "--quarantine-detached-ticket" => {
                 let ticket_id=args.get(index+1)
                     .ok_or("--quarantine-detached-ticket needs Ticket ID and revision.")?;
@@ -2577,6 +2649,15 @@ fn validate_project_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_work_item_key(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len()>128
+        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.'))
+    {
+        return Err("Provide a bounded WorkItem idempotency key.".into());
+    }
+    Ok(())
+}
+
 fn validate_effect_key(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128
         || !value.bytes().all(|c| c.is_ascii_alphanumeric()
@@ -2605,7 +2686,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2811,6 +2892,52 @@ mod tests {
     /// The command half of a parse, for tests that don't care about the import path.
     fn parsed(flags: &str) -> Result<Command, String> {
         parse(&argv(flags)).map(|(command, _)| command)
+    }
+
+    #[test]
+    fn planned_work_item_headless_commands_require_exact_native_identities() {
+        assert_eq!(parsed("--plan-work-item ticket_123 0 plan.root summary.txt"),
+            Ok(Command::PlanWorkItem {
+                ticket_id:"ticket_123".into(),expected_revision:0,
+                request_key:"plan.root".into(),summary_file:PathBuf::from("summary.txt"),
+                parent_id:None,
+            }));
+        assert_eq!(parsed("--plan-work-item ticket_123 8 plan.child child.txt --parent-work-item item_456"),
+            Ok(Command::PlanWorkItem {
+                ticket_id:"ticket_123".into(),expected_revision:8,
+                request_key:"plan.child".into(),summary_file:PathBuf::from("child.txt"),
+                parent_id:Some("item_456".into()),
+            }));
+        assert_eq!(parsed("--cancel-planned-work-item ticket_123 9 item_456 cancel.key"),
+            Ok(Command::CancelPlannedWorkItem {
+                ticket_id:"ticket_123".into(),expected_revision:9,
+                item_id:"item_456".into(),request_key:"cancel.key".into(),
+            }));
+        for bad in [
+            "--plan-work-item",
+            "--plan-work-item ticket_123 -1 k summary.txt",
+            "--plan-work-item ../other 0 k summary.txt",
+            "--plan-work-item ticket_123 0 ../unsafe summary.txt",
+            "--plan-work-item ticket_123 0 key --stop-ticket",
+            "--plan-work-item ticket_123 0 key summary.txt --parent-work-item",
+            "--plan-work-item ticket_123 0 key summary.txt --parent-work-item ../other",
+            "--plan-work-item ticket_123 0 key summary.txt --parent-work-item item_1 --stop-ticket ticket_123",
+            "--cancel-planned-work-item ticket_123 1 item_1",
+            "--cancel-planned-work-item ticket_123 -1 item_1 cancel",
+            "--cancel-planned-work-item ticket_123 1 ../foreign cancel",
+            "--cancel-planned-work-item ticket_123 1 item_1 bad/key",
+            "--cancel-planned-work-item ticket_123 1 item_1 cancel --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(bad).is_err(),"{bad}");
+        }
+        let path=std::env::temp_dir().join(format!("workitem-summary-{}.txt",crate::storage::id()));
+        std::fs::write(&path,"Plan a safe migration").unwrap();
+        assert_eq!(read_bounded_work_item_summary(&path).unwrap(),"Plan a safe migration");
+        std::fs::write(&path,vec![b'x';1001]).unwrap();
+        assert!(read_bounded_work_item_summary(&path).is_err());
+        std::fs::write(&path,"bad\nline").unwrap();
+        assert!(read_bounded_work_item_summary(&path).is_err());
+        let _=std::fs::remove_file(path);
     }
 
     #[test]

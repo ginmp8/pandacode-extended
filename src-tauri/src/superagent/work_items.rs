@@ -255,3 +255,117 @@ pub(super) fn cancel(
     tx.commit().map_err(|e|e.to_string())?;
     Ok(WorkItem{state:"cancelled".into(),..item})
 }
+
+
+/// Headless operators share Desktop WorkItem policy and Ticket CAS without
+/// invoking startup recovery on a concurrently running PandaCode host.
+pub(crate) fn headless_plan(
+    database_path:&std::path::Path, ticket_id:&str, expected_revision:i64,
+    request_key:&str, summary:&str, parent_id:Option<&str>,
+)->Result<String> {
+    let store=super::open_headless_transition_store(database_path)?;
+    let item=plan(&store,ticket_id,expected_revision,request_key,summary,parent_id)?;
+    let ticket=super::get_ticket(&store,ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":item.ticket_id,"workItemId":item.id,"state":item.state,
+        "parentId":item.parent_id,"revision":ticket.revision,
+        "providerDispatched":false,"grantIssued":false,"externalEffectReplayed":false,
+    })).map_err(|e|e.to_string())
+}
+
+/// A cancelled plan preserves the original WorkItem, immutable receipt and
+/// audit; no Worker, external effect or Council review is dispatched.
+pub(crate) fn headless_cancel(
+    database_path:&std::path::Path, ticket_id:&str, expected_revision:i64,
+    item_id:&str, request_key:&str,
+)->Result<String> {
+    let store=super::open_headless_transition_store(database_path)?;
+    let item=cancel(&store,ticket_id,expected_revision,item_id,request_key)?;
+    let ticket=super::get_ticket(&store,ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":item.ticket_id,"workItemId":item.id,"state":item.state,
+        "revision":ticket.revision,
+        "providerDispatched":false,"grantIssued":false,"externalEffectReplayed":false,
+    })).map_err(|e|e.to_string())
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::*;
+    use crate::superagent::{self, NewOrchestration};
+
+    #[test]
+    fn headless_work_item_plan_and_cancel_share_native_revision_and_restart_safety() {
+        let path=std::env::temp_dir().join(format!(
+            "pandacode-headless-work-items-{}.sqlite3",storage::id(),
+        ));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/headless-workitem-test')",[],
+        ).unwrap();
+        for id in ["router","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config=superagent::create_configuration(&store,NewOrchestration {
+            name:"Headless plans".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&config.id],
+        ).unwrap();
+        let (ticket,launched)=superagent::admit_role_with_staging(
+            &mut store,&config.id,"Plan without dispatch","headless-plan",false,false,true,
+        ).unwrap();
+        assert!(!launched);
+        let assignments_before=superagent::assignments(&store,&ticket.id,100).unwrap().len();
+        let root:serde_json::Value=serde_json::from_str(&headless_plan(
+            &path,&ticket.id,ticket.revision,"root","Prepare change",None,
+        ).unwrap()).unwrap();
+        assert_eq!(root["state"],"planned");
+        assert_eq!(root["providerDispatched"],false);
+        assert_eq!(root["grantIssued"],false);
+        let root_id=root["workItemId"].as_str().unwrap().to_owned();
+        let replay:serde_json::Value=serde_json::from_str(&headless_plan(
+            &path,&ticket.id,ticket.revision,"root","Prepare change",None,
+        ).unwrap()).unwrap();
+        assert_eq!(replay["workItemId"],root["workItemId"]);
+        assert_eq!(replay["revision"],root["revision"]);
+        assert!(headless_plan(&path,&ticket.id,ticket.revision,
+            "stale","Change after revision",None).is_err());
+        let next=root["revision"].as_i64().unwrap();
+        let child:serde_json::Value=serde_json::from_str(&headless_plan(
+            &path,&ticket.id,next,"child","Verify change",Some(&root_id),
+        ).unwrap()).unwrap();
+        assert_eq!(child["parentId"].as_str(),Some(root_id.as_str()));
+        let current=child["revision"].as_i64().unwrap();
+        assert!(headless_cancel(&path,&ticket.id,current,&root_id,"cancel-root").is_err());
+        assert!(headless_cancel(&path,&ticket.id,current+1,
+            child["workItemId"].as_str().unwrap(),"stale").is_err());
+        let child_id=child["workItemId"].as_str().unwrap();
+        let cancelled:serde_json::Value=serde_json::from_str(&headless_cancel(
+            &path,&ticket.id,current,child_id,"cancel-child",
+        ).unwrap()).unwrap();
+        assert_eq!(cancelled["state"],"cancelled");
+        let replay_cancel:serde_json::Value=serde_json::from_str(&headless_cancel(
+            &path,&ticket.id,current,child_id,"cancel-child",
+        ).unwrap()).unwrap();
+        assert_eq!(replay_cancel["revision"],cancelled["revision"]);
+        assert!(headless_cancel(&path,&ticket.id,current,child_id,"another-key").is_err());
+        let root_cancel:serde_json::Value=serde_json::from_str(&headless_cancel(
+            &path,&ticket.id,cancelled["revision"].as_i64().unwrap(),&root_id,"cancel-root",
+        ).unwrap()).unwrap();
+        assert_eq!(root_cancel["state"],"cancelled");
+        assert_eq!(superagent::assignments(&store,&ticket.id,100).unwrap().len(),assignments_before);
+        assert!(!superagent::mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let plans=list(&reopened,&ticket.id,100).unwrap().0;
+        assert_eq!(plans.len(),2);
+        assert!(plans.iter().all(|item|item.state=="cancelled"));
+    }
+}

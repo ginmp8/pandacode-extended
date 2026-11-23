@@ -2193,6 +2193,23 @@ fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
     })).map_err(|e| e.to_string())
 }
 
+/// A detached headless Stop revokes durable authority, but cannot attest that
+/// another live serve process has stopped its provider handle. Preserve this
+/// distinction and the unresolved remote-effect count in the response.
+fn headless_stopped_ticket_status(store: &Store, ticket: &Ticket) -> Result<String> {
+    let unresolved = effects::unresolved_count(store, &ticket.id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "providerStoppedByCommand": false,
+        "liveProviderState": "unknown",
+        "unresolvedExternalEffects": unresolved,
+        "requiresIndependentRemoteReconciliation": unresolved > 0,
+        "externalEffectReplayAllowed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// A detached local operator can stage one explicitly chosen Team Worker,
 /// including a secondary member. Staging never reserves a provider session;
 /// the native desktop retry must revalidate the frozen roster, worker profile,
@@ -2438,7 +2455,7 @@ pub(crate) fn headless_disable_orchestration(
 pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &str) -> Result<String> {
     let store = open_headless_transition_store(database_path)?;
     let (ticket, _session) = stop(&store, ticket_id)?;
-    headless_ticket_status(&ticket)
+    headless_stopped_ticket_status(&store, &ticket)
 }
 
 /// Revision-bound headless Stop prevents a stale observation from revoking
@@ -2449,7 +2466,7 @@ pub(crate) fn headless_stop_ticket_at_revision(
     let store = open_headless_transition_store(database_path)?;
     let (ticket, _session) =
         stop_with_expected_revision(&store, ticket_id, Some(expected_revision))?;
-    headless_ticket_status(&ticket)
+    headless_stopped_ticket_status(&store, &ticket)
 }
 
 /// Explicit local-operator quarantine for one exact pending effect receipt.
@@ -4405,9 +4422,16 @@ fn stop_with_expected_revision(
     }
     let session = assignment_session(store,ticket_id)?;
     let now = storage::now();
+    // Missing Mandates are a degraded-state recovery case, not a reason to
+    // leave a running provider authorized. Stop is an explicit trusted local
+    // operator action; it never issues or reconstructs a missing grant.
     let revoked = tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
         .map_err(|e| e.to_string())?;
-    if revoked != 1 { return Err("SuperAgent mandate missing; Stop aborted.".into()); }
+    let stop_reason = if revoked == 1 {
+        "local-user revoked mandate"
+    } else {
+        "local-user stopped Ticket with missing Mandate; no authority reconstructed"
+    };
     let updated = tx.execute(
         "UPDATE sa_tickets SET state='stopped',active_assignment_id=NULL,revision=revision+1,updated_at=?2
          WHERE id=?1 AND revision=?3",
@@ -4431,8 +4455,8 @@ fn stop_with_expected_revision(
     ).map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-         VALUES(?1,'stopped','local-user revoked mandate',?2)",
-        params![ticket_id,now],
+         VALUES(?1,'stopped',?2,?3)",
+        params![ticket_id,stop_reason,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,session))
@@ -13159,6 +13183,62 @@ mod tests {
         let (ticket, launch) = admit(&mut store, &config.id, "Must roll back", "fault-1", false).unwrap();
         assert!(launch);
         assert_eq!(ticket.state, "running");
+    }
+
+    #[test]
+    fn native_stop_recovers_missing_mandate_without_replaying_pending_effect() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Stop orphaned native authority",
+            "stop-missing-mandate-recovery", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let digest = "a".repeat(64);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:missing-mandate',?2,'pending',?3,?3)",
+            params![&ticket.id,&digest,now],
+        ).unwrap();
+        store.db.execute(
+            "DELETE FROM sa_mandates WHERE ticket_id=?1", [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+        let path = store.path.clone();
+        let revision = ticket.revision;
+        let before = history(&store, &ticket.id, 50).unwrap().len();
+        assert!(headless_stop_ticket_at_revision(&path, &ticket.id, revision + 1).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(history(&store, &ticket.id, 50).unwrap().len(), before);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 1).unwrap()[0].state, "pending");
+
+        let stopped: serde_json::Value = serde_json::from_str(
+            &headless_stop_ticket_at_revision(&path, &ticket.id, revision).unwrap(),
+        ).unwrap();
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["revision"], revision + 1);
+        assert_eq!(stopped["providerStoppedByCommand"], false);
+        assert_eq!(stopped["liveProviderState"], "unknown");
+        assert_eq!(stopped["unresolvedExternalEffects"], 1);
+        assert_eq!(stopped["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(stopped["externalEffectReplayAllowed"], false);
+        assert_eq!(assignments(&store, &ticket.id, 5).unwrap()[0].state, "stopped");
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 1).unwrap()[0].state, "uncertain");
+        assert_eq!(history(&store, &ticket.id, 50).unwrap().len(), before + 1);
+        assert!(history(&store, &ticket.id, 50).unwrap().iter()
+            .any(|entry| entry.kind == "stopped" && entry.detail.contains("missing Mandate")));
+        assert!(headless_stop_ticket_at_revision(&path, &ticket.id, revision).is_err());
+        assert!(!on_run_finished(&store, &session, true, "late untrusted success").unwrap());
+        assert!(read_only_policy(&store, &session).is_err());
+
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(effects::receipt_history(&reopened, &ticket.id, 1).unwrap()[0].state, "uncertain");
+        assert_eq!(history(&reopened, &ticket.id, 50).unwrap().len(), before + 1);
     }
 
     #[test]

@@ -2745,6 +2745,20 @@ test('native Task timeline orders durable audit and assignment records and opens
           {id:12,kind:'admitted',detail:'Operator admitted a read-only task',at:1800000000300},
           {id:13,kind:'callback_rejected',detail:'Stale callback denied',at:1800000000750},
         ],
+        timeline:[
+          {at:1800000000100,key:'assignment-start:attempt-1',
+            label:'Assignment 1 recorded',detail:'Bot worker · Session session-one',assignmentId:'attempt-1'},
+          {at:1800000000300,key:'audit:12',
+            label:'admitted',detail:'Operator admitted a read-only task',assignmentId:null},
+          {at:1800000000400,key:'assignment-update:attempt-1',
+            label:'Native assignment state: failed',detail:'Attempt 1 · Bot worker',assignmentId:null},
+          {at:1800000000500,key:'assignment-start:attempt-2',
+            label:'Assignment 2 recorded',detail:'Bot worker · Session session-two',assignmentId:'attempt-2'},
+          {at:1800000000750,key:'audit:13',
+            label:'callback_rejected',detail:'Stale callback denied',assignmentId:null},
+          {at:1800000000900,key:'assignment-update:attempt-2',
+            label:'Native assignment state: running',detail:'Attempt 2 · Bot worker',assignmentId:null},
+        ],
       } as never;
       throw Error('Unexpected command: ' + command);
     }, async route => { routes.push(route); });

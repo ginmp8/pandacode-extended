@@ -869,6 +869,58 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
 }
 
 
+/// Chronological root-Ticket events assembled from persisted native audit and
+/// assignment records inside the inspector's read transaction. An assignment
+/// transition is not proof of a tool effect, test result or Council approval.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTimelineEntry {
+    pub at: i64,
+    pub key: String,
+    pub label: String,
+    pub detail: String,
+    pub assignment_id: Option<String>,
+}
+
+fn task_timeline(activity: &[AuditEntry], attempts: &[Assignment]) -> Vec<TaskTimelineEntry> {
+    let mut events = Vec::with_capacity(activity.len() + attempts.len() * 2);
+    for event in activity {
+        if event.at > 0 {
+            events.push(TaskTimelineEntry {
+                at: event.at,
+                key: format!("audit:{}", event.id),
+                label: event.kind.clone(),
+                detail: event.detail.clone(),
+                assignment_id: None,
+            });
+        }
+    }
+    for attempt in attempts {
+        if attempt.created_at > 0 {
+            events.push(TaskTimelineEntry {
+                at: attempt.created_at,
+                key: format!("assignment-start:{}", attempt.id),
+                label: format!("Assignment {} recorded", attempt.attempt),
+                detail: format!("Bot {} · Session {}", attempt.bot_id, attempt.session_id),
+                assignment_id: Some(attempt.id.clone()),
+            });
+        }
+        if attempt.updated_at > attempt.created_at && attempt.updated_at > 0 {
+            events.push(TaskTimelineEntry {
+                at: attempt.updated_at,
+                key: format!("assignment-update:{}", attempt.id),
+                label: format!("Native assignment state: {}", attempt.state),
+                detail: format!("Attempt {} · Bot {}", attempt.attempt, attempt.bot_id),
+                assignment_id: None,
+            });
+        }
+    }
+    events.sort_by(|left, right| {
+        left.at.cmp(&right.at).then_with(|| left.key.cmp(&right.key))
+    });
+    events
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityPage {
@@ -931,6 +983,8 @@ pub struct TaskSnapshot {
     pub assignments: Vec<Assignment>,
     pub attempt_insights: Vec<AssignmentInsight>,
     pub activity: Vec<AuditEntry>,
+    /// Native chronological root-Ticket timeline (no inferred child or provider effects).
+    pub timeline: Vec<TaskTimelineEntry>,
     /// Historical task-effective bot profiles, not permission or execution proof.
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -989,6 +1043,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     } else {
         "native_recheck_required"
     };
+    let native_history = history(store, ticket_id, limit)?;
+    let timeline = task_timeline(&native_history, &native_assignments);
     let result = TaskSnapshot {
         current_team_policy_revision,
         team_policy_changed_since_admission,
@@ -999,7 +1055,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         mandate: native_mandate,
         assignments: native_assignments,
         attempt_insights,
-        activity: history(store, ticket_id, limit)?,
+        activity: native_history,
+        timeline,
         admitted_profile: roster::ticket_profile(store, ticket_id)?,
         admitted_strategy: roster::ticket_strategy(store, ticket_id)?,
     };
@@ -8558,6 +8615,71 @@ mod tests {
         assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
     }
 
+
+    #[test]
+    fn native_task_timeline_is_ordered_ticket_scoped_and_restart_safe() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &team.id, "Private timeline objective",
+            "native-timeline-one", false,
+        ).unwrap();
+        assert!(started);
+        let before = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        let assignment_id = before.assignments[0].id.clone();
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=1000,updated_at=4000 WHERE id=?1",
+            [&assignment_id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'timeline_marker','Persisted audit marker',2500)",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             SELECT 'foreign-timeline-ticket',orchestration_id,'foreign-timeline-key',
+                    'Private other Demand',actor,source,project_id,worker_bot_id,
+                    policy_revision,'queued',2000,2000
+             FROM sa_tickets WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES('foreign-timeline-ticket','foreign_marker','Other Demand secret',2400)",
+            [],
+        ).unwrap();
+
+        let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(snapshot.timeline.windows(2).all(|pair| {
+            pair[0].at < pair[1].at ||
+                (pair[0].at == pair[1].at && pair[0].key <= pair[1].key)
+        }));
+        let started_event = snapshot.timeline.iter()
+            .find(|event| event.key == format!("assignment-start:{assignment_id}")).unwrap();
+        assert_eq!(started_event.at, 1000);
+        assert_eq!(started_event.assignment_id.as_deref(), Some(assignment_id.as_str()));
+        assert!(snapshot.timeline.iter().any(|event|
+            event.label == "timeline_marker" && event.at == 2500));
+        assert!(snapshot.timeline.iter().any(|event|
+            event.key == format!("assignment-update:{assignment_id}") &&
+            event.at == 4000));
+        let serialized = serde_json::to_string(&snapshot.timeline).unwrap();
+        assert!(!serialized.contains("Other Demand secret"));
+        assert!(!serialized.contains("Private other Demand"));
+        assert!(!serialized.contains("Private timeline objective"));
+        assert!(ticket_snapshot(&store, "foreign-unknown", 50).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let stable = ticket_snapshot(&reopened, &ticket.id, 50).unwrap();
+        assert_eq!(
+            serde_json::to_value(&snapshot.timeline).unwrap(),
+            serde_json::to_value(&stable.timeline).unwrap(),
+        );
+    }
 
     #[test]
     fn headless_run_graph_is_durable_redacted_and_never_recovers_a_live_task() {

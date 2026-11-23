@@ -87,6 +87,9 @@ interface AdmittedMemberProfile {
 interface AdmittedTeamProfile {
   policyRevision: number; capturedAt: number; members: AdmittedMemberProfile[];
 }
+interface TaskTimelineEntry {
+  at: number; key: string; label: string; detail: string; assignmentId: string | null;
+}
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   admittedProfile?: AdmittedTeamProfile | null;
@@ -94,7 +97,7 @@ interface TicketDetails {
   currentTeamPolicyRevision?: number;
   teamPolicyChangedSinceAdmission?: boolean;
   attemptInsights?: AssignmentInsight[];
-  activity: Activity[]; council?: CouncilObservation | null;
+  activity: Activity[]; timeline?: TaskTimelineEntry[]; council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
 }
@@ -481,42 +484,35 @@ let demandArchived = false;
               safe(entry.kind) + ' · ' + safe(entry.detail) + ' · Event ' + entry.id +
               '</li>').join('')) +
         (!activity.length ? '<li>No matching native events.</li>' : '') + '</ol>';
-    // Native root-Ticket audit and assignment timestamps are independently
-    // persisted. Display them together without inferring provider tool activity,
-    // review success, child Tickets, or side-effect application.
-    const taskTimeline: Array<{
-      at: number; key: string; label: string; detail: string; assignmentId?: string;
-    }> = [];
-    for (const event of activityTrail) {
-      if (Number.isSafeInteger(event.at) && event.at > 0) {
-        taskTimeline.push({
-          at: event.at, key: 'audit:' + event.id, label: event.kind,
-          detail: event.detail,
-        });
+    // The native Ticket snapshot builds assignment and audit ordering in the
+    // same SQLite transaction. Never infer provider effects or child Tickets
+    // from free-form audit text; older native audit pages remain append-only.
+    const nativeTimeline = ticketDetails?.timeline;
+    const knownAssignmentIds = new Set(ticketDetails?.assignments.map(item => item.id) ?? []);
+    const validTimeline = Array.isArray(nativeTimeline) &&
+      nativeTimeline.length <= 600 && nativeTimeline.every((entry, index) =>
+        entry && Number.isSafeInteger(entry.at) && entry.at > 0 &&
+        typeof entry.key === 'string' && /^(audit:|assignment-start:|assignment-update:)/.test(entry.key) &&
+        typeof entry.label === 'string' && typeof entry.detail === 'string' &&
+        (entry.assignmentId === null ||
+          (typeof entry.assignmentId === 'string' && knownAssignmentIds.has(entry.assignmentId))) &&
+        (index === 0 || nativeTimeline[index - 1].at < entry.at ||
+          (nativeTimeline[index - 1].at === entry.at &&
+            nativeTimeline[index - 1].key < entry.key)));
+    const timelineKeys = new Set(validTimeline ? nativeTimeline.map(entry => entry.key) : []);
+    const taskTimeline: TaskTimelineEntry[] = validTimeline ? [...nativeTimeline] : [];
+    if (validTimeline && olderActivityTicketId === ticketDetails?.ticket.id) {
+      for (const event of olderActivity) {
+        const key = 'audit:' + event.id;
+        if (!timelineKeys.has(key) && Number.isSafeInteger(event.at) && event.at > 0) {
+          taskTimeline.push({at:event.at, key, label:event.kind,
+            detail:event.detail, assignmentId:null});
+          timelineKeys.add(key);
+        }
       }
+      taskTimeline.sort((left, right) =>
+        left.at - right.at || left.key.localeCompare(right.key));
     }
-    for (const assignment of ticketDetails?.assignments ?? []) {
-      const started = assignment.createdAt ?? 0;
-      const updated = assignment.updatedAt ?? 0;
-      if (Number.isSafeInteger(started) && started > 0) {
-        taskTimeline.push({
-          at: started, key: 'assignment-start:' + assignment.id,
-          label: 'Assignment ' + assignment.attempt + ' recorded',
-          detail: 'Bot ' + botName(assignment.botId) +
-            ' · Session ' + assignment.sessionId,
-          assignmentId: assignment.id,
-        });
-      }
-      if (Number.isSafeInteger(updated) && updated > started && updated > 0) {
-        taskTimeline.push({
-          at: updated, key: 'assignment-update:' + assignment.id,
-          label: 'Native assignment state: ' + assignment.state,
-          detail: 'Attempt ' + assignment.attempt + ' · Bot ' + botName(assignment.botId),
-        });
-      }
-    }
-    taskTimeline.sort((left, right) =>
-      left.at - right.at || left.key.localeCompare(right.key));
     const taskTimelineContent = '<section class="sa-task-timeline" role="region" aria-label="Task timeline">' +
       '<h5>Task timeline</h5><p>Chronological native root-Ticket audit and assignment records only. ' +
       'An assignment or provider message is not proof of a file change, test pass, Council verdict ' +
@@ -524,12 +520,13 @@ let demandArchived = false;
       '<ol>' + (taskTimeline.map(entry =>
         '<li><time>' + safe(activityTime(entry.at)) + '</time> · <strong>' +
         safe(entry.label) + '</strong> · ' + safe(entry.detail) +
-        (entry.assignmentId
+        (entry.assignmentId && knownAssignmentIds.has(entry.assignmentId)
           ? ' <button type="button" data-sa-inspect-assignment="' +
             safe(entry.assignmentId) + '">Inspect timeline attempt ' +
             safe(ticketDetails?.assignments.find(item => item.id === entry.assignmentId)?.attempt) +
             '</button>' : '') + '</li>').join('') ||
-        '<li>No recorded native Task events or assignments.</li>') + '</ol></section>';
+        '<li>' + (validTimeline ? 'No recorded native Task events or assignments.' :
+          'Native Task timeline unavailable or inconsistent; reload Ticket.') + '</li>') + '</ol></section>';
     const attempt = ticketDetails?.assignments.find(item => item.id === inspectedAssignmentId);
     const insight = ticketDetails?.attemptInsights?.find(item => item.assignmentId === inspectedAssignmentId);
     const attemptDetails = attempt

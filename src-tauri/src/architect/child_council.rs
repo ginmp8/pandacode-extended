@@ -997,6 +997,10 @@ pub struct VerifiedChildCriterion {
     pub lens: String,
     pub lowest_score: f64,
     pub leaf_worker_ids: Vec<String>,
+    /// True only for a currently valid host-executed criterion receipt.
+    /// Legacy score-only receipts deserialize as unverified.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_evidence_verified: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1147,6 +1151,9 @@ fn verified_receipt(
             super::council::same_lens(&seat.lens, &criterion.lens)
                 .then_some((leaf.id.clone(), seat.score?))
         }).collect::<Vec<_>>();
+        let native_evidence_verified = criterion.evidence_required
+            && super::council::native_criterion_check_verified(&first, criterion, 1);
+        if criterion.evidence_required && !native_evidence_verified { return Ok(None); }
         if matches.is_empty() { return Ok(None); }
         let lowest = matches.iter().map(|(_, score)| *score).fold(f64::INFINITY, f64::min);
         if !lowest.is_finite() || lowest < config.target.max(criterion.target) {
@@ -1156,6 +1163,7 @@ fn verified_receipt(
             id: criterion.id.clone(), lens: criterion.lens.clone(),
             lowest_score: lowest,
             leaf_worker_ids: matches.into_iter().map(|(id, _)| id).collect(),
+            native_evidence_verified,
         });
     }
     Ok(Some(VerifiedChildReceipt {
@@ -1325,7 +1333,9 @@ fn escalation_receipt(
     for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
         // Native scored reviewer evidence is not an independent artifact check.
         // A required check still needs its own native verification receipt.
-        if criterion.evidence_required { return Ok(None); }
+        let native_evidence_verified = criterion.evidence_required
+            && super::council::native_criterion_check_verified(child, criterion, 2);
+        if criterion.evidence_required && !native_evidence_verified { return Ok(None); }
         let matching = fresh.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
             super::council::same_lens(&seat.lens, &criterion.lens)
@@ -1342,6 +1352,7 @@ fn escalation_receipt(
             lens: criterion.lens.clone(),
             lowest_score: minimum,
             leaf_worker_ids: matching.into_iter().map(|(id, _)| id).collect(),
+            native_evidence_verified,
         });
     }
     Ok(Some(VerifiedChildReceipt {
@@ -1502,7 +1513,9 @@ fn challenge_receipt(
     let mut criterion_evidence = Vec::new();
     for criterion in policy.criteria.iter().filter(|criterion| criterion.required) {
         // A scored review is not an independent artifact/check attestation.
-        if criterion.evidence_required { return Ok(None); }
+        let native_evidence_verified = criterion.evidence_required
+            && super::council::native_criterion_check_verified(child, criterion, 2);
+        if criterion.evidence_required && !native_evidence_verified { return Ok(None); }
         let matching = challengers.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
             super::council::same_lens(&seat.lens, &criterion.lens)
@@ -1519,6 +1532,7 @@ fn challenge_receipt(
             lens: criterion.lens.clone(),
             lowest_score: minimum,
             leaf_worker_ids: matching.into_iter().map(|(id, _)| id).collect(),
+            native_evidence_verified,
         });
     }
     Ok(Some(VerifiedChildChallengeReceipt {

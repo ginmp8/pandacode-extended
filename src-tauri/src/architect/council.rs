@@ -2568,7 +2568,7 @@ pub(super) fn status_for_authenticated_children(
         // by itself, and score-only proof cannot satisfy an evidence-required
         // criterion until an independent native evidence receipt exists.
         || config.criteria.iter().filter(|criterion| criterion.required).any(|criterion| {
-            criterion.evidence_required || children.iter().any(|child| {
+            children.iter().any(|child| {
                 let Some(choice) = config.nested_bot_reviewers.iter()
                     .find(|choice| choice.bot_id == child.bot_id) else { return true; };
                 !child.criterion_evidence.iter().any(|proof| {
@@ -2577,6 +2577,7 @@ pub(super) fn status_for_authenticated_children(
                         && !proof.leaf_worker_ids.is_empty()
                         && valid_composed_score(proof.lowest_score)
                         && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
+                        && (!criterion.evidence_required || proof.native_evidence_verified)
                 })
             })
         })
@@ -2757,13 +2758,13 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
             || !sessions.insert(child.child_session_id.as_str())
             || !valid_composed_score(child.lowest_score) || child.lowest_score < config.target.max(choice.child_target)
             || config.criteria.iter().filter(|criterion| criterion.required)
-                .any(|criterion| criterion.evidence_required
-                    || !child.criterion_evidence.iter().any(|proof| {
+                .any(|criterion| !child.criterion_evidence.iter().any(|proof| {
                         proof.id == criterion.id
                             && same_lens(&proof.lens, &criterion.lens)
                             && !proof.leaf_worker_ids.is_empty()
                             && valid_composed_score(proof.lowest_score)
                             && proof.lowest_score >= criterion.target.max(config.target).max(choice.child_target)
+                            && (!criterion.evidence_required || proof.native_evidence_verified)
                     }))
         {
             return None;
@@ -2856,13 +2857,14 @@ pub(super) fn status_for_authenticated_children_s2(
             return None;
         }
         for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
-            if criterion.evidence_required || !receipt.criterion_evidence.iter().any(|proof|
+            if !receipt.criterion_evidence.iter().any(|proof|
                 proof.id == criterion.id && same_lens(&proof.lens, &criterion.lens)
                     && !proof.leaf_worker_ids.is_empty()
                     && proof.leaf_worker_ids.iter().all(|id|
                         receipt.leaf_worker_ids.contains(id))
                     && valid_composed_score(proof.lowest_score)
-                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
+                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target)
+                    && (!criterion.evidence_required || proof.native_evidence_verified))
             {
                 return None;
             }
@@ -2985,14 +2987,15 @@ pub(super) fn status_for_authenticated_children_s3(
         // A composite minimum cannot satisfy a missing mandatory criterion,
         // and a scored report cannot stand in for independent evidenceRequired.
         for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
-            if criterion.evidence_required || !second.criterion_evidence.iter().any(|proof|
+            if !second.criterion_evidence.iter().any(|proof|
                 proof.id == criterion.id
                     && same_lens(&proof.lens, &criterion.lens)
                     && !proof.leaf_worker_ids.is_empty()
                     && proof.leaf_worker_ids.iter().all(|id|
                         second.leaf_worker_ids.contains(id))
                     && valid_composed_score(proof.lowest_score)
-                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target))
+                    && proof.lowest_score >= config.target.max(criterion.target).max(choice.child_target)
+                    && (!criterion.evidence_required || proof.native_evidence_verified))
             {
                 return None;
             }

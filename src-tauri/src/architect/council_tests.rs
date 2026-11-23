@@ -8716,6 +8716,139 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
 
 
 #[test]
+fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
+    let (state, sid) = state_fixture();
+    let checkout = std::env::temp_dir()
+        .join(format!("native-child-check-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&checkout).unwrap();
+    let contents = b"Native child reviewer proof\n";
+    std::fs::write(checkout.join("proof.txt"), contents).unwrap();
+    let expected = format!("{:x}", sha2::Sha256::digest(contents));
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![sid, checkout.to_str().unwrap()],
+        ).unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["file-security-child", "file-architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.criteria_source = council::CouncilCriteriaSource::User;
+        config.criteria = vec![council::CouncilCriterion {
+            id: "child-file-proof".into(),
+            lens: "File SHA-256: proof.txt".into(),
+            required: true, target: 9.5, evidence_required: true,
+            native_evidence: Some(council::CouncilCriterionNativeEvidence {
+                kind: "reviewed_file_sha256".into(), skill_id: String::new(),
+                path: Some("proof.txt".into()), expected_sha256: Some(expected),
+                expected_text: None,
+            }),
+        }];
+        config.nested_bot_reviewers = ["file-security-child", "file-architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        assert_eq!(config.mode(), "m4");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Check each child reviewer's actual file evidence",
+        None, None,
+    ).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Require native child file evidence"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (worker_id, attempt, generation) = {
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+            let worker = child.workers.iter()
+                .find(|worker| worker.session_id == launch.sid).unwrap();
+            (worker.id.clone(), worker.attempt, child.generation)
+        };
+        let actor = coordination::Actor::Worker { id: worker_id, attempt };
+        let (check, changed) = reviewer_skill_evidence::dispatch_state(
+            &state, &launch.admission.parent, generation, &actor,
+            "pandacode_reviewer_file_verify",
+            json!({"criterionId":"child-file-proof"}),
+        ).unwrap();
+        assert_eq!(check["nativeFileDigestVerified"], true);
+        assert!(changed.is_some(), "a host check must record native evidence");
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Read-only child reviewer verified its assigned file.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(
+            &state, &launch.sid, Some(&launch.admission),
+            true, false, &mut |_| {},
+        );
+    }
+    let (settled, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Native child file checks passed"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(settled["completed"], true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let seats = child_council::verified_parent_seats(&store, &root)
+        .unwrap().unwrap();
+    assert_eq!(seats.len(), 2);
+    assert!(seats.iter().all(|seat|
+        seat.criterion_evidence.len() == 1
+            && seat.criterion_evidence[0].native_evidence_verified
+            && seat.criterion_evidence[0].lowest_score == 9.6));
+    assert!(verified_council_pass(&store, &root),
+        "two independent host-verified child Councils may pass the same required file check");
+    let mut forged = seats.clone();
+    forged[0].criterion_evidence[0].native_evidence_verified = false;
+    assert!(council::status_for_authenticated_children(&root, &forged).is_none(),
+        "a scored child without a verified native host check cannot pass the root");
+    let receipt_key = format!(
+        "native-council-child-receipt:{}:file-security-child", root.council_since,
+    );
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key], |row| row.get(0),
+    ).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_str(&original).unwrap();
+    tampered["criterionEvidence"][0]["nativeEvidenceVerified"] = json!(false);
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1
+         AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key, tampered.to_string()],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &root),
+        "tampering with stored native child evidence must revoke root approval");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1
+         AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key, original],
+    ).unwrap();
+    assert!(verified_council_pass(&store, &root));
+    drop(store);
+    std::fs::remove_dir_all(checkout).unwrap();
+}
+
+#[test]
 fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
     let (state, sid) = state_fixture();
     {
@@ -8776,6 +8909,7 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
     for child in &children {
         assert_eq!(child.criterion_evidence.len(), 1);
         let proof = &child.criterion_evidence[0];
+        assert!(!proof.native_evidence_verified, "score-only criteria have no host verification");
         assert_eq!(proof.id, "security-review");
         assert_eq!(proof.lens, "Security requirements");
         assert_eq!(proof.lowest_score, 9.6);

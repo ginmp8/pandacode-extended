@@ -1302,6 +1302,30 @@ fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Resu
         .ok_or_else(|| "Authenticated GitHub repository ID is missing or invalid.".into())
 }
 
+/// Revalidate the independently authenticated repository identity after
+/// reading the bounded Events window. A repo deleted/recreated or redirected
+/// while pagination was in flight must not produce durable Observe receipts.
+fn require_same_authenticated_repository(
+    requested: &str, expected_id: u64, current: &serde_json::Value,
+) -> Result<()> {
+    if authenticated_repository_id(current, requested)? != expected_id {
+        return Err("GitHub repository identity changed during Observe; cursor unchanged.".into());
+    }
+    Ok(())
+}
+
+fn recheck_authenticated_repository(
+    root: &std::path::Path, requested: &str, expected_id: u64,
+) -> Result<()> {
+    let endpoint = format!("repos/{requested}");
+    let result = crate::github::run_gh(
+        root, &["api", &endpoint], crate::github::TIMEOUT,
+    )?;
+    require_same_authenticated_repository(
+        requested, expected_id, &crate::github::json(&result)?,
+    )
+}
+
 /// Keep the first independently authenticated repository ID for the entire
 /// source lifetime. Re-enabling Observe never rebinds a source to a deleted,
 /// renamed or recreated repository. The insert is in the same transaction as
@@ -2005,6 +2029,10 @@ fn fetch_authenticated_github_window(
     let response = combine_github_pages(&pages, since, prior_cursor)?;
     require_authenticated_feed_repository(&response, repository_id)?;
     require_authenticated_feed_actor_ids(&response)?;
+    // The first repository lookup and the Events fetch are separate API
+    // requests. Reconfirm the same repository ID before admitting receipts,
+    // even for an empty feed that cannot attest its own repository identity.
+    recheck_authenticated_repository(&root, repo, repository_id)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;
     Ok((signed_in, response, pages.len(), repository_id, operator_id))
 }
@@ -4921,6 +4949,29 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn authenticated_observe_rejects_repository_replacement_during_fetch() {
+        let original = serde_json::json!({"id":73,"full_name":"owner/repo"});
+        let same = serde_json::json!({"id":73,"full_name":"Owner/Repo"});
+        assert!(require_same_authenticated_repository("owner/repo", 73, &same).is_ok());
+        for changed in [
+            serde_json::json!({"id":74,"full_name":"owner/repo"}),
+            serde_json::json!({"id":73,"full_name":"other/repo"}),
+            serde_json::json!({"id":73}),
+            serde_json::json!({"id":0,"full_name":"owner/repo"}),
+            serde_json::json!({"id":"73","full_name":"owner/repo"}),
+        ] {
+            assert!(require_same_authenticated_repository("owner/repo", 73, &changed).is_err());
+        }
+        assert!(require_same_authenticated_repository("owner/repo", 73, &original).is_ok());
+        // A window with no events has no repo IDs to validate, but the
+        // post-fetch authenticated metadata check still fences replacement.
+        assert!(require_authenticated_feed_repository(&serde_json::json!([]), 73).is_ok());
+        assert!(require_same_authenticated_repository(
+            "owner/repo", 73, &serde_json::json!({"id":74,"full_name":"owner/repo"}),
+        ).is_err());
     }
 
     #[test]

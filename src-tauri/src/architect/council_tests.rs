@@ -6205,6 +6205,48 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
     // discard an active agent; this fixture has no live agent processes.
     let paused = control_state(&state, &sid, "pause").unwrap();
     let frozen_root = serde_json::to_value(&paused).unwrap();
+    // An empty local agents registry cannot establish that a native leaf
+    // provider stopped. Both the paused and interrupted root preflights must
+    // fail closed without altering child ownership or the frozen root cycle.
+    let original_leaf_status = {
+        let store = state.store.lock().unwrap();
+        store.session(&old_leaves[0]).unwrap().status
+    };
+    for live_status in ["running", "waiting"] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2 WHERE id=?1",
+                rusqlite::params![&old_leaves[0], live_status],
+            ).unwrap();
+            let paused_root = load(&store, &sid).unwrap().unwrap();
+            let paused_error = child_council::require_unrevoked_child_sessions_on_resume(
+                &store, &paused_root,
+            ).unwrap_err();
+            assert!(paused_error.contains("native leaf reviewer session remains active"),
+                "{paused_error}");
+            let mut interrupted_root = paused_root.clone();
+            interrupted_root.status = "interrupted".into();
+            let interrupted_error = child_council::require_resumable_child_cycles(
+                &store, &interrupted_root,
+            ).unwrap_err();
+            assert!(interrupted_error.contains("native leaf reviewer session remains active"),
+                "{interrupted_error}");
+            assert_eq!(parent_of(&store, &old_leaves[0]).unwrap().as_deref(),
+                Some(old_child.as_str()), "denied Resume preserves native leaf ownership");
+        }
+        let denied = control_state(&state, &sid, "resume").unwrap_err();
+        assert!(denied.contains("native leaf reviewer session remains active"), "{denied}");
+        assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root,
+            "denied Resume must preserve the immutable root Council cycle");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&old_leaves[0], original_leaf_status],
+        ).unwrap();
+    }
     // A paused root retains the original child issuance generation. A
     // forged task objective in the stopped child must not regain native
     // reviewer authority through ordinary Resume.

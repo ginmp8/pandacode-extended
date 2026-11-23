@@ -310,6 +310,19 @@ fn require_unsettled_root_on_resume(store: &Store, root: &TeamSnapshot) -> Resul
     Ok(())
 }
 
+// Resume must not overtake a native leaf provider that is still running after
+// root Pause or interruption. Worker snapshots and an empty local agent map
+// cannot establish that a remote reviewer process has stopped.
+fn require_stopped_native_leaves_on_resume(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    for leaf_id in leaf_sessions(store, &root.session_id)? {
+        let session = store.session(&leaf_id)?;
+        if matches!(session.status.as_str(), "running" | "waiting") {
+            return Err("child_council_revoked: native leaf reviewer session remains active; stop it before resuming the Council.".into());
+        }
+    }
+    Ok(())
+}
+
 /// A physical restart interrupts child Architect snapshots and invalidates
 /// their native reviewer grants. Resume must not present a running root with
 /// unusable child reservations; an explicit fresh Council cycle is required.
@@ -323,6 +336,7 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
     require_unsettled_root_on_resume(store, root)?;
+    require_stopped_native_leaves_on_resume(store, root)?;
     // Restart preflight must not adopt an unselected child reservation from
     // this immutable cycle. Per-choice validation alone misses foreign rows.
     for choice in &config.nested_bot_reviewers {
@@ -365,6 +379,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     let Some(config) = config else { return Ok(()); };
     if config.nested_bot_reviewers.is_empty() { return Ok(()); }
     require_unsettled_root_on_resume(store, root)?;
+    require_stopped_native_leaves_on_resume(store, root)?;
     let root_session = store.session(&root.session_id)?;
     // A paused root must not silently adopt an extra or duplicated native
     // child reservation. Old cycles are excluded from this immutable roster.

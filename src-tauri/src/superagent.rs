@@ -1986,124 +1986,73 @@ fn list_headless_recovery_inbox_page_scoped(
         require_global_effect_reconciliation_integrity(&store)?;
     }
     let observed_at = storage::now();
-    let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
+    // The SQL index only enumerates potential recovery candidates. The
+    // native admission guard owns provider, model, prompt, Skills, checkout
+    // and role identity, which cannot be faithfully duplicated in SQL.
+    // Filter healthy running Tickets before applying the page limit so they
+    // cannot hide an invalid Assignment behind a page of healthy providers.
     let ids: Vec<(String, i64, i64)> = {
         let mut stmt = store.db.prepare(
-            "WITH scoped_tickets AS (
-               SELECT * FROM sa_tickets WHERE (?7 IS NULL OR orchestration_id=?7)
-             ), candidates AS (
-               SELECT t.id,t.created_at,
+            "WITH candidates AS (
+               SELECT t.id,t.created_at,t.state,
                  CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
                                   WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
                       THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
                                          WHERE a.ticket_id=t.id AND a.state='running')
                       THEN 1 ELSE 2 END AS priority
-               FROM scoped_tickets t
-               WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
-                                 'failed','interrupted','inconclusive')
-                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
-                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
-                  OR (t.state<>'running' AND EXISTS(
-                      SELECT 1 FROM sa_assignments a
-                      WHERE a.ticket_id=t.id AND a.state='running'))
-                  OR (t.state='running' AND (
-                      t.active_assignment_id IS NULL
-                      -- A live assignment whose provider session vanished
-                      -- needs investigation even before the watchdog settles it.
+               FROM sa_tickets t
+               WHERE (?4 IS NULL OR t.orchestration_id=?4)
+                 AND (t.state IN ('running','queued','blocked','waiting_approval','waiting_review',
+                                  'failed','interrupted','inconclusive')
+                      OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                                WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
                       OR EXISTS(SELECT 1 FROM sa_assignments a
-                          LEFT JOIN sessions live ON live.id=a.session_id
-                          WHERE a.ticket_id=t.id AND a.state='running'
-                            AND live.id IS NULL)
-                      -- The recovery index must find an active provider whose
-                      -- task-owned channel binding was deleted or remapped.
-                      -- Native read_only_policy already refuses this session;
-                      -- otherwise the read-only inbox incorrectly appears clear.
-                      OR NOT EXISTS(
-                        SELECT 1 FROM sa_assignments a
-                        JOIN bot_threads thread ON thread.session_id=a.session_id
-                          AND thread.bot_id=a.bot_id AND thread.channel_id=?6
-                        WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
-                          AND a.state='running'
-                          AND (
-                            (a.attempt=1 AND thread.external_id=t.id)
-                            OR (a.attempt=1 AND thread.external_id=t.id || ':attempt:1'
-                                AND EXISTS(SELECT 1 FROM sa_audit initial
-                                  WHERE initial.ticket_id=t.id AND initial.kind='admitted'
-                                    AND initial.detail IN ('blocked: worker occupied',
-                                      'blocked: explicit headless staging'))
-                                AND EXISTS(SELECT 1 FROM sa_audit retry
-                                  WHERE retry.ticket_id=t.id AND retry.kind='manual_retry'))
-                            OR (a.attempt>1 AND
-                                thread.external_id=t.id || ':attempt:' || a.attempt)
-                            OR (a.attempt>1 AND
-                                thread.external_id=t.id || ':worker:' || a.attempt)
-                          ))
-                      OR (SELECT COUNT(*) FROM sa_assignments a
-                          WHERE a.ticket_id=t.id AND a.state='running')<>1
-                      OR NOT EXISTS(SELECT 1 FROM sa_assignments a
-                                    WHERE a.id=t.active_assignment_id
-                                      AND a.ticket_id=t.id AND a.state='running'
-                                      AND a.created_at>0 AND a.created_at<=?1
-                                      AND a.created_at>?2)
-                      -- Detect durable native authority drift even before
-                      -- a watchdog tick. The full provider/tool admission
-                      -- policy is independently rechecked in the projection.
-                      OR NOT EXISTS(SELECT 1 FROM sa_mandates m
-                                    WHERE m.ticket_id=t.id AND m.revoked=0
-                                      AND m.expires_at>?1
-                                      AND m.policy_revision=t.policy_revision
-                                      AND m.project_id=t.project_id
-                                      AND m.actor=t.actor
-                                      AND length(trim(m.authorization_id))>0
-                                      AND m.allowed_tools='[]'
-                                      AND m.allowed_side_effects=0)
-                      OR NOT EXISTS(
-                        SELECT 1 FROM sa_orchestrations o
-                        JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
-                        JOIN sa_assignments active ON active.id=t.active_assignment_id
-                          AND active.ticket_id=t.id AND active.state='running'
-                        JOIN bots assignee ON assignee.id=active.bot_id
-                        JOIN sessions live ON live.id=active.session_id
-                        WHERE o.id=t.orchestration_id AND o.enabled=1
-                          AND o.policy_revision=t.policy_revision
-                          AND o.project_id=t.project_id
-                          AND coordinator.paused=0 AND assignee.paused=0
-                          AND live.project_id=assignee.project_id
-                          AND (active.bot_id=o.coordinator_bot_id OR
-                               (active.bot_id=t.worker_bot_id
-                                AND assignee.project_id=t.project_id)))))
-             ), page AS (
-               SELECT id,priority,created_at FROM candidates
-               WHERE ?3 IS NULL OR priority>?3
-                  OR (priority=?3 AND (created_at<?4
-                      OR (created_at=?4 AND id<?5)))
-               ORDER BY priority ASC,created_at DESC,id DESC
-               LIMIT 201
+                                WHERE a.ticket_id=t.id AND a.state='running'))
              )
-             SELECT page.id,page.priority,page.created_at,
-               CASE WHEN ?3 IS NULL THEN 1 ELSE EXISTS(
-                 SELECT 1 FROM candidates anchor
-                 WHERE anchor.id=?5 AND anchor.priority=?3 AND anchor.created_at=?4
-               ) END AS cursor_valid
-             FROM (SELECT 1) singleton LEFT JOIN page ON 1=1
-             ORDER BY page.priority ASC,page.created_at DESC,page.id DESC",
+             SELECT id,priority,created_at,state FROM candidates
+             WHERE ?1 IS NULL OR priority>?1
+                  OR (priority=?1 AND (created_at<?2
+                      OR (created_at=?2 AND id<=?3)))
+             ORDER BY priority ASC,created_at DESC,id DESC",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(
-            params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL,orchestration_id],
-            |row| Ok((
-                row.get::<_,Option<String>>(0)?,
-                row.get::<_,Option<i64>>(1)?,
-                row.get::<_,Option<i64>>(2)?,
-                row.get::<_,bool>(3)?,
-            )),
-        ).map_err(|e| e.to_string())?;
-        let records = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
-        if records.first().is_some_and(|row| !row.3) {
+        let mut rows = stmt.query(params![
+            before_priority,before_updated_at,before_id,orchestration_id,
+        ]).map_err(|e| e.to_string())?;
+        let mut records = Vec::with_capacity(201);
+        // Include the anchor in the query, verify that it is still a genuine
+        // candidate of this Team and priority, then omit it from the result.
+        let mut anchor_pending = before_priority.is_some();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let id: String = row.get(0).map_err(|e| e.to_string())?;
+            let priority: i64 = row.get(1).map_err(|e| e.to_string())?;
+            let created_at: i64 = row.get(2).map_err(|e| e.to_string())?;
+            let state: String = row.get(3).map_err(|e| e.to_string())?;
+            let healthy_running = if priority == 1 && state == "running" {
+                let ticket = get_ticket(&store, &id)?;
+                let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+                recovery["activeNativeReadOnlyAdmissionValid"].as_bool() == Some(true)
+                    && recovery["expiredNativeAssignments"].as_i64() == Some(0)
+            } else {
+                false
+            };
+            if anchor_pending {
+                if before_id != Some(id.as_str()) || before_priority != Some(priority)
+                    || before_updated_at != Some(created_at) || healthy_running
+                {
+                    return Err("Recovery cursor no longer belongs to a recoverable Ticket; reload inbox.".into());
+                }
+                anchor_pending = false;
+                continue;
+            }
+            if !healthy_running {
+                records.push((id,priority,created_at));
+                if records.len() == 201 { break; }
+            }
+        }
+        if anchor_pending {
             return Err("Recovery cursor no longer belongs to a recoverable Ticket; reload inbox.".into());
         }
-        records.into_iter().filter_map(|(id,priority,updated_at,_)| {
-            Some((id?,priority?,updated_at?))
-        }).collect()
+        records
     };
     let mut items = Vec::with_capacity(ids.len().min(200));
     for (id,_,_) in ids.iter().take(200) {
@@ -8721,7 +8670,8 @@ mod tests {
     #[test]
     fn headless_recovery_inbox_surfaces_native_admission_drift_without_replay() {
         for fault in ["team_disabled", "coordinator_paused", "worker_paused",
-                      "policy_revision", "unsupported_tools"] {
+                      "policy_revision", "unsupported_tools", "provider", "instructions",
+                      "skills", "checkout"] {
             let mut store = fixture();
             let cfg = enabled(&store);
             let (ticket, launched) = admit(&mut store, &cfg.id,
@@ -8761,6 +8711,22 @@ mod tests {
                         [&ticket.id],
                     ).unwrap();
                 }
+                "provider" => {
+                    store.db.execute("UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                        [&session]).unwrap();
+                }
+                "instructions" => {
+                    store.db.execute("UPDATE bots SET instructions='Changed instructions' WHERE id=?1",
+                        [&cfg.worker_bot_id]).unwrap();
+                }
+                "skills" => {
+                    store.db.execute("UPDATE bots SET skills='[\"new-skill\"]' WHERE id=?1",
+                        [&cfg.worker_bot_id]).unwrap();
+                }
+                "checkout" => {
+                    store.db.execute("UPDATE projects SET path='/tmp/superagent-recovery-rebound' WHERE id=?1",
+                        [&cfg.project_id]).unwrap();
+                }
                 _ => unreachable!(),
             }
             assert!(read_only_policy(&store, &session).is_err(), "{fault}");
@@ -8797,6 +8763,45 @@ mod tests {
             assert_eq!(again["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
             assert!(!again.to_string().contains("Private drift recovery objective"));
         }
+    }
+
+    #[test]
+    fn headless_recovery_cursor_rejects_a_restored_native_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private recovery cursor objective", "restored-recovery-cursor", false).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original_model: String = store.db.query_row(
+            "SELECT model FROM sessions WHERE id=?1", [&session], |row| row.get(0),
+        ).unwrap();
+        store.db.execute("UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+            [&session]).unwrap();
+        let path = store.path.clone();
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(&path, &cfg.id, None, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(inbox["items"][0]["ticketId"], ticket.id);
+        assert_eq!(inbox["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+        let created_at = inbox["items"][0]["createdAt"].as_i64().unwrap();
+        let after_anchor: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(
+                &path, &cfg.id, Some(1), Some(created_at), Some(&ticket.id),
+            ).unwrap(),
+        ).unwrap();
+        assert!(after_anchor["items"].as_array().unwrap().is_empty());
+        store.db.execute("UPDATE sessions SET model=?2 WHERE id=?1",
+            params![&session, original_model]).unwrap();
+        assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+        assert!(list_headless_team_recovery_inbox_page(
+            &path, &cfg.id, Some(1), Some(created_at), Some(&ticket.id),
+        ).is_err(), "A now-healthy Ticket cannot anchor recovery pagination");
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_team_recovery_inbox_page(&path, &cfg.id, None, None, None).unwrap(),
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
     }
 
     #[test]

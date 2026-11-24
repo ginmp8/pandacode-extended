@@ -152,10 +152,14 @@ fn frozen_with_recovery_status(
     {
         return Err("child_council_revoked: selected bot review harness changed.".into());
     }
+    // The project ID and optional worktree fields alone do not identify the
+    // checkout: relinking a project must revoke old child grants and receipts.
+    let workspace = store.workspace_root(&session.project_id, Some(session_id))
+        .map_err(|_| "child_council_stale: native child checkout is unavailable.".to_string())?;
     let scope = serde_json::to_vec(&(
         &session.project_id, &session.worktree_path, &session.worktree_branch,
         &session.provider,
-        &session.model, &session.reasoning_effort,
+        &session.model, &session.reasoning_effort, &workspace,
     )).map_err(|e| e.to_string())?;
     // A pending child must never be admitted under an edited coordinator persona,
     // selected Skills or MCP references. Hash-only pins avoid persisting prompts,
@@ -165,7 +169,7 @@ fn frozen_with_recovery_status(
         &bot.mode, &bot.skills, &bot.mcp, &bot.backup_models, &bot.fallback_mode,
     )).map_err(|e| e.to_string())?;
     Ok(FrozenChildReservation {
-        schema_version: 5,
+        schema_version: 6,
         root_session_id: root.session_id.clone(),
         root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
         bot_id: child.bot_id.clone(),

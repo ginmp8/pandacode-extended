@@ -384,9 +384,11 @@ callbacks remain revoked; this does not resume or approve the previous
 artifact. A still-running child reviewer blocks the new task until it stops. New child
 coordinator and leaf sessions inherit the root's exact checkout path and
 branch; native admission, callback and paused Resume validate both. Frozen
-child reservation schema v5 pins the checkout branch. Earlier v4 reservations
-without that pin fail closed and require a fresh task cycle rather than
-silently receiving authority over a different branch.
+child reservation schema v6 pins the resolved local checkout in addition to
+the checkout branch. Earlier reservations without the resolved checkout pin
+fail closed and require a fresh task cycle rather than silently receiving
+authority over a different folder. Relinking the project revokes child
+admission, recovery and callbacks even when the project ID remains unchanged.
 
 Setup offers one limit, workers at once. PandaCode enforces no rounds, assignments,
 batch size, file scopes, sub-worker counts or follow-up attempts; the kept brakes

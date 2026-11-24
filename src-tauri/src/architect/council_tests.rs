@@ -5935,6 +5935,27 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
     }
     assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    // A relink preserves the project ID and worktree fields, but not the
+    // frozen checkout. Recovery must not mint a child for the new folder.
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let original_path = store.project(&project).unwrap().path;
+        let other_root = std::env::temp_dir().join(format!("child-recovery-relinked-{}", storage::id()));
+        std::fs::create_dir(&other_root).unwrap();
+        store.relink_project(&project, &other_root).unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::recover_interrupted_children(&store, &root).is_err());
+        assert_eq!(serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(), before_root);
+        let reserved: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1
+             AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &old_child], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reserved, old_child);
+        store.relink_project(&project, std::path::Path::new(&original_path)).unwrap();
+        std::fs::remove_dir(&other_root).unwrap();
+    }
     assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
     let replacement = {
         let store = state.store.lock().unwrap();
@@ -8473,7 +8494,7 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     assert!(council_requests::resolve_native_admission_collision(
         &store, &sid, &project, "assignment-1", &"b".repeat(64),
     ).unwrap_err().contains("council_task_conflict"));
-    assert_eq!(first.schema_version, 2);
+    assert_eq!(first.schema_version, 3);
     // Different assignment keys or artifact digests must never share one
     // task-bound Council verdict, even if both are admitted before dispatch.
     for (assignment, digest) in [
@@ -8772,7 +8793,7 @@ fn native_task_admission_rejects_invalid_persisted_council_policy() {
     let admitted = council_requests::admit_native_task(
         &store, &sid, &project, "valid-policy-task", &artifact,
     ).unwrap();
-    assert_eq!(admitted.schema_version, 2);
+    assert_eq!(admitted.schema_version, 3);
     assert!(council_requests::inspect_native_task(
         &store, &sid, &project, "valid-policy-task", &artifact, &admitted.request_id,
     ).is_ok());
@@ -9127,6 +9148,24 @@ fn native_child_progress_callbacks_require_live_grants_and_allow_waiting_complet
             worker.session_id == launch.sid).unwrap().status, "waiting");
         child_council::authorize_leaf(&store, &launch.sid, &launch.admission)
             .expect("waiting remains an active, previously issued native reviewer");
+        // The same previously issued grant cannot authorize a different
+        // checkout under the same persistent project ID.
+        let project = store.session(&sid).unwrap().project_id;
+        let original_path = store.project(&project).unwrap().path;
+        let other_root = std::env::temp_dir().join(format!("child-callback-relinked-{}", storage::id()));
+        std::fs::create_dir(&other_root).unwrap();
+        let before_relink = serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap(),
+        ).unwrap();
+        store.relink_project(&project, &other_root).unwrap();
+        assert!(child_council::authorize_leaf(&store, &launch.sid, &launch.admission).is_err());
+        assert!(record_activity(&store, &launch.sid, &launch.admission).is_none());
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap(),
+        ).unwrap(), before_relink);
+        store.relink_project(&project, std::path::Path::new(&original_path)).unwrap();
+        std::fs::remove_dir(&other_root).unwrap();
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
         // Simulate a delayed callback after native root interruption while
         // the persisted child snapshot still says running. A progress event
         // must not update the child even though its generation still matches.

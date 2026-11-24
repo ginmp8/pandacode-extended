@@ -220,6 +220,26 @@ pub(super) fn plan(
     {
         return Err("Only blocked or queued local Demands without an active assignment can be planned.".into());
     }
+    if ticket.revision != expected_revision {
+        return Err("Demand revision changed; planning denied.".into());
+    }
+    // Each remaining non-cancelled, unaccepted item needs at least one
+    // more native Worker attempt. Failed attempts count too. Reserve this
+    // capacity in the same transaction as the plan revision, using the
+    // immutable Ticket budget rather than the Team's mutable preferences.
+    let budget = super::roster::ticket_worker_attempt_limit(store, ticket_id)?;
+    let (used, pending): (i64, i64) = tx.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM sa_assignments a JOIN sa_tickets t
+            ON t.id=a.ticket_id AND t.worker_bot_id=a.bot_id WHERE t.id=?1),
+           (SELECT COUNT(*) FROM sa_work_items w WHERE w.ticket_id=?1
+            AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+            AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id))",
+        [ticket_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    if pending >= budget.saturating_sub(used) {
+        return Err("WorkItem plan exceeds remaining native Worker attempt budget; cancel an unexecuted item or create a new authorized Demand.".into());
+    }
     if let Some(parent)=parent_id {
         let valid:bool=tx.query_row(
             "SELECT EXISTS(

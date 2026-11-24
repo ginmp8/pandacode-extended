@@ -6254,6 +6254,55 @@ mod tests {
     }
 
     #[test]
+    fn work_item_planning_respects_immutable_remaining_worker_attempt_budget() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit_role_with_staging(
+            &mut store, &team.id, "Bounded native plan", "budgeted-plan", false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(roster::ticket_worker_attempt_limit(&store, &ticket.id).unwrap(), 2);
+        let root = work_items::plan(&store, &ticket.id, ticket.revision,
+            "budget-root", "Inspect root", None).unwrap();
+        let current = get_ticket(&store, &ticket.id).unwrap();
+        let child = work_items::plan(&store, &ticket.id, current.revision,
+            "budget-child", "Inspect child", Some(&root.id)).unwrap();
+        let full = get_ticket(&store, &ticket.id).unwrap();
+        assert!(work_items::plan(&store, &ticket.id, full.revision,
+            "budget-overflow", "Unfinishable plan", None).unwrap_err().contains("attempt budget"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, full.revision);
+        assert_eq!(work_items::list(&store, &ticket.id, 100).unwrap().0.len(), 2);
+        assert_eq!(work_items::plan(&store, &ticket.id, ticket.revision,
+            "budget-root", "Inspect root", None).unwrap().id, root.id);
+        work_items::cancel(&store, &ticket.id, full.revision, &child.id, "cancel-budget-child").unwrap();
+        let available = get_ticket(&store, &ticket.id).unwrap();
+        let replacement = work_items::plan(&store, &ticket.id, available.revision,
+            "budget-replacement", "Inspect replacement", Some(&root.id)).unwrap();
+        let full = get_ticket(&store, &ticket.id).unwrap();
+        work_items::cancel(&store, &ticket.id, full.revision, &replacement.id,
+            "cancel-budget-replacement").unwrap();
+        let ready = get_ticket(&store, &ticket.id).unwrap();
+        let (running, _, _, _) =
+            retry_blocked_at_revision(&mut store, &ticket.id, ready.revision, false).unwrap();
+        fail_launch(&store, &running, "Disposable provider failure").unwrap();
+        let failed = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(failed.state, "blocked");
+        assert!(work_items::plan(&store, &ticket.id, failed.revision,
+            "budget-after-failure", "Cannot fit after failed attempt", None)
+            .unwrap_err().contains("attempt budget"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, failed.revision);
+        assert_eq!(assignments(&store, &ticket.id, 100).unwrap().len(), 1);
+        assert!(!mandate(&store, &ticket.id).unwrap().allowed_side_effects);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(work_items::plan(&reopened, &ticket.id, failed.revision,
+            "budget-after-restart", "Still cannot fit", None)
+            .unwrap_err().contains("attempt budget"));
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().revision, failed.revision);
+    }
+
+    #[test]
     fn work_item_planning_never_reenters_active_or_uncertain_demands() {
         let mut store=fixture();
         let team=enabled(&store);

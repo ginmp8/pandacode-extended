@@ -320,6 +320,10 @@ test.describe('shared bot channels', () => {
         explanation: 'Unverified reviewer report', artifactRevision: 'revision-9',
         verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
       }],
+      composedUsage: { uniqueAttempts: 3, queueMeasuredAttempts: 0, spanMeasuredAttempts: 0,
+        cumulativeQueueWaitMs: null, cumulativeObservedSpanMs: null,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      retiredChildAttempts: 2,
       reservedChildren: [{ botId: 'security-child', childSessionId: 'channel-child-one',
         rootCycleId: 'channel-root:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
       attempts: [{
@@ -370,7 +374,12 @@ test.describe('shared bot channels', () => {
     const details = dialog.locator('.council-inspection');
     await expect(details).toHaveAttribute('open', '');
     await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
-    await expect(dialog.getByText('Tokens unknown', { exact: false })).toBeVisible();
+    await expect(dialog.getByRole('region', { name: 'Review round 1' })
+      .getByText('Tokens unknown', { exact: false })).toBeVisible();
+    await expect(dialog.locator('.council-composed-usage-breakdown'))
+      .toContainText('Current root and child reservation attempts: 1');
+    await expect(dialog.locator('.council-composed-usage-breakdown'))
+      .toContainText('Retired child attempts (included in total): 2');
     await expect(dialog.getByText('<script>alert(1)</script>', { exact: false })).toBeVisible();
     await expect(dialog.locator('script')).toHaveCount(0);
     const child = dialog.locator('.council-child-reservations details[data-council-child-key="channel-root:1000:channel-child-one"]');

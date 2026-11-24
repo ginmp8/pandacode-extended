@@ -589,6 +589,10 @@ pub struct CouncilInspection {
     /// no provider billing is inferred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub composed_usage: Option<CouncilUsageTotals>,
+    /// Same-cycle retired child leaf IDs counted in composed usage but absent from
+    /// current root and child reservations. Never review authority or billing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired_child_attempts: Option<usize>,
     /// Root-only native observations grouped by round and reviewer source. Each worker ID
     /// contributes to at most one group; unexecuted child reservations contribute nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1154,6 +1158,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_by_round_source: usage_by_round_source(&attempts),
         composed_usage_by_round_source: Vec::new(),
         usage: usage_totals(&attempts), attempts, composed_usage: None,
+        retired_child_attempts: None,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
         historical_reported_findings: Vec::new(),
         finding_triage: CouncilFindingTriage::default(),

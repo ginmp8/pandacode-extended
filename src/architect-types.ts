@@ -141,6 +141,8 @@ export interface CouncilInspection {
   usage?: CouncilUsageTotals;
   /** Root and child native attempts, excluding reservations and composite seats; provider billing remains unknown. */
   composedUsage?: CouncilUsageTotals | null;
+  /** Deduplicated retired same-cycle child leaves included in composed usage; absent on older builds. */
+  retiredChildAttempts?: number | null;
   /** Absent in older builds; all groups together count each root worker ID at most once. */
   usageByRoundSource?: CouncilUsageGroup[];
   /** Root and actual child leaves grouped by round/source; no composite votes or inferred billing. */

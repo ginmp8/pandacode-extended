@@ -781,7 +781,7 @@ test('Council inspector rejects invalid root, child and composed metering but pr
     sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 12,
     status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
-    usage: invalid, composedUsage: invalid,
+    usage: invalid, composedUsage: invalid, retiredChildAttempts: 2,
     usageByRoundSource: [{ round: 1, reviewerSource: 'automatic', usage: invalid }],
     composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_child', usage: invalid }],
     reservedChildren: [{
@@ -798,6 +798,8 @@ test('Council inspector rejects invalid root, child and composed metering but pr
   await expect(rootUsage).toContainText('Provider tokens unknown · Cost unknown');
   await expect(rootUsage).toContainText('Cumulative queue unknown');
   await expect(inspector.locator('.council-composed-usage')).toContainText('Root + child native attempts: unknown');
+  await expect(inspector.locator('.council-composed-usage-breakdown'))
+    .toContainText('Current/retired attempt breakdown unknown');
   await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens unknown · Cost unknown');
   await expect(inspector.getByRole('region', { name: 'Root usage by round and source' }))
     .toContainText('Native attempts unknown');
@@ -817,7 +819,7 @@ test('Council inspector rejects invalid root, child and composed metering but pr
     cumulativeObservedSpanMs: 0, settledReviewWindowMs: 0,
     tokenCount: 0, costAmount: 0 };
   await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
-    ...inspection, usage: zero, composedUsage: zero,
+    ...inspection, usage: zero, composedUsage: zero, retiredChildAttempts: 0,
     reservedChildren: [{ ...inspection.reservedChildren[0], observedLeafUsage: zero }],
   });
   await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
@@ -825,6 +827,8 @@ test('Council inspector rejects invalid root, child and composed metering but pr
   await expect(rootUsage).toContainText('Provider tokens 0 · Cost 0 USD');
   await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens 0 · Cost 0 USD');
   await expect(child).toContainText('Child-observed native leaf attempts: 0');
+  await expect(inspector.locator('.council-composed-usage-breakdown'))
+    .toContainText('Retired child attempts (included in total): 0');
 });
 
 test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
@@ -1094,12 +1098,13 @@ test('child Council drill-down shows actual native leaves without root votes or 
     usage: { uniqueAttempts: 0, queueMeasuredAttempts: 0, spanMeasuredAttempts: 0,
       cumulativeQueueWaitMs: null, cumulativeObservedSpanMs: null,
       tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
-    composedUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+    retiredChildAttempts: 2,
+    composedUsage: { uniqueAttempts: 4, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
       cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
       tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
     composedUsageByRoundSource: [{
       round: 1, reviewerSource: 'nested_child',
-      usage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+      usage: { uniqueAttempts: 4, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
         cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
         tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
     }],
@@ -1135,12 +1140,16 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(leaves.locator('img')).toHaveCount(0);
   const combined = panel(page).locator('.council-composed-usage');
-  await expect(combined).toContainText('Root + child native attempts: 2');
+  await expect(combined).toContainText('Root + child native attempts: 4');
+  const breakdown = panel(page).locator('.council-composed-usage-breakdown');
+  await expect(breakdown).toContainText('Current root and child reservation attempts: 2');
+  await expect(breakdown).toContainText('Retired child attempts (included in total): 2');
+  await expect(breakdown).toContainText('not current evidence or approval');
   await expect(combined).toContainText('Provider tokens unknown');
   await expect(combined).toContainText('Cost unknown');
   const grouped = panel(page).getByRole('region', { name: 'Root and child usage by round and source' });
   await expect(grouped.locator('li')).toHaveCount(1);
-  await expect(grouped.locator('li')).toContainText('Round 1 · nested child · Native attempts 2');
+  await expect(grouped.locator('li')).toContainText('Round 1 · nested child · Native attempts 4');
   await expect(grouped).toContainText('composite parent seats and unadmitted reservations are excluded');
   await expect(combined).toContainText('parent composite seats excluded');
   await expect(children).toContainText('No verified child receipt is available; no parent vote');
@@ -1151,6 +1160,19 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(sources).toContainText('reservations are not approvals');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const host = document.createElement('div');
+    host.id = 'embedded-recovered-usage';
+    document.body.append(host);
+    const view = createCouncilInspector(async () => snapshot, 'session-1');
+    host.append(view);
+    view.open = true;
+  }, inspection);
+  const embedded = page.locator('#embedded-recovered-usage .council-inspection');
+  await expect(embedded.locator('.council-composed-usage-breakdown'))
+    .toHaveText(await breakdown.textContent() ?? '');
+  await expect(embedded).toContainText('Native pass not verified');
 });
 
 test('forced S2 child inspector exposes both native waves without promoting first-wave proof', async ({ page }) => {

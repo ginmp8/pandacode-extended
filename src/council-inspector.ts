@@ -19,6 +19,15 @@ function observedProviderCost(amount: number | null | undefined, currency: strin
     ? amount + ' ' + currency : 'unknown';
 }
 
+/** The native aggregate includes retired attempts, but only current reservations may expose leaves. */
+function composedAttemptBreakdown(total: number, retired: number | null | undefined): string {
+  if (!Number.isSafeInteger(total) || total < 0 || typeof retired !== 'number'
+    || !Number.isSafeInteger(retired) || retired < 0 || retired > total)
+    return 'Current/retired attempt breakdown unknown';
+  return 'Current root and child reservation attempts: ' + (total - retired) +
+    ' · Retired child attempts (included in total): ' + retired;
+}
+
 /** An invalid native usage group must not produce a claimed source or round. */
 function validUsageGroup(group: CouncilUsageGroup, includeChild: boolean): boolean {
   return group != null && Number.isSafeInteger(group.round) && group.round > 0
@@ -441,7 +450,10 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' (overlap counted once; not provider time)' +
       ' · Provider tokens ' + escape(nonNegativeCount(composed.tokenCount)) +
       ' · Cost ' + escape(observedProviderCost(composed.costAmount, composed.costCurrency)) +
-      ' · Child reservations and parent composite seats excluded.</p>'
+      ' · Child reservations and parent composite seats excluded.</p>' +
+      '<p class="council-composed-usage-breakdown">' +
+      escape(composedAttemptBreakdown(composed.uniqueAttempts, inspection.retiredChildAttempts)) +
+      '. Retired attempts are usage history, not current evidence or approval.</p>'
     : '';
   const rootGroupInputs = Array.isArray(inspection.usageByRoundSource) ? inspection.usageByRoundSource : [];
   const groups = rootGroupInputs.filter(group => validUsageGroup(group, false));
@@ -468,7 +480,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   const allGroupsHtml = children.length && omittedChildren === 0 && (allGroups.length || omittedComposedGroups)
     ? '<section aria-label="Root and child usage by round and source" class="council-usage-breakdown">' +
       '<h4>Root and child native usage by round and source</h4>' +
-      '<p>Each valid admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p>' +
+      '<p>Each valid admitted native leaf or root reviewer is counted once, including retired child attempts from this cycle. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p>' +
       (omittedComposedGroups ? '<p role="status">' + omittedComposedGroups +
         ' malformed composed usage group(s) omitted; this summary does not prove review completion.</p>' : '') + '<ul>' +
       allGroups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +

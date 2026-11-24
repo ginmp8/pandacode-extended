@@ -7590,6 +7590,10 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
         let composed = inspected.composed_usage.as_ref().unwrap();
         assert_eq!(composed.unique_attempts, old_leaves.len() + fresh_attempts,
             "recovering children must not erase already admitted reviewer usage");
+        assert_eq!(inspected.retired_child_attempts, Some(old_leaves.len()),
+            "retired attempts must remain distinguishable from current reservations");
+        assert_eq!(composed.unique_attempts - inspected.retired_child_attempts.unwrap(),
+            fresh_attempts);
         assert_eq!(inspected.composed_usage_by_round_source.iter()
             .map(|group| group.usage.unique_attempts).sum::<usize>(), composed.unique_attempts);
         assert!(inspected.composed_usage_by_round_source.iter()
@@ -9983,6 +9987,7 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert_eq!(inspect.usage.unique_attempts, 0, "M4 has no direct root reviewer");
     let composed = inspect.composed_usage.as_ref().expect("task-scoped child usage");
     assert_eq!(composed.unique_attempts, 4, "two child Councils issue four real leaves, not two votes");
+    assert_eq!(inspect.retired_child_attempts, Some(0));
     assert_eq!(composed.queue_measured_attempts, 4);
     assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
     assert_eq!(inspect.composed_usage_by_round_source.len(), 1);
@@ -10015,6 +10020,7 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
         child.root_cycle_id != format!("{}:{}", sid, saved.council_since)
             && child.verified_child_receipt.is_none()));
     let next_inspection = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(next_inspection.retired_child_attempts, Some(0));
     assert_eq!(next_inspection.composed_usage.unwrap().unique_attempts, 0,
         "a new native cycle must not inherit prior child usage");
     store.db.execute(

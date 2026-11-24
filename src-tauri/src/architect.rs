@@ -1454,9 +1454,18 @@ pub(crate) fn council_inspection_state(
             let retired = child_council::retired_child_usage_attempts(
                 store, &team, &result.reserved_children,
             )?;
-            result.composed_usage = Some(council::composed_usage(
+            let current = council::composed_usage(
+                &result.attempts, &result.reserved_children, &[],
+            );
+            let combined = council::composed_usage(
                 &result.attempts, &result.reserved_children, &retired,
-            ));
+            );
+            // Use the same deduplicated identity set as the combined total.
+            // A retired ID repeated in a current reservation contributes nothing.
+            result.retired_child_attempts = Some(
+                combined.unique_attempts.saturating_sub(current.unique_attempts),
+            );
+            result.composed_usage = Some(combined);
             result.composed_usage_by_round_source = council::composed_usage_by_round_source(
                 &result.attempts, &result.reserved_children, &retired,
             );

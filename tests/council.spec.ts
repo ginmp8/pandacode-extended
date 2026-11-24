@@ -382,7 +382,8 @@ test('the native Council inspector rejects foreign task responses before exposin
   await expect(unbound.getByRole('alert')).toHaveCount(0);
 });
 
-test('Council inspector rejects cross-task and malformed finding claims without hiding valid history', async ({ page }) => {
+for (const target of ['direct', 'embedded'] as const) {
+test(`Council inspector rejects cross-task and malformed finding claims without hiding valid history (${target})`, async ({ page }) => {
   const finding = (cycleId: string, title: string) => ({
     schemaVersion: 1, id: title, cycleId, round: 1, workerId: 'security',
     reportMessageId: 11, lens: 'Security', severity: 'high', category: 'privacy',
@@ -406,81 +407,74 @@ test('Council inspector rejects cross-task and malformed finding claims without 
     findingTriage: { reported: 3, highPriorityClaims: 3, unverifiedClaims: 3 },
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
-  await button(page).click();
-  await panel(page).getByText('Review evidence and usage').click();
-  const direct = panel(page).locator('.council-inspection');
-  await expect(direct).toContainText('Own current finding');
-  await expect(direct).toContainText('Own earlier-cycle finding');
-  await expect(direct.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
-  await expect(direct).not.toContainText('Private foreign task finding');
-  await expect(direct).not.toContainText('Foreign historical claim');
-  await expect(direct).not.toContainText('Malformed claim');
-  await expect(direct).not.toContainText('Verified native pass');
-  await expect(direct.locator('.council-finding-triage')).toHaveCount(0);
-
-  await page.evaluate(async snapshot => {
-    const { createCouncilInspector } = await import('/src/council-inspector.ts');
-    (window as any).__embeddedScopeInspection = snapshot;
-    const host = document.createElement('div');
-    host.id = 'embedded-scope-council';
-    document.body.append(host);
-    const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'session-1');
-    host.append(detail);
-    detail.open = true;
-  }, inspection);
-  const embedded = page.locator('#embedded-scope-council .council-inspection');
-  await expect(embedded.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
-  await expect(embedded).not.toContainText('Private foreign task finding');
-  await expect(embedded).not.toContainText('Verified native pass');
+  // The Council modal closes on an outside pointer interaction. Exercise
+  // each consumer in its own page so that no assertion relies on two open surfaces.
+  const view = target === 'direct'
+    ? panel(page).locator('.council-inspection')
+    : page.locator('#embedded-scope-council .council-inspection');
+  if (target === 'direct') {
+    await button(page).click();
+    await panel(page).getByText('Review evidence and usage').click();
+  } else {
+    await page.evaluate(async snapshot => {
+      const { createCouncilInspector } = await import('/src/council-inspector.ts');
+      (window as any).__embeddedScopeInspection = snapshot;
+      const host = document.createElement('div');
+      host.id = 'embedded-scope-council';
+      document.body.append(host);
+      const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'session-1');
+      host.append(detail);
+      detail.open = true;
+    }, inspection);
+  }
+  await expect(view).toContainText('Own current finding');
+  await expect(view).toContainText('Own earlier-cycle finding');
+  await expect(view.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
+  await expect(view).not.toContainText('Private foreign task finding');
+  await expect(view).not.toContainText('Foreign historical claim');
+  await expect(view).not.toContainText('Malformed claim');
+  await expect(view).not.toContainText('Verified native pass');
+  await expect(view.locator('.council-finding-triage')).toHaveCount(0);
+  const setSnapshot = async (snapshot: object) => {
+    await page.evaluate(({ snapshot, target }) => {
+      if (target === 'direct') (window as any).__councilInspectorOverride = snapshot;
+      else (window as any).__embeddedScopeInspection = snapshot;
+    }, { snapshot, target });
+  };
 
   const clean = { ...inspection, reportedFindings: [own],
     historicalReportedFindings: [history],
     findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 } };
-  await page.evaluate(snapshot => {
-    (window as any).__councilInspectorOverride = snapshot;
-    (window as any).__embeddedScopeInspection = snapshot;
-  }, clean);
-  await direct.getByRole('button', { name: 'Refresh native evidence' }).click();
-  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
-  await expect(direct).toContainText('Verified native pass');
-  await expect(embedded).toContainText('Verified native pass');
-  await expect(direct).toContainText('Own earlier-cycle finding');
-  await expect(direct.getByRole('alert')).toHaveCount(0);
-  await expect(embedded.getByRole('alert')).toHaveCount(0);
+  await setSnapshot(clean);
+  await view.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(view).toContainText('Verified native pass');
+  await expect(view).toContainText('Own earlier-cycle finding');
+  await expect(view.getByRole('alert')).toHaveCount(0);
 
   const foreignChild = { ...clean, reservedChildren: [{ botId: 'Private child bot',
     rootCycleId: 'another-task:1000', childSessionId: 'foreign-child',
     requiredLeafReviewers: 2, status: 'reviewing' }, { botId: 'Own child bot',
     rootCycleId: 'session-1:1000', childSessionId: 'own-child',
     requiredLeafReviewers: 2, status: 'reviewing' }] };
-  await page.evaluate(snapshot => {
-    (window as any).__councilInspectorOverride = snapshot;
-    (window as any).__embeddedScopeInspection = snapshot;
-  }, foreignChild);
-  for (const view of [direct, embedded]) {
-    await view.getByRole('button', { name: 'Refresh native evidence' }).click();
-    await expect(view.getByRole('alert')).toContainText('1 foreign-cycle or malformed child Council reservation(s) omitted');
-    await expect(view).not.toContainText('Private child bot');
-    await expect(view).toContainText('Own child bot');
-    await expect(view).not.toContainText('Verified native pass');
-    await view.locator(':scope > summary').click();
-    await expect(view.locator('.council-inspection-body')).toBeEmpty();
-  }
+  await setSnapshot(foreignChild);
+  await view.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(view.getByRole('alert')).toContainText('1 foreign-cycle or malformed child Council reservation(s) omitted');
+  await expect(view).not.toContainText('Private child bot');
+  await expect(view).toContainText('Own child bot');
+  await expect(view).not.toContainText('Verified native pass');
+  await view.locator(':scope > summary').click();
+  await expect(view.locator('.council-inspection-body')).toBeEmpty();
   const revoked = { ...clean, verifiedPass: false, verifiedCompletion: undefined,
     status: { ...clean.status, state: 'blocked', stale: true }, reportedFindings: [] };
-  await page.evaluate(snapshot => {
-    (window as any).__councilInspectorOverride = snapshot;
-    (window as any).__embeddedScopeInspection = snapshot;
-  }, revoked);
-  for (const view of [direct, embedded]) {
-    await view.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
-    await expect(view.locator('.council-inspection-body')).toBeEmpty();
-    await view.locator(':scope > summary').click();
-    await expect(view).toContainText('Native pass not verified');
-    await expect(view).not.toContainText('Own current finding');
-    await expect(view).not.toContainText('Verified native pass');
-  }
+  await setSnapshot(revoked);
+  await view.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(view.locator('.council-inspection-body')).toBeEmpty();
+  await view.locator(':scope > summary').click();
+  await expect(view).toContainText('Native pass not verified');
+  await expect(view).not.toContainText('Own current finding');
+  await expect(view).not.toContainText('Verified native pass');
 });
+}
 
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {

@@ -5,7 +5,7 @@
 //! message queue, where the user can edit or cancel the repair request.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{path::{Path, PathBuf}, process::Command, time::Duration};
+use std::{io::Read, path::{Path, PathBuf}, process::Command, time::Duration};
 
 use crate::workspace::run_process;
 
@@ -16,25 +16,15 @@ const TAIL_BYTES: usize = 4000;
 
 const NO_PLAN: &str = "This project declares no fast check (no npm test script and no Cargo.toml).";
 
-/// A bounded, deterministic snapshot of local code/configuration inputs, not
-/// an assertion that every artifact or generated dependency was examined.
+/// A bounded, deterministic snapshot of regular workspace files, excluding
+/// generated/dependency directories and Git metadata. Only the aggregate
+/// digest is retained; this is not an immutable or full artifact snapshot.
 const MAX_SOURCE_ENTRIES: usize = 20_000;
 const MAX_SOURCE_FILES: usize = 8_192;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SOURCE_DEPTH: usize = 16;
 
 fn source_snapshot_sha256(root: &Path) -> Option<String> {
-    fn eligible_file(path: &Path) -> bool {
-        matches!(path.extension().and_then(|ext| ext.to_str()), Some(
-            "rs" | "cs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" |
-            "py" | "go" | "java" | "kt" | "kts" | "swift" | "sql" |
-            "toml" | "json" | "yaml" | "yml" | "lock" |
-            "html" | "css" | "scss" | "sh" | "ps1" | "xml" |
-            "md" | "mdx"
-        )) || path.file_name().and_then(|name| name.to_str())
-            .is_some_and(|name| matches!(name, "Dockerfile" | "Makefile" | "Gemfile"))
-    }
-
     fn collect(
         dir: &Path, files: &mut Vec<(PathBuf, u64)>, entries_seen: &mut usize,
         bytes: &mut u64, depth: usize,
@@ -48,25 +38,28 @@ fn source_snapshot_sha256(root: &Path) -> Option<String> {
             if *entries_seen > MAX_SOURCE_ENTRIES { return None; }
             let name = entry.file_name();
             let name = name.to_str()?;
-            if matches!(name,
-                ".git" | "node_modules" | "target" | "dist" | "build" |
-                "coverage" | "vendor" | ".venv" | ".next" | ".turbo" |
-                ".cache" | ".vite-cache" | "out"
-            ) {
-                continue;
-            }
+            // A linked worktree has a regular .git pointer instead of a directory.
+            if name == ".git" { continue; }
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path).ok()?;
-            // Never follow links outside the authorized checkout.
+            // Never intentionally traverse symbolic links.
             if metadata.file_type().is_symlink() { return None; }
             if metadata.is_dir() {
+                if matches!(name,
+                    "node_modules" | "target" | "dist" | "build" |
+                    "coverage" | "vendor" | ".venv" | ".next" | ".turbo" |
+                    ".cache" | ".vite-cache" | "out"
+                ) { continue; }
                 collect(&path, files, entries_seen, bytes, depth + 1)?;
-            } else if metadata.is_file() && eligible_file(&path) {
+            } else if metadata.is_file() {
                 *bytes = bytes.checked_add(metadata.len())?;
                 if *bytes > MAX_SOURCE_BYTES || files.len() >= MAX_SOURCE_FILES {
                     return None;
                 }
                 files.push((path, metadata.len()));
+            } else {
+                // Devices, sockets and other non-regular files cannot be evidence.
+                return None;
             }
         }
         Some(())
@@ -76,10 +69,16 @@ fn source_snapshot_sha256(root: &Path) -> Option<String> {
     collect(root, &mut files, &mut count, &mut bytes, 0)?;
     if files.is_empty() { return None; }
     let mut sha = Sha256::new();
-    sha.update(b"pandacode:bounded-source-snapshot:v1");
+    sha.update(b"pandacode:bounded-source-snapshot:v2");
     for (path, original_size) in files {
         let relative = path.strip_prefix(root).ok()?.to_str()?;
-        let data = std::fs::read(&path).ok()?;
+        // A file that grows after collection must not defeat the byte budget.
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.len() != original_size { return None; }
+        let file = std::fs::File::open(&path).ok()?;
+        if !file.metadata().ok()?.is_file() { return None; }
+        let mut data = Vec::new();
+        file.take(original_size.checked_add(1)?).read_to_end(&mut data).ok()?;
         if data.len() as u64 != original_size { return None; }
         sha.update((relative.len() as u64).to_le_bytes());
         sha.update(relative.as_bytes());
@@ -484,6 +483,45 @@ mod tests {
         let refreshed = report_for_plan_inner(root, &plan, true);
         assert_eq!(refreshed["hostObservation"]["passed"], true);
         assert_ne!(refreshed["hostObservation"]["sourceSnapshotSha256"], original_hash);
+    }
+
+    #[test]
+    fn native_task_check_covers_binary_and_extensionless_workspace_artifacts() {
+        let temp = Scratch::new("native-artifact-snapshot");
+        let root = temp.path();
+        fs::write(root.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        fs::write(root.join("LICENSE"), "original license").unwrap();
+        fs::write(root.join("logo.bin"), [0_u8, 1, 2]).unwrap();
+        fs::create_dir(root.join("build")).unwrap();
+        fs::write(root.join("build/generated.bin"), [0_u8]).unwrap();
+        let runner = root.join("fake-npm");
+        fake(&runner,
+            "if [ -f mutate-asset ]; then printf changed > logo.bin; fi\nif [ -f mutate-license ]; then echo changed > LICENSE; fi\necho generated > build/generated.bin\nexit 0");
+        let plan = Plan {
+            name: "npm test".into(), program: runner.to_str().unwrap().into(), args: vec![],
+        };
+        let original = report_for_plan_inner(root, &plan, true);
+        assert_eq!(original["hostObservation"]["passed"], true);
+        let repeated = report_for_plan_inner(root, &plan, true);
+        assert_eq!(repeated["hostObservation"]["sourceSnapshotSha256"],
+            original["hostObservation"]["sourceSnapshotSha256"]);
+        fs::write(root.join("mutate-asset"), "yes").unwrap();
+        let changed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(changed["checked"], true);
+        assert!(changed.get("hostObservation").is_none());
+        fs::remove_file(root.join("mutate-asset")).unwrap();
+        fs::write(root.join("mutate-license"), "yes").unwrap();
+        let changed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(changed["checked"], true);
+        assert!(changed.get("hostObservation").is_none());
+        fs::remove_file(root.join("mutate-license")).unwrap();
+        let refreshed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(refreshed["hostObservation"]["passed"], true);
+        assert_ne!(refreshed["hostObservation"]["sourceSnapshotSha256"],
+            original["hostObservation"]["sourceSnapshotSha256"]);
+        let oversized = fs::File::create(root.join("oversized.bin")).unwrap();
+        oversized.set_len(MAX_SOURCE_BYTES + 1).unwrap();
+        assert!(source_snapshot_sha256(root).is_none());
     }
 
     #[test]

@@ -9071,6 +9071,31 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     refresh_council(&store, &mut live_projection);
     assert_eq!(live_projection.council_status.as_ref()
         .map(|status| status.state.as_str()), Some("passed"));
+    // A same-score change to a leaf's report cannot keep the original
+    // clean child receipt or its root composite seat valid.
+    let child = load(&store, &inspected[0].child_session_id).unwrap().unwrap();
+    let leaf = &child.workers[0];
+    let (report_id, original): (i64, String) = store.db.query_row(
+        "SELECT id,content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+        [&leaf.session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    for (severity, category) in [("high", "security"), ("low", "conflict")] {
+        let changed = format!(
+            "Council findings JSON: {}\nCouncil score: 9.5/10",
+            json!([{"severity":severity,"category":category,
+                "title":"New unresolved finding","explanation":"Evidence changed after callback"}]),
+        );
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, changed]).unwrap();
+        assert!(authenticated_hierarchical_status(&store, &root).is_none(),
+            "same-score changed leaf findings must revoke the root composite");
+        assert!(child_council::inspect(&store, &root).is_err(),
+            "a changed child report must not expose its old receipt");
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, &original]).unwrap();
+    }
+    assert_eq!(authenticated_hierarchical_status(&store, &root)
+        .as_ref().map(|status| status.state.as_str()), Some("passed"));
     // A coordinator never runs a provider conversation. Even after both
     // children settled, an unrelated native resume context must revoke
     // the existing composite receipts rather than letting cached scores pass.
@@ -12562,6 +12587,32 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                                     &artifact, &request.request_id,
                                 ).unwrap(), receipt,
                                     "{mode}/{strategy:?}: original receipt remains idempotent");
+
+                                let (report_id, original): (i64, String) = store.db.query_row(
+                                    "SELECT id,content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                                    [&reviewer.session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+                                ).unwrap();
+                                for (severity, category) in [("high", "security"), ("low", "conflict")] {
+                                    let changed = format!(
+                                        "Council findings JSON: {}\nCouncil score: 9.7/10",
+                                        json!([{"severity":severity,"category":category,
+                                            "title":"New unresolved finding","explanation":"Evidence changed after callback"}]),
+                                    );
+                                    store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+                                        rusqlite::params![report_id, changed]).unwrap();
+                                    assert!(!verified_council_pass(&store, &snapshot),
+                                        "{mode}/{strategy:?}: same-score changed findings must revoke proof");
+                                    assert!(council_requests::read_native_terminal(
+                                        &store, &sid, &project, "root-matrix-task",
+                                        &artifact, &request.request_id,
+                                    ).is_err(), "{mode}/{strategy:?}: changed claims must revoke receipt");
+                                    store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+                                        rusqlite::params![report_id, &original]).unwrap();
+                                }
+                                assert_eq!(council_requests::read_native_terminal(
+                                    &store, &sid, &project, "root-matrix-task",
+                                    &artifact, &request.request_id,
+                                ).unwrap(), receipt);
                             }
                         }
 

@@ -1315,6 +1315,26 @@ pub(super) fn latest_score(store: &storage::Store, session_id: &str) -> Option<f
     store.db.query_row("SELECT substr(content,?2) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1", params![session_id, -SCORE_TAIL_CHARS], |r| r.get::<_, String>(0)).optional().ok().flatten().and_then(|tail| parse_score(&tail))
 }
 
+/// Revalidate the scored report and its escalation claims together. A changed
+/// report with the same numeric score cannot reuse an earlier clean callback.
+/// This is not an artifact check or a new scoring engine.
+pub(super) fn scored_report_is_current(
+    store: &storage::Store, session_id: &str, seat: &CouncilSeat,
+) -> bool {
+    let Some(score) = seat.score else { return false };
+    let tail: Option<String> = store.db.query_row(
+        "SELECT substr(content,?2) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+        params![session_id, -SCORE_TAIL_CHARS], |row| row.get(0),
+    ).optional().ok().flatten();
+    let Some(tail) = tail.filter(|report| parse_score(report) == Some(score)) else {
+        return false;
+    };
+    let findings = parse_reported_findings(&tail);
+    let severe = findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "high"));
+    let conflict = findings.iter().any(|finding| finding.category.eq_ignore_ascii_case("conflict"));
+    (severe, conflict) == (seat.reported_severe_finding, seat.reported_conflict)
+}
+
 /// This cycle's reviewers: each new user objective starts a new cycle.
 fn seats(team: &TeamSnapshot) -> impl Iterator<Item = (&Worker, &CouncilSeat)> {
     team.workers.iter().filter(|w| w.created_at >= team.council_since).filter_map(|w| Some((w, w.council.as_ref()?)))

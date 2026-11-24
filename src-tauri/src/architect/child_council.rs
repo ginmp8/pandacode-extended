@@ -1227,7 +1227,7 @@ fn verified_receipt(
         if !leaf.read_only || leaf.abandoned || leaf.wrote_at != 0
             || !leaf.files.is_empty() || seat.round != 1 || seat.started_at <= 0
             || seat.reported_severe_finding || seat.reported_conflict
-            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
             || binding.validate(&first, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
@@ -1419,7 +1419,7 @@ fn escalation_receipt(
             || previous_sessions.contains(leaf.session_id.as_str())
             || !fresh_ids.insert(leaf.id.as_str())
             || !fresh_sessions.insert(leaf.session_id.as_str())
-            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
             || binding.validate(child, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
@@ -1600,7 +1600,7 @@ fn challenge_receipt(
             || original_sessions.contains(leaf.session_id.as_str())
             || !challenge_ids.insert(leaf.id.as_str())
             || !challenge_sessions.insert(leaf.session_id.as_str())
-            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
             || binding.validate(child, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
@@ -2346,7 +2346,7 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
             || seat.score.is_none_or(|score| !score.is_finite() || score < config.target)
-            || super::council::latest_score(store, &worker.session_id) != seat.score
+            || !super::council::scored_report_is_current(store, &worker.session_id, seat)
             || first_sessions.contains(worker.session_id.as_str())
             || !sessions.insert(worker.session_id.as_str())
             || binding.validate(root, worker).is_err()
@@ -2642,9 +2642,9 @@ fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool>
                     // independent native callback. Reject a changed S2 score
                     // before another child leaf can be launched.
                     || (leaf.status == "completed" && leaf.council.as_ref()
-                        .and_then(|seat| seat.score).is_some_and(|score|
+                        .is_some_and(|seat| seat.score.is_some_and(|score|
                             !score.is_finite()
-                                || super::council::latest_score(store, &leaf.session_id) != Some(score)))
+                                || !super::council::scored_report_is_current(store, &leaf.session_id, seat))))
                 {
                     return Err("child_council_stale: triggered S2 leaf authority or identity changed.".into());
                 }
@@ -2931,7 +2931,7 @@ fn authenticated_first_wave_s2_triggers(
             || leaf.id.is_empty() || leaf.session_id.is_empty()
             || !identities.insert(leaf.id.as_str()) || !sessions.insert(leaf.session_id.as_str())
             || seat.started_at <= 0 || !score.is_finite()
-            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
             || seat.reported_severe_finding != native_severe
             || seat.reported_conflict != native_conflict
             || binding.validate(child, leaf).is_err()

@@ -798,8 +798,8 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
                 && binding.validate(team, worker).is_ok()
                 && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
                 && native_root_reviewer_session_is_current(store, &team.session_id, worker)
-                && worker.council.as_ref().and_then(|seat| seat.score)
-                    == council::latest_score(store, &worker.session_id)
+                && worker.council.as_ref().is_some_and(|seat|
+                    council::scored_report_is_current(store, &worker.session_id, seat))
         });
     }
     if !matches!(mode, "m3" | "m5" | "m6" | "m7") { return true; }
@@ -849,8 +849,8 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
             }
             // M3 also requires a real native reviewer callback: recorded
             // authority is not proof that the model supplied this score.
-            if worker.council.as_ref().and_then(|seat| seat.score)
-                != council::latest_score(store, &worker.session_id)
+            if !worker.council.as_ref().is_some_and(|seat|
+                council::scored_report_is_current(store, &worker.session_id, seat))
             {
                 return false;
             }
@@ -905,7 +905,7 @@ fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) 
                         store, &team.session_id, binding,
                     ).is_ok()
                     && bot_reviewers::validate_frozen_seat(store, binding, false).is_ok()
-                    && council::latest_score(store, &worker.session_id) == seat.score
+                    && council::scored_report_is_current(store, &worker.session_id, seat)
             })
     })
 }

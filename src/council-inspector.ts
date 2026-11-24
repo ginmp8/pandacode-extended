@@ -83,6 +83,75 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && typeof child.status === 'string' && Number.isSafeInteger(child.requiredLeafReviewers)
     && child.requiredLeafReviewers >= 2 && child.requiredLeafReviewers <= 8);
   const omittedChildren = childInputs.length - childReservations.length;
+  // Correlate displayed receipts once, before showing any root verdict.
+  // This is display consistency only; it never grants native approval.
+  const childEvidence = childReservations.map(child => {
+    const receipt = child.verifiedChildReceipt;
+    const ids = receipt?.leafWorkerIds ?? [];
+    const correlated = receipt && receipt.rootCycleId === child.rootCycleId
+      && receipt.childSessionId === child.childSessionId && receipt.botId === child.botId
+      && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
+      && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
+      && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length
+      && ids.every(id => typeof id === 'string' && id.trim().length > 0);
+    const escalationReceipt = child.verifiedEscalationReceipt;
+    const freshIds = escalationReceipt?.leafWorkerIds ?? [];
+    // Correlation is display hygiene, not a second native approval gate.
+    // A receipt displayed by the host must refer to the same frozen child
+    // and to fresh identities outside the original child review wave.
+    // A triggered S2 child can start with a genuine failing first wave.
+    // It has no passing first-wave receipt, even after its independently
+    // verified second wave succeeds. This is display hygiene only: the
+    // native inspector has already revalidated the exact task receipt.
+    const triggeredWithoutPassingFirst = !receipt
+      && inspection.strategy === 'escalated' && !inspection.forceEscalation
+      && child.status === 'child_escalation_evidence_ready_root_pending'
+      && (child.automaticEscalationTriggers ?? []).some(reason =>
+        ['below_target', 'required_criterion', 'conflicting_verdict', 'required_evidence'].includes(reason));
+    const escalationCorrelated = escalationReceipt && (correlated || triggeredWithoutPassingFirst)
+      && escalationReceipt.rootCycleId === child.rootCycleId
+      && escalationReceipt.childSessionId === child.childSessionId
+      && escalationReceipt.botId === child.botId
+      && (!receipt || (
+        escalationReceipt.objectiveSha256 === receipt.objectiveSha256
+        && escalationReceipt.policySha256 === receipt.policySha256
+        && escalationReceipt.childConfigSha256 === receipt.childConfigSha256))
+      && Number.isFinite(escalationReceipt.lowestScore)
+      && escalationReceipt.lowestScore >= 0 && escalationReceipt.lowestScore <= 10
+      && Array.isArray(freshIds) && freshIds.length === child.requiredLeafReviewers
+      && freshIds.length >= 2 && freshIds.length <= 8
+      && new Set(freshIds).size === freshIds.length
+      && freshIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
+    const challengeReceipt = child.verifiedChallengeReceipt;
+    const challenge = challengeReceipt?.phaseTwo;
+    const challengeIds = challenge?.leafWorkerIds ?? [];
+    // UI correlation is only display hygiene. The native authorization
+    // boundary separately re-derives all receipts, grants and callbacks.
+    const challengeCorrelated = challengeReceipt && correlated
+      && challengeReceipt.rootCycleId === child.rootCycleId
+      && challengeReceipt.childSessionId === child.childSessionId
+      && challengeReceipt.botId === child.botId
+      && /^[a-f0-9]{64}$/.test(challengeReceipt.phaseOneReceiptSha256 ?? '')
+      && challenge?.rootCycleId === child.rootCycleId
+      && challenge?.childSessionId === child.childSessionId
+      && challenge?.botId === child.botId
+      && challenge?.objectiveSha256 === receipt?.objectiveSha256
+      && challenge?.policySha256 === receipt?.policySha256
+      && challenge?.childConfigSha256 === receipt?.childConfigSha256
+      && Number.isFinite(challenge?.lowestScore)
+      && (challenge?.lowestScore ?? -1) >= 0 && (challenge?.lowestScore ?? 11) <= 10
+      && Array.isArray(challengeIds)
+      && challengeIds.length === child.requiredLeafReviewers
+      && challengeIds.length >= 2 && challengeIds.length <= 8
+      && new Set(challengeIds).size === challengeIds.length
+      && challengeIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
+    return { child, receipt, ids, correlated, escalationReceipt, freshIds,
+      escalationCorrelated, challengeReceipt, challenge, challengeIds, challengeCorrelated };
+  });
+  const conflictingChildEvidence = childEvidence.some(evidence =>
+    (evidence.receipt != null && !evidence.correlated)
+    || (evidence.escalationReceipt != null && !evidence.escalationCorrelated)
+    || (evidence.challengeReceipt != null && !evidence.challengeCorrelated));
   const proof = inspection.verifiedCompletion;
   const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale
     && proof != null && typeof inspection.sessionId === 'string' && inspection.sessionId.length > 0
@@ -91,10 +160,10 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && proof.teamRevision === inspection.teamRevision
     && proof.round === inspection.status.round
     && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
-    && proof.lowest >= inspection.status.target && omittedFindingCount === 0 && omittedChildren === 0;
+    && proof.lowest >= inspection.status.target && omittedFindingCount === 0 && omittedChildren === 0 && !conflictingChildEvidence;
   // A historical user exception is not authorization for a newer revision.
   // The read-only presenter must never promote stale acceptance to a current gate.
-  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0 && omittedChildren === 0
+  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0 && omittedChildren === 0 && !conflictingChildEvidence
     ? 'Accepted by user (not a native pass)'
     : verified ? 'Verified native pass' : 'Native pass not verified';
   const modeLabels: Record<CouncilInspection['mode'], string> = {
@@ -247,71 +316,13 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '<p>The matching reviewer attempt is not in this display.</p><ul>' +
       unlinked.map(findingRow).join('') + '</ul></section>'
     : '';
-  const children = childReservations.slice(0,8);
+  const children = childEvidence.slice(0,8);
   const childHtml = children.length
     ? '<section aria-label="Task-owned child Councils" class="council-child-reservations">' +
       '<h4>Task-owned child Councils (not approvals)</h4>' +
       '<p>Reservations are not executed reviews or parent Council votes.</p><ul>' +
-      children.map(child => {
-        const receipt = child.verifiedChildReceipt;
-        const ids = receipt?.leafWorkerIds ?? [];
-        const correlated = receipt && receipt.rootCycleId === child.rootCycleId
-          && receipt.childSessionId === child.childSessionId && receipt.botId === child.botId
-          && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
-          && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
-          && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length
-          && ids.every(id => typeof id === 'string' && id.trim().length > 0);
-        const escalationReceipt = child.verifiedEscalationReceipt;
-        const freshIds = escalationReceipt?.leafWorkerIds ?? [];
-        // Correlation is display hygiene, not a second native approval gate.
-        // A receipt displayed by the host must refer to the same frozen child
-        // and to fresh identities outside the original child review wave.
-        // A triggered S2 child can start with a genuine failing first wave.
-        // It has no passing first-wave receipt, even after its independently
-        // verified second wave succeeds. This is display hygiene only: the
-        // native inspector has already revalidated the exact task receipt.
-        const triggeredWithoutPassingFirst = !receipt
-          && inspection.strategy === 'escalated' && !inspection.forceEscalation
-          && child.status === 'child_escalation_evidence_ready_root_pending'
-          && (child.automaticEscalationTriggers ?? []).some(reason =>
-            ['below_target', 'required_criterion', 'conflicting_verdict', 'required_evidence'].includes(reason));
-        const escalationCorrelated = escalationReceipt && (correlated || triggeredWithoutPassingFirst)
-          && escalationReceipt.rootCycleId === child.rootCycleId
-          && escalationReceipt.childSessionId === child.childSessionId
-          && escalationReceipt.botId === child.botId
-          && (!receipt || (
-            escalationReceipt.objectiveSha256 === receipt.objectiveSha256
-            && escalationReceipt.policySha256 === receipt.policySha256
-            && escalationReceipt.childConfigSha256 === receipt.childConfigSha256))
-          && Number.isFinite(escalationReceipt.lowestScore)
-          && escalationReceipt.lowestScore >= 0 && escalationReceipt.lowestScore <= 10
-          && Array.isArray(freshIds) && freshIds.length === child.requiredLeafReviewers
-          && freshIds.length >= 2 && freshIds.length <= 8
-          && new Set(freshIds).size === freshIds.length
-          && freshIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
-        const challengeReceipt = child.verifiedChallengeReceipt;
-        const challenge = challengeReceipt?.phaseTwo;
-        const challengeIds = challenge?.leafWorkerIds ?? [];
-        // UI correlation is only display hygiene. The native authorization
-        // boundary separately re-derives all receipts, grants and callbacks.
-        const challengeCorrelated = challengeReceipt && correlated
-          && challengeReceipt.rootCycleId === child.rootCycleId
-          && challengeReceipt.childSessionId === child.childSessionId
-          && challengeReceipt.botId === child.botId
-          && /^[a-f0-9]{64}$/.test(challengeReceipt.phaseOneReceiptSha256 ?? '')
-          && challenge?.rootCycleId === child.rootCycleId
-          && challenge?.childSessionId === child.childSessionId
-          && challenge?.botId === child.botId
-          && challenge?.objectiveSha256 === receipt?.objectiveSha256
-          && challenge?.policySha256 === receipt?.policySha256
-          && challenge?.childConfigSha256 === receipt?.childConfigSha256
-          && Number.isFinite(challenge?.lowestScore)
-          && (challenge?.lowestScore ?? -1) >= 0 && (challenge?.lowestScore ?? 11) <= 10
-          && Array.isArray(challengeIds)
-          && challengeIds.length === child.requiredLeafReviewers
-          && challengeIds.length >= 2 && challengeIds.length <= 8
-          && new Set(challengeIds).size === challengeIds.length
-          && challengeIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
+      children.map(({ child, receipt, ids, correlated, escalationReceipt, freshIds,
+        escalationCorrelated, challengeReceipt, challenge, challengeIds, challengeCorrelated }) => {
         const measured = child.observedLeafUsage;
         const childUsageHtml = measured
           ? '<p>Child-observed native leaf attempts: ' + escape(nonNegativeCount(measured.uniqueAttempts)) +
@@ -496,6 +507,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' foreign-cycle or malformed child Council reservation(s) omitted; composed usage and approval are not verified.</p>' : '';
   const passWarning = inspection.status.state === 'passed' && !verified
     ? '<p role="status">The recorded passed status has no current verified native proof. Do not treat it as approval.</p>' : '';
+  const conflictWarning = conflictingChildEvidence && (inspection.status.state === 'passed' || inspection.status.state === 'accepted')
+    ? '<p role="status">Conflicting child receipts in this inspection; the recorded root verdict cannot be verified.</p>' : '';
   const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
@@ -504,7 +517,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Status at last native inspection') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
-    passWarning + completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    passWarning + conflictWarning + completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childScopeWarning + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 

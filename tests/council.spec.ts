@@ -1063,8 +1063,10 @@ test('Council inspector rejects malformed child reviewer receipt identifiers wit
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: true,
     sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
-    status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
-    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    status: { state: 'passed', round: 2, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 10, round: 2, lowest: 9.5 },
+    criteria: [], attempts: [],
     reservedChildren: [{
       botId: 'bad-first', childSessionId: 'child-first', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'reviewing', verifiedChildReceipt: first,
@@ -1086,6 +1088,7 @@ test('Council inspector rejects malformed child reviewer receipt identifiers wit
   await expect(children).toContainText('Child evidence receipt correlation or reviewer count mismatch; no approval');
   await expect(children).toContainText('Second-wave child receipt correlation or reviewer identity mismatch; no approval');
   await expect(children.getByRole('list', { name: 'Fresh child reviewer evidence identifiers' })).toHaveCount(0);
+  await expect(panel(page)).toContainText('Conflicting child receipts in this inspection');
   await expect(panel(page)).toContainText('Native pass not verified');
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
@@ -1388,6 +1391,34 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
   await expect(panel(page)).toContainText('Verified native pass');
   await expect(passedChild).toContainText('Independent S3 challenge receipt and root native pass are verified');
   await expect(passedChild).toContainText('Native S3 challenge child receipt recorded (root native pass verified)');
+
+  // Even a matching root completion cannot be presented as verified when
+  // an included child receipt contradicts the native task or reviewer identity.
+  const conflictingInspection = structuredClone(approvedInspection);
+  conflictingInspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, conflictingInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('Conflicting child receipts in this inspection');
+  await expect(panel(page)).not.toContainText('Verified native pass');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__conflictingCouncilSnapshot = snapshot;
+    const host = document.createElement('div');
+    host.id = 'embedded-conflicting-council';
+    const detail = createCouncilInspector(async () => (window as any).__conflictingCouncilSnapshot, 'session-1');
+    host.append(detail);
+    document.body.append(host);
+    detail.open = true;
+  }, conflictingInspection);
+  const embeddedConflict = page.locator('#embedded-conflicting-council .council-inspection');
+  await expect(embeddedConflict).toContainText('Conflicting child receipts in this inspection');
+  await expect(embeddedConflict).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__conflictingCouncilSnapshot = snapshot; }, approvedInspection);
+  await embeddedConflict.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embeddedConflict).toContainText('Verified native pass');
+  await expect(embeddedConflict).not.toContainText('Conflicting child receipts in this inspection');
 
   const staleInspection = {
     ...approvedInspection,

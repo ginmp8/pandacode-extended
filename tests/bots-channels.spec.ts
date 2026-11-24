@@ -419,6 +419,23 @@ test.describe('shared bot channels', () => {
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
     await refresh.click();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    // A conflicting first-wave receipt must revoke the displayed root verdict
+    // without navigating away, even when its root completion still matches.
+    await page.evaluate(snapshot => {
+      (window as any).__channelCouncilInspectorOverride = snapshot;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    }, { ...accepted, reservedChildren: [{
+      ...accepted.reservedChildren[0],
+      verifiedChildReceipt: { rootCycleId: 'channel-root:1000', childSessionId: 'channel-child-one',
+        botId: 'foreign-owner', objectiveSha256: 'objective', policySha256: 'policy',
+        childConfigSha256: 'config', lowestScore: 9.7, leafWorkerIds: ['leaf-a', 'leaf-b'] },
+    }] });
+    await expect(dialog).toContainText('Conflicting child receipts in this inspection');
+    await expect(dialog).not.toContainText('Verified native pass');
+    await expect(dialog.locator('.council-verified-completion')).toHaveCount(0);
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
+    await refresh.click();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'other-channel' }));
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     await refresh.focus();

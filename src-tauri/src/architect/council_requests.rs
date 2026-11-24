@@ -794,6 +794,16 @@ pub(crate) fn record_native_host_check(
     if record.host_checks.len() >= 16 {
         return Err("council_task_denied: maximum retained native checks reached.".into());
     }
+    // Replays above return only an existing historical observation. A new
+    // receipt must still match the actual bounded source and manifest that
+    // the host observed before and after the command, not just its request ID.
+    let workspace = store.workspace_root(&request.project_id, Some(&request.session_id))
+        .map_err(|_| "council_task_stale: native task checkout is unavailable.".to_string())?;
+    crate::checks::validate_native_check_observation(
+        &workspace, &receipt.check_name, &receipt.manifest_sha256,
+        receipt.source_snapshot_sha256.as_deref()
+            .ok_or("council_task_denied: missing native source snapshot.")?,
+    )?;
     record.host_checks.push(receipt.clone());
     let updated = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     let changed = store.db.execute(

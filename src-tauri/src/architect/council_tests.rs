@@ -8576,6 +8576,15 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     start_state(&state, &sid, "Review the frozen artifact and host check", None, None).unwrap();
     let store = state.store.lock().unwrap();
     let project = store.session(&sid).unwrap().project_id;
+    // Use an isolated checkout, not the shared state_fixture temp directory.
+    let checkout = std::env::temp_dir().join(format!("council-host-check-{}", storage::id()));
+    std::fs::create_dir(&checkout).unwrap();
+    let manifest = "[package]\nname = \"host-check\"\nversion = \"0.1.0\"\n";
+    std::fs::write(checkout.join("Cargo.toml"), manifest).unwrap();
+    std::fs::write(checkout.join("proof.txt"), "reviewed bytes").unwrap();
+    store.relink_project(&project, &checkout).unwrap();
+    let manifest_hash = format!("{:x}", sha2::Sha256::digest(manifest.as_bytes()));
+    let original_snapshot = crate::checks::source_snapshot_sha256(&checkout).unwrap();
     let artifact = "a".repeat(64);
     assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none(),
         "normal project checks cannot be mislabeled as admitted Council evidence");
@@ -8591,12 +8600,12 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
         "checked": true, "ok": true,
         "hostObservation": {
             "kind": "manifest_declared_check", "name": "cargo check",
-            "manifestSha256": "a".repeat(64),
+            "manifestSha256": manifest_hash,
             "observedAt": storage::now(), "passed": true,
             "observationId": storage::id(), "nativeRequestId": request.request_id.clone(),
             "outputTruncated": false, "provenance": "native_host",
             "scope": "bounded_source_snapshot_not_full_artifact_verification",
-            "sourceSnapshotSha256": "b".repeat(64)
+            "sourceSnapshotSha256": original_snapshot.clone()
         }
     });
     let receipt = council_requests::record_native_host_check(&store, &request, &observed).unwrap();
@@ -8606,7 +8615,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert!(receipt.check_passed);
     assert_eq!(receipt.check_name, "cargo check");
     assert_eq!(receipt.schema_version, 2);
-    assert_eq!(receipt.source_snapshot_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    assert_eq!(receipt.source_snapshot_sha256.as_deref(), Some(original_snapshot.as_str()));
     let inspected = council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap();
@@ -8641,11 +8650,23 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     bounded["hostObservation"]["observationId"] = json!(storage::id());
     bounded["hostObservation"]["scope"] =
         json!("bounded_source_snapshot_not_full_artifact_verification");
-    bounded["hostObservation"]["sourceSnapshotSha256"] = json!("c".repeat(64));
+    // A process completed against the old bytes, but publication is delayed.
+    // A new observation identity must not make that stale snapshot current.
+    std::fs::write(checkout.join("proof.txt"), "changed bytes").unwrap();
+    assert!(council_requests::record_native_host_check(&store, &request, &bounded)
+        .unwrap_err().contains("host check source or manifest changed"));
+    assert_eq!(council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap().host_checks, vec![receipt.clone()]);
+    // Replaying the already persisted observation is historical/idempotent.
+    assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+    let changed_snapshot = crate::checks::source_snapshot_sha256(&checkout).unwrap();
+    assert_ne!(changed_snapshot, original_snapshot);
+    bounded["hostObservation"]["sourceSnapshotSha256"] = json!(changed_snapshot.clone());
     let bounded_receipt = council_requests::record_native_host_check(
         &store, &request, &bounded,
     ).unwrap();
-    assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some("c".repeat(64).as_str()));
+    assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some(changed_snapshot.as_str()));
     let saved = council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap();
@@ -8754,6 +8775,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert!(council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).is_err(), "old task observations must fail closed after a stale Council cycle");
+    std::fs::remove_dir_all(&checkout).unwrap();
 }
 
 #[test]

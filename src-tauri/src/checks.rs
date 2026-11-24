@@ -24,7 +24,7 @@ const MAX_SOURCE_FILES: usize = 8_192;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SOURCE_DEPTH: usize = 16;
 
-fn source_snapshot_sha256(root: &Path) -> Option<String> {
+pub(crate) fn source_snapshot_sha256(root: &Path) -> Option<String> {
     fn collect(
         dir: &Path, files: &mut Vec<(PathBuf, u64)>, entries_seen: &mut usize,
         bytes: &mut u64, depth: usize,
@@ -176,6 +176,24 @@ fn manifest_sha256(root: &Path, plan: &Plan) -> Option<String> {
     };
     std::fs::read(root.join(name))
         .ok().map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Recheck the observed bounded checkout immediately before admitting a new
+/// native task receipt. The execution report and its persistence are separate
+/// operations; neither a prior passing process nor a new observation ID can
+/// attest bytes changed in between. This is not a full immutable artifact.
+pub(crate) fn validate_native_check_observation(
+    root: &Path, check_name: &str, manifest_hash: &str, source_hash: &str,
+) -> crate::Result<()> {
+    let matches = source_snapshot_sha256(root).as_deref() == Some(source_hash)
+        && plan(root).is_some_and(|current| {
+            current.name == check_name
+                && manifest_sha256(root, &current).as_deref() == Some(manifest_hash)
+        });
+    if !matches {
+        return Err("council_task_stale: host check source or manifest changed before receipt persistence.".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn turn_report(root: &Path) -> Value {
@@ -448,6 +466,16 @@ mod tests {
         assert!(repeated["hostObservation"]["observationId"].as_str().is_some());
         assert_ne!(first["hostObservation"]["observationId"], repeated["hostObservation"]["observationId"],
             "separate native executions must have distinct observation identities");
+
+        let manifest = first["hostObservation"]["manifestSha256"].as_str().unwrap();
+        validate_native_check_observation(root, "npm test", manifest, &original).unwrap();
+        assert!(validate_native_check_observation(root, "cargo check", manifest, &original).is_err());
+        assert!(validate_native_check_observation(root, "npm test", &"a".repeat(64), &original).is_err());
+        // The completed execution cannot attest a later checkout edit.
+        fs::write(root.join("src/app.ts"), "export const value = 9;").unwrap();
+        assert!(validate_native_check_observation(root, "npm test", manifest, &original).is_err());
+        fs::write(root.join("src/app.ts"), "export const value = 1;").unwrap();
+        validate_native_check_observation(root, "npm test", manifest, &original).unwrap();
 
         // The process completed, but it changed what was under review.
         fs::write(root.join("mutate-source"), "yes").unwrap();

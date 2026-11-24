@@ -1299,105 +1299,73 @@ pub(crate) fn inspect_headless_status(
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let observed_at = storage::now();
-    // A damaged or partially migrated Ticket can lose its Mandate or retain
-    // invalid tool-grant JSON. Keep its recovery metadata observable without
-    // synthesizing permissions or trusting a malformed authorization.
     if let Some(ticket_id) = ticket_id {
-        let mandate_exists: bool = store.db.query_row(
+        // Keep the Ticket, grant classification, assignments, audit and effect
+        // totals in ONE SQLite snapshot. A live serve host may revoke a grant,
+        // settle a provider or quarantine an effect during a detached read.
+        // A pre-snapshot mandate check or a second read after ticket_snapshot
+        // could otherwise mix revisions and incorrectly report safe recovery.
+        let read = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let ticket = get_ticket(&store, ticket_id)?;
+        let mandate_present: bool = store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_mandates WHERE ticket_id=?1)",
             [ticket_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        let mandate_corrupt = if mandate_exists {
+        // A missing or damaged Mandate is an observable recovery problem, not
+        // a new grant. Preserve the existing redacted status contract.
+        let (native_mandate, mandate_corrupt) = if mandate_present {
             match mandate(&store, ticket_id) {
-                Ok(_) => false,
+                Ok(grant) => (Some(grant), false),
                 Err(error) if error == "SuperAgent mandate contains invalid tool authorization." =>
-                    true,
+                    (None, true),
                 Err(error) => return Err(error),
             }
         } else {
-            false
+            (None, false)
         };
-        if !mandate_exists || mandate_corrupt {
-            // Keep the degraded status, assignment list, and effect count in
-            // one read-only snapshot while another host may be recovering it.
-            let read = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-            let ticket = get_ticket(&store, ticket_id)?;
-            let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
-            let unresolved = effects::unresolved_count(&store, ticket_id)?;
-            let native_assignments = assignments(&store, ticket_id, 50)?;
-            let native_history = history(&store, ticket_id, 50)?;
-            read.commit().map_err(|e| e.to_string())?;
-            let result = serde_json::json!({
-                "ticketId": ticket.id,
-                "orchestrationId": ticket.orchestration_id,
-                "state": ticket.state,
-                "revision": ticket.revision,
-                "activeAssignmentId": ticket.active_assignment_id,
-                "hasEvidence": ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
-                "unresolvedExternalEffects": unresolved,
-                "recovery": recovery,
-                "mandate": null,
-                "mandateMissing": !mandate_exists,
-                "mandateCorrupt": mandate_corrupt,
-                "assignments": native_assignments.iter().map(|a| {
-                    let (expired, remaining) = headless_assignment_budget(a, observed_at);
-                    serde_json::json!({
-                        "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
-                        "state": &a.state, "attempt": a.attempt,
-                        "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty()),
-                        "runBudgetExpired": expired,
-                        "remainingRunBudgetMs": remaining
-                    })
-                }).collect::<Vec<_>>(),
-                "activity": native_history.iter().map(|a| serde_json::json!({
-                    "kind": &a.kind, "at": a.at
-                })).collect::<Vec<_>>(),
-                "observationalOnly": true,
-                "automaticReplayAllowed": false
-            });
-            return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
-        }
-    }
-    let value = if let Some(ticket_id) = ticket_id {
-        let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
-        serde_json::json!({
-            "ticketId": &snapshot.ticket.id,
-            "orchestrationId": &snapshot.ticket.orchestration_id,
-            "state": &snapshot.ticket.state,
-            "revision": snapshot.ticket.revision,
-            "activeAssignmentId": &snapshot.ticket.active_assignment_id,
-            "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
-            "unresolvedExternalEffects": effects::unresolved_count(&store, ticket_id)?,
-            "recovery": headless_recovery_summary(&store, &snapshot.ticket, observed_at)?,
-            "mandate": {
-                "revoked": snapshot.mandate.revoked,
-                "policyRevision": snapshot.mandate.policy_revision,
-                "expiresAt": snapshot.mandate.expires_at,
-                "allowedSideEffects": snapshot.mandate.allowed_side_effects,
-                "allowedToolCount": snapshot.mandate.allowed_tools.len()
-            },
-            "mandateMissing": false,
-            "mandateCorrupt": false,
-            "assignments": snapshot.assignments.iter().map(|a| {
-                let (run_budget_expired, remaining_run_budget_ms) =
-                    headless_assignment_budget(a, observed_at);
+        let native_assignments = assignments(&store, ticket_id, 50)?;
+        let native_history = history(&store, ticket_id, 50)?;
+        let unresolved = effects::unresolved_count(&store, ticket_id)?;
+        let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+        read.commit().map_err(|e| e.to_string())?;
+        let result = serde_json::json!({
+            "ticketId": ticket.id,
+            "orchestrationId": ticket.orchestration_id,
+            "state": ticket.state,
+            "revision": ticket.revision,
+            "activeAssignmentId": ticket.active_assignment_id,
+            "hasEvidence": ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
+            "unresolvedExternalEffects": unresolved,
+            "recovery": recovery,
+            "mandate": native_mandate.as_ref().map(|grant| serde_json::json!({
+                "revoked": grant.revoked,
+                "policyRevision": grant.policy_revision,
+                "expiresAt": grant.expires_at,
+                "allowedSideEffects": grant.allowed_side_effects,
+                "allowedToolCount": grant.allowed_tools.len()
+            })),
+            "mandateMissing": !mandate_present,
+            "mandateCorrupt": mandate_corrupt,
+            "assignments": native_assignments.iter().map(|a| {
+                let (expired, remaining) = headless_assignment_budget(a, observed_at);
                 serde_json::json!({
                     "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
                     "state": &a.state, "attempt": a.attempt,
                     "hasResult": a.result.as_ref().is_some_and(|text| !text.is_empty()),
-                    "runBudgetExpired": run_budget_expired,
-                    "remainingRunBudgetMs": remaining_run_budget_ms,
+                    "runBudgetExpired": expired,
+                    "remainingRunBudgetMs": remaining
                 })
             }).collect::<Vec<_>>(),
-            "activity": snapshot.activity.iter().map(|a| serde_json::json!({
+            "activity": native_history.iter().map(|a| serde_json::json!({
                 "kind": &a.kind, "at": a.at
-            })).collect::<Vec<_>>()
-        })
-    } else {
-        serde_json::to_value(orchestration_overview(&store)?)
-            .map_err(|e| e.to_string())?
-    };
-    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+            })).collect::<Vec<_>>(),
+            "observationalOnly": true,
+            "automaticReplayAllowed": false
+        });
+        return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
+    }
+    serde_json::to_string_pretty(&orchestration_overview(&store)?)
+        .map_err(|e| e.to_string())
 }
 
 /// Read-only, bounded recovery classification for a local operator. The CLI
@@ -8587,6 +8555,73 @@ mod tests {
             [&ticket.id], |row| row.get::<_, String>(0),
         ).unwrap(), "uncertain");
         assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn headless_status_keeps_ticket_revision_and_effect_totals_in_one_snapshot() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private concurrent recovery objective",
+            "headless-atomic-status-snapshot", false,
+        ).unwrap();
+        assert!(launched);
+        store.db.execute("UPDATE sa_tickets SET revision=100 WHERE id=?1",
+            [&ticket.id]).unwrap();
+        let audit_before = history(&store, &ticket.id, 100).unwrap().len();
+        let writer_path = store.path.clone();
+        let writer_ticket = ticket.id.clone();
+        let writer = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(writer_path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            for turn in 0..120 {
+                let tx = conn.unchecked_transaction().unwrap();
+                if turn % 2 == 0 {
+                    tx.execute("UPDATE sa_tickets SET revision=101 WHERE id=?1",
+                        [&writer_ticket]).unwrap();
+                    tx.execute(
+                        "INSERT OR IGNORE INTO sa_effect_receipts
+                         (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                         VALUES(?1,'snapshot-race',?2,'pending',?3,?3)",
+                        params![&writer_ticket, "a".repeat(64), storage::now()],
+                    ).unwrap();
+                } else {
+                    tx.execute("UPDATE sa_tickets SET revision=100 WHERE id=?1",
+                        [&writer_ticket]).unwrap();
+                    tx.execute("DELETE FROM sa_effect_receipts
+                                WHERE ticket_id=?1 AND effect_key='snapshot-race'",
+                        [&writer_ticket]).unwrap();
+                }
+                tx.commit().unwrap();
+                std::thread::yield_now();
+            }
+        });
+        for _ in 0..60 {
+            let status: serde_json::Value = serde_json::from_str(
+                &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+            ).unwrap();
+            let revision = status["revision"].as_i64().unwrap();
+            let unresolved = status["unresolvedExternalEffects"].as_i64().unwrap();
+            assert!(revision == 100 || revision == 101);
+            assert_eq!(unresolved, if revision == 101 { 1 } else { 0 },
+                "Detached recovery must not combine different SQLite revisions");
+            assert_eq!(status["recovery"]["pendingExternalEffects"], unresolved);
+            assert_eq!(status["recovery"]["requiresIndependentRemoteReconciliation"],
+                unresolved != 0);
+            assert_eq!(status["observationalOnly"], true);
+            assert_eq!(status["automaticReplayAllowed"], false);
+            assert_eq!(status["mandate"]["allowedSideEffects"], false);
+        }
+        writer.join().unwrap();
+        assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_before,
+            "Repeated inspection must not write audit or dispatch effects");
+        let final_status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(final_status["revision"], 100);
+        assert_eq!(final_status["unresolvedExternalEffects"], 0);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running",
+            "Detached observation cannot trigger startup recovery");
     }
 
     #[test]

@@ -9281,6 +9281,39 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
 }
 
 
+/// Exercise the persisted metadata, not just the JSON payload. An occupied
+/// native request slot must never be interpreted as absent or reassigned.
+fn assert_child_receipt_metadata_is_bound(
+    store: &Store, root: &TeamSnapshot, key: &str,
+) {
+    let (kind, owner): (String, String) = store.db.query_row(
+        "SELECT kind,worker_id FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    for (changed_kind, changed_owner) in [
+        ("foreign_kind", owner.as_str()),
+        (kind.as_str(), "foreign-native-owner"),
+    ] {
+        store.db.execute(
+            "UPDATE architect_requests SET kind=?3,worker_id=?4
+             WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![root.session_id, key, changed_kind, changed_owner],
+        ).unwrap();
+        assert!(!verified_council_pass(store, root),
+            "foreign receipt metadata must revoke the verified Council pass");
+        assert!(child_council::inspect(store, root).unwrap_err()
+            .contains("receipt kind or native ownership changed"));
+        store.db.execute(
+            "UPDATE architect_requests SET kind=?3,worker_id=?4
+             WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![root.session_id, key, kind, owner],
+        ).unwrap();
+        assert!(child_council::inspect(store, root).is_ok());
+    }
+}
+
 #[test]
 fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering() {
     let (state, sid) = state_fixture();
@@ -9501,6 +9534,15 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
          WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
         rusqlite::params![sid, pin_key], |row| row.get(0),
     ).unwrap();
+    for key in [
+        pin_key.clone(),
+        format!("native-council-child-receipt:{}:{}", root.council_since, inspected[0].bot_id),
+        format!("native-council-parent-seat:{}:{}", root.council_since, inspected[0].bot_id),
+    ] {
+        assert_child_receipt_metadata_is_bound(&store, &root, &key);
+        assert!(authenticated_hierarchical_status(&store, &root)
+            .is_some_and(|status| status.state == "passed"));
+    }
     let mut altered_root = root.clone();
     altered_root.workers.push(writer("late-root-writer", storage::now() + 10));
     assert!(child_council::verified_parent_seats(&store, &altered_root)
@@ -11412,6 +11454,11 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     // Persisted challenge receipts must match the original native callbacks,
     // including after an untrusted record is modified and later restored.
     let key = format!("native-council-child-s3-receipt:{}:security-child", root.council_since);
+    assert_child_receipt_metadata_is_bound(&store, &root, &key);
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "nested-m4-s3-native", &artifact,
+        &request.request_id,
+    ).unwrap(), terminal);
     let recorded: String = store.db.query_row(
         "SELECT content FROM architect_requests
          WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
@@ -11553,6 +11600,8 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
         "leaf identities must be distinct across both child Councils and both S2 waves");
     assert!(child_council::verified_s2_receipts(&store, &saved).unwrap().is_some());
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
+    assert_child_receipt_metadata_is_bound(&store, &saved, &key);
+    assert!(verified_council_pass(&store, &saved));
     store.db.execute(
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![sid, key],

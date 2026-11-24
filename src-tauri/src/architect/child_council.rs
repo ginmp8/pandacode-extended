@@ -1227,6 +1227,26 @@ fn parent_seat_key(root: &TeamSnapshot, bot_id: &str) -> String {
     format!("native-council-parent-seat:{}:{bot_id}", root.council_since)
 }
 
+/// A request key is unique within its root session. Read the occupied slot
+/// before checking kind and owner: filtering them in SQL would mistake a
+/// conflicting persisted receipt for a missing one during recovery.
+fn read_bound_receipt(
+    store: &Store, root: &TeamSnapshot, key: &str, kind: &str, owner: &str,
+) -> Result<Option<String>> {
+    let recorded: Option<(String, String, String)> = store.db.query_row(
+        "SELECT content,kind,worker_id FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2",
+        params![root.session_id, key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    match recorded {
+        Some((content, recorded_kind, recorded_owner))
+            if recorded_kind == kind && recorded_owner == owner => Ok(Some(content)),
+        Some(_) => Err("child_council_stale: receipt kind or native ownership changed.".into()),
+        None => Ok(None),
+    }
+}
+
 fn receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
     format!("native-council-child-receipt:{}:{bot_id}", root.council_since)
 }
@@ -1262,12 +1282,9 @@ fn root_artifact_revision(
         ),
     };
     let key = root_artifact_revision_key(root);
-    let recorded: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
-        params![root.session_id, key],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let recorded = read_bound_receipt(
+        store, root, &key, "council_root_artifact", &root.session_id,
+    )?;
     if let Some(recorded) = recorded {
         let pinned: RootArtifactRevision = serde_json::from_str(&recorded)
             .map_err(|_| "child_council_stale: malformed root artifact revision.")?;
@@ -1370,13 +1387,10 @@ fn read_verified_receipt(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot,
 ) -> Result<Option<VerifiedChildReceipt>> {
-    let existing: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'
-         AND worker_id=?3",
-        params![root.session_id, receipt_key(root, &record.bot_id), record.child_session_id],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing = read_bound_receipt(
+        store, root, &receipt_key(root, &record.bot_id),
+        "council_child_receipt", &record.child_session_id,
+    )?;
     let Some(existing) = existing else { return Ok(None) };
     let stored: VerifiedChildReceipt = serde_json::from_str(&existing)
         .map_err(|_| "child_council_stale: malformed child evidence receipt.")?;
@@ -1563,13 +1577,9 @@ fn record_escalation_receipt(
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
 ) -> Result<bool> {
     let key = escalation_receipt_key(root, &record.bot_id);
-    let existing: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'
-         AND worker_id=?3",
-        params![root.session_id, key, record.child_session_id],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing = read_bound_receipt(
+        store, root, &key, "council_child_s2_receipt", &record.child_session_id,
+    )?;
     let candidate = escalation_receipt(store, root, record, child, choice)?;
     if let Some(raw) = existing {
         let recorded: VerifiedChildReceipt = serde_json::from_str(&raw)
@@ -1593,13 +1603,9 @@ fn read_escalation_receipt(
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
 ) -> Result<Option<VerifiedChildReceipt>> {
     let key = escalation_receipt_key(root, &record.bot_id);
-    let recorded: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'
-         AND worker_id=?3",
-        params![root.session_id, key, record.child_session_id],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let recorded = read_bound_receipt(
+        store, root, &key, "council_child_s2_receipt", &record.child_session_id,
+    )?;
     let Some(raw) = recorded else { return Ok(None) };
     let stored: VerifiedChildReceipt = serde_json::from_str(&raw)
         .map_err(|_| "child_council_stale: malformed second-wave receipt.")?;
@@ -1748,13 +1754,9 @@ fn record_challenge_receipt(
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
 ) -> Result<bool> {
     let key = challenge_receipt_key(root, &record.bot_id);
-    let existing: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'
-         AND worker_id=?3",
-        params![root.session_id, key, record.child_session_id],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing = read_bound_receipt(
+        store, root, &key, "council_child_s3_receipt", &record.child_session_id,
+    )?;
     let candidate = challenge_receipt(store, root, record, child, choice)?;
     if let Some(raw) = existing {
         let stored: VerifiedChildChallengeReceipt = serde_json::from_str(&raw)
@@ -1778,13 +1780,9 @@ fn read_challenge_receipt(
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
 ) -> Result<Option<VerifiedChildChallengeReceipt>> {
     let key = challenge_receipt_key(root, &record.bot_id);
-    let saved: Option<String> = store.db.query_row(
-        "SELECT content FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'
-         AND worker_id=?3",
-        params![root.session_id, key, record.child_session_id],
-        |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let saved = read_bound_receipt(
+        store, root, &key, "council_child_s3_receipt", &record.child_session_id,
+    )?;
     let Some(raw) = saved else { return Ok(None) };
     let stored: VerifiedChildChallengeReceipt = serde_json::from_str(&raw)
         .map_err(|_| "child_council_stale: malformed S3 challenge receipt.")?;
@@ -1846,12 +1844,10 @@ fn parent_seat(
     child: &TeamSnapshot, persist: bool,
 ) -> Result<Option<AuthenticatedParentSeat>> {
     let receipt = read_verified_receipt(store, root, record, child)?;
-    let existing: Option<(String, String)> = store.db.query_row(
-        "SELECT content,worker_id FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_parent_seat'",
-        params![root.session_id, parent_seat_key(root, &record.bot_id)],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing = read_bound_receipt(
+        store, root, &parent_seat_key(root, &record.bot_id),
+        "council_parent_seat", &record.child_session_id,
+    )?;
     let candidate = if let Some(receipt) = receipt {
         let (count, worker): (i64, Option<String>) = store.db.query_row(
             "SELECT COUNT(*), MIN(worker_id) FROM architect_workers
@@ -1875,10 +1871,10 @@ fn parent_seat(
             criterion_evidence: receipt.criterion_evidence.clone(),
         })
     } else { None };
-    if let Some((content, owned_child)) = existing {
+    if let Some(content) = existing {
         let recorded: AuthenticatedParentSeat = serde_json::from_str(&content)
             .map_err(|_| "child_council_stale: malformed composite parent seat.")?;
-        if owned_child != record.child_session_id || candidate.as_ref() != Some(&recorded) {
+        if candidate.as_ref() != Some(&recorded) {
             return Err("child_council_stale: composite parent seat no longer matches native evidence.".into());
         }
         return Ok(Some(recorded));

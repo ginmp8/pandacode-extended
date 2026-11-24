@@ -176,6 +176,7 @@ let demandArchived = false;
   let selectedDemandWorkerId = '';
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
+  let preflightWorkerId = '';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
   let draftPresetPurpose = '', draftPresetStrategy = 'balanced';
@@ -993,6 +994,7 @@ let demandArchived = false;
       demandPreflight.orchestrationId === chosen.id &&
       demandPreflight.policyRevision === chosen.policyRevision &&
       preflightObjective === demandObjective.trim() && preflightMode === demandMode &&
+      preflightWorkerId === ((chosen.workerCount ?? 1) > 1 ? selectedDemandWorkerId : chosen.workerBotId) &&
       demandPreflight.selectedRole === (demandMode === 'coordinated' ? 'coordinator' : 'worker') &&
       demandPreflight.selectedBotId === (demandMode === 'coordinated'
         ? chosen.coordinatorBotId :
@@ -1010,6 +1012,8 @@ let demandArchived = false;
             : 'Not eligible for immediate admission: ' + safe(demandPreflight.reason)) + '</p>' +
         '<dl><dt>Selected role and bot</dt><dd>' + safe(demandPreflight.selectedRole) +
         ' · ' + safe(botName(demandPreflight.selectedBotId)) + '</dd>' +
+        (demandMode === 'coordinated' ? '<dt>Worker after coordination</dt><dd>' +
+          safe(botName(preflightWorkerId)) + '</dd>' : '') +
         '<dt>Team project / policy revision</dt><dd>' + safe(demandPreflight.projectId) +
         ' / ' + demandPreflight.policyRevision + '</dd>' +
         '<dt>Authorized tools / effects</dt><dd>' +
@@ -1059,8 +1063,8 @@ let demandArchived = false;
               '<option value="' + safe(id) + '"' +
               (selectedDemandWorkerId === id ? ' selected' : '') + '>' +
               safe(botName(id)) + '</option>').join('') +
-            '</select></label><p>Only explicitly selected direct read-only Workers are supported. ' +
-            'Reviewer-backed and coordinated multi-Worker execution remain unavailable.</p>')
+            '</select></label><p>The selected Worker is pinned to this Demand for direct or coordinated read-only dispatch. ' +
+            'Reviewer-backed execution and automatic Worker routing remain unavailable.</p>')
         : '') +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (manualAdmissionReady ? '' : ' disabled') +
@@ -2167,9 +2171,9 @@ let demandArchived = false;
       const coordinated = form?.querySelector<HTMLSelectElement>('select[name="mode"]')?.value !== 'direct';
       const isMulti = (chosen?.workerCount ?? 1) > 1;
       if (!chosen || !objective) return;
-      if (isMulti && (coordinated || roleRoster?.orchestrationId !== chosen.id ||
+      if (isMulti && (roleRoster?.orchestrationId !== chosen.id ||
           !roleRoster.workerBotIds.includes(selectedDemandWorkerId))) {
-        error = 'Choose a configured Worker and direct dispatch for this read-only Demand.';
+        error = 'Choose a configured Worker for this read-only Demand.';
         render(); return;
       }
       const workerId = isMulti ? selectedDemandWorkerId : chosen.workerBotId;
@@ -2177,7 +2181,7 @@ let demandArchived = false;
       void work(async () => {
         const snapshot = isMulti
           ? await call<ManualPreflight>('superagent_preflight_worker', {
-            orchestrationId:chosen.id,objective,workerBotId:workerId,
+            orchestrationId:chosen.id,objective,workerBotId:workerId,coordinated,
           })
           : await call<ManualPreflight>('superagent_preflight', {
             orchestrationId:chosen.id,objective,coordinated,
@@ -2194,6 +2198,7 @@ let demandArchived = false;
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
+        preflightWorkerId = workerId;
       });
       return;
     }
@@ -3595,14 +3600,14 @@ let demandArchived = false;
       const command = coordinated ? 'superagent_submit_coordinated'
         : isMulti ? 'superagent_submit_to_worker' : 'superagent_submit';
       const reviewed = demandPreflight;
-      if (isMulti && (coordinated || roleRoster?.orchestrationId !== selectedConfig?.id ||
+      if (isMulti && (roleRoster?.orchestrationId !== selectedConfig?.id ||
           !roleRoster?.workerBotIds.includes(workerId))) return;
       if (!selectedConfig?.enabled || !objective || !reviewed ||
           reviewed.orchestrationId !== selectedConfig.id ||
           reviewed.policyRevision !== selectedConfig.policyRevision ||
           reviewed.selectedRole !== (coordinated ? 'coordinator' : 'worker') ||
           reviewed.selectedBotId !== (coordinated ? selectedConfig.coordinatorBotId : workerId) ||
-          preflightObjective !== objective ||
+          preflightObjective !== objective || preflightWorkerId !== workerId ||
           preflightMode !== (coordinated ? 'coordinated' : 'direct') ||
           (!reviewed.eligible && !reviewed.canStageBlocked) ||
           reviewed.allowedSideEffects || reviewed.allowedTools.length !== 0) {
@@ -3621,7 +3626,7 @@ let demandArchived = false;
         if (selected !== selectedConfig.id || demandPreflight !== reviewed ||
             (isMulti && selectedDemandWorkerId !== workerId) ||
             demandObjective.trim() !== objective ||
-            preflightObjective !== objective ||
+            preflightObjective !== objective || preflightWorkerId !== workerId ||
             preflightMode !== (coordinated ? 'coordinated' : 'direct')) {
           throw new Error('Demand or Team changed before confirmation. Review native preflight again.');
         }
@@ -3629,7 +3634,7 @@ let demandArchived = false;
         // followed by the native submit's own authorization and lease checks.
         const latest = isMulti
           ? await call<ManualPreflight>('superagent_preflight_worker', {
-            orchestrationId:selectedConfig.id,objective,workerBotId:workerId,
+            orchestrationId:selectedConfig.id,objective,workerBotId:workerId,coordinated,
           })
           : await call<ManualPreflight>('superagent_preflight', {
             orchestrationId:selectedConfig.id,objective,coordinated,

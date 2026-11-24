@@ -185,6 +185,7 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(inspector.getByText('Stale revision', { exact: false })).toBeVisible();
   await expect(inspector.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+  await expect(inspector).toContainText('The recorded passed status has no current verified native proof.');
   await expect(refresh).toBeEnabled();
 });
 
@@ -337,19 +338,25 @@ test('the native Council inspector rejects foreign task responses before exposin
   await expect(inspector).toContainText('Native pass not verified');
   await expect(inspector.getByRole('alert')).toHaveCount(0);
 
-  // An embedded native task consumer uses the same read-only presenter and
-  // cannot switch its root task by swapping a result after the first read.
+  // The embedded consumer pins its task before the first response, just as
+  // the direct and Channel consumers do. A self-consistent foreign first
+  // response must never establish the identity of the inspector.
   await page.evaluate(async snapshot => {
     const { createCouncilInspector } = await import('/src/council-inspector.ts');
     (window as any).__embeddedCouncil = snapshot;
     const host = document.createElement('div');
     host.id = 'embedded-native-council';
     document.body.append(host);
-    const detail = createCouncilInspector(async () => (window as any).__embeddedCouncil);
+    const detail = createCouncilInspector(async () => (window as any).__embeddedCouncil, 'session-1');
     host.append(detail);
     detail.open = true;
-  }, own);
+  }, foreign);
   const embedded = page.locator('#embedded-native-council .council-inspection');
+  await expect(embedded.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(embedded).not.toContainText('Foreign private finding');
+  await expect(embedded).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, own);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
   await expect(embedded).toContainText('Native pass not verified');
   await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, foreign);
   await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
@@ -360,26 +367,31 @@ test('the native Council inspector rejects foreign task responses before exposin
   await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
   await expect(embedded).toContainText('Native pass not verified');
 
-  // An unbound embedded consumer must not disclose a malformed first response.
-  // In particular, a missing task identity cannot become a trusted binding.
+  // A missing caller-side task identity is an invalid inspection request.
+  // Even a valid foreign response must not be fetched or rendered.
   await page.evaluate(async snapshot => {
     const { createCouncilInspector } = await import('/src/council-inspector.ts');
     (window as any).__unboundCouncil = snapshot;
     const host = document.createElement('div');
     host.id = 'unbound-native-council';
     document.body.append(host);
-    const detail = createCouncilInspector(async () => (window as any).__unboundCouncil);
+    (window as any).__unboundCouncilReads = 0;
+    const detail = createCouncilInspector(async () => {
+      (window as any).__unboundCouncilReads++;
+      return (window as any).__unboundCouncil;
+    }, '');
     host.append(detail);
     detail.open = true;
-  }, { ...foreign, sessionId: undefined });
+  }, foreign);
   const unbound = page.locator('#unbound-native-council .council-inspection');
   await expect(unbound.getByRole('alert')).toContainText('Council evidence does not match this task');
   await expect(unbound).not.toContainText('Foreign private finding');
   await expect(unbound).not.toContainText('Verified native pass');
   await page.evaluate(snapshot => { (window as any).__unboundCouncil = snapshot; }, own);
   await unbound.getByRole('button', { name: 'Refresh native evidence' }).click();
-  await expect(unbound).toContainText('Native pass not verified');
-  await expect(unbound.getByRole('alert')).toHaveCount(0);
+  await expect(unbound.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(unbound).not.toContainText('Foreign private finding');
+  expect(await page.evaluate(() => (window as any).__unboundCouncilReads)).toBe(0);
 });
 
 for (const target of ['direct', 'embedded'] as const) {

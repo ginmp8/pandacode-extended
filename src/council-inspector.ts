@@ -482,6 +482,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   const childScopeWarning = omittedChildren > 0
     ? '<p role="alert">' + escape(String(omittedChildren)) +
       ' foreign-cycle or malformed child Council reservation(s) omitted; composed usage and approval are not verified.</p>' : '';
+  const passWarning = inspection.status.state === 'passed' && !verified
+    ? '<p role="status">The recorded passed status has no current verified native proof. Do not treat it as approval.</p>' : '';
   const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
@@ -490,12 +492,12 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Status at last native inspection') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
-    completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    passWarning + completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childScopeWarning + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */
-export function createCouncilInspector(read: () => Promise<CouncilInspection | null>, expectedSessionId?: string): HTMLElement {
+export function createCouncilInspector(read: () => Promise<CouncilInspection | null>, expectedSessionId: string): HTMLElement {
   const details = document.createElement('details');
   details.className = 'council-inspection';
   details.setAttribute('aria-label', 'Council results');
@@ -515,10 +517,9 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       && Number.isSafeInteger(snapshot.cycleStartedAt) && Number.isSafeInteger(snapshot.teamRevision)
       ? JSON.stringify([snapshot.sessionId, snapshot.cycleStartedAt, snapshot.teamRevision]) : null;
   let shownScope: string | null = null;
-  // One inspector belongs to one native root task, not a later unrelated read.
-  // Direct chats and Channels bind their known task ID before the first read;
-  // generic embedded consumers may bind on their first valid native response.
-  let boundSessionId: string | null = expectedSessionId?.trim() || null;
+  // Every consumer must bind its known root task before the first read.
+  // A response cannot establish its own authority, even for embedded consumers.
+  const boundSessionId = typeof expectedSessionId === 'string' ? expectedSessionId.trim() : '';
   let serial = 0;
   let loading = false;
   const load = () => {
@@ -545,10 +546,10 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       .map(reviewer => reviewer.dataset.councilReviewerKey));
     body.textContent = 'Loading native Council result…';
     // A synchronous read failure must also fail closed and release the button.
-    void Promise.resolve().then(read).then(result => {
+    void Promise.resolve().then(() => boundSessionId ? read() : null).then(result => {
       if (serial !== current || !details.open || !details.isConnected) return;
       const nextScope = scopeOf(result);
-      if (result && (nextScope === null || (boundSessionId !== null && result.sessionId !== boundSessionId))) {
+      if (!boundSessionId || (result && (nextScope === null || result.sessionId !== boundSessionId))) {
         // A stale/cross-task response is not safe to render, even if it carries
         // a seemingly verified pass. Keep the original binding for a retry.
         shownScope = null;
@@ -559,7 +560,6 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
         body.append(error);
         return;
       }
-      if (!boundSessionId && nextScope !== null) boundSessionId = result?.sessionId ?? null;
       body.innerHTML = councilInspectionHtml(result);
       // The reservation and the root task/revision must still match. A new
       // artifact revision must not inherit an earlier review's open drill-down.

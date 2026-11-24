@@ -114,6 +114,15 @@ fn frozen_with_recovery_status(
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
+    // The task-owned coordinator is a native scheduling reservation, not a
+    // provider conversation. A foreign resume token or active provider means
+    // that this context is no longer isolated, even without any chat messages.
+    if session.resume_id.is_some() {
+        return Err("child_council_revoked: child coordinator has a provider resume context.".into());
+    }
+    if matches!(session.status.as_str(), "running" | "waiting") {
+        return Err("child_council_revoked: child coordinator native session remains active.".into());
+    }
     // A persisted interrupted child cannot retain leaf review authority
     // across restart, even when its old child TeamSnapshot still says running.
     // Recheck the native session on every inspection, launch and callback.

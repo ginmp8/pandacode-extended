@@ -5657,6 +5657,29 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
         .contains("child_council_stale"));
     store.db.execute("DELETE FROM messages WHERE id=?1", [injected_message]).unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    // Provider context can exist before the first persisted chat message.
+    // Neither a blocked reservation nor a second root seat may adopt it.
+    store.db.execute(
+        "UPDATE sessions SET resume_id='foreign-provider-context' WHERE id=?1",
+        [&child_id],
+    ).unwrap();
+    let denied = child_council::inspect(&store, &started).unwrap_err();
+    assert!(denied.contains("child coordinator has a provider resume context"), "{denied}");
+    store.db.execute("UPDATE sessions SET resume_id=NULL WHERE id=?1", [&child_id]).unwrap();
+    let original_status = store.session(&child_id).unwrap().status;
+    for active_status in ["running", "waiting"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&child_id, active_status],
+        ).unwrap();
+        let denied = child_council::inspect(&store, &started).unwrap_err();
+        assert!(denied.contains("child coordinator native session remains active"), "{denied}");
+    }
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![&child_id, original_status],
+    ).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     // Even without a user message or worker in the TeamSnapshot, forged
     // session metadata, native requests and sub-worker ownership must revoke
     // the pending task-isolated reviewer reservation.
@@ -8996,6 +9019,23 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     refresh_council(&store, &mut live_projection);
     assert_eq!(live_projection.council_status.as_ref()
         .map(|status| status.state.as_str()), Some("passed"));
+    // A coordinator never runs a provider conversation. Even after both
+    // children settled, an unrelated native resume context must revoke
+    // the existing composite receipts rather than letting cached scores pass.
+    let contaminated_child = &inspected[0].child_session_id;
+    store.db.execute(
+        "UPDATE sessions SET resume_id='foreign-provider-context' WHERE id=?1",
+        [contaminated_child],
+    ).unwrap();
+    assert!(authenticated_hierarchical_status(&store, &root).is_none());
+    assert!(child_council::inspect(&store, &root).unwrap_err()
+        .contains("child coordinator has a provider resume context"));
+    store.db.execute(
+        "UPDATE sessions SET resume_id=NULL WHERE id=?1",
+        [contaminated_child],
+    ).unwrap();
+    assert_eq!(authenticated_hierarchical_status(&store, &root)
+        .as_ref().map(|status| status.state.as_str()), Some("passed"));
     // A restart-interrupted root must not display a passed Council merely
     // because its previous child composite receipts still exist in storage.
     let previous_status = store.session(&sid).unwrap().status;

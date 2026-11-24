@@ -428,20 +428,24 @@ pub(super) fn validate_observed_issue(
     }
     let src = source(store, &selection.source_id)?;
     if src.orchestration_id != team.id || src.mode != "observe"
-        || src.policy_revision != selection.source_revision || src.event_kind != "issues.opened"
+        || src.policy_revision != selection.source_revision
+        || !matches!(src.event_kind.as_str(), "issues.opened" | "issues.reopened")
     {
         return Err("Issue source is not the selected Team's current Observe policy.".into());
     }
+    // A damaged receipt watermark cannot authorize a new Demand. Replay
+    // of an already admitted request remains read-only via its original key.
+    require_source_cursor_integrity(tx, &src)?;
     let (subject_key, repository_id): (String, i64) = tx.query_row(
         "SELECT d.subject_key,repo.repository_id FROM sa_event_decisions d
          JOIN sa_source_repository_identity repo ON repo.source_id=d.source_id
          JOIN sa_source_actor_identity actor ON actor.source_id=d.source_id
          WHERE d.source_id=?1 AND d.delivery_id=?2 AND d.policy_revision=?3
-           AND d.decision='observed_permitted' AND d.event_kind='issues.opened'
+           AND d.decision='observed_permitted' AND d.event_kind=?6
            AND d.repository=?4 COLLATE NOCASE AND d.actor=?5 COLLATE NOCASE
            AND d.at>=repo.attested_at AND d.at>=actor.attested_at",
         params![&src.id,&selection.delivery_id,selection.source_revision,
-                &src.repository,&src.actor_filter],
+                &src.repository,&src.actor_filter,&src.event_kind],
         |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?
         .ok_or("No currently attested permitted issue receipt matches this selection.")?;
@@ -3548,6 +3552,12 @@ mod tests {
         };
         let invalid = ObservedIssueSelection { delivery_id:"unknown".into(), ..selected.clone() };
         assert!(stage("missing", &invalid).is_err());
+        let cursor = source(&store, &on.id).unwrap().last_sequence;
+        store.db.execute("UPDATE sa_event_sources SET last_sequence=0 WHERE id=?1", [&on.id]).unwrap();
+        assert!(stage("damaged-cursor", &selected).unwrap_err().to_string().contains("cursor"));
+        assert_eq!(count(&store), 0);
+        store.db.execute("UPDATE sa_event_sources SET last_sequence=?2 WHERE id=?1",
+            params![&on.id, cursor]).unwrap();
         store.db.execute_batch(
             "CREATE TRIGGER reject_source_issue BEFORE INSERT ON sa_audit
              WHEN NEW.kind='source_issue_subject'
@@ -3589,8 +3599,50 @@ mod tests {
         assert_eq!(replay["ticketId"], receipt["ticketId"]);
         assert_eq!(count(&store), 1);
         assert!(list_thread_links(&store,id).unwrap().is_empty());
+
+        // A reopened issue may be selected explicitly, but reopening the
+        // same issue cannot produce a second Demand, even across sources.
+        let reopened_off = create_source(&store, &team.id, "owner/repo", "trusted-bot",
+            "issues.reopened").unwrap();
+        let reopened_on = set_mode(&store, &reopened_off.id, reopened_off.policy_revision, "observe").unwrap();
+        let reopened_raw = serde_json::json!([
+            {"id":"5000099002","type":"IssuesEvent","created_at":"2026-11-12T09:01:00Z",
+             "actor":{"login":"trusted-bot","id":123},"repo":{"name":"owner/repo","id":456},
+             "payload":{"action":"reopened","issue":{"number":42}}},
+            {"id":"5000099003","type":"IssuesEvent","created_at":"2026-11-12T09:02:00Z",
+             "actor":{"login":"trusted-bot","id":123},"repo":{"name":"owner/repo","id":456},
+             "payload":{"action":"reopened","issue":{"number":43}}}
+        ]);
+        let reopened_poll = poll_authenticated_events_with_repository_id_scoped(
+            &store, &reopened_on, 0, &reopened_raw, "operator", 1,
+            ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+        ).unwrap();
+        assert_eq!(reopened_poll.recorded, 2);
+        let duplicate = ObservedIssueSelection {
+            source_id:reopened_on.id.clone(), delivery_id:"5000099002".into(),
+            source_revision:reopened_on.policy_revision, team_revision:team.policy_revision+1,
+        };
+        assert!(stage("reopened-duplicate", &duplicate).is_err());
+        let new_issue = ObservedIssueSelection { delivery_id:"5000099003".into(), ..duplicate.clone() };
+        // Receipt event kind must still equal the configured source class.
+        store.db.execute("UPDATE sa_event_decisions SET event_kind='issues.opened' WHERE source_id=?1 AND delivery_id=?2",
+            params![&reopened_on.id,&new_issue.delivery_id]).unwrap();
+        assert!(stage("wrong-kind", &new_issue).is_err());
+        assert_eq!(count(&store), 1);
+        store.db.execute("UPDATE sa_event_decisions SET event_kind='issues.reopened' WHERE source_id=?1 AND delivery_id=?2",
+            params![&reopened_on.id,&new_issue.delivery_id]).unwrap();
+        let reopened_demand: serde_json::Value = serde_json::from_str(&stage("reopened-new", &new_issue).unwrap()).unwrap();
+        let reopened_id = reopened_demand["ticketId"].as_str().unwrap();
+        assert_ne!(reopened_id, id);
+        assert_eq!(list_thread_links(&store, reopened_id).unwrap()[0].subject_key, "issue:43");
+        assert_eq!(count(&store), 2);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(reopened_demand["allowedSideEffects"], false);
         drop(store);
         let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(count(&reopened), 2);
+        assert_eq!(list_thread_links(&reopened, reopened_id).unwrap()[0].subject_key, "issue:43");
         assert_eq!(super::super::get_ticket(&reopened,id).unwrap().objective,
             "Inspect local checkout");
     }

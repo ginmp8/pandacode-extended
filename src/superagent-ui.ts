@@ -374,6 +374,8 @@ let demandArchived = false;
         ' · Head ' + safe(entry.checkHeadSha.slice(0, 12)) +
         ' · Completed ' + safe(activityTime(entry.checkCompletedAt))
       : ' · Check outcome unavailable (legacy receipt)';
+  const isIssueIntakeKind = (kind: string): boolean =>
+    kind === 'issues.opened' || kind === 'issues.reopened';
   // A receipt is context, never a grant. The native transaction must recheck
   // the selected Team, source policy, attested identities and request key.
   function observedIssueIntake() {
@@ -381,14 +383,14 @@ let demandArchived = false;
     const source = sources.find(item => item.id === decisionSourceId);
     if (!team?.enabled || team.reviewerCount !== 0 ||
         !source || source.orchestrationId !== team.id ||
-        source.mode !== 'observe' || source.eventKind !== 'issues.opened') return null;
+        source.mode !== 'observe' || !isIssueIntakeKind(source.eventKind)) return null;
     const workers = team.workerCount === 1 ? [team.workerBotId] :
       roleRoster?.orchestrationId === team.id &&
       roleRoster.policyRevision === team.policyRevision &&
       roleRoster.reviewerBotIds.length === 0 ? roleRoster.workerBotIds : [];
     const eligibleWorkers = workers.filter(id => bots.some(bot => bot.id === id && !bot.paused));
     const receipts = decisions.filter(d => d.sourceId === source.id &&
-      d.eventKind === 'issues.opened' && d.decision === 'observed_permitted' &&
+      d.eventKind === source.eventKind && d.decision === 'observed_permitted' &&
       d.policyRevision === source.policyRevision && /^issue:[1-9][0-9]*$/.test(d.subjectKey));
     return eligibleWorkers.length && receipts.length
       ? {team, source, workers:eligibleWorkers, receipts} : null;
@@ -3092,7 +3094,7 @@ let demandArchived = false;
         decisionSourceId = id; decisions = loaded;
         const team = current();
         if (team && (team.workerCount ?? 0) > 1 && team.reviewerCount === 0 &&
-            sources.some(src => src.id === id && src.mode === 'observe' && src.eventKind === 'issues.opened')) {
+            sources.some(src => src.id === id && src.mode === 'observe' && isIssueIntakeKind(src.eventKind))) {
           roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:team.id});
           workerOrder = [...roleRoster.workerBotIds];
           reviewerDraft = [...roleRoster.reviewerBotIds];

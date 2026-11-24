@@ -1031,10 +1031,11 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
 
 
 
-test('explicit observed issue staging confirms exact native source and Worker without launching', async ({page}) => {
+for (const eventKind of ['issues.opened', 'issues.reopened'] as const) {
+test(`explicit ${eventKind} staging confirms exact native source and Worker without launching`, async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
-  await page.evaluate(async () => {
+  await page.evaluate(async (eventKind) => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');
     const host = document.createElement('div');
     host.id = 'sa-observed-intake'; document.body.appendChild(host);
@@ -1043,7 +1044,7 @@ test('explicit observed issue staging confirms exact native source and Worker wi
     const team = {id:'team',name:'Issue Team',coordinatorBotId:'router',workerBotId:'worker',
       enabled:true,policyRevision:3,workerCount:1,reviewerCount:0};
     const source = {id:'source',orchestrationId:'team',repository:'owner/repo',
-      actorFilter:'trusted',eventKind:'issues.opened',mode:'observe',policyRevision:2,lastSequence:5};
+      actorFilter:'trusted',eventKind,mode:'observe',policyRevision:2,lastSequence:5};
     mountSuperagent(host, async (command,args) => {
       if(command==='bots_list') return [
         {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
@@ -1052,12 +1053,14 @@ test('explicit observed issue staging confirms exact native source and Worker wi
       if(command==='superagent_tickets') return tickets as never;
       if(command==='superagent_source_list') return [source] as never;
       if(command==='superagent_source_decisions') return [
-        {sourceId:'source',deliveryId:'5',eventKind:'issues.opened',subjectKey:'issue:42',
+        {sourceId:'source',deliveryId:'5',eventKind,subjectKey:'issue:42',
           decision:'observed_permitted',sequence:5,policyRevision:2,at:1794444000000},
-        {sourceId:'source',deliveryId:'4',eventKind:'issues.opened',subjectKey:'issue:43',
+        {sourceId:'source',deliveryId:'4',eventKind,subjectKey:'issue:43',
           decision:'observed_permitted',sequence:4,policyRevision:1,at:1794444000000},
-        {sourceId:'source',deliveryId:'3',eventKind:'issues.opened',subjectKey:'issue:44',
+        {sourceId:'source',deliveryId:'3',eventKind,subjectKey:'issue:44',
           decision:'observed_denied',sequence:3,policyRevision:2,at:1794444000000},
+        {sourceId:'source',deliveryId:'2',eventKind:eventKind==='issues.opened'?'issues.reopened':'issues.opened',
+          subjectKey:'issue:45',decision:'observed_permitted',sequence:2,policyRevision:2,at:1794444000000},
       ] as never;
       if(command==='superagent_ticket' && args?.ticketId==='native-issue-demand') return tickets[0] as never;
       if(command==='superagent_stage_observed_issue') {
@@ -1070,7 +1073,7 @@ test('explicit observed issue staging confirms exact native source and Worker wi
       }
       throw new Error('Unexpected command: '+command);
     });
-  });
+  }, eventKind);
   const host=page.locator('#sa-observed-intake');
   await host.getByRole('button',{name:'Sources',exact:true}).click();
   await host.getByRole('button',{name:'Load sources'}).click();
@@ -1089,6 +1092,7 @@ test('explicit observed issue staging confirms exact native source and Worker wi
   expect(requests).toEqual([{orchestrationId:'team',workerBotId:'worker',objective:'Inspect issue',
     sourceId:'source',deliveryId:'5',sourceRevision:2,teamRevision:3,requestKey:expect.any(String)}]);
 });
+}
 
 test('Off and Observe source controls expose durable native receipts without Auto', async ({page}) => {
   // Multiple sequential native-control interactions can exceed the default 20s CI budget.

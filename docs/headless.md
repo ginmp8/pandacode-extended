@@ -1237,7 +1237,7 @@ unexecuted plan. No headless provider launch or automatic scheduling is implied.
 
 ### Explicit staging from a GitHub Observe issue receipt
 
-After inspecting the Team policy revision and a source's permitted, attested `issues.opened` decision, a local operator may explicitly stage a Demand:
+After inspecting the Team policy revision and a source's permitted, attested `issues.opened` or `issues.reopened` decision, a local operator may explicitly stage a Demand:
 
 ```sh
 pandacode serve --queue-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVERY_ID TEAM_REVISION REQUEST_KEY objective.txt

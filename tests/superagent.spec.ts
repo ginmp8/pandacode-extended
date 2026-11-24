@@ -1919,7 +1919,8 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
       }
       if(command==='superagent_retry'){
         if(mode==='native-denied')throw Error('Original mandate expired; native retry denied.');
-        if(args?.ticketId!==demand.id)throw Error('Incorrect native retry Ticket');
+        if(args?.ticketId!==demand.id || args?.expectedRevision!==demand.revision)
+          throw Error('Incorrect native retry Ticket or confirmation revision');
         demand={...demand,state:'running',revision:demand.revision+1};
         return {...demand} as never;
       }
@@ -1964,7 +1965,7 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
       .saRetryTrace);
   expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(2);
   expect(calls.find(call=>call.command==='superagent_retry')?.args)
-    .toMatchObject({ticketId:'retry-7'});
+    .toMatchObject({ticketId:'retry-7',expectedRevision:7});
   expect(calls.some(call=>/grant|accept|effect_reserve|council_pass/.test(call.command)))
     .toBe(false);
 });

@@ -2447,7 +2447,7 @@ let demandArchived = false;
           }
           let retried:Ticket;
           try {
-            retried = await call<Ticket>('superagent_retry',{ticketId:demand.id});
+            retried = await call<Ticket>('superagent_retry',{ticketId:demand.id,expectedRevision:demand.revision});
           } finally {
             // Native retry may persist a blocked launch failure before returning
             // an error. Never leave the prior board controls as if nothing changed.
@@ -3213,15 +3213,15 @@ let demandArchived = false;
     if (target.hasAttribute('data-sa-reject-cancel')) { rejectingTicket = ''; render(); return; }
     if (target.dataset.saDispatch) {
       const t = tickets.find(item => item.id === target.dataset.saDispatch);
-      if (t?.state === 'queued') ask('Dispatch the worker using the original coordinator evidence?', async () => {
-        await call('superagent_dispatch_worker',{ ticketId:t.id }); await reload();
+      if (t?.state === 'queued') ask('Dispatch the read-only Worker using the original coordinator evidence and current operator plan at revision ' + t.revision + '?', async () => {
+        await call('superagent_dispatch_worker',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
       });
       return;
     }
     if (target.dataset.saRetry) {
       const t = tickets.find(item => item.id === target.dataset.saRetry);
-      if (t?.state === 'blocked') ask('Retry the original mandate with unchanged permissions?', async () => {
-        await call('superagent_retry',{ ticketId:t.id }); await reload();
+      if (t?.state === 'blocked') ask('Retry the original mandate and current operator plan with unchanged permissions at revision ' + t.revision + '?', async () => {
+        await call('superagent_retry',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
       });
       return;
     }

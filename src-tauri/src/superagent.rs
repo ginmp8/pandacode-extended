@@ -5477,15 +5477,72 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 /// explicit local request may retry it, under the original immutable mandate.
 /// Each attempt uses a separate native session; a late callback from a failed
 /// attempt never becomes evidence for a successor.
+#[cfg(test)]
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String)> {
+    let revision = get_ticket(store, ticket_id)?.revision;
+    let (ticket, thread, worker, _) = retry_blocked_at_revision(store, ticket_id, revision, busy)?;
+    Ok((ticket, thread, worker))
+}
+
+/// Read current operator plans inside the transaction reserving the Worker.
+/// WorkItems are bounded context for the whole Demand, not independent
+/// execution grants, dependency completions or child assignments.
+fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, Vec<String>)> {
+    let (items, truncated) = work_items::list(store, ticket_id, 100)?;
+    if truncated {
+        return Err("Demand WorkItem plan exceeds the native admission limit.".into());
+    }
+    let planned: Vec<_> = items.iter().filter(|item| item.state == "planned").collect();
+    if planned.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    let ids = planned.iter().map(|item| item.id.clone()).collect();
+    let entries: Vec<_> = planned.iter().map(|item| serde_json::json!({
+        "id": &item.id,
+        "parentId": &item.parent_id,
+        "summary": &item.summary,
+    })).collect();
+    let context = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    if context.len() > 16 * 1024 {
+        return Err("Demand WorkItem context exceeds 16 KiB; reduce the active plan before dispatch.".into());
+    }
+    Ok((format!("\n\nOperator-planned WorkItems (context only; no additional authority or per-item completion):\n{context}"), ids))
+}
+
+/// Audit exactly which plan revision and WorkItem IDs were included in the
+/// native Assignment admission. Original plan rows remain unchanged.
+fn record_work_item_admission(
+    store: &Store, ticket: &Ticket, assignment_id: &str, ids: &[String], now: i64,
+) -> Result<()> {
+    if !ids.is_empty() {
+        let detail = serde_json::json!({
+            "assignmentId": assignment_id,
+            "confirmedRevision": ticket.revision,
+            "workItemIds": ids,
+        }).to_string();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'worker_plan_context_admitted',?2,?3)",
+            params![ticket.id,detail,now],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn retry_blocked_at_revision(
+    store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
+) -> Result<(Ticket, String, String, String)> {
     // Serialize recovery checks and lease reservation across independent
     // SQLite connections, just as for initial and coordinated admission.
     let tx = rusqlite::Transaction::new_unchecked(
         &store.db, rusqlite::TransactionBehavior::Immediate,
     ).map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
+    if ticket.revision != expected_revision {
+        return Err("Demand changed before native retry admission; refresh and confirm again.".into());
+    }
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
     }
@@ -5556,6 +5613,7 @@ fn retry_blocked(
     if busy || occupied {
         return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
     }
+    let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
     let attempt=attempts+1;
     let thread=format!("{ticket_id}:attempt:{attempt}");
     let assignment_id=storage::id();
@@ -5578,8 +5636,9 @@ fn retry_blocked(
          VALUES(?1,'manual_retry','user-requested bounded read-only worker attempt',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok((get_ticket(store,ticket_id)?,thread,worker.id))
+    Ok((get_ticket(store,ticket_id)?,thread,worker.id,work_context))
 }
 
 fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
@@ -5590,8 +5649,16 @@ fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
 /// Admit the selected existing worker only after a successful, current
 /// read-only coordinator turn. A coordinator may recommend work but cannot
 /// select another bot, mutate permissions, or expand the immutable mandate.
+#[cfg(test)]
 fn prepare_coordinated_worker(
     store: &mut Store, ticket_id: &str, busy: bool,
+) -> Result<(Ticket, String, String, String)> {
+    let revision = get_ticket(store, ticket_id)?.revision;
+    prepare_coordinated_worker_at_revision(store, ticket_id, revision, busy)
+}
+
+fn prepare_coordinated_worker_at_revision(
+    store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
 ) -> Result<(Ticket, String, String, String)> {
     // Serialize the native checkout/mandate checks with assignment creation.
     // A separate headless connection can otherwise change the lease after
@@ -5600,6 +5667,9 @@ fn prepare_coordinated_worker(
         &store.db, rusqlite::TransactionBehavior::Immediate,
     ).map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, ticket_id)?;
+    if ticket.revision != expected_revision {
+        return Err("Demand changed before native coordinated dispatch; refresh and confirm again.".into());
+    }
     if ticket.state != "queued" || ticket.active_assignment_id.is_some() {
         return Err("Coordinator has not produced a current, dispatchable plan.".into());
     }
@@ -5678,6 +5748,7 @@ fn prepare_coordinated_worker(
     if busy || occupied {
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
     }
+    let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
     let next_attempt: i64 = store.db.query_row(
         "SELECT COALESCE(MAX(attempt),0)+1 FROM sa_assignments WHERE ticket_id=?1",
         [ticket_id], |r| r.get(0),
@@ -5703,8 +5774,9 @@ fn prepare_coordinated_worker(
          VALUES(?1,'worker_admitted','manual dispatch after coordinator evidence',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok((get_ticket(store,ticket_id)?,thread,worker.id,plan))
+    Ok((get_ticket(store,ticket_id)?,thread,worker.id,format!("{plan}{work_context}")))
 }
 
 #[tauri::command]
@@ -5745,6 +5817,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
 #[tauri::command]
 pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_, AppState>, ticket_id: String,
+    expected_revision: i64,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
     let (ticket,thread,worker_id,plan) = {
@@ -5755,7 +5828,7 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
         let ticket = get_ticket(&store, &ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
         let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
-        prepare_coordinated_worker(&mut store,&ticket_id,busy)?
+        prepare_coordinated_worker_at_revision(&mut store,&ticket_id,expected_revision,busy)?
     };
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id, channel_id: CHANNEL.into(), thread,
@@ -5777,9 +5850,10 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
 #[tauri::command]
 pub async fn superagent_retry(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
+    expected_revision: i64,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id)={
+    let (ticket,thread,worker_id,work_context)={
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
@@ -5787,7 +5861,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         let ticket = get_ticket(&store, &ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
         let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
-        retry_blocked(&mut store,&ticket_id,busy)?
+        retry_blocked_at_revision(&mut store,&ticket_id,expected_revision,busy)?
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id,
@@ -5795,7 +5869,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         thread,
         sender_id: "local-user".into(),
         sender_name: "Manual retry".into(),
-        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        text: format!("SuperAgent ticket {} (manual retry)\n\n{}{work_context}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
         trusted: true,
         image_ids: None,
         moodboard_ids: None,
@@ -14458,6 +14532,83 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn coordinated_dispatch_pins_operator_work_item_context_and_rejects_stale_confirmation() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &cfg.id, "Inspect the original project", "planned-dispatch", false, true,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Coordinator evidence").unwrap());
+        let before = get_ticket(&store, &ticket.id).unwrap();
+        let active = work_items::plan(
+            &store, &ticket.id, before.revision, "active-plan", "Inspect the unit tests", None,
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let removed = work_items::plan(
+            &store, &ticket.id, revision, "removed-plan", "Cancelled private note", None,
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        work_items::cancel(&store, &ticket.id, revision, &removed.id, "cancel-plan").unwrap();
+        assert!(prepare_coordinated_worker_at_revision(
+            &mut store, &ticket.id, before.revision, false,
+        ).unwrap_err().contains("changed before native"));
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
+        let current = get_ticket(&store, &ticket.id).unwrap();
+        let (running, _, _, packet) = prepare_coordinated_worker_at_revision(
+            &mut store, &ticket.id, current.revision, false,
+        ).unwrap();
+        assert!(packet.contains("Coordinator evidence"));
+        assert!(packet.contains("Inspect the unit tests"));
+        assert!(packet.contains(active.id.as_str()));
+        assert!(!packet.contains("Cancelled private note"));
+        assert!(!packet.contains(removed.id.as_str()));
+        let receipt: String = store.db.query_row(
+            "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='worker_plan_context_admitted'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(receipt["assignmentId"].as_str(), running.active_assignment_id.as_deref());
+        assert_eq!(receipt["confirmedRevision"].as_i64(), Some(current.revision));
+        assert_eq!(receipt["workItemIds"], serde_json::json!([active.id]));
+        let worker_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &worker_session).unwrap().is_some());
+        assert_eq!(work_items::list(&store, &ticket.id, 100).unwrap().0.iter()
+            .filter(|item| item.state == "planned").count(), 1);
+    }
+
+    #[test]
+    fn manual_retry_pins_revision_and_operator_plan_without_widening_mandate() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Inspect original scope", "planned-retry", true,
+        ).unwrap();
+        assert!(!started);
+        let item = work_items::plan(
+            &store, &ticket.id, ticket.revision, "retry-plan", "Inspect failing tests", None,
+        ).unwrap();
+        assert!(retry_blocked_at_revision(
+            &mut store, &ticket.id, ticket.revision, false,
+        ).unwrap_err().contains("changed before native"));
+        assert!(assignments(&store, &ticket.id, 10).unwrap().is_empty());
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let (running, _, _, packet) = retry_blocked_at_revision(
+            &mut store, &ticket.id, revision, false,
+        ).unwrap();
+        assert!(packet.contains("Inspect failing tests"));
+        assert!(packet.contains(item.id.as_str()));
+        assert!(running.active_assignment_id.is_some());
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(retry_blocked_at_revision(
+            &mut store, &ticket.id, revision, false,
+        ).is_err());
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
     }
 
     #[test]

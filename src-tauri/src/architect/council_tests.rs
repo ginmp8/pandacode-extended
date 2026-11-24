@@ -7440,6 +7440,153 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
 }
 
 #[test]
+fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
+    // Use an actual file-backed database; in-memory interruption simulations
+    // do not exercise Store::open recovery of both sessions and Architect teams.
+    let directory = std::env::temp_dir().join(format!(
+        "pandacode-nested-council-recover-{}", uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("state.sqlite");
+    let (sid, launch, sibling_launch) = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&directory).unwrap();
+        let session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
+        for bot in ["restart-security", "restart-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project.id, storage::now()],
+            ).unwrap();
+        }
+        let mut council = on(9.0, 3, 0);
+        council.nested_bot_reviewers = ["restart-security", "restart-architecture"]
+            .iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        council.validate().unwrap();
+        let mut team_config = config();
+        team_config.council = Some(council);
+        let mut root = new_team(session.id.clone(), team_config);
+        save(&store, &mut root).unwrap();
+        let state = AppState {
+            store: Arc::new(std::sync::Mutex::new(store)),
+            agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            shutdown: std::sync::atomic::AtomicU8::new(0),
+        };
+        let (started, _) = start_state(
+            &state, &session.id, "Review the frozen artifact", None, None,
+        ).unwrap();
+        let (result, _) = dispatch_state(
+            &state, &session.id, started.generation, "pandacode_finish_team",
+            json!({"summary":"Begin real nested review"}),
+            &std::sync::atomic::AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(result["completed"], false);
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        // Start a reviewer in the second child as well, so reopening SQLite
+        // must revoke both independently owned child sessions and callbacks.
+        let sibling_launch = (0..3)
+            .filter_map(|_| next_action_state(&state, &mut |_| {}).unwrap())
+            .find(|candidate| candidate.admission.parent != launch.admission.parent)
+            .expect("the second native child must have an independently launched reviewer");
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                parent_of(&store, &launch.admission.parent).unwrap().as_deref(),
+                Some(session.id.as_str())
+            );
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+            child_council::authorize_leaf(&store, &sibling_launch.sid, &sibling_launch.admission).unwrap();
+            assert_ne!(launch.admission.parent, sibling_launch.admission.parent);
+            // Keep one coordinator idle and mark the other interrupted
+            // by the actual restart. Every started leaf has native work.
+            store.db.execute("UPDATE sessions SET status='running' WHERE id=?1",
+                [&session.id]).unwrap();
+            store.db.execute("UPDATE sessions SET status='running' WHERE id=?1",
+                [&sibling_launch.admission.parent]).unwrap();
+            for child_id in [&launch.admission.parent, &sibling_launch.admission.parent] {
+                let child = load(&store, child_id).unwrap().unwrap();
+                for leaf in &child.workers {
+                    if leaf.council.as_ref().unwrap().started_at > 0 {
+                        store.db.execute("UPDATE sessions SET status='running' WHERE id=?1",
+                            [&leaf.session_id]).unwrap();
+                    }
+                }
+            }
+        }
+        (session.id, launch, sibling_launch)
+    };
+    let reopened = Store::open(&path).unwrap();
+    let root = load(&reopened, &sid).unwrap().unwrap();
+    assert_eq!(root.status, "interrupted");
+    let before_root = serde_json::to_value(&root).unwrap();
+    let old_children = [&launch.admission.parent, &sibling_launch.admission.parent];
+    let old_teams = old_children.iter().map(|id|
+        load(&reopened, id).unwrap().unwrap()).collect::<Vec<_>>();
+    let old_leaves = old_teams.iter().flat_map(|team|
+        team.workers.iter().map(|leaf| leaf.session_id.clone())).collect::<Vec<_>>();
+    assert!(old_teams.iter().all(|team| team.status == "interrupted"));
+    // A user-stopped native leaf is not proof of restart revocation.
+    // The transaction must roll back all replacements.
+    reopened.db.execute("UPDATE sessions SET restart_interrupted=0 WHERE id=?1",
+        [&sibling_launch.sid]).unwrap();
+    let denied = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+    assert!(denied.contains("no confirmed physical restart"), "{denied}");
+    for id in old_children {
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+    reopened.db.execute("UPDATE sessions SET restart_interrupted=1 WHERE id=?1",
+        [&sibling_launch.sid]).unwrap();
+    assert_eq!(child_council::recover_interrupted_children(&reopened, &root).unwrap(), 2);
+    assert_eq!(serde_json::to_value(load(&reopened, &sid).unwrap().unwrap()).unwrap(),
+        before_root);
+    for (id, old_team) in old_children.iter().zip(&old_teams) {
+        assert_eq!(serde_json::to_value(load(&reopened, id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(old_team).unwrap());
+    }
+    for id in &old_leaves {
+        assert!(parent_of(&reopened, id).unwrap().is_none());
+    }
+    let state = AppState {
+        store: Arc::new(std::sync::Mutex::new(reopened)),
+        agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        shutdown: std::sync::atomic::AtomicU8::new(0),
+    };
+    let resumed = control_state(&state, &sid, "resume").unwrap();
+    assert_eq!(resumed.council_since, root.council_since);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sid]).unwrap();
+    }
+    let (pending, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"Admit new independent reviewers after restart"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let fresh = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert!(!old_leaves.contains(&fresh.sid));
+    let before_callbacks = serde_json::to_value(saved(&state, &sid)).unwrap();
+    for old in [&launch, &sibling_launch] {
+        completed_state(&state, &old.sid, Some(&old.admission), true, false, &mut |_| {});
+    }
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_callbacks);
+    {
+        let store = state.store.lock().unwrap();
+        child_council::authorize_leaf(&store, &fresh.sid, &fresh.admission).unwrap();
+    }
+    drop(state);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.

@@ -678,8 +678,33 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             "child_council_recovery_denied: required frozen child reservation is missing."
         )?;
         let old = store.session(&old_id)?;
-        let old_team = super::load(store, &old_id)?
+        let mut old_team = super::load(store, &old_id)?
             .ok_or("child_council_recovery_denied: child state is missing.")?;
+        // Store::open advances both Architect generations and stops running
+        // workers. Recover the original issuance shape only in this local
+        // validation copy; never persist or reactivate the old grants.
+        let physical_restart = root.status == "interrupted"
+            && root.error.as_deref() == Some("PandaCode restarted. Resume explicitly to continue.")
+            && old_team.status == "interrupted"
+            && old_team.error == root.error
+            && old_team.generation == root.generation
+            && old_team.generation > 0
+            && matches!(old.status.as_str(), "idle" | "interrupted")
+            && store.db.query_row(
+                "SELECT restart_interrupted FROM sessions WHERE id=?1",
+                [&root.session_id], |row| row.get::<_, i64>(0),
+            ).map_err(|e| e.to_string())? == 1;
+        if physical_restart {
+            old_team.status = "running".into();
+            old_team.generation -= 1;
+            for leaf in &mut old_team.workers {
+                if leaf.status == "stopped" && leaf.council.as_ref()
+                    .is_some_and(|seat| seat.started_at > 0)
+                {
+                    leaf.status = "running".into();
+                }
+            }
+        }
         // A paused root has a newer generation than its admitted child.
         // Once every provider process has stopped, fresh task-scoped grants
         // may replace an unfinished child without reviving the old attempt.
@@ -687,7 +712,9 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             && old.status != "interrupted"
             && old_team.status == "running"
             && old_team.generation < root.generation;
-        if !matches!(old.status.as_str(), "interrupted" | "error") && !stale_paused_child {
+        if !matches!(old.status.as_str(), "interrupted" | "error")
+            && !stale_paused_child && !physical_restart
+        {
             continue;
         }
         // A paused root snapshot is not proof that its child coordinator's
@@ -816,6 +843,15 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 // An unpaused abrupt crash cannot be inferred solely from
                 // persisted worker status. Every started leaf must have a
                 // separately interrupted native session, not an active host.
+                if physical_restart && started {
+                    let interrupted_by_restart: i64 = store.db.query_row(
+                        "SELECT restart_interrupted FROM sessions WHERE id=?1",
+                        [&leaf.session_id], |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if session.status != "interrupted" || interrupted_by_restart != 1 {
+                        return Err("child_council_recovery_denied: started leaf has no confirmed physical restart.".into());
+                    }
+                }
                 if root.status == "interrupted" && started
                     && !matches!(session.status.as_str(), "interrupted" | "error")
                 {

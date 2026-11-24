@@ -4233,7 +4233,12 @@ pub(crate) fn guard_run_admission(
     Ok(())
 }
 
-fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
+fn fail_launch(store: &Store, ticket: &Ticket, reason: &str) -> Result<()> {
+    // The caller carries the admitted Ticket snapshot across gateway IO.
+    // A delayed failure must not settle a successor admitted during recovery.
+    let ticket_id = &ticket.id;
+    let assignment_id = ticket.active_assignment_id.as_deref()
+        .ok_or("SuperAgent launch has no admitted assignment.")?;
     // A failed gateway launch must release the worker lease, change the ticket
     // and retain its audit receipt atomically. An audit/storage failure cannot
     // leave a partially failed assignment or silently permit a second worker.
@@ -4242,9 +4247,10 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     let detail = reason.chars().take(500).collect::<String>();
     let assignment = tx.execute(
         "UPDATE sa_assignments SET state='failed',updated_at=?2,result=?3
-         WHERE id=(SELECT active_assignment_id FROM sa_tickets
+         WHERE id=?4 AND ticket_id=?1
+           AND id=(SELECT active_assignment_id FROM sa_tickets
                    WHERE id=?1 AND state='running') AND state='running'",
-        params![ticket_id, now, &detail],
+        params![ticket_id, now, &detail, assignment_id],
     ).map_err(|e| e.to_string())?;
     if assignment != 1 {
         return Err("SuperAgent launch failure no longer owns an active assignment.".into());
@@ -4252,8 +4258,8 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     let ticket = tx.execute(
         "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,
          revision=revision+1,updated_at=?2
-         WHERE id=?1 AND state='running' AND active_assignment_id IS NOT NULL",
-        params![ticket_id, now],
+         WHERE id=?1 AND state='running' AND active_assignment_id=?3",
+        params![ticket_id, now, assignment_id],
     ).map_err(|e| e.to_string())?;
     if ticket != 1 {
         return Err("SuperAgent ticket changed before launch failure settlement.".into());
@@ -5427,7 +5433,7 @@ pub async fn superagent_submit_to_worker(
         image_ids:None,moodboard_ids:None,
     }).await;
     if let Err(error)=delivered {
-        if let Ok(store)=state.store.lock() {let _=fail_launch(&store,&ticket.id,&error);}
+        if let Ok(store)=state.store.lock() {let _=fail_launch(&store,&ticket,&error);}
         return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
     }
     let store=state.store.lock().map_err(|e|e.to_string())?;
@@ -5466,7 +5472,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
         },
     ).await;
     if let Err(error) = delivered {
-        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket.id,&error); }
+        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket,&error); }
         return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -5807,7 +5813,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
         trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
     if let Err(error) = delivered {
-        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket.id,&error); }
+        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket,&error); }
         return Err(format!("Coordinator dispatch failed; ticket {} retained: {error}",ticket.id));
     }
     let store = state.store.lock().map_err(|e|e.to_string())?;
@@ -5840,7 +5846,7 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
         trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
     if let Err(error) = delivered {
-        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket.id,&error); }
+        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket,&error); }
         return Err(format!("Worker dispatch failed; ticket {} retained: {error}",ticket.id));
     }
     let store = state.store.lock().map_err(|e|e.to_string())?;
@@ -5875,7 +5881,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         moodboard_ids: None,
     }).await;
     if let Err(error)=delivered {
-        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket.id,&error); }
+        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket,&error); }
         return Err(format!("Retry dispatch failed; ticket {} retained: {error}",ticket.id));
     }
     let store=state.store.lock().map_err(|e|e.to_string())?;
@@ -6405,7 +6411,7 @@ mod tests {
         let (ticket,started)=admit(&mut store,&disabled.id,"Budgeted Worker","worker-attempt-budget-one",false).unwrap();
         assert!(started);
         assert_eq!(roster::ticket_worker_attempt_limit(&store,&ticket.id).unwrap(),1);
-        fail_launch(&store,&ticket.id,"test provider unavailable").unwrap();
+        fail_launch(&store,&ticket,"test provider unavailable").unwrap();
         let sessions_before:i64=store.db.query_row(
             "SELECT COUNT(*) FROM sessions",[],|r|r.get(0),
         ).unwrap();
@@ -14254,12 +14260,12 @@ mod tests {
         let mut store=fixture();
         let cfg=enabled(&store);
         let (first,_)=admit(&mut store,&cfg.id,"Recover once","recover-1",false).unwrap();
-        fail_launch(&store,&first.id,"provider unavailable").unwrap();
+        fail_launch(&store,&first,"provider unavailable").unwrap();
         let (retried,_,_)=retry_blocked(&mut store,&first.id,false).unwrap();
         assert_eq!(retried.state,"running");
         let sid=assignment_session(&store,&first.id).unwrap().unwrap();
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
-        fail_launch(&store,&first.id,"provider unavailable again").unwrap();
+        fail_launch(&store,&retried,"provider unavailable again").unwrap();
         assert!(retry_blocked(&mut store,&first.id,false).is_err());
         let allowed:i64=store.db.query_row(
             "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
@@ -14370,7 +14376,7 @@ mod tests {
              WHEN NEW.kind='launch_failed'
              BEGIN SELECT RAISE(ABORT,'injected launch audit failure'); END;"
         ).unwrap();
-        assert!(fail_launch(&store, &ticket.id, "temporary provider failure").is_err());
+        assert!(fail_launch(&store, &ticket, "temporary provider failure").is_err());
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
         assert_eq!(assignment_session(&store, &ticket.id).unwrap(), Some(session.clone()));
         assert!(read_only_policy(&store, &session).unwrap().is_some());
@@ -14379,10 +14385,10 @@ mod tests {
         ).unwrap();
         assert_eq!(pending, "running");
         store.db.execute_batch("DROP TRIGGER reject_sa_launch_audit").unwrap();
-        fail_launch(&store, &ticket.id, "temporary provider failure").unwrap();
+        fail_launch(&store, &ticket, "temporary provider failure").unwrap();
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
         assert!(assignment_session(&store, &ticket.id).unwrap().is_none());
-        assert!(fail_launch(&store, &ticket.id, "stale duplicate").is_err());
+        assert!(fail_launch(&store, &ticket, "stale duplicate").is_err());
         let failures: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='launch_failed'",
             [&ticket.id], |r| r.get(0),
@@ -14391,6 +14397,45 @@ mod tests {
         let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
+    }
+
+    #[test]
+    fn delayed_launch_failure_cannot_settle_a_successor_assignment() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (original, launched) = admit(
+            &mut store, &cfg.id, "Inspect project", "late-launch-failure", false,
+        ).unwrap();
+        assert!(launched);
+        let old_session = assignment_session(&store, &original.id).unwrap().unwrap();
+        fail_launch(&store, &original, "original dispatch failed").unwrap();
+        let (successor, _, _) = retry_blocked(&mut store, &original.id, false).unwrap();
+        let session = assignment_session(&store, &original.id).unwrap().unwrap();
+        assert_ne!(original.active_assignment_id, successor.active_assignment_id);
+        assert_ne!(old_session, session);
+
+        // Simulate the late error on a separate connection, as a delayed
+        // gateway response may arrive after operator recovery has re-admitted.
+        let other = open_headless_transition_store(&store.path).unwrap();
+        assert!(fail_launch(&other, &original, "late duplicate failure").is_err());
+        let current = get_ticket(&other, &original.id).unwrap();
+        assert_eq!(current.state, "running");
+        assert_eq!(current.revision, successor.revision);
+        assert_eq!(current.active_assignment_id, successor.active_assignment_id);
+        assert_eq!(assignment_session(&other, &original.id).unwrap(), Some(session.clone()));
+        assert!(read_only_policy(&other, &session).unwrap().is_some());
+        assert!(!on_run_finished(&other, &old_session, true, "late result").unwrap());
+        let failures: i64 = other.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='launch_failed'",
+            [&original.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(failures, 1);
+        assert!(on_run_finished(&other, &session, true, "current evidence").unwrap());
+        let settled = get_ticket(&store, &original.id).unwrap();
+        assert_eq!(settled.state, "waiting_approval");
+        assert_eq!(settled.evidence.as_deref(), Some("current evidence"));
+        assert!(fail_launch(&store, &successor, "late after settlement").is_err());
+        assert_eq!(get_ticket(&store, &original.id).unwrap().revision, settled.revision);
     }
 
     #[test]
@@ -14433,7 +14478,7 @@ mod tests {
         ).unwrap();
         assert!(launched);
         let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
-        fail_launch(&store, &ticket.id, "provider unavailable").unwrap();
+        fail_launch(&store, &ticket, "provider unavailable").unwrap();
         let (_, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert_ne!(first_session, second_session);
@@ -14696,7 +14741,7 @@ mod tests {
         let (ticket, _) = admit_role(
             &mut store,&cfg.id,"Refuse bypass","coord-fail",false,true,
         ).unwrap();
-        fail_launch(&store,&ticket.id,"Coordinator unavailable").unwrap();
+        fail_launch(&store,&ticket,"Coordinator unavailable").unwrap();
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
         assert!(retry_blocked(&mut store,&ticket.id,false).is_err());
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
@@ -14751,7 +14796,7 @@ mod tests {
             &store, &native, std::slice::from_ref(&ordinary.id),
         ).is_err());
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
-        fail_launch(&store, &ticket.id, "No concurrent checkout access").unwrap();
+        fail_launch(&store, &ticket, "No concurrent checkout access").unwrap();
     }
 
     #[test]
@@ -15021,7 +15066,7 @@ mod tests {
             &store, &native_session, std::slice::from_ref(&old_session),
         ).is_err());
         assert!(guard_run_admission(&store, &old_session, &[]).is_err());
-        fail_launch(&store, &ticket.id, "Release exclusive bot lease").unwrap();
+        fail_launch(&store, &ticket, "Release exclusive bot lease").unwrap();
         assert!(guard_run_admission(&store, &old_session, &[]).is_ok());
     }
 
@@ -15050,7 +15095,7 @@ mod tests {
         assert!(guard_run_admission(
             &store, &superagent_session, std::slice::from_ref(&ordinary.id),
         ).is_err());
-        fail_launch(&store, &ticket.id, "leave the project untouched").unwrap();
+        fail_launch(&store, &ticket, "leave the project untouched").unwrap();
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_session, &[]).is_ok());
         assert!(guard_run_admission(&store, &superagent_session, &[]).is_err());
@@ -15470,7 +15515,7 @@ mod tests {
             params![blocked.id,unrelated_session.id,storage::now()],
         );
         assert!(bypass.is_err());
-        fail_launch(&store, &coordinated.id, "coordinator stopped").unwrap();
+        fail_launch(&store, &coordinated, "coordinator stopped").unwrap();
         let (retried, _, worker) = retry_blocked(&mut store, &blocked.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_eq!(worker, "other-worker");
@@ -15538,7 +15583,7 @@ mod tests {
         ).unwrap();
         assert_eq!(before, after, "Denied admission must not create an assignment");
 
-        fail_launch(&store, &foreign_ticket.id, "Coordinator cancelled").unwrap();
+        fail_launch(&store, &foreign_ticket, "Coordinator cancelled").unwrap();
         let (dispatched, _, worker_id, _) = prepare_coordinated_worker(
             &mut store, &ticket.id, false,
         ).unwrap();
@@ -15584,7 +15629,7 @@ mod tests {
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
 
-        fail_launch(&store, &ticket.id, "original coordinator session disappeared").unwrap();
+        fail_launch(&store, &ticket, "original coordinator session disappeared").unwrap();
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
     }

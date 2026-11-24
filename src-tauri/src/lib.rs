@@ -3813,9 +3813,9 @@ async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Resu
         (project_id, task_request, root)
     };
     let checked_root = root.clone();
-    let has_native_task = task_request.is_some();
-    let mut report = blocking(move || Ok(if has_native_task {
-        checks::turn_report_for_native_task(&root)
+    let native_request_id = task_request.as_ref().map(|request| request.request_id.clone());
+    let mut report = blocking(move || Ok(if let Some(request_id) = native_request_id.as_deref() {
+        checks::turn_report_for_native_task(&root, request_id)
     } else {
         checks::turn_report(&root)
     })).await?;

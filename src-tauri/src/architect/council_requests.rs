@@ -732,6 +732,12 @@ pub(crate) fn record_native_host_check(
     }
     let observed = report.get("hostObservation")
         .ok_or("council_task_denied: no completed native check observation.")?;
+    if observed["nativeRequestId"].as_str() != Some(request.request_id.as_str()) {
+        return Err("council_task_denied: host check belongs to a different native request.".into());
+    }
+    let observation_id = observed["observationId"].as_str()
+        .filter(|id| super::valid_id(id))
+        .ok_or("council_task_denied: native execution observation identity is missing or invalid.")?;
     let check_name = observed["name"].as_str()
         .ok_or("council_task_denied: check name is missing.")?;
     let manifest_sha256 = observed["manifestSha256"].as_str()
@@ -756,7 +762,7 @@ pub(crate) fn record_native_host_check(
         return Err("council_task_denied: native check provenance is inconsistent.".into());
     }
     let receipt = NativeTaskHostCheckReceipt {
-        schema_version: 2, observation_id: storage::id(),
+        schema_version: 2, observation_id: observation_id.to_owned(),
         request_id: request.request_id.clone(),
         session_id: request.session_id.clone(),
         cycle_id: request.cycle_id.clone(),
@@ -774,6 +780,13 @@ pub(crate) fn record_native_host_check(
     if record.request != *request || record.receipt.is_some() {
         return Err("council_task_stale: task has changed or already settled.".into());
     }
+    if let Some(existing) = record.host_checks.iter().find(|check|
+        check.observation_id == receipt.observation_id)
+    {
+        return if existing == &receipt { Ok(existing.clone()) } else {
+            Err("council_task_conflict: observation identity has different native execution evidence.".into())
+        };
+    }
     if record.host_checks.len() >= 16 {
         return Err("council_task_denied: maximum retained native checks reached.".into());
     }
@@ -786,6 +799,14 @@ pub(crate) fn record_native_host_check(
         params![updated, &request.session_id, native_task_key(&request.assignment_key)?, old],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
+        // An identical retry may have won on another SQLite connection.
+        let winner = inspect_native_task(
+            store, &request.session_id, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        )?;
+        if winner.host_checks.iter().any(|check| check == &receipt) {
+            return Ok(receipt);
+        }
         return Err("council_task_conflict: concurrent native task receipt change.".into());
     }
     Ok(receipt)

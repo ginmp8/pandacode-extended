@@ -187,11 +187,15 @@ pub(crate) fn turn_report(root: &Path) -> Value {
 
 /// Only admitted native Council tasks pay for a bounded source snapshot.
 /// Ordinary turn checks retain their existing manifest-only behavior.
-pub(crate) fn turn_report_for_native_task(root: &Path) -> Value {
+pub(crate) fn turn_report_for_native_task(root: &Path, request_id: &str) -> Value {
     let Some(plan) = plan(root) else {
         return json!({"checked": false, "reason": NO_PLAN});
     };
-    report_for_plan_inner(root, &plan, true)
+    let mut report = report_for_plan_inner(root, &plan, true);
+    if let Some(observation) = report.get_mut("hostObservation") {
+        observation["nativeRequestId"] = json!(request_id);
+    }
+    report
 }
 
 /// Only the existing, explicitly enabled host path invokes this runner.
@@ -235,6 +239,8 @@ fn report_for_plan_inner(root: &Path, plan: &Plan, snapshot_sources: bool) -> Va
                     });
                     if let Some(source) = source {
                         report["hostObservation"]["sourceSnapshotSha256"] = json!(source);
+                        // Identity belongs to the completed execution, not a later persistence attempt.
+                        report["hostObservation"]["observationId"] = json!(crate::storage::id());
                     }
                 }
             }
@@ -438,6 +444,10 @@ mod tests {
         assert_eq!(original.len(), 64);
         let repeated = report_for_plan_inner(root, &plan, true);
         assert_eq!(repeated["hostObservation"]["sourceSnapshotSha256"], original);
+        assert!(first["hostObservation"]["observationId"].as_str().is_some());
+        assert!(repeated["hostObservation"]["observationId"].as_str().is_some());
+        assert_ne!(first["hostObservation"]["observationId"], repeated["hostObservation"]["observationId"],
+            "separate native executions must have distinct observation identities");
 
         // The process completed, but it changed what was under review.
         fs::write(root.join("mutate-source"), "yes").unwrap();

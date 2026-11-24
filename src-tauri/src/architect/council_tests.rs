@@ -8516,6 +8516,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             "kind": "manifest_declared_check", "name": "cargo check",
             "manifestSha256": "a".repeat(64),
             "observedAt": storage::now(), "passed": true,
+            "observationId": storage::id(), "nativeRequestId": request.request_id.clone(),
             "outputTruncated": false, "provenance": "native_host",
             "scope": "bounded_source_snapshot_not_full_artifact_verification",
             "sourceSnapshotSha256": "b".repeat(64)
@@ -8544,7 +8545,23 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     forged = observed.clone();
     forged["hostObservation"]["manifestSha256"] = json!("invalid-digest");
     assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err());
+    // Retrying persistence must not mint another execution or consume capacity.
+    assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+    let mut conflicting_replay = observed.clone();
+    conflicting_replay["hostObservation"]["sourceSnapshotSha256"] = json!("d".repeat(64));
+    assert!(council_requests::record_native_host_check(&store, &request, &conflicting_replay)
+        .unwrap_err().contains("observation identity"));
+    let mut foreign = observed.clone();
+    foreign["hostObservation"]["nativeRequestId"] = json!(storage::id());
+    assert!(council_requests::record_native_host_check(&store, &request, &foreign).is_err());
+    let mut missing_id = observed.clone();
+    missing_id["hostObservation"].as_object_mut().unwrap().remove("observationId");
+    assert!(council_requests::record_native_host_check(&store, &request, &missing_id).is_err());
+    assert_eq!(council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).unwrap().host_checks, vec![receipt.clone()]);
     let mut bounded = observed.clone();
+    bounded["hostObservation"]["observationId"] = json!(storage::id());
     bounded["hostObservation"]["scope"] =
         json!("bounded_source_snapshot_not_full_artifact_verification");
     bounded["hostObservation"]["sourceSnapshotSha256"] = json!("c".repeat(64));

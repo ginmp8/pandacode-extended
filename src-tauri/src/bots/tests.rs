@@ -857,6 +857,46 @@ fn an_approved_council_with_no_text_still_posts_one_truthful_final_result() {
         params![delivery_id,cycle,crate::storage::now()],
     ).unwrap();
     assert_eq!(channel_council_outcome(&f.store,&session_id).unwrap(),ChannelCouncilOutcome::Approved);
+    // A valid native approval is scoped to the entire durable delivery tuple,
+    // not just the session and delivery IDs supplied by a callback.
+    let foreign_bot = create(&f.store, &input("Foreign"), &f.root).unwrap();
+    let foreign_channel = shared_channels::create(
+        &f.store, "foreign-council-destination", std::slice::from_ref(&foreign_bot.id),
+    ).unwrap();
+    let foreign_message = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Foreign objective','in_progress',?3)",
+        params![foreign_message,foreign_channel.id,crate::storage::now()],
+    ).unwrap();
+    for (destination, source, author) in [
+        (foreign_channel.id.as_str(), message_id.as_str(), executor.id.as_str()),
+        (channel.id.as_str(), foreign_message.as_str(), executor.id.as_str()),
+        (channel.id.as_str(), message_id.as_str(), foreign_bot.id.as_str()),
+    ] {
+        assert_eq!(
+            shared_channels::settle_channel_delivery(
+                &f.store, &session_id, (&delivery_id, destination, source, author),
+                true, "Private Council result",
+            ).unwrap(), None,
+            "a mismatched delivery identity must not consume the valid approval",
+        );
+        let status: String = f.store.db.query_row(
+            "SELECT status FROM bot_shared_channel_deliveries WHERE id=?1",
+            [&delivery_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(status, "in_progress");
+        let replies: i64 = f.store.db.query_row(
+            "SELECT COUNT(*) FROM bot_shared_channel_messages WHERE kind='reply' AND channel_id IN (?1,?2)",
+            params![channel.id,foreign_channel.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(replies, 0, "foreign callback must not disclose the private result");
+        let receipts: i64 = f.store.db.query_row(
+            "SELECT COUNT(*) FROM extended_council_task_receipts WHERE delivery_id=?1",
+            [&delivery_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(receipts, 0);
+    }
     assert_eq!(
         shared_channels::settle_channel_delivery(
             &f.store, &session_id,

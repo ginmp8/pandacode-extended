@@ -1066,8 +1066,10 @@ pub(super) fn settle_channel_delivery(
     let approved = successful && !denied;
     let changed = store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3
-         WHERE id=?1 AND session_id=?4 AND status='in_progress'",
-        params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id],
+         WHERE id=?1 AND session_id=?4 AND status='in_progress'
+           AND channel_id=?5 AND message_id=?6 AND bot_id=?7",
+        params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id,
+            channel_id,message_id,bot_id],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Ok(None); }
     if approved && matches!(gate, super::ChannelCouncilOutcome::Approved) {

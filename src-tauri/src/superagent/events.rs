@@ -2620,6 +2620,28 @@ fn linked_pr_check_source(store: &Store, source_id: &str, ticket_id: &str,
     Ok(selected)
 }
 
+/// Freeze local correlation before authenticated network IO. A source policy
+/// revision alone cannot detect a Ticket revision change or unlink/relink ABA.
+struct LinkedPrCheckContext {
+    source: EventSource,
+    ticket_id: String,
+    pull_key: String,
+    revision_and_links: (i64, i64),
+}
+
+fn linked_pr_check_context(store: &Store, source_id: &str, ticket_id: &str,
+    pull_key: &str) -> Result<LinkedPrCheckContext>
+{
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let source = linked_pr_check_source(store, source_id, ticket_id, pull_key)?;
+    let revision_and_links = issue_pull_context_fence(store, ticket_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(LinkedPrCheckContext {
+        source, ticket_id: ticket_id.into(), pull_key: pull_key.into(),
+        revision_and_links,
+    })
+}
+
 const LINKED_PR_CHECK_LIMIT: usize = 100;
 
 // A complete PR Check Run batch is a single validated observation result.
@@ -2789,21 +2811,31 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
 /// A later conflicting replay, source revocation or exhausted receipt capacity
 /// rolls back earlier receipts and their cursor/audit entries in this batch.
 fn observe_linked_pr_check_batch(
-    store: &Store, selected: &EventSource,
-    ticket_id: &str, pull_key: &str,
+    store: &Store, context: &LinkedPrCheckContext,
     runs: &[(i64, serde_json::Value)], signed_in: &str, repository_id: u64,
 ) -> Result<(usize, usize)> {
     if runs.len() > LINKED_PR_CHECK_LIMIT {
         return Err("Linked PR Check batch exceeds the native limit.".into());
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let current = linked_pr_check_source(store, &selected.id, ticket_id, pull_key)?;
+    let selected = &context.source;
+    let current = linked_pr_check_source(
+        store, &selected.id, &context.ticket_id, &context.pull_key,
+    )?;
     if current.policy_revision != selected.policy_revision {
         return Err("Linked PR Check source policy changed during authenticated fetch.".into());
+    }
+    if issue_pull_context_fence(store, &context.ticket_id)? != context.revision_and_links {
+        return Err("Ticket revision or source links changed during authenticated Check fetch.".into());
     }
     let mut observed = 0;
     let mut duplicates = 0;
     for (id, raw) in runs {
+        if authenticated_check_run(&current, raw, *id, 1, repository_id)?.subject_key
+            != context.pull_key
+        {
+            return Err("Authenticated Check Run belongs to a different linked PR.".into());
+        }
         let receipt = observe_authenticated_check_run_in_tx(
             store, &tx, selected, *id, raw, signed_in, repository_id,
         )?;
@@ -2819,16 +2851,18 @@ fn observe_linked_pr_check_batch(
 pub(crate) fn headless_observe_linked_pr_checks(
     path: &std::path::Path, source_id: &str, ticket_id: &str, pull_key: &str,
 ) -> Result<String> {
-    let store = super::open_headless_transition_store(path)?;
-    let selected = linked_pr_check_source(&store, source_id, ticket_id, pull_key)?;
+    let context = {
+        let store = Store::open_read_only(path)?;
+        linked_pr_check_context(&store, source_id, ticket_id, pull_key)?
+    };
     let (signed_in, pull, listing, repository_id) =
-        fetch_authenticated_linked_pr_checks(&selected.repository, pull_key)?;
+        fetch_authenticated_linked_pr_checks(&context.source.repository, pull_key)?;
     let (head_sha, runs, pending) = authenticated_linked_pr_checks(
-        &selected, repository_id, pull_key, &pull, &listing,
+        &context.source, repository_id, pull_key, &pull, &listing,
     )?;
+    let store = super::open_headless_transition_store(path)?;
     let (observed, duplicates) = observe_linked_pr_check_batch(
-        &store, &selected, ticket_id, pull_key,
-        &runs, &signed_in, repository_id,
+        &store, &context, &runs, &signed_in, repository_id,
     )?;
     serde_json::to_string_pretty(&serde_json::json!({
         "sourceId":source_id, "ticketId":ticket_id, "pullKey":pull_key,
@@ -5880,15 +5914,17 @@ mod tests {
         let rejected = vec![(90, first.clone()), (91, conflict)];
         // A caller cannot substitute an unrelated source identity during
         // an already-linked, authenticated Check Run observation batch.
-        let wrong_source = EventSource { id: "foreign-source".into(), ..active.clone() };
+        let wrong_context = LinkedPrCheckContext {
+            source: EventSource { id: "foreign-source".into(), ..active.clone() },
+            ..linked_pr_check_context(&store, &active.id, "batch-ticket", "pull:42").unwrap()
+        };
+        let context = linked_pr_check_context(&store, &active.id, "batch-ticket", "pull:42").unwrap();
         assert!(observe_linked_pr_check_batch(
-            &store, &wrong_source, "batch-ticket", "pull:42",
-            &rejected, "local-operator", 900,
+            &store, &wrong_context, &rejected, "local-operator", 900,
         ).is_err());
         assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
         assert!(observe_linked_pr_check_batch(
-            &store, &active, "batch-ticket", "pull:42",
-            &rejected, "local-operator", 900,
+            &store, &context, &rejected, "local-operator", 900,
         ).is_err());
         assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
         assert_eq!(source(&store, &active.id).unwrap().last_sequence, 1);
@@ -5896,8 +5932,7 @@ mod tests {
 
         let valid = vec![(90, first), (91, previous)];
         assert_eq!(observe_linked_pr_check_batch(
-            &store, &active, "batch-ticket", "pull:42",
-            &valid, "local-operator", 900,
+            &store, &context, &valid, "local-operator", 900,
         ).unwrap(), (1, 1));
         assert_eq!(source(&store, &active.id).unwrap().last_sequence, 2);
         assert_eq!(linked_decisions(&store, "batch-ticket", 10).unwrap().len(), 2);
@@ -5907,6 +5942,74 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn linked_pr_check_batch_rejects_revoked_context_and_stale_ticket_revision() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "check-ticket", "orch");
+        insert_manual_ticket(&store, "other-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        link_thread(&store, &off.id, "check-ticket", "pull:42").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let context = {
+            let reader = Store::open_read_only(&path).unwrap();
+            linked_pr_check_context(&reader, &active.id, "check-ticket", "pull:42").unwrap()
+        };
+        let sha = "0123456789012345678901234567890123456789";
+        let raw = serde_json::json!({
+            "id":7710, "status":"completed", "conclusion":"success",
+            "head_sha":sha,
+            "completed_at":(chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        let runs = vec![(7710, raw.clone())];
+        unlink_thread(&store, &active.id, "check-ticket", "pull:42").unwrap();
+        link_thread(&store, &active.id, "other-ticket", "pull:42").unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900,
+        ).is_err());
+        unlink_thread(&store, &active.id, "other-ticket", "pull:42").unwrap();
+        link_thread(&store, &active.id, "check-ticket", "pull:42").unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900,
+        ).is_err());
+        let context = linked_pr_check_context(&store, &active.id, "check-ticket", "pull:42").unwrap();
+        store.db.execute("UPDATE sa_tickets SET revision=revision+1 WHERE id='check-ticket'",
+            []).unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900,
+        ).is_err());
+        assert!(list_decisions(&store, &active.id, 10).unwrap().is_empty());
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE kind='source_context_observed'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        let context = linked_pr_check_context(&store, &active.id, "check-ticket", "pull:42").unwrap();
+        let mut wrong = raw;
+        wrong["pull_requests"][0]["number"] = serde_json::json!(43);
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &[(7710, wrong)], "local-operator", 900,
+        ).is_err());
+        assert!(list_decisions(&store, &active.id, 10).unwrap().is_empty());
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900,
+        ).unwrap(), (1, 0));
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900,
+        ).unwrap(), (0, 1));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "check-ticket", 10).unwrap().len(), 1);
+        assert!(linked_decisions(&reopened, "other-ticket", 10).unwrap().is_empty());
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

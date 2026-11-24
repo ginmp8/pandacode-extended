@@ -2330,20 +2330,31 @@ pub(crate) fn headless_queue_selected_worker_demand(
     )
 }
 
-/// Explicit operator-selected issue staging, not inferred Observe admission.
-pub(crate) fn headless_queue_observed_issue(
-    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+/// Shared explicit staging operation for local desktop and detached CLI.
+fn stage_observed_issue(
+    store: &mut Store, orchestration_id: &str, worker_bot_id: &str,
     objective: &str, request_key: &str, selection: &events::ObservedIssueSelection,
-) -> Result<String> {
-    let mut store = open_headless_transition_store(database_path)?;
+) -> Result<Ticket> {
     let (ticket, launched) = admit_role_with_observed_issue(
-        &mut store, orchestration_id, objective, request_key, true,
+        store, orchestration_id, objective, request_key, true,
         ManualAdmissionOptions {
             coordinate: false, headless_staging: true, selected_worker_id: Some(worker_bot_id),
         },
         Some(selection),
     )?;
     debug_assert!(!launched);
+    Ok(ticket)
+}
+
+/// Explicit operator-selected issue staging, not inferred Observe admission.
+pub(crate) fn headless_queue_observed_issue(
+    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+    objective: &str, request_key: &str, selection: &events::ObservedIssueSelection,
+) -> Result<String> {
+    let mut store = open_headless_transition_store(database_path)?;
+    let ticket = stage_observed_issue(
+        &mut store, orchestration_id, worker_bot_id, objective, request_key, selection,
+    )?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket.id,
         "state": ticket.state,
@@ -5589,6 +5600,37 @@ fn admit_desktop_manual_request_with_pause(
         store, config_id, objective, request_key, busy, options,
     )?;
     Ok((ticket, launch, launch.then(|| candidate_id.to_owned())))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedIssueDemandInput {
+    orchestration_id: String,
+    worker_bot_id: String,
+    objective: String,
+    request_key: String,
+    source_id: String,
+    delivery_id: String,
+    source_revision: i64,
+    team_revision: i64,
+}
+
+/// Stage only: no provider session, external effect or implicit Auto grant.
+#[tauri::command]
+pub async fn superagent_stage_observed_issue(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    input: ObservedIssueDemandInput,
+) -> Result<Ticket> {
+    require_main_window(&window)?;
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    let selection = events::ObservedIssueSelection {
+        source_id: input.source_id, delivery_id: input.delivery_id,
+        source_revision: input.source_revision, team_revision: input.team_revision,
+    };
+    stage_observed_issue(
+        &mut store, &input.orchestration_id, &input.worker_bot_id,
+        &input.objective, &input.request_key, &selection,
+    )
 }
 
 #[tauri::command]

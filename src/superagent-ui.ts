@@ -374,6 +374,28 @@ let demandArchived = false;
         ' · Head ' + safe(entry.checkHeadSha.slice(0, 12)) +
         ' · Completed ' + safe(activityTime(entry.checkCompletedAt))
       : ' · Check outcome unavailable (legacy receipt)';
+  // A receipt is context, never a grant. The native transaction must recheck
+  // the selected Team, source policy, attested identities and request key.
+  function observedIssueIntake() {
+    const team = current();
+    const source = sources.find(item => item.id === decisionSourceId);
+    if (!team?.enabled || team.reviewerCount !== 0 ||
+        !source || source.orchestrationId !== team.id ||
+        source.mode !== 'observe' || source.eventKind !== 'issues.opened') return null;
+    const workers = team.workerCount === 1 ? [team.workerBotId] :
+      roleRoster?.orchestrationId === team.id &&
+      roleRoster.policyRevision === team.policyRevision &&
+      roleRoster.reviewerBotIds.length === 0 ? roleRoster.workerBotIds : [];
+    const eligibleWorkers = workers.filter(id => bots.some(bot => bot.id === id && !bot.paused));
+    const receipts = decisions.filter(d => d.sourceId === source.id &&
+      d.eventKind === 'issues.opened' && d.decision === 'observed_permitted' &&
+      d.policyRevision === source.policyRevision && /^issue:[1-9][0-9]*$/.test(d.subjectKey));
+    return eligibleWorkers.length && receipts.length
+      ? {team, source, workers:eligibleWorkers, receipts} : null;
+  }
+
+  let pendingObservedIssue: {identity:string; key:string} | null = null;
+
   function render(): void {
     if (!host.isConnected) return;
     const nativeCount = (n: number | undefined, label: string): string =>
@@ -819,6 +841,18 @@ let demandArchived = false;
       '">View decisions</button>' +
       '<button type="button" data-sa-source-health="' + safe(src.id) +
       '">Inspect source health</button></li>').join('');
+    const issueIntake = observedIssueIntake();
+    const issueIntakeForm = issueIntake
+      ? '<form data-sa-form="observed-issue-demand"><h5>Stage an observed issue as a manual Demand</h5>' +
+        '<p>Explicit read-only staging only. No provider starts; native retry is required later.</p>' +
+        '<label>Observed issue<select name="deliveryId" required><option value="">Select a recorded issue</option>' +
+        issueIntake.receipts.map(d => '<option value="' + safe(d.deliveryId) + '">' +
+          safe(d.subjectKey) + ' · ' + safe(d.deliveryId) + '</option>').join('') + '</select></label>' +
+        '<label>Issue Worker<select name="workerBotId" required><option value="">Select a Worker</option>' +
+        issueIntake.workers.map(id => '<option value="' + safe(id) + '">' +
+          safe(botName(id)) + '</option>').join('') + '</select></label>' +
+        '<label>Issue Demand objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
+        '<button type="submit">Review issue Demand</button></form>' : '';
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
       '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
@@ -892,7 +926,7 @@ let demandArchived = false;
               safe(d.subjectKey) + observedCheck(d) +
               ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
-              '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
+              '<li>No recorded events.</li>') + '</ol>' + issueIntakeForm + '</div>' : '')) + '</section>';
     // One native read of the bounded cross-Team Demand index powers both
     // accessible presentations. A board column is not a scheduler state.
     const demandCard = (demand: DemandIndex) => {
@@ -3056,6 +3090,13 @@ let demandArchived = false;
         const loaded = await call<SourceDecision[]>('superagent_source_decisions',
           {sourceId:id,limit:50});
         decisionSourceId = id; decisions = loaded;
+        const team = current();
+        if (team && (team.workerCount ?? 0) > 1 && team.reviewerCount === 0 &&
+            sources.some(src => src.id === id && src.mode === 'observe' && src.eventKind === 'issues.opened')) {
+          roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:team.id});
+          workerOrder = [...roleRoster.workerBotIds];
+          reviewerDraft = [...roleRoster.reviewerBotIds];
+        }
       });
       return;
     }
@@ -3521,6 +3562,61 @@ let demandArchived = false;
         // idempotent replay instead of creating a duplicate native WorkItem.
         pendingWorkItem=null;
         feedback='WorkItem plan saved. No Worker was dispatched or authorized.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'observed-issue-demand') {
+      const intake = observedIssueIntake();
+      const deliveryId = String(data.get('deliveryId') ?? '');
+      const workerBotId = String(data.get('workerBotId') ?? '');
+      const objective = String(data.get('objective') ?? '').trim();
+      const receipt = intake?.receipts.find(d => d.deliveryId === deliveryId);
+      if (!intake || !receipt || !intake.workers.includes(workerBotId) || !objective ||
+          new TextEncoder().encode(objective).length > 16 * 1024 || objective.includes('\0')) {
+        error = 'Select a current permitted issue and configured Worker, and provide a bounded objective.';
+        render(); return;
+      }
+      const input = {
+        orchestrationId:intake.team.id, workerBotId, objective,
+        sourceId:intake.source.id, deliveryId,
+        sourceRevision:intake.source.policyRevision, teamRevision:intake.team.policyRevision,
+      };
+      const identity = JSON.stringify(input);
+      if (pendingObservedIssue?.identity !== identity) {
+        pendingObservedIssue = {identity,key:crypto.randomUUID()};
+      }
+      const request = pendingObservedIssue;
+      ask('Stage ' + intake.source.repository + ' ' + receipt.subjectKey +
+        ' for Team ' + intake.team.name + ' and Worker ' + botName(workerBotId) +
+        ' at Team revision ' + input.teamRevision + ' and source revision ' + input.sourceRevision +
+        '? This creates a manual read-only Demand without starting a provider or granting writes.', async () => {
+        const fresh = observedIssueIntake();
+        if (!fresh || fresh.team.id !== input.orchestrationId ||
+            fresh.team.policyRevision !== input.teamRevision || fresh.source.id !== input.sourceId ||
+            fresh.source.policyRevision !== input.sourceRevision || !fresh.workers.includes(workerBotId) ||
+            !fresh.receipts.some(d => d.deliveryId === deliveryId)) {
+          throw new Error('Observed issue selection changed. Review the current source again.');
+        }
+        const saved = await call<Ticket>('superagent_stage_observed_issue',{
+          input:{...input,requestKey:request.key},
+        });
+        if (!saved || typeof saved.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(saved.id) ||
+            saved.orchestrationId !== input.orchestrationId || saved.objective !== objective ||
+            !Number.isSafeInteger(saved.revision) || saved.revision < 0) {
+          throw new Error('Native issue Demand acknowledgement is inconsistent. Inspect before retrying.');
+        }
+        // Independently re-read the exact Ticket, including an older idempotent
+        // replay outside the latest list page. Preserve the request key on failure.
+        const verified = await call<Ticket>('superagent_ticket',{ticketId:saved.id});
+        if (!verified || verified.id !== saved.id || verified.orchestrationId !== input.orchestrationId ||
+            verified.objective !== objective || !Number.isSafeInteger(verified.revision) ||
+            verified.revision < saved.revision) {
+          throw new Error('Issue Demand may already exist; refresh native history before retrying.');
+        }
+        await reload();
+        pendingObservedIssue = null;
+        feedback = 'Native issue Demand ' + verified.id + ' recorded (' + verified.state +
+          '). No provider or external effect was started by staging.';
       });
       return;
     }

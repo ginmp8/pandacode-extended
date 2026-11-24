@@ -3498,7 +3498,7 @@ mod tests {
 
     #[test]
     fn explicit_observed_issue_staging_is_atomic_idempotent_and_read_only() {
-        let (store, path) = fixture();
+        let (mut store, path) = fixture();
         store.db.execute(
             "INSERT INTO projects(id,name,path) VALUES('issue-project','Disposable','/tmp/sa-observed-issue')",
             [],
@@ -3534,9 +3534,9 @@ mod tests {
             ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
         ).unwrap();
         assert_eq!(result.recorded, 1);
-        let count = || store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+        let count = |store: &Store| store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |row| row.get::<_, i64>(0)).unwrap();
-        assert_eq!(count(), 0, "Observe alone must not admit work");
+        assert_eq!(count(&store), 0, "Observe alone must not admit work");
         let selected = ObservedIssueSelection {
             source_id:on.id.clone(), delivery_id:"5000099001".into(),
             source_revision:on.policy_revision, team_revision:team.policy_revision+1,
@@ -3554,16 +3554,23 @@ mod tests {
              BEGIN SELECT RAISE(ABORT,'source issue audit unavailable'); END;"
         ).unwrap();
         assert!(stage("atomic", &selected).is_err());
-        assert_eq!(count(), 0);
+        assert_eq!(count(&store), 0);
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links", [],
             |row| row.get::<_, i64>(0)).unwrap(), 0);
         store.db.execute_batch("DROP TRIGGER reject_source_issue;").unwrap();
+        // Stage through the live desktop store, then replay through the detached
+        // CLI. Both must preserve the same native Ticket and source identity.
+        let staged = super::super::stage_observed_issue(
+            &mut store, &team.id, "issue-worker", "Inspect local checkout", "atomic", &selected,
+        ).unwrap();
+        assert_eq!(staged.state, "blocked");
         let receipt: serde_json::Value = serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();
         let id = receipt["ticketId"].as_str().unwrap();
+        assert_eq!(id, staged.id);
         assert_eq!(receipt["state"], "blocked");
         assert_eq!(receipt["providerDispatchedByCommand"], false);
         assert_eq!(receipt["allowedSideEffects"], false);
-        assert_eq!(count(), 1);
+        assert_eq!(count(&store), 1);
         let links = list_thread_links(&store, id).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].subject_key, "issue:42");
@@ -3580,7 +3587,7 @@ mod tests {
         assert!(stage("after-revoke", &selected).is_err());
         let replay: serde_json::Value = serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();
         assert_eq!(replay["ticketId"], receipt["ticketId"]);
-        assert_eq!(count(), 1);
+        assert_eq!(count(&store), 1);
         assert!(list_thread_links(&store,id).unwrap().is_empty());
         drop(store);
         let reopened = Store::open_read_only(&path).unwrap();

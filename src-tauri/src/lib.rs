@@ -4506,6 +4506,7 @@ pub fn run() {
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_preflight_worker,
+                superagent::superagent_stage_observed_issue,
                 superagent::superagent_submit_to_worker,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,

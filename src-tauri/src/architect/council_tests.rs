@@ -395,7 +395,7 @@ fn native_composed_usage_ignores_invalid_child_duration_samples() {
     invalid.started_at = SINCE + 10;
     invalid.last_updated_at = SINCE + 11;
 
-    let totals = council::composed_usage(&[valid.clone(), invalid.clone()], &[]);
+    let totals = council::composed_usage(&[valid.clone(), invalid.clone()], &[], &[]);
     assert_eq!(totals.unique_attempts, 2);
     assert_eq!(totals.queue_measured_attempts, 1);
     assert_eq!(totals.span_measured_attempts, 1);
@@ -406,7 +406,7 @@ fn native_composed_usage_ignores_invalid_child_duration_samples() {
     assert!(totals.token_count.is_none() && totals.cost_amount.is_none());
 
     let by_source = council::composed_usage_by_round_source(
-        &[valid, invalid.clone()], &[]);
+        &[valid, invalid.clone()], &[], &[]);
     assert_eq!(by_source.len(), 2);
     assert_eq!(by_source[0].reviewer_source, "automatic");
     assert_eq!(by_source[1].reviewer_source, "nested_child");
@@ -417,7 +417,7 @@ fn native_composed_usage_ignores_invalid_child_duration_samples() {
     assert_eq!(by_source[1].usage.cumulative_observed_span_ms, None);
     assert_eq!(by_source[1].usage.settled_review_window_ms, None);
 
-    let unmeasured = council::composed_usage(&[invalid], &[]);
+    let unmeasured = council::composed_usage(&[invalid], &[], &[]);
     assert_eq!(unmeasured.unique_attempts, 1);
     assert_eq!(unmeasured.cumulative_queue_wait_ms, None);
     assert_eq!(unmeasured.cumulative_observed_span_ms, None);
@@ -457,7 +457,7 @@ fn native_composed_usage_requires_a_seated_nonblank_reviewer_identity() {
     measured_zero.observed_span_ms = Some(0);
 
     let attempts = [valid, missing_identity, missing_seat, measured_zero];
-    let totals = council::composed_usage(&attempts, &[]);
+    let totals = council::composed_usage(&attempts, &[], &[]);
     assert_eq!(totals.unique_attempts, 2);
     assert_eq!(totals.queue_measured_attempts, 2);
     assert_eq!(totals.span_measured_attempts, 2);
@@ -466,7 +466,7 @@ fn native_composed_usage_requires_a_seated_nonblank_reviewer_identity() {
     assert_eq!(totals.settled_review_window_ms, Some(2));
     assert!(totals.token_count.is_none() && totals.cost_amount.is_none());
 
-    let groups = council::composed_usage_by_round_source(&attempts, &[]);
+    let groups = council::composed_usage_by_round_source(&attempts, &[], &[]);
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0].round, 1);
     assert_eq!(groups[0].reviewer_source, "automatic");
@@ -506,7 +506,7 @@ fn native_composed_usage_rejects_inconsistent_positive_timing_claims() {
     premature.status = "running".into();
 
     let attempts = [measured, forged, premature];
-    let totals = council::composed_usage(&attempts, &[]);
+    let totals = council::composed_usage(&attempts, &[], &[]);
     assert_eq!(totals.unique_attempts, 3);
     assert_eq!(totals.queue_measured_attempts, 2);
     assert_eq!(totals.span_measured_attempts, 1);
@@ -515,7 +515,7 @@ fn native_composed_usage_rejects_inconsistent_positive_timing_claims() {
     assert_eq!(totals.settled_review_window_ms, Some(5));
     assert!(totals.cost_amount.is_none() && totals.token_count.is_none());
 
-    let groups = council::composed_usage_by_round_source(&attempts, &[]);
+    let groups = council::composed_usage_by_round_source(&attempts, &[], &[]);
     let child = groups.iter().find(|group| group.reviewer_source == "nested_child").unwrap();
     assert_eq!(child.usage.queue_measured_attempts, 0);
     assert_eq!(child.usage.span_measured_attempts, 0);
@@ -7581,6 +7581,23 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
     {
         let store = state.store.lock().unwrap();
         child_council::authorize_leaf(&store, &fresh.sid, &fresh.admission).unwrap();
+        let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+        let fresh_attempts = inspected.reserved_children.iter()
+            .map(|child| child.leaf_attempts.len()).sum::<usize>();
+        assert!(fresh_attempts > 0);
+        assert!(!old_leaves.is_empty());
+        assert_eq!(inspected.usage.unique_attempts, 0);
+        let composed = inspected.composed_usage.as_ref().unwrap();
+        assert_eq!(composed.unique_attempts, old_leaves.len() + fresh_attempts,
+            "recovering children must not erase already admitted reviewer usage");
+        assert_eq!(inspected.composed_usage_by_round_source.iter()
+            .map(|group| group.usage.unique_attempts).sum::<usize>(), composed.unique_attempts);
+        assert!(inspected.composed_usage_by_round_source.iter()
+            .all(|group| group.reviewer_source == "nested_child"));
+        assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
+        assert!(inspected.reserved_children.iter()
+            .all(|child| !old_children.iter().any(|id| id.as_str() == child.child_session_id.as_str())));
+        assert!(!inspected.verified_pass);
     }
     drop(state);
     std::fs::remove_dir_all(directory).unwrap();
@@ -9977,9 +9994,9 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     let mut duplicate_leaf_id = inspect.reserved_children.clone();
     duplicate_leaf_id[1].leaf_attempts[0].worker_id =
         duplicate_leaf_id[0].leaf_attempts[0].worker_id.clone();
-    assert_eq!(council::composed_usage(&inspect.attempts, &duplicate_leaf_id).unique_attempts, 3,
+    assert_eq!(council::composed_usage(&inspect.attempts, &duplicate_leaf_id, &[]).unique_attempts, 3,
         "a replayed worker ID cannot be double-billed or counted twice");
-    assert_eq!(council::composed_usage_by_round_source(&inspect.attempts, &duplicate_leaf_id)[0]
+    assert_eq!(council::composed_usage_by_round_source(&inspect.attempts, &duplicate_leaf_id, &[])[0]
         .usage.unique_attempts, 3, "replayed leaf identities cannot inflate per-source usage");
     assert_eq!(inspect.verified_completion.unwrap().lowest, 9.5);
     assert_eq!(inspect.reserved_children.len(), 2);
@@ -9997,6 +10014,9 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert!(new_children.iter().all(|child|
         child.root_cycle_id != format!("{}:{}", sid, saved.council_since)
             && child.verified_child_receipt.is_none()));
+    let next_inspection = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(next_inspection.composed_usage.unwrap().unique_attempts, 0,
+        "a new native cycle must not inherit prior child usage");
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
          WHERE parent_session_id=?1 AND kind='council_child_receipt'

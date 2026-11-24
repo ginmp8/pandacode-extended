@@ -2143,7 +2143,9 @@ pub(super) fn verified_s2_receipts(
 /// native ownership of retired child sessions, and their original read-only
 /// authority records remain durable even after leaf ownership is detached.
 /// Counting only active reservations would refund an entire wave on recovery.
-fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+fn child_attempt_history_in_cycle(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<Vec<(TeamSnapshot, usize)>> {
     // Retired child sessions remain owned by the root after recovery.
     // Never use a mutable description or TeamSnapshot cycle to refund an
     // already issued native reviewer grant.
@@ -2158,7 +2160,7 @@ fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Resul
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
 
-    let mut attempts = 0usize;
+    let mut history = Vec::new();
     for child_id in children {
         // Ordinary root workers have no task-owned child Council snapshot
         // and no child-scoped native reviewer grants.
@@ -2211,7 +2213,47 @@ fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Resul
             .map_err(|_| "child_council_stale: invalid historical leaf grant count.")?;
         // Neither a removed snapshot entry nor a deleted authority row may
         // refund a previously admitted reviewer attempt.
-        attempts = attempts.saturating_add(child.workers.len().max(recorded));
+        let admitted = child.workers.len().max(recorded);
+        history.push((child, admitted));
+    }
+    Ok(history)
+}
+
+fn admitted_child_attempts_in_cycle(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+    Ok(child_attempt_history_in_cycle(store, root)?.iter()
+        .fold(0usize, |total, (_, admitted)| total.saturating_add(*admitted)))
+}
+
+/// Preserve observed usage of retired child reviewers in the same root cycle.
+/// Only root-owned historical snapshots with revoked leaf markers contribute.
+/// Retired leaves remain outside the active child inspector and approval gate.
+pub(super) fn retired_child_usage_attempts(
+    store: &Store, root: &TeamSnapshot, current: &[ChildReservationView],
+) -> Result<Vec<super::council::CouncilInspectionAttempt>> {
+    let mut attempts = Vec::new();
+    for (child, _) in child_attempt_history_in_cycle(store, root)? {
+        if child.workers.is_empty()
+            || current.iter().any(|view| view.child_session_id == child.session_id)
+        {
+            continue;
+        }
+        for leaf in &child.workers {
+            let revoked: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM architect_requests
+                 WHERE parent_session_id=?1 AND worker_id=?1
+                   AND key='native-council-revoked-leaf' AND kind='council_revoked_leaf')",
+                [&leaf.session_id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if !revoked {
+                return Err("child_council_stale: retired leaf usage has no native revocation marker.".into());
+            }
+        }
+        if let Some(report) = super::council::inspection(&child, false) {
+            for mut attempt in report.attempts {
+                attempt.reviewer_source = "nested_child";
+                attempts.push(attempt);
+            }
+        }
     }
     Ok(attempts)
 }

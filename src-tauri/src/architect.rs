@@ -1451,11 +1451,14 @@ pub(crate) fn council_inspection_state(
     if let Some(result) = inspection.as_mut() {
         result.reserved_children = child_council::inspect(store, &team)?;
         if !result.reserved_children.is_empty() {
+            let retired = child_council::retired_child_usage_attempts(
+                store, &team, &result.reserved_children,
+            )?;
             result.composed_usage = Some(council::composed_usage(
-                &result.attempts, &result.reserved_children,
+                &result.attempts, &result.reserved_children, &retired,
             ));
             result.composed_usage_by_round_source = council::composed_usage_by_round_source(
-                &result.attempts, &result.reserved_children,
+                &result.attempts, &result.reserved_children, &retired,
             );
         }
     }

@@ -585,7 +585,8 @@ pub struct CouncilInspection {
     pub attempts: Vec<CouncilInspectionAttempt>,
     /// Summed native observations, not wall-clock elapsed time or a provider billing receipt.
     pub usage: CouncilUsageTotals,
-    /// Root and task-owned child leaf attempts counted once; no provider billing is inferred.
+    /// Root and task-owned current/retired child leaf attempts counted once;
+    /// no provider billing is inferred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub composed_usage: Option<CouncilUsageTotals>,
     /// Root-only native observations grouped by round and reviewer source. Each worker ID
@@ -745,11 +746,13 @@ fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
 pub(super) fn composed_usage(
     roots: &[CouncilInspectionAttempt],
     children: &[super::child_council::ChildReservationView],
+    retired: &[CouncilInspectionAttempt],
 ) -> CouncilUsageTotals {
     let mut attempts = roots.to_vec();
     for child in children {
         attempts.extend(child.leaf_attempts.iter().cloned());
     }
+    attempts.extend(retired.iter().cloned());
     usage_totals(&attempts)
 }
 /// Report actual child leaves separately from root automatic reviewers; the
@@ -757,6 +760,7 @@ pub(super) fn composed_usage(
 pub(super) fn composed_usage_by_round_source(
     roots: &[CouncilInspectionAttempt],
     children: &[super::child_council::ChildReservationView],
+    retired: &[CouncilInspectionAttempt],
 ) -> Vec<CouncilUsageGroup> {
     let mut attempts = roots.to_vec();
     for child in children {
@@ -766,6 +770,7 @@ pub(super) fn composed_usage_by_round_source(
             attempts.push(attempt);
         }
     }
+    attempts.extend(retired.iter().cloned());
     usage_by_round_source(&attempts)
 }
 #[derive(Clone, Debug, Serialize)]

@@ -3627,6 +3627,14 @@ fn admit_role_with_staging_member(
     {
         return Err("Provide a stable alphanumeric manual-request key.".into());
     }
+    // Serialize the request-key lookup, current policy and checkout lease
+    // checks with reservation. Otherwise a second SQLite connection can
+    // admit the same request or occupy the checkout before the first write.
+    // The database constraints remain a final defense, not the normal
+    // response to a concurrent, valid manual request.
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
     if let Some(existing) = store.db.query_row(
         "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
         params![config_id,request_key], |row| row.get::<_, String>(0),
@@ -3675,6 +3683,8 @@ fn admit_role_with_staging_member(
         if originally_coordinated != coordinate {
             return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
         }
+        // Release the reservation without changing the original receipt.
+        tx.commit().map_err(|e| e.to_string())?;
         return Ok((ticket, false));
     }
     let config = configuration(store, config_id)?;
@@ -3717,12 +3727,9 @@ fn admit_role_with_staging_member(
     let blocked = busy || occupied || headless_staging;
     let ticket_id = storage::id();
     let assignment_id = (!blocked).then(storage::id);
-    // Reserve the internal conversation in the SAME SQLite transaction as the
-    // ticket, mandate and worker lease. If any insert or CHECK fails, the
-    // ephemeral session and bot-thread mapping must roll back as well.
-    // Store methods share this connection, so use unchecked_transaction here
-    // instead of borrowing it mutably while provisioning the bot thread.
-    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    // Reserve the internal conversation in the SAME transaction as the
+    // policy/lease checks, Ticket, mandate and worker lease. If any insert or
+    // CHECK fails, the ephemeral session and thread mapping roll back too.
     let session_id = if blocked { None } else {
         Some(bots::thread_session(store, candidate, CHANNEL, &ticket_id,
             if coordinate { "SuperAgent · Coordinator" } else { "SuperAgent · Manual task" })?.0)
@@ -14318,6 +14325,39 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn initial_manual_admission_serializes_checkout_and_request_replay_across_connections() {
+        let store = fixture();
+        let cfg = enabled(&store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = ["shared-request", "shared-request", "other-request"]
+            .into_iter().map(|key| {
+                let path = store.path.clone();
+                let config_id = cfg.id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut other = open_headless_transition_store(&path).unwrap();
+                    barrier.wait();
+                    admit(&mut other, &config_id, "Inspect the shared checkout", key, false)
+                })
+            }).collect();
+        let results: Vec<_> = handles.into_iter()
+            .map(|handle| handle.join().unwrap().unwrap()).collect();
+        assert_eq!(results[0].0.id, results[1].0.id);
+        assert_ne!(results[0].0.id, results[2].0.id);
+        assert_eq!(results.iter().filter(|(_, launched)| *launched).count(), 1);
+        let (tickets, running, mandates): (i64, i64, i64) = store.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sa_tickets),
+                    (SELECT COUNT(*) FROM sa_assignments WHERE state='running'),
+                    (SELECT COUNT(*) FROM sa_mandates)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((tickets, running, mandates), (2, 1, 2));
+        let blocked = results.iter().find(|(ticket, _)| ticket.state == "blocked").unwrap();
+        assert!(assignment_session(&store, &blocked.0.id).unwrap().is_none());
+        assert!(!mandate(&store, &blocked.0.id).unwrap().allowed_side_effects);
     }
 
     #[test]

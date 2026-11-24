@@ -621,7 +621,10 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
 }
 
 /// Explicit recovery replaces interrupted child reservations or fully stopped
-/// read-only child attempts with no scored/reported result. After an abrupt
+/// read-only child attempts. A confirmed physical restart may also retire an
+/// incomplete first wave containing an authenticated clean passing leaf report;
+/// the old report remains historical and all fresh leaves must review again.
+/// A sealed child receipt or composite seat is never replaced here. After an abrupt
 /// unpaused native root interruption, an unscored started leaf may also be
 /// revoked only when its own native session is interrupted/error. Partial provider
 /// transcripts remain on revoked old sessions: they are never copied into the
@@ -732,19 +735,57 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         // Only the first native leaf wave can be restarted in the same
         // frozen cycle. An admitted reviewer may have started, but every
         // started leaf must have been STOPPED by an explicit root Pause;
-        // nothing can have scored, reported, written or settled. A real
+        // no unconfirmed score, report, write or settlement may be reused.
+        // A clean settled leaf may be retired only after a confirmed physical
+        // restart, and only as part of an incomplete first wave. A real
         // interrupted/error native leaf is verified only for explicit revocation
         // after an actual root Pause or a confirmed native root interruption.
         let pristine = old_team.status == "blocked" && old_team.workers.is_empty()
             && old_team.objective.is_empty() && old_team.generation == 0
             && old_team.council_since == 0;
-        let admitted_without_result = old_team.status == "running"
+        // A stale, foreign or already sealed receipt cannot be carried forward
+        // to a replacement reservation, even if the child snapshot was reset.
+        let sealed: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM architect_requests
+             WHERE parent_session_id=?1 AND key IN (?2,?3,?4,?5))",
+            params![&root.session_id, receipt_key(root, &choice.bot_id),
+                escalation_receipt_key(root, &choice.bot_id),
+                challenge_receipt_key(root, &choice.bot_id),
+                parent_seat_key(root, &choice.bot_id)],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if sealed {
+            return Err("child_council_recovery_denied: sealed child evidence cannot be replaced in this cycle.".into());
+        }
+        let recoverable_scored_leaf = |leaf: &Worker| {
+            physical_restart && leaf.status == "completed"
+                && !leaf.abandoned && !leaf.timed_out && leaf.wrote_at == 0
+                && leaf.error.is_none() && leaf.result_revision > 0
+                && !leaf.summary.is_empty()
+                && leaf.council.as_ref().is_some_and(|seat| {
+                    let target = config.criteria.iter()
+                        .filter(|criterion| criterion.required
+                            && super::council::same_lens(&criterion.lens, &seat.lens))
+                        .map(|criterion| criterion.target)
+                        .fold(config.target.max(choice.child_target), f64::max);
+                    seat.round == 1 && seat.started_at > 0 && !seat.closed_by_selection
+                        && seat.score.is_some_and(|score| score.is_finite()
+                            && score >= target && score <= 10.0)
+                        && !seat.reported_severe_finding && !seat.reported_conflict
+                        && super::council::scored_report_is_current(store, &leaf.session_id, seat)
+                })
+        };
+        let recoverable_first_wave = old_team.status == "running"
             && old_team.workers.len() == choice.child_reviewers
             && old_team.objective == root.objective
             && old_team.generation <= root.generation
             && old_team.council_since == root.council_since
+            // An entirely settled wave needs a distinct terminal-evidence
+            // recovery path; do not relabel it as an incomplete wave.
+            && old_team.workers.iter().any(|leaf|
+                leaf.council.as_ref().is_some_and(|seat| seat.score.is_none()))
             && old_team.workers.iter().all(|leaf| {
-                (matches!(leaf.status.as_str(), "queued" | "stopped")
+                recoverable_scored_leaf(leaf) || ((matches!(leaf.status.as_str(), "queued" | "stopped")
                     || (root.status == "interrupted" && leaf.status == "running"
                         && leaf.council.as_ref().is_some_and(|seat| seat.started_at > 0)))
                     && !leaf.abandoned
@@ -758,19 +799,19 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                         && !seat.reported_conflict)
                     && leaf.summary.is_empty() && leaf.error.is_none()
                     && leaf.result_revision == 0 && !leaf.reported
-                    && !leaf.timed_out && leaf.wrote_at == 0
+                    && !leaf.timed_out && leaf.wrote_at == 0)
             });
         if previous != expected
             || super::parent_of(store, &old_id)?.as_deref() != Some(root.session_id.as_str())
             || old_team.config != child_config
-            || (!pristine && !admitted_without_result)
+            || (!pristine && !recoverable_first_wave)
             || old_team.pending_setup.is_some() || old_team.pending_turn.is_some()
             || old_team.summary.is_some() || old_team.council_accepted.is_some()
             || !old_team.briefings.is_empty()
         {
             return Err("child_council_recovery_denied: interrupted child has completed, changed or unauthorized work.".into());
         }
-        if admitted_without_result {
+        if recoverable_first_wave {
             // All previously issued seats must have real recorded native
             // authority and exact project/cycle/leaf ownership. Do not
             // recover a forged child by merely counting its worker entries.
@@ -809,7 +850,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
             [&old_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        let expected_leaves = if admitted_without_result { choice.child_reviewers as i64 } else { 0 };
+        let expected_leaves = if recoverable_first_wave { choice.child_reviewers as i64 } else { 0 };
         if claims != 1 || owned != 1 || descendants != expected_leaves
             || requests != expected_leaves || messages != 0
             || description != RESERVATION_DESCRIPTION
@@ -821,7 +862,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         // for audit, but never reuse them. Only a stopped/started leaf may
         // have provider messages or a resume token; a never-started leaf may
         // not inherit those artifacts from an unrelated conversation.
-        if admitted_without_result {
+        if recoverable_first_wave {
             for leaf in &old_team.workers {
                 let session = store.session(&leaf.session_id)?;
                 let messages: i64 = store.db.query_row(
@@ -836,14 +877,19 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                     .is_some_and(|seat| seat.started_at > 0);
                 // A native leaf that settled independently is not an unstarted
                 // reviewer merely because its old TeamSnapshot still says queued.
-                // Never revoke its native completion to replace a sibling seat.
-                if session.status == "completed" {
+                // Only an authenticated, clean completed report from this
+                // incomplete wave can be retired after a physical restart.
+                let scored = recoverable_scored_leaf(leaf);
+                if session.status == "completed" && !scored {
                     return Err("child_council_recovery_denied: completed native reviewer session cannot be replaced.".into());
+                }
+                if scored && !matches!(session.status.as_str(), "idle" | "completed") {
+                    return Err("child_council_recovery_denied: scored leaf has no settled native session.".into());
                 }
                 // An unpaused abrupt crash cannot be inferred solely from
                 // persisted worker status. Every started leaf must have a
                 // separately interrupted native session, not an active host.
-                if physical_restart && started {
+                if physical_restart && started && !scored {
                     let interrupted_by_restart: i64 = store.db.query_row(
                         "SELECT restart_interrupted FROM sessions WHERE id=?1",
                         [&leaf.session_id], |row| row.get(0),
@@ -852,7 +898,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                         return Err("child_council_recovery_denied: started leaf has no confirmed physical restart.".into());
                     }
                 }
-                if root.status == "interrupted" && started
+                if root.status == "interrupted" && started && !scored
                     && !matches!(session.status.as_str(), "interrupted" | "error")
                 {
                     return Err("child_council_recovery_denied: started leaf has no native interruption.".into());
@@ -873,10 +919,15 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 }
             }
             for leaf in &old_team.workers {
-                store.db.execute(
-                    "UPDATE sessions SET status='interrupted' WHERE id=?1",
-                    [&leaf.session_id],
-                ).map_err(|e| e.to_string())?;
+                // Preserve a genuinely completed provider's status and
+                // report for audit. Detachment and the durable revocation
+                // marker, not rewriting its score, remove all live authority.
+                if !recoverable_scored_leaf(leaf) {
+                    store.db.execute(
+                        "UPDATE sessions SET status='interrupted' WHERE id=?1",
+                        [&leaf.session_id],
+                    ).map_err(|e| e.to_string())?;
+                }
                 let detached = store.db.execute(
                     "DELETE FROM architect_workers
                      WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",

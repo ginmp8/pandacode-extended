@@ -7441,6 +7441,15 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
 
 #[test]
 fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
+    physical_sqlite_restart_recovers_multiple_child_reservations(false);
+}
+
+#[test]
+fn physical_sqlite_restart_retires_a_scored_leaf_without_reusing_its_report() {
+    physical_sqlite_restart_recovers_multiple_child_reservations(true);
+}
+
+fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: bool) {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.
     let directory = std::env::temp_dir().join(format!(
@@ -7492,13 +7501,29 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
             .filter_map(|_| next_action_state(&state, &mut |_| {}).unwrap())
             .find(|candidate| candidate.admission.parent != launch.admission.parent)
             .expect("the second native child must have an independently launched reviewer");
+        if score_one_leaf {
+            {
+                let store = state.store.lock().unwrap();
+                store.message(&launch.sid, "assistant", "Independent review.\nCouncil score: 9.5/10").unwrap();
+                store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&launch.sid]).unwrap();
+            }
+            completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+            let leaf = child.workers.iter().find(|leaf| leaf.session_id == launch.sid).unwrap();
+            assert_eq!(leaf.status, "completed");
+            assert_eq!(leaf.council.as_ref().unwrap().score, Some(9.5));
+            assert!(leaf.result_revision > 0);
+        }
         {
             let store = state.store.lock().unwrap();
             assert_eq!(
                 parent_of(&store, &launch.admission.parent).unwrap().as_deref(),
                 Some(session.id.as_str())
             );
-            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+            if !score_one_leaf {
+                child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+            }
             child_council::authorize_leaf(&store, &sibling_launch.sid, &sibling_launch.admission).unwrap();
             assert_ne!(launch.admission.parent, sibling_launch.admission.parent);
             // Keep one coordinator idle and mark the other interrupted
@@ -7510,7 +7535,9 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
             for child_id in [&launch.admission.parent, &sibling_launch.admission.parent] {
                 let child = load(&store, child_id).unwrap().unwrap();
                 for leaf in &child.workers {
-                    if leaf.council.as_ref().unwrap().started_at > 0 {
+                    if leaf.council.as_ref().unwrap().started_at > 0
+                        && leaf.status != "completed"
+                    {
                         store.db.execute("UPDATE sessions SET status='running' WHERE id=?1",
                             [&leaf.session_id]).unwrap();
                     }
@@ -7529,6 +7556,21 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
     let old_leaves = old_teams.iter().flat_map(|team|
         team.workers.iter().map(|leaf| leaf.session_id.clone())).collect::<Vec<_>>();
     assert!(old_teams.iter().all(|team| team.status == "interrupted"));
+    // A stale sealed receipt, even with a foreign worker ID, must not
+    // survive replacement or allow a partially scored wave to settle.
+    let sealed_key = format!("native-council-child-receipt:{}:restart-security", root.council_since);
+    reopened.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+         VALUES(?1,?2,'council_child_receipt','{}',?3)",
+        rusqlite::params![&sid, &sealed_key, &launch.admission.parent],
+    ).unwrap();
+    let sealed_denial = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+    assert!(sealed_denial.contains("sealed child evidence"), "{sealed_denial}");
+    assert_eq!(serde_json::to_value(load(&reopened, &sid).unwrap().unwrap()).unwrap(), before_root);
+    reopened.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![&sid, &sealed_key],
+    ).unwrap();
     // A user-stopped native leaf is not proof of restart revocation.
     // The transaction must roll back all replacements.
     reopened.db.execute("UPDATE sessions SET restart_interrupted=0 WHERE id=?1",
@@ -7552,6 +7594,13 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
     }
     for id in &old_leaves {
         assert!(parent_of(&reopened, id).unwrap().is_none());
+    }
+    if score_one_leaf {
+        let historical = load(&reopened, &launch.admission.parent).unwrap().unwrap();
+        let leaf = historical.workers.iter().find(|leaf| leaf.session_id == launch.sid).unwrap();
+        assert_eq!(leaf.status, "completed");
+        assert_eq!(leaf.council.as_ref().unwrap().score, Some(9.5));
+        assert_eq!(reopened.session(&launch.sid).unwrap().status, "idle");
     }
     let state = AppState {
         store: Arc::new(std::sync::Mutex::new(reopened)),
@@ -7602,6 +7651,13 @@ fn physical_sqlite_restart_recovers_multiple_unscored_child_reservations() {
         assert!(inspected.reserved_children.iter()
             .all(|child| !old_children.iter().any(|id| id.as_str() == child.child_session_id.as_str())));
         assert!(!inspected.verified_pass);
+        assert!(inspected.reserved_children.iter().all(|child|
+            child.verified_child_receipt.is_none() && child.authenticated_parent_seat.is_none()));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1
+             AND kind IN ('council_child_receipt','council_parent_seat')",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
     drop(state);
     std::fs::remove_dir_all(directory).unwrap();

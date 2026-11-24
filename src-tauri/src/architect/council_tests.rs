@@ -12464,52 +12464,53 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                         ).unwrap(), receipt, "{mode}/{strategy:?}: receipt must be idempotent");
 
 
-                        // Original M1 retains its legacy path. New direct/composed
-                        // terminal proof must revoke a reviewer whose native
-                        // owner link or session was removed after completion.
-                        if mode != "m1" {
+                        // Only original M1/S1 retains its legacy completion
+                        // gate. Every opt-in automatic wave, including phase
+                        // one, must retain its independent native authority.
+                        if mode != "m1" || strategy != council::CouncilExecutionStrategy::Parallel {
                             let snapshot = load(&store, &sid).unwrap().unwrap();
-                            let reviewer = snapshot.workers.iter().find(|worker|
-                                worker.council.as_ref().is_some_and(|seat| seat.round == round)
-                            ).unwrap();
-                            let deleted = store.db.execute(
-                                "DELETE FROM architect_workers WHERE parent_session_id=?1
-                                 AND worker_id=?2 AND session_id=?3",
-                                rusqlite::params![&sid, &reviewer.id, &reviewer.session_id],
-                            ).unwrap();
-                            assert_eq!(deleted, 1, "{mode}/{strategy:?}: native link must exist");
-                            assert!(!verified_council_pass(&store, &snapshot),
-                                "{mode}/{strategy:?}: a detached reviewer cannot authorize pass");
-                            assert!(council_requests::read_native_terminal(
-                                &store, &sid, &project, "root-matrix-task",
-                                &artifact, &request.request_id,
-                            ).is_err(), "{mode}/{strategy:?}: detached reviewer must revoke receipt");
-                            store.db.execute(
-                                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
-                                 VALUES(?1,?2,?3)",
-                                rusqlite::params![&sid, &reviewer.id, &reviewer.session_id],
-                            ).unwrap();
-                            store.db.execute(
-                                "UPDATE sessions SET archived=1 WHERE id=?1",
-                                [&reviewer.session_id],
-                            ).unwrap();
-                            assert!(!verified_council_pass(&store, &snapshot),
-                                "{mode}/{strategy:?}: archived reviewer cannot authorize pass");
-                            assert!(council_requests::read_native_terminal(
-                                &store, &sid, &project, "root-matrix-task",
-                                &artifact, &request.request_id,
-                            ).is_err(), "{mode}/{strategy:?}: archived reviewer must revoke receipt");
-                            store.db.execute(
-                                "UPDATE sessions SET archived=0 WHERE id=?1",
-                                [&reviewer.session_id],
-                            ).unwrap();
-                            assert!(verified_council_pass(&store, &snapshot),
-                                "{mode}/{strategy:?}: restoring native ownership revalidates proof");
-                            assert_eq!(council_requests::read_native_terminal(
-                                &store, &sid, &project, "root-matrix-task",
-                                &artifact, &request.request_id,
-                            ).unwrap(), receipt,
-                                "{mode}/{strategy:?}: original receipt remains idempotent");
+                            for reviewer in snapshot.workers.iter().filter(|worker|
+                                worker.council.as_ref().is_some_and(|seat| seat.score.is_some())
+                            ) {
+                                let deleted = store.db.execute(
+                                    "DELETE FROM architect_workers WHERE parent_session_id=?1
+                                     AND worker_id=?2 AND session_id=?3",
+                                    rusqlite::params![&sid, &reviewer.id, &reviewer.session_id],
+                                ).unwrap();
+                                assert_eq!(deleted, 1, "{mode}/{strategy:?}: native link must exist");
+                                assert!(!verified_council_pass(&store, &snapshot),
+                                    "{mode}/{strategy:?}: a detached reviewer cannot authorize pass");
+                                assert!(council_requests::read_native_terminal(
+                                    &store, &sid, &project, "root-matrix-task",
+                                    &artifact, &request.request_id,
+                                ).is_err(), "{mode}/{strategy:?}: detached reviewer must revoke receipt");
+                                store.db.execute(
+                                    "INSERT INTO architect_workers(parent_session_id,worker_id,session_id)
+                                     VALUES(?1,?2,?3)",
+                                    rusqlite::params![&sid, &reviewer.id, &reviewer.session_id],
+                                ).unwrap();
+                                store.db.execute(
+                                    "UPDATE sessions SET archived=1 WHERE id=?1",
+                                    [&reviewer.session_id],
+                                ).unwrap();
+                                assert!(!verified_council_pass(&store, &snapshot),
+                                    "{mode}/{strategy:?}: archived reviewer cannot authorize pass");
+                                assert!(council_requests::read_native_terminal(
+                                    &store, &sid, &project, "root-matrix-task",
+                                    &artifact, &request.request_id,
+                                ).is_err(), "{mode}/{strategy:?}: archived reviewer must revoke receipt");
+                                store.db.execute(
+                                    "UPDATE sessions SET archived=0 WHERE id=?1",
+                                    [&reviewer.session_id],
+                                ).unwrap();
+                                assert!(verified_council_pass(&store, &snapshot),
+                                    "{mode}/{strategy:?}: restoring native ownership revalidates proof");
+                                assert_eq!(council_requests::read_native_terminal(
+                                    &store, &sid, &project, "root-matrix-task",
+                                    &artifact, &request.request_id,
+                                ).unwrap(), receipt,
+                                    "{mode}/{strategy:?}: original receipt remains idempotent");
+                            }
                         }
 
                         // All nine root-only mode/strategy paths must revoke

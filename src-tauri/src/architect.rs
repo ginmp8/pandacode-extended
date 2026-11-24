@@ -673,9 +673,12 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
             );
         }
     }
-    // Selected M2 and composed M3 scores are not approval authority until
-    // their persisted native grants and callbacks have been reauthenticated.
-    if team.config.council.as_ref().is_some_and(|config| matches!(config.mode(), "m2" | "m3"))
+    // Selected M2, composed M3 and opt-in automatic S2/S3 scores are not
+    // approval authority until native grants and callbacks are reauthenticated.
+    if team.config.council.as_ref().is_some_and(|config| {
+        matches!(config.mode(), "m2" | "m3")
+            || (config.mode() == "m1" && config.strategy != council::CouncilExecutionStrategy::Parallel)
+    })
         && projected.as_ref().is_some_and(|status| status.state == "passed")
         && !(mixed_native_authority_current(store, team)
             && selected_direct_native_authority_current(store, team))
@@ -773,6 +776,32 @@ fn distinct_root_review_waves(team: &TeamSnapshot, rounds: &[usize]) -> bool {
 fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
     let mode = config.mode();
+    // M1 parallel retains the original compatibility gate. Opt-in S2/S3
+    // must authenticate every scored automatic wave, just like composed
+    // modes: a cached score alone is not a native callback.
+    if mode == "m1" && config.strategy != council::CouncilExecutionStrategy::Parallel {
+        let Some(status) = council::status(team) else { return false };
+        if status.state != "passed" || status.stale || status.round == 0 {
+            return false;
+        }
+        let rounds = native_reviewer_authority_rounds(config.strategy, status.round);
+        if !distinct_root_review_waves(team, &rounds) { return false; }
+        return team.workers.iter().filter(|worker| {
+            worker.created_at >= team.council_since
+                && worker.council.as_ref().is_some_and(|seat|
+                    rounds.contains(&seat.round) && seat.score.is_some())
+        }).all(|worker| {
+            let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+            worker.read_only && worker.status == "completed" && !worker.abandoned
+                && worker.wrote_at == 0 && worker.files.is_empty()
+                && binding.reviewer_bot_id.is_none()
+                && binding.validate(team, worker).is_ok()
+                && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
+                && native_root_reviewer_session_is_current(store, &team.session_id, worker)
+                && worker.council.as_ref().and_then(|seat| seat.score)
+                    == council::latest_score(store, &worker.session_id)
+        });
+    }
     if !matches!(mode, "m3" | "m5" | "m6" | "m7") { return true; }
     let (rounds, required) = if mode == "m3" {
         let Some(status) = council::status(team) else { return false };
@@ -3128,6 +3157,13 @@ fn dispatch_as(
                     && !mixed_native_authority_current(&store, &team)
                 {
                     return Err("reviewer_session_mismatch: M3 Council seats require persisted native reviewer authority before completion.".into());
+                }
+                if team.config.council.as_ref().is_some_and(|config|
+                    config.mode() == "m1" && config.strategy != council::CouncilExecutionStrategy::Parallel)
+                    && council::status(&team).is_some_and(|status| status.state == "passed")
+                    && !mixed_native_authority_current(&store, &team)
+                {
+                    return Err("reviewer_session_mismatch: automatic S2/S3 Council waves require persisted native reviewer authority before completion.".into());
                 }
                 team.status = "completed".into();
                 team.summary = Some(finish.summary);

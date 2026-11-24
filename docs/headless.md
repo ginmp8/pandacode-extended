@@ -1203,8 +1203,21 @@ manual Demand using `--queue-demand`, then inspect its Ticket revision:
 pandacode serve --inspect-ticket <ticket-id>
 pandacode serve --plan-work-item <ticket-id> <revision> <request-key> <summary-file>
 pandacode serve --plan-work-item <ticket-id> <revision> <child-key> <summary-file> --parent-work-item <work-item-id>
+pandacode serve --plan-work-items <ticket-id> <revision> <plan-file>
 pandacode serve --cancel-planned-work-item <ticket-id> <revision> <work-item-id> <cancel-key>
 ```
+
+Use `--plan-work-items` to apply an operator-reviewed dependency plan in one native transaction. The local UTF-8 JSON file (maximum 16 KiB) contains 1–16 entries, for example:
+
+```json
+[
+  {"requestKey":"inspect","summary":"Inspect the relevant module"},
+  {"requestKey":"verify","summary":"Verify the findings","parentRequestKey":"inspect"}
+]
+```
+
+Parents must precede children in the same file. Every new item consumes the existing Demand's remaining Worker-attempt budget; an invalid entry, stale revision or exhausted budget rolls back the entire batch. Identical item-key replays do not create another item or refresh stale authority for new entries. This is explicit operator planning only, including when the plan was prepared from Coordinator advice: no Worker is launched, no tools or effects are authorized, and native approval remains required.
+
 
 The summary is read from a private local UTF-8 file (maximum 1000 bytes)
 rather than shell arguments. Commands apply the same native Ticket revision

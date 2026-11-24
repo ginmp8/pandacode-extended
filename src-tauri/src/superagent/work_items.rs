@@ -182,6 +182,19 @@ pub(super) fn plan(
     store:&Store,ticket_id:&str,expected_revision:i64,request_key:&str,
     summary:&str,parent_id:Option<&str>,
 )->Result<WorkItem> {
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e|e.to_string())?;
+    let item = plan_in_transaction(store, &tx, ticket_id, expected_revision,
+        request_key, summary, parent_id)?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(item)
+}
+
+fn plan_in_transaction(
+    store: &Store, tx: &rusqlite::Transaction<'_>, ticket_id: &str,
+    expected_revision: i64, request_key: &str, summary: &str, parent_id: Option<&str>,
+) -> Result<WorkItem> {
     let summary=summary.trim();
     if request_key.is_empty() || request_key.len()>128
         || !request_key.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'|b'.'))
@@ -195,7 +208,6 @@ pub(super) fn plan(
         || !id.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'))) {
         return Err("Invalid parent WorkItem identity.".into());
     }
-    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let previous=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
                 CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
@@ -281,8 +293,7 @@ pub(super) fn plan(
          VALUES(?1,'work_item_planned',?2,?3)",
         params![ticket_id,format!("Operator planned WorkItem {id}; no provider dispatched"),now],
     ).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e|e.to_string())?;
-    store.db.query_row(
+    tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
                 CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
                      WHEN EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
@@ -296,6 +307,73 @@ pub(super) fn plan(
     ).map_err(|e|e.to_string())
 }
 
+
+/// An operator-reviewed dependency plan. It may be prepared from Coordinator
+/// advice, but this document has no execution or permission fields.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PlannedWorkItemInput {
+    request_key: String,
+    summary: String,
+    parent_request_key: Option<String>,
+}
+
+/// Apply an ordered, bounded plan atomically through the same native policy,
+/// budget, revision and immutable request-key checks as individual planning.
+/// Existing identical keys are read-only receipts, including on stale replay.
+fn plan_batch(
+    store: &Store, ticket_id: &str, expected_revision: i64,
+    inputs: &[PlannedWorkItemInput],
+) -> Result<Vec<WorkItem>> {
+    if inputs.is_empty() || inputs.len() > 16 || expected_revision < 0 {
+        return Err("A WorkItem plan must contain 1 to 16 items and a valid revision.".into());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e|e.to_string())?;
+    let mut revision = expected_revision;
+    let mut keys = std::collections::BTreeMap::<String, String>::new();
+    let mut items = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if keys.contains_key(&input.request_key) {
+            return Err("Duplicate WorkItem key in dependency plan.".into());
+        }
+        let parent = input.parent_request_key.as_ref().map(|key| {
+            keys.get(key).map(String::as_str)
+                .ok_or("WorkItem parent key must precede its child in the same plan.")
+        }).transpose()?;
+        let before = super::get_ticket(store, ticket_id)?.revision;
+        let item = plan_in_transaction(store, &tx, ticket_id, revision,
+            &input.request_key, &input.summary, parent)?;
+        let after = super::get_ticket(store, ticket_id)?.revision;
+        // An idempotent receipt cannot refresh a stale caller's authority
+        // for the next, genuinely new item.
+        if before != after {
+            revision = after;
+        }
+        keys.insert(input.request_key.clone(), item.id.clone());
+        items.push(item);
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(items)
+}
+
+pub(crate) fn headless_plan_batch(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+    inputs: &[PlannedWorkItemInput],
+) -> Result<String> {
+    let store = super::open_headless_transition_store(database_path)?;
+    let items = plan_batch(&store, ticket_id, expected_revision, inputs)?;
+    let ticket = super::get_ticket(&store, ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id, "revision": ticket.revision,
+        "items": items.iter().map(|item| serde_json::json!({
+            "workItemId": item.id, "requestKey": item.request_key,
+            "parentId": item.parent_id, "state": item.state,
+        })).collect::<Vec<_>>(),
+        "providerDispatched": false, "grantIssued": false, "externalEffectReplayed": false,
+    })).map_err(|e|e.to_string())
+}
 
 /// A trusted local operator cancels only an unexecuted WorkItem plan. The
 /// immutable original plan, child lineage, Ticket and audit history survive.
@@ -540,5 +618,68 @@ mod headless_tests {
         let plans=list(&reopened,&ticket.id,100).unwrap().0;
         assert_eq!(plans.len(),2);
         assert!(plans.iter().all(|item|item.state=="cancelled"));
+    }
+
+    #[test]
+    fn headless_dependency_plan_is_atomic_and_replay_does_not_refresh_authority() {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-headless-plan-batch-{}.sqlite3", storage::id(),
+        ));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/headless-plan-batch')", [],
+        ).unwrap();
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config = superagent::create_configuration(&store, NewOrchestration {
+            name: "Batch plans".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&config.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit_role_with_staging(
+            &mut store, &config.id, "Plan dependency work", "batch-plan", false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        let input = |key: &str, parent: Option<&str>| PlannedWorkItemInput {
+            request_key: key.into(), summary: format!("Inspect {key}"),
+            parent_request_key: parent.map(str::to_owned),
+        };
+        let invalid = [input("root", None), input("child", Some("foreign"))];
+        assert!(headless_plan_batch(&path, &ticket.id, ticket.revision, &invalid).is_err());
+        assert!(list(&store, &ticket.id, 100).unwrap().0.is_empty());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().revision, ticket.revision);
+        let valid = [input("root", None), input("child", Some("root"))];
+        let result: serde_json::Value = serde_json::from_str(
+            &headless_plan_batch(&path, &ticket.id, ticket.revision, &valid).unwrap(),
+        ).unwrap();
+        assert_eq!(result["items"][1]["parentId"], result["items"][0]["workItemId"]);
+        assert_eq!(result["grantIssued"], false);
+        assert_eq!(result["providerDispatched"], false);
+        let revision = result["revision"].as_i64().unwrap();
+        assert_eq!(revision, ticket.revision + 2);
+        let replay: serde_json::Value = serde_json::from_str(
+            &headless_plan_batch(&path, &ticket.id, ticket.revision, &valid).unwrap(),
+        ).unwrap();
+        assert_eq!(replay, result);
+        let extension = [input("root", None), input("third", Some("root"))];
+        assert!(headless_plan_batch(&path, &ticket.id, ticket.revision, &extension).is_err());
+        let duplicate = [input("root", None), input("root", None)];
+        assert!(headless_plan_batch(&path, &ticket.id, revision, &duplicate).is_err());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert!(superagent::assignments(&store, &ticket.id, 100).unwrap().is_empty());
+        assert!(!superagent::mandate(&store, &ticket.id).unwrap().allowed_side_effects);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let items = list(&reopened, &ticket.id, 100).unwrap().0;
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.state == "planned"));
     }
 }

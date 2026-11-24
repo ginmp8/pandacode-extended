@@ -120,6 +120,21 @@ pub(crate) fn eligible_turn_check_project(
     Ok(session.project_id)
 }
 
+/// Revalidate the exact workspace that the host actually checked. A project
+/// can be relinked without changing its ID or the session's Council pins.
+/// This is a pre/post execution guard, not an immutable artifact snapshot.
+pub(crate) fn validate_native_check_workspace(
+    store: &crate::storage::Store, session_id: &str, project_id: &str,
+    expected_root: &Path,
+) -> crate::Result<()> {
+    if eligible_turn_check_project(store, session_id)? != project_id
+        || store.workspace_root(project_id, Some(session_id))?.as_path() != expected_root
+    {
+        return Err("council_task_stale: host check workspace changed during execution.".into());
+    }
+    Ok(())
+}
+
 /// One fast check a checkout declares through its own manifests.
 pub(crate) struct Plan {
     pub name: String,
@@ -508,6 +523,41 @@ mod tests {
         let denied = eligible_turn_check_project(&store, &leaf.id).unwrap_err();
         assert!(denied.contains("reviewer_policy_denied"), "{denied}");
         assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id);
+    }
+
+    #[test]
+    fn native_host_check_rejects_relinked_workspace_even_with_same_project_id() {
+        let temp = Scratch::new("native-check-relink");
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let store = crate::storage::Store::open(&temp.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(&original).unwrap();
+        let root = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        let checked_root = store.workspace_root(&project.id, Some(&root.id)).unwrap();
+        validate_native_check_workspace(&store, &root.id, &project.id, &checked_root).unwrap();
+
+        fs::write(original.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        let runner = original.join("fake-npm");
+        fake(&runner, "echo checked\nexit 0");
+        let plan = Plan {
+            name: "npm test".into(),
+            program: runner.to_str().unwrap().into(),
+            args: vec![],
+        };
+        let report = report_for_plan_inner(&checked_root, &plan, true);
+        assert_eq!(report["hostObservation"]["passed"], true);
+
+        store.relink_project(&project.id, &replacement).unwrap();
+        assert_eq!(eligible_turn_check_project(&store, &root.id).unwrap(), project.id);
+        let error = validate_native_check_workspace(&store, &root.id, &project.id, &checked_root)
+            .unwrap_err();
+        assert!(error.contains("council_task_stale"), "{error}");
+
+        // A fresh observation can still target the newly resolved workspace.
+        let fresh = store.workspace_root(&project.id, Some(&root.id)).unwrap();
+        validate_native_check_workspace(&store, &root.id, &project.id, &fresh).unwrap();
     }
 
     #[test]

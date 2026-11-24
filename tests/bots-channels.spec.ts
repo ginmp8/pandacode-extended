@@ -498,10 +498,20 @@ test.describe('shared bot channels', () => {
       if (!assignment || !history) throw new Error('Channel fixture is missing');
       history.append(assignment);
     });
+    // A foreign response on the FIRST native read must never become the bound
+    // Channel task or display its private findings/approval.
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, foreign);
     await page.getByRole('button', { name: 'Inspect Council evidence' }).click();
     const dialog = page.getByRole('dialog', { name: 'Council inspection' });
-    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByRole('alert')).toContainText('Council evidence does not match this task');
+    await expect(dialog).not.toContainText('Other Channel secret finding');
+    await expect(dialog).not.toContainText('Verified native pass');
     const refresh = dialog.getByRole('button', { name: 'Refresh native evidence' });
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, own);
+    await refresh.click();
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    // The same binding must remain in force across subsequent refreshes.
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, foreign);
     await refresh.click();
     await expect(dialog.getByRole('alert')).toContainText('Council evidence does not match this task');

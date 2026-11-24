@@ -7239,7 +7239,12 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'channel-council-inspect': {
       const deliveryId = element.dataset.deliveryId;
       const channelId = state.sharedChannelId;
-      if (!deliveryId || !channelId) break;
+      // Pin the read-only display to the session already shown in this delivery.
+      // This DOM hint is never sent as authority to the native inspection command.
+      const expectedSessionId = element.closest<HTMLElement>('.bc-council-summary')
+        ?.querySelector<HTMLButtonElement>('[data-action="channel-council-report"]')
+        ?.dataset.sessionId?.trim();
+      if (!deliveryId || !channelId || !expectedSessionId) break;
       // Native resolves and revalidates the delivery's owning channel, policy,
       // isolated task and frozen cycle. DOM-provided task ids have no authority.
       const { createCouncilInspector } = await import('./council-inspector');
@@ -7248,7 +7253,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
         'bc-council-inspector-dialog');
       const inspector = createCouncilInspector(() =>
         call<import('./architect-types').CouncilInspection>('bot_shared_channel_council_inspect',
-          { channelId, deliveryId }));
+          { channelId, deliveryId }), expectedSessionId);
       const host = dialog.querySelector<HTMLElement>('.bc-council-inspector-host');
       if (host) { host.dataset.channelId = channelId; host.append(inspector); }
       const summary = inspector.querySelector<HTMLElement>('summary');

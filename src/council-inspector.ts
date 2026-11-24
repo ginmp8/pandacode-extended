@@ -503,9 +503,9 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       && Number.isSafeInteger(snapshot.cycleStartedAt) && Number.isSafeInteger(snapshot.teamRevision)
       ? JSON.stringify([snapshot.sessionId, snapshot.cycleStartedAt, snapshot.teamRevision]) : null;
   let shownScope: string | null = null;
-  // One embedded inspector is bound to one native root task, not whichever
-  // unrelated result a later read happens to return. Channels bind on their
-  // first authorized native inspection; direct chats already know the task ID.
+  // One inspector belongs to one native root task, not a later unrelated read.
+  // Direct chats and Channels bind their known task ID before the first read;
+  // generic embedded consumers may bind on their first valid native response.
   let boundSessionId: string | null = expectedSessionId?.trim() || null;
   let serial = 0;
   let loading = false;

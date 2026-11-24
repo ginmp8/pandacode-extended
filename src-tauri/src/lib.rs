@@ -1585,6 +1585,7 @@ struct RunAdmission<'a> {
 
 struct PreparedRun {
     config: RunConfig,
+    superagent_session: bool,
     restore_stage: Option<String>,
     turn_message_id: i64,
     turn_started: std::time::Instant,
@@ -1811,7 +1812,9 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
-    let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
+    let superagent_policy = superagent::read_only_policy(&store, &session_id).map_err(restore)?;
+    let superagent_session = superagent_policy.is_some();
+    let reviewer_policy = match superagent_policy {
         Some(policy) => Some(policy),
         None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
     };
@@ -1845,6 +1848,7 @@ fn prepare_task_run_in_project(
     agents.insert(session_id.clone(), agent);
     Ok(PreparedRun {
         config,
+        superagent_session,
         restore_stage: maintenance.then_some(session.task_stage),
         turn_message_id,
         turn_started,
@@ -1899,6 +1903,7 @@ fn prepare_cloud_attach(
     let agent = RunningAgent::new(tx, stopped);
     let prepared = PreparedRun {
         config,
+        superagent_session: false,
         restore_stage: None,
         turn_message_id: cloud.turn_message,
         turn_started: std::time::Instant::now(),
@@ -2142,6 +2147,7 @@ async fn launch_operation_admitted(
     let stopped = Arc::new(AtomicBool::new(false));
     let PreparedRun {
         mut config,
+        superagent_session,
         restore_stage,
         turn_message_id,
         turn_started,
@@ -2464,15 +2470,27 @@ async fn launch_operation_admitted(
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
         let managed_worker = team.as_ref().is_some_and(|admission| admission.parent != session_id);
-        let warm_next = (providers::warms(&config) && !managed_worker && !cloud).then(|| {
+        // Task-owned sessions may not start a spare after their Assignment settles.
+        let warm_next = (!superagent_session && providers::warms(&config) && !managed_worker && !cloud).then(|| {
             let tools = host.as_ref().map(|host| (host.tools.clone(), host.approval_tools.clone())).unwrap_or_default();
             (config.clone(), tools)
         });
         // The harness and model this run used, for model health.
         let ran = (config.provider.clone(), config.model.clone());
         let reached_harness = Arc::new(AtomicBool::new(false));
+        let superagent_launch = if superagent_session {
+            // Drop any spare created by an older build; revalidate after all
+            // asynchronous preparation and before handing the turn to the provider.
+            providers::discard_warm_agent(&session_id);
+            store.lock().map_err(|e| e.to_string())
+                .and_then(|db| superagent::guard_prepared_provider_launch(&db, &config))
+        } else {
+            Ok(())
+        };
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
+        } else if let Err(error) = superagent_launch {
+            Err(error)
         } else if let Some(error) = reviewer_host_error {
             Err(error)
         } else if team_tools_missing {

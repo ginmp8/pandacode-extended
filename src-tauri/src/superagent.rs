@@ -4073,6 +4073,35 @@ pub(crate) fn read_only_policy(
     Ok(None)
 }
 
+/// The async provider launch happens after preparation releases the Store
+/// lock. Re-read the task-owned authority and the actual launch configuration
+/// at that last native boundary; never turn a prepared run into an ambient
+/// bot launch after Stop, expiry, profile drift or checkout replacement.
+pub(crate) fn guard_prepared_provider_launch(
+    store: &Store, config: &crate::providers::RunConfig,
+) -> Result<()> {
+    use crate::architect::reviewer_security::ReviewerToolPolicy;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if read_only_policy(store, &config.session_id)? != Some(ReviewerToolPolicy::NativeReadOnly)
+        || !config.reviewer_boundary
+        || config.reviewer_policy.as_ref() != Some(&ReviewerToolPolicy::NativeReadOnly)
+        || config.mode != "plan"
+        || config.skill.is_some() || config.goal.is_some() || config.codex_settings.is_some()
+        || !config.images.is_empty()
+    {
+        return Err("policy_unsupported: prepared SuperAgent provider authority changed.".into());
+    }
+    let session = store.session(&config.session_id)?;
+    if config.provider != session.provider || config.model != session.model
+        || config.reasoning_effort != session.reasoning_effort
+        || config.cwd != store.workspace_root(&session.project_id, Some(&config.session_id))?
+    {
+        return Err("policy_unsupported: prepared SuperAgent provider or checkout changed.".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Cloud reattachment skips the normal native provider policy preparation.
 /// Even a currently valid read-only assignment must fail closed here until a
 /// cloud adapter can enforce its mandate at every provider/tool admission.
@@ -12046,6 +12075,56 @@ mod tests {
             "Unrelated projects must remain independently executable");
         assert!(active_manual_conflict(&store, &["missing-live-session".to_owned()],
             "worker", "project").is_err(), "Missing live metadata must fail closed");
+    }
+
+    #[test]
+    fn prepared_provider_launch_rechecks_native_authority_and_checkout() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-provider-launch-{}", storage::id()));
+        std::fs::create_dir(&root).unwrap();
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [root.to_string_lossy().as_ref()],
+        ).unwrap();
+        let team = enabled(&store);
+        let (ticket, started) = admit(&mut store, &team.id, "Inspect the scoped checkout",
+            "prepared-provider-launch", false).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let session = store.session(&sid).unwrap();
+        let cwd = store.workspace_root(&session.project_id, Some(&sid)).unwrap();
+        let mut config = crate::providers::RunConfig {
+            session_id: sid.clone(),
+            provider: session.provider,
+            model: session.model,
+            reasoning_effort: session.reasoning_effort,
+            mode: "plan".into(),
+            reviewer_boundary: true,
+            reviewer_policy: read_only_policy(&store, &sid).unwrap(),
+            cwd: cwd.clone(),
+            resume_id: None,
+            prompt: "Inspect".into(),
+            instructions: String::new(),
+            skill: None,
+            goal: None,
+            codex_settings: None,
+            images: Vec::new(),
+        };
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+        config.mode = "full".into();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        config.mode = "plan".into();
+        config.cwd = cwd.join("different-checkout");
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        config.cwd = cwd;
+        let model = std::mem::replace(&mut config.model, "different-model".into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        config.model = model;
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+        stop(&store, &ticket.id).unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err(),
+            "A prepared provider launch must not survive native Stop");
+        std::fs::remove_dir(&root).unwrap();
     }
 
     #[test]

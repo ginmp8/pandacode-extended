@@ -5353,6 +5353,19 @@ pub async fn superagent_plan_work_item(
         &summary,parent_id.as_deref())
 }
 
+/// Apply a reviewed dependency plan in one native transaction. This is
+/// planning only: no provider dispatch, tool grant or Council acceptance.
+#[tauri::command]
+pub async fn superagent_plan_work_items(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: i64, plan_json: String,
+) -> Result<Vec<work_items::WorkItem>> {
+    require_main_window(&window)?;
+    let inputs = work_items::decode_plan(&plan_json)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    work_items::plan_batch(&store, &ticket_id, expected_revision, &inputs)
+}
+
 /// Trusted Desktop-only cancellation of an unexecuted operator plan.
 /// This is revision-guarded native metadata, never a provider stop or effect.
 #[tauri::command]

@@ -39,6 +39,16 @@ passing exact-HEAD CI run before the slice is considered verified.
 ## Serial native WorkItem attempts (partial S2)
 
 An operator can plan individual WorkItems on a blocked or queued manual Demand.
+The **Reviewed dependency plan (JSON)** form also applies an operator-reviewed
+array of up to 16 items atomically, using the same native transition as
+`--plan-work-items`. Supply stable `requestKey` and `summary` fields and an
+optional `parentRequestKey` referring to a preceding item in the same plan.
+The 16 KiB payload limit, strict schema, original Ticket revision, remaining
+attempt budget, dependency ownership and idempotency are enforced natively;
+a rejected item rolls back the whole batch. Keep request keys unchanged when
+retrying an uncertain acknowledgement. This is manual planning only, not a
+Coordinator-triggered dispatch, tool grant, or Council verdict.
+
 The existing **Dispatch worker** or **Retry** confirmation authorizes the current
 Ticket revision and selects exactly one ready item, prioritizing an attempted
 but unaccepted item before new items. A child becomes ready only after its

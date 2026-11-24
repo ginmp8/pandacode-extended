@@ -2992,6 +2992,74 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
     /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
 });
 
+test('reviewed dependency plan sends one revision-bound native batch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-plan-batch-test';document.body.appendChild(host);
+    let revision=3;
+    let items:Array<Record<string,unknown>>=[];
+    const calls:Array<Record<string,unknown>>=[];
+    const ticket=()=>({id:'ticket',orchestrationId:'team',objective:'Review dependency plan',
+      state:'blocked',revision,evidence:null});
+    (window as unknown as {batchPlanEvidence:()=>unknown}).batchPlanEvidence=()=>({calls,revision,items});
+    mountSuperagent(host,async (command,args) => {
+      if(command==='bots_list') return [{id:'lead',name:'Lead',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list') return [{id:'team',name:'Plan Team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets') return [ticket()] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {ticket:ticket(),
+        mandate:{actor:'local-user',authorizationId:'native-user-issued',policyRevision:1,
+          projectId:'project',expiresAt:1900000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],workItems:items,truncatedWorkItems:false} as never;
+      if(command==='superagent_plan_work_items') {
+        const request=args as Record<string,unknown>;
+        calls.push(request);
+        if(request.ticketId!=='ticket' || request.expectedRevision!==revision)
+          throw Error('Stale native plan revision');
+        const input=JSON.parse(String(request.planJson)) as Array<{requestKey:string;summary:string;parentRequestKey?:string}>;
+        if(input.some((item,index)=>item.parentRequestKey &&
+          !input.slice(0,index).some(parent=>parent.requestKey===item.parentRequestKey)))
+          throw Error('WorkItem parent key must precede its child in the same plan.');
+        items=input.map(item=>({id:'item-'+item.requestKey,ticketId:'ticket',
+          requestKey:item.requestKey,summary:item.summary,parentId:item.parentRequestKey?'item-'+item.parentRequestKey:null,
+          state:'planned',createdAt:1800000000100,cancelledAt:null,assignmentId:null}));
+        revision+=items.length;
+        return items as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-plan-batch-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const plans=host.getByRole('region',{name:'Operator-planned WorkItems'});
+  const input=plans.getByLabel('Reviewed dependency plan (JSON)');
+  const invalid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout'},
+    {requestKey:'child',summary:'Verify results',parentRequestKey:'foreign'}]);
+  await input.fill(invalid);
+  await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
+  await expect(host).toContainText('WorkItem parent key must precede its child');
+  await expect(input).toHaveValue(invalid);
+  const valid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout'},
+    {requestKey:'child',summary:'Verify results',parentRequestKey:'root'}]);
+  await input.fill(valid);
+  await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
+  await expect(plans).toContainText('Inspect checkout');
+  await expect(plans).toContainText('Verify results');
+  const result=await page.evaluate(()=>(window as unknown as {batchPlanEvidence:()=> {
+    calls:Array<Record<string,unknown>>;revision:number;items:Array<Record<string,unknown>>;
+  }}).batchPlanEvidence());
+  expect(result.calls).toHaveLength(2);
+  expect(result.calls.map(call=>call.expectedRevision)).toEqual([3,3]);
+  expect(result.calls[1].planJson).toBe(valid);
+  expect(result.items[1].parentId).toBe(result.items[0].id);
+  expect(result.revision).toBe(5);
+});
+
 test('native effect receipt inspection is lazy, task-scoped and cannot dispatch', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

@@ -148,8 +148,7 @@ fn read_bounded_work_item_plan(path: &std::path::Path)
 {
     let text = read_bounded_objective(path)
         .map_err(|_| "Cannot read bounded UTF-8 WorkItem plan file.".to_owned())?;
-    serde_json::from_str(&text)
-        .map_err(|_| "WorkItem plan must be a JSON array of requestKey, summary and optional parentRequestKey.".into())
+    crate::superagent::work_items::decode_plan(&text)
 }
 
 /// Read a complete, bounded local Team role-selection document. Bot identifiers

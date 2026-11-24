@@ -157,6 +157,7 @@ export function mountSuperagent(
 ): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let pendingWorkItem: {ticketId:string;summary:string;parentId:string|null;key:string}|null=null;
+  let batchPlanDraft: {ticketId:string;json:string}|null=null;
   let pendingCancelWorkItem: {ticketId:string;itemId:string;key:string}|null=null;
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
@@ -705,7 +706,14 @@ let demandArchived = false;
             plannedWorkItems.filter(item=>item.state!=='cancelled').map(item =>
               '<option value="' + safe(item.id) + '">' + safe(item.summary) +
               '</option>').join('') + '</select></label>' +
-            '<button type="submit">Save plan without dispatch</button></form>' : '') +
+            '<button type="submit">Save plan without dispatch</button></form>' +
+            '<form data-sa-form="plan-work-items"><label>Reviewed dependency plan (JSON)' +
+            '<textarea name="planJson" rows="5" maxlength="16384" required>' +
+            safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json : '') +
+            '</textarea></label><p>Up to 16 items. Each needs a stable requestKey and summary; ' +
+            'optional parentRequestKey must refer to a preceding item in the same plan. ' +
+            'Review the entire plan before saving. No Worker is dispatched or authorized.</p>' +
+            '<button type="submit">Save dependency plan without dispatch</button></form>' : '') +
         '</section>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
@@ -3532,6 +3540,47 @@ let demandArchived = false;
         feedback=verifyGitHub
           ? 'GitHub Issue and PR objects verified; relationship remains operator asserted. No task or grant created.'
           : 'PR associated as operator context only; GitHub relationship is not verified.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'plan-work-items') {
+      const detail=ticketDetails;
+      const ticketId=inspectedTicket;
+      const planJson=String(data.get('planJson') ?? '');
+      if (!detail || ticketId!==detail.ticket.id || detail.ticket.orchestrationId!==selected ||
+          !['blocked','queued'].includes(detail.ticket.state)) return;
+      batchPlanDraft={ticketId:detail.ticket.id,json:planJson};
+      void work(async () => {
+        if (new TextEncoder().encode(planJson).length>16*1024)
+          throw Error('WorkItem plan exceeds the native 16 KiB limit.');
+        let parsed:unknown;
+        try { parsed=JSON.parse(planJson); }
+        catch { throw Error('Provide a reviewed JSON dependency plan.'); }
+        if (!Array.isArray(parsed) || parsed.length<1 || parsed.length>16 ||
+            parsed.some(item=>!item || typeof item.requestKey!=='string' ||
+              typeof item.summary!=='string' || (item.parentRequestKey!=null &&
+                typeof item.parentRequestKey!=='string'))) {
+          throw Error('Provide 1 to 16 WorkItems with stable requestKey and summary.');
+        }
+        const items=await call<PlannedWorkItem[]>('superagent_plan_work_items',{
+          ticketId,expectedRevision:detail.ticket.revision,planJson,
+        });
+        const ids=new Map<string,string>();
+        if (!Array.isArray(items) || items.length!==parsed.length ||
+            items.some((item,index)=>{
+              const input=parsed[index];
+              const parent=input.parentRequestKey==null ? null : ids.get(input.parentRequestKey);
+              if (!item || item.ticketId!==ticketId || item.requestKey!==input.requestKey ||
+                  item.summary!==input.summary.trim() || item.parentId!==parent ||
+                  typeof item.id!=='string' || !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+                  !['planned','cancelled','accepted'].includes(item.state) ||
+                  ids.has(item.requestKey)) return true;
+              ids.set(item.requestKey,item.id);
+              return false;
+            })) throw Error('Native dependency plan acknowledgement is inconsistent.');
+        await refreshTicketDetails();
+        batchPlanDraft=null;
+        feedback='Dependency plan saved atomically. No Worker was dispatched or authorized.';
       });
       return;
     }

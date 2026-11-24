@@ -318,10 +318,18 @@ pub(crate) struct PlannedWorkItemInput {
     parent_request_key: Option<String>,
 }
 
+pub(crate) fn decode_plan(text: &str) -> Result<Vec<PlannedWorkItemInput>> {
+    if text.len() > 16 * 1024 {
+        return Err("WorkItem plan exceeds the native 16 KiB limit.".into());
+    }
+    serde_json::from_str(text)
+        .map_err(|_| "WorkItem plan must be a JSON array of requestKey, summary and optional parentRequestKey.".into())
+}
+
 /// Apply an ordered, bounded plan atomically through the same native policy,
 /// budget, revision and immutable request-key checks as individual planning.
 /// Existing identical keys are read-only receipts, including on stale replay.
-fn plan_batch(
+pub(super) fn plan_batch(
     store: &Store, ticket_id: &str, expected_revision: i64,
     inputs: &[PlannedWorkItemInput],
 ) -> Result<Vec<WorkItem>> {
@@ -621,6 +629,15 @@ mod headless_tests {
     }
 
     #[test]
+    fn desktop_and_headless_plan_payloads_share_bounded_strict_decoding() {
+        let valid = r#"[{"requestKey":"root","summary":"Inspect"}]"#;
+        assert_eq!(decode_plan(valid).unwrap()[0].request_key, "root");
+        assert!(decode_plan(&" ".repeat(16 * 1024 + 1)).is_err());
+        assert!(decode_plan(r#"[{"requestKey":"root","summary":"Inspect","allowedSideEffects":true}]"#).is_err());
+        assert!(decode_plan("not JSON").is_err());
+    }
+
+    #[test]
     fn headless_dependency_plan_is_atomic_and_replay_does_not_refresh_authority() {
         let path = std::env::temp_dir().join(format!(
             "pandacode-headless-plan-batch-{}.sqlite3", storage::id(),
@@ -657,9 +674,15 @@ mod headless_tests {
         assert!(list(&store, &ticket.id, 100).unwrap().0.is_empty());
         assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().revision, ticket.revision);
         let valid = [input("root", None), input("child", Some("root"))];
+        // Desktop applies to the live store. Detached CLI replays the exact
+        // same keys and must return the already committed native identities.
+        let desktop = plan_batch(&store, &ticket.id, ticket.revision, &valid).unwrap();
+        assert_eq!(desktop[1].parent_id.as_deref(), Some(desktop[0].id.as_str()));
         let result: serde_json::Value = serde_json::from_str(
             &headless_plan_batch(&path, &ticket.id, ticket.revision, &valid).unwrap(),
         ).unwrap();
+        assert_eq!(result["items"][0]["workItemId"], desktop[0].id);
+        assert_eq!(result["items"][1]["workItemId"], desktop[1].id);
         assert_eq!(result["items"][1]["parentId"], result["items"][0]["workItemId"]);
         assert_eq!(result["grantIssued"], false);
         assert_eq!(result["providerDispatched"], false);

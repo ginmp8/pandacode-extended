@@ -3613,6 +3613,14 @@ mod tests {
              "actor":{"login":"trusted-bot","id":123},"repo":{"name":"owner/repo","id":456},
              "payload":{"action":"reopened","issue":{"number":43}}}
         ]);
+        // GitHub's Events API returns descending identities. The ascending
+        // fixture must fail without recording decisions or advancing the cursor.
+        assert!(poll_authenticated_events_with_repository_id_scoped(
+            &store, &reopened_on, 0, &reopened_raw, "operator", 1,
+            ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+        ).unwrap_err().to_string().contains("feed order"));
+        assert_eq!(source(&store, &reopened_on.id).unwrap().last_sequence, 0);
+        let reopened_raw = serde_json::json!([reopened_raw[1].clone(), reopened_raw[0].clone()]);
         let reopened_poll = poll_authenticated_events_with_repository_id_scoped(
             &store, &reopened_on, 0, &reopened_raw, "operator", 1,
             ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },

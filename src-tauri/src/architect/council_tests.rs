@@ -7591,6 +7591,51 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             ).unwrap();
         }
     }
+    // A resting snapshot is not proof of provider quiescence, even outside
+    // the interrupted path. Removing the nested source must not bypass the
+    // historical child ownership check either.
+    for resting_status in ["paused", "failed", "stopped", "completed"] {
+        for council_removed in [false, true] {
+            let mut resting = root.clone();
+            resting.status = resting_status.into();
+            if council_removed {
+                resting.config.council = None;
+            }
+            let resting_json = serde_json::to_value(&resting).unwrap();
+            {
+                let store = state.store.lock().unwrap();
+                store.db.execute(
+                    "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+                    rusqlite::params![&sid, resting_json.to_string()],
+                ).unwrap();
+                store.db.execute(
+                    "UPDATE sessions SET status='waiting' WHERE id=?1",
+                    [&sibling_launch.sid],
+                ).unwrap();
+            }
+            let denied = start_state(
+                &state, &sid, "Must not overtake a historical native reviewer", None, None,
+            ).unwrap_err();
+            assert!(denied.contains("native hierarchy still has active sessions"), "{denied}");
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(),
+                resting_json, "denied objective must preserve the resting root"
+            );
+            assert_eq!(
+                serde_json::to_value(load(&store, &sibling_launch.admission.parent).unwrap().unwrap()).unwrap(),
+                before_sibling, "denied objective must preserve the native sibling"
+            );
+            store.db.execute(
+                "UPDATE sessions SET status='interrupted' WHERE id=?1",
+                [&sibling_launch.sid],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+                rusqlite::params![&sid, before_root.to_string()],
+            ).unwrap();
+        }
+    }
     // A new user objective is not a Resume: restart recovery must allocate
     // fresh child sessions and never reactivate interrupted reviewer grants.
     let (fresh, _) = start_state(

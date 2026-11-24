@@ -1893,11 +1893,20 @@ pub(crate) fn start_state(
     }
     // Explicit new work after a physical restart must get fresh child sessions
     // and native grants; an ordinary Resume remains fail-closed.
-    let restarted_nested_cycle = team.status == "interrupted"
-        && team.council_since > 0
+    let nested_cycle = team.council_since > 0
         && team.config.council.as_ref()
             .is_some_and(|config| !config.nested_bot_reviewers.is_empty());
-    if restarted_nested_cycle {
+    let restarted_nested_cycle = team.status == "interrupted" && nested_cycle;
+    // Pause, Stop, failure and a later configuration change do not prove that
+    // a previously issued native child or leaf has stopped. Protect every
+    // new objective on a hierarchical root, including historical children
+    // whose source was subsequently removed from the current configuration.
+    let has_child_history: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child')",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if nested_cycle || has_child_history {
         if child_council::active_leaf_agents(&store, session_id, &agents)? {
             return Err(AGENTS_STOPPING.into());
         }

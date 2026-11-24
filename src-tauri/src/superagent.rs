@@ -2330,6 +2330,31 @@ pub(crate) fn headless_queue_selected_worker_demand(
     )
 }
 
+/// Explicit operator-selected issue staging, not inferred Observe admission.
+pub(crate) fn headless_queue_observed_issue(
+    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+    objective: &str, request_key: &str, selection: &events::ObservedIssueSelection,
+) -> Result<String> {
+    let mut store = open_headless_transition_store(database_path)?;
+    let (ticket, launched) = admit_role_with_observed_issue(
+        &mut store, orchestration_id, objective, request_key, true,
+        ManualAdmissionOptions {
+            coordinate: false, headless_staging: true, selected_worker_id: Some(worker_bot_id),
+        },
+        Some(selection),
+    )?;
+    debug_assert!(!launched);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "providerDispatchedByCommand": false,
+        "requiresExplicitNativeDispatch": ticket.state == "blocked",
+        "allowedTools": [],
+        "allowedSideEffects": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Create a reusable, disabled Team through the same atomic role and future-task
 /// policy boundary as desktop. A detached operator cannot turn a creation
 /// document into a live grant, Assignment, Council verdict or provider launch.
@@ -3614,7 +3639,18 @@ fn admit_role_with_staging_member(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, options: ManualAdmissionOptions<'_>,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_observed_issue(store, config_id, objective, request_key, busy, options, None)
+}
+
+fn admit_role_with_observed_issue(
+    store: &mut Store, config_id: &str, objective: &str, request_key: &str,
+    busy: bool, options: ManualAdmissionOptions<'_>,
+    selection: Option<&events::ObservedIssueSelection>,
+) -> Result<(Ticket, bool)> {
     let ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id } = options;
+    if selection.is_some() && (coordinate || !headless_staging || selected_worker_id.is_none()) {
+        return Err("Observed issues require explicit staged Worker admission.".into());
+    }
     if coordinate && headless_staging {
         return Err("A staged Demand cannot bypass native Coordinator admission.".into());
     }
@@ -3640,6 +3676,7 @@ fn admit_role_with_staging_member(
         params![config_id,request_key], |row| row.get::<_, String>(0),
     ).optional().map_err(|e| e.to_string())? {
         let ticket = get_ticket(store, &existing)?;
+        events::require_observed_issue_replay(&tx, &ticket.id, selection)?;
         if ticket.objective != objective {
             return Err("The manual-request key is already bound to another objective.".into());
         }
@@ -3702,6 +3739,9 @@ fn admit_role_with_staging_member(
     }
     // No legacy caller may silently select the first Worker of a multi-member Team.
     // Reviewer-backed Teams remain unsupported until real task-scoped Council exists.
+    let observed_issue = selection.map(|selected|
+        events::validate_observed_issue(store, &tx, &config, selected)
+    ).transpose()?;
     let members=roster::read(store,config_id)?;
     if !members.reviewer_bot_ids.is_empty()
         || (selected_worker_id.is_none() && members.worker_bot_ids.len()>1) {
@@ -3771,6 +3811,9 @@ fn admit_role_with_staging_member(
              else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, &ticket_id)?;
+    if let Some((selected, issue)) = selection.zip(observed_issue.as_ref()) {
+        events::bind_observed_issue(store, &tx, &ticket.id, selected, issue)?;
+    }
     if coordinate {
         // Validate the complete planning packet before committing the initial
         // native Ticket, thread and lease. No partial or silently truncated

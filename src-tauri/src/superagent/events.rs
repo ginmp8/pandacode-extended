@@ -295,10 +295,21 @@ fn require_ticket_link_repository_identity(
 fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &str)
     -> Result<SourceThreadLink>
 {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    link_thread_in_tx(store, &tx, source_id, ticket_id, subject_key)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    list_thread_links(store, ticket_id)?.into_iter()
+        .find(|link| link.source_id == source_id && link.subject_key == subject_key)
+        .ok_or_else(|| "Source thread link unavailable after update.".into())
+}
+
+fn link_thread_in_tx(
+    store: &Store, tx: &rusqlite::Transaction<'_>, source_id: &str,
+    ticket_id: &str, subject_key: &str,
+) -> Result<()> {
     if !valid_thread_key(subject_key) {
         return Err("A source link requires an exact issue:123 or pull:123 thread key.".into());
     }
-    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = super::get_ticket(store, ticket_id)?;
     let src = source(store, source_id)?;
     if src.orchestration_id != ticket.orchestration_id {
@@ -309,7 +320,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     {
         return Err("Terminal Tickets cannot gain new source thread links.".into());
     }
-    require_ticket_link_repository_identity(&tx, source_id, ticket_id, &src.repository)?;
+    require_ticket_link_repository_identity(tx, source_id, ticket_id, &src.repository)?;
     let current: Option<String> = tx.query_row(
         "SELECT ticket_id FROM sa_source_thread_links
          WHERE source_id=?1 AND subject_key=?2",
@@ -363,12 +374,108 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
                 storage::now()],
         ).map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
-    list_thread_links(store, ticket_id)?.into_iter()
-        .find(|link| link.source_id == source_id && link.subject_key == subject_key)
-        .ok_or_else(|| "Source thread link unavailable after update.".into())
+    Ok(())
 }
 
+/// Explicit selection of one native receipt, not a caller-supplied event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObservedIssueSelection {
+    pub source_id: String,
+    pub delivery_id: String,
+    pub source_revision: i64,
+    pub team_revision: i64,
+}
+
+impl ObservedIssueSelection {
+    fn audit_detail(&self) -> String {
+        format!("{} / {} / {} / {}", self.source_id, self.delivery_id,
+            self.source_revision, self.team_revision)
+    }
+}
+
+pub(super) struct ObservedIssue {
+    subject_key: String,
+    identity: String,
+}
+
+/// A request key cannot change its original source selection. Replays only
+/// inspect an existing receipt, including after unlink or source revocation.
+pub(super) fn require_observed_issue_replay(
+    tx: &rusqlite::Transaction<'_>, ticket_id: &str,
+    selection: Option<&ObservedIssueSelection>,
+) -> Result<()> {
+    let existing: Option<String> = tx.query_row(
+        "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='source_issue_admitted'
+         ORDER BY id LIMIT 1", [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if existing != selection.map(ObservedIssueSelection::audit_detail) {
+        return Err("Manual request key belongs to a different source selection.".into());
+    }
+    Ok(())
+}
+
+/// Called inside the immediate native admission transaction. A name-only
+/// historical receipt or a previous activation cannot authorize new staging.
+pub(super) fn validate_observed_issue(
+    store: &Store, tx: &rusqlite::Transaction<'_>, team: &super::Orchestration,
+    selection: &ObservedIssueSelection,
+) -> Result<ObservedIssue> {
+    if !token_ok(&selection.source_id, 128)
+        || !token_ok(&selection.delivery_id, 128)
+        || selection.source_revision <= 0 || selection.team_revision != team.policy_revision
+    {
+        return Err("Observed issue selection or Team revision is invalid or stale.".into());
+    }
+    let src = source(store, &selection.source_id)?;
+    if src.orchestration_id != team.id || src.mode != "observe"
+        || src.policy_revision != selection.source_revision || src.event_kind != "issues.opened"
+    {
+        return Err("Issue source is not the selected Team's current Observe policy.".into());
+    }
+    let (subject_key, repository_id): (String, i64) = tx.query_row(
+        "SELECT d.subject_key,repo.repository_id FROM sa_event_decisions d
+         JOIN sa_source_repository_identity repo ON repo.source_id=d.source_id
+         JOIN sa_source_actor_identity actor ON actor.source_id=d.source_id
+         WHERE d.source_id=?1 AND d.delivery_id=?2 AND d.policy_revision=?3
+           AND d.decision='observed_permitted' AND d.event_kind='issues.opened'
+           AND d.repository=?4 COLLATE NOCASE AND d.actor=?5 COLLATE NOCASE
+           AND d.at>=repo.attested_at AND d.at>=actor.attested_at",
+        params![&src.id,&selection.delivery_id,selection.source_revision,
+                &src.repository,&src.actor_filter],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("No currently attested permitted issue receipt matches this selection.")?;
+    if repository_id <= 0 || !subject_key.starts_with("issue:") || !valid_thread_key(&subject_key) {
+        return Err("Observed receipt does not identify an exact GitHub issue.".into());
+    }
+    let identity = format!("{repository_id} / {subject_key}");
+    let previously_admitted: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit a JOIN sa_tickets t ON t.id=a.ticket_id
+         WHERE t.orchestration_id=?1 AND a.kind='source_issue_subject' AND a.detail=?2)",
+        params![&team.id,&identity], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if previously_admitted {
+        return Err("This observed issue already has an admitted Demand in this Team.".into());
+    }
+    Ok(ObservedIssue { subject_key, identity })
+}
+
+pub(super) fn bind_observed_issue(
+    store: &Store, tx: &rusqlite::Transaction<'_>, ticket_id: &str,
+    selection: &ObservedIssueSelection, issue: &ObservedIssue,
+) -> Result<()> {
+    link_thread_in_tx(store, tx, &selection.source_id, ticket_id, &issue.subject_key)?;
+    for (kind, detail) in [
+        ("source_issue_admitted", selection.audit_detail()),
+        ("source_issue_subject", issue.identity.clone()),
+    ] {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+            params![ticket_id,kind,detail,storage::now()],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 /// Operator-asserted issue/PR context only; not proof of a GitHub relationship.
 /// The existing linked issue and the new PR reference must share Team, Ticket
@@ -3388,6 +3495,98 @@ mod tests {
     use super::*;
 
 
+
+    #[test]
+    fn explicit_observed_issue_staging_is_atomic_idempotent_and_read_only() {
+        let (store, path) = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('issue-project','Disposable','/tmp/sa-observed-issue')",
+            [],
+        ).unwrap();
+        for (id,name) in [("issue-router","Router"),("issue-worker","Worker")] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?2,'issue-project','codex','default','plan',?3,?3)",
+                params![id,name,storage::now()],
+            ).unwrap();
+        }
+        let team = super::super::create_configuration(&store, super::super::NewOrchestration {
+            name: "Observed issue Team".into(),
+            coordinator_bot_id: "issue-router".into(),
+            worker_bot_id: "issue-worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let off = create_source(&store, &team.id, "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let raw = serde_json::json!([{
+            "id":"5000099001", "type":"IssuesEvent",
+            "created_at":"2026-11-12T09:00:00Z",
+            "actor":{"login":"trusted-bot","id":123},
+            "repo":{"name":"owner/repo","id":456},
+            "payload":{"action":"opened","issue":{"number":42,"body":"Untrusted instructions"}}
+        }]);
+        let result = poll_authenticated_events_with_repository_id_scoped(
+            &store, &on, 0, &raw, "operator", 1,
+            ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+        ).unwrap();
+        assert_eq!(result.recorded, 1);
+        let count = || store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(count(), 0, "Observe alone must not admit work");
+        let selected = ObservedIssueSelection {
+            source_id:on.id.clone(), delivery_id:"5000099001".into(),
+            source_revision:on.policy_revision, team_revision:team.policy_revision+1,
+        };
+        let stage = |key: &str, selection: &ObservedIssueSelection| {
+            super::super::headless_queue_observed_issue(
+                &path, &team.id, "issue-worker", "Inspect local checkout", key, selection,
+            )
+        };
+        let invalid = ObservedIssueSelection { delivery_id:"unknown".into(), ..selected.clone() };
+        assert!(stage("missing", &invalid).is_err());
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_source_issue BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='source_issue_subject'
+             BEGIN SELECT RAISE(ABORT,'source issue audit unavailable'); END;"
+        ).unwrap();
+        assert!(stage("atomic", &selected).is_err());
+        assert_eq!(count(), 0);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        store.db.execute_batch("DROP TRIGGER reject_source_issue;").unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();
+        let id = receipt["ticketId"].as_str().unwrap();
+        assert_eq!(receipt["state"], "blocked");
+        assert_eq!(receipt["providerDispatchedByCommand"], false);
+        assert_eq!(receipt["allowedSideEffects"], false);
+        assert_eq!(count(), 1);
+        let links = list_thread_links(&store, id).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].subject_key, "issue:42");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert!(stage("atomic", &invalid).is_err());
+        assert!(stage("different-key", &selected).is_err());
+        assert!(super::super::headless_queue_selected_worker_demand(
+            &path, &team.id, "issue-worker", "Inspect local checkout", "atomic",
+        ).is_err());
+        unlink_thread(&store, &on.id, id, "issue:42").unwrap();
+        assert!(stage("after-unlink", &selected).is_err());
+        set_mode(&store, &on.id, on.policy_revision, "off").unwrap();
+        assert!(stage("after-revoke", &selected).is_err());
+        let replay: serde_json::Value = serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();
+        assert_eq!(replay["ticketId"], receipt["ticketId"]);
+        assert_eq!(count(), 1);
+        assert!(list_thread_links(&store,id).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(super::super::get_ticket(&reopened,id).unwrap().objective,
+            "Inspect local checkout");
+    }
 
     #[test]
     fn disabled_team_does_not_trigger_background_observe_after_restart() {

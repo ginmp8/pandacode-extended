@@ -81,6 +81,9 @@ enum Command {
     ObserveCheckRun { source_id: String, check_run_id: i64 },
     ObserveLinkedPrChecks { source_id: String, ticket_id: String, pull_key: String },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
+    QueueObservedIssue { orchestration_id: String, worker_bot_id: String,
+        request_key: String, objective_file: PathBuf,
+        selection: crate::superagent::events::ObservedIssueSelection },
     PlanWorkItem { ticket_id: String, expected_revision: i64, request_key: String,
         summary_file: PathBuf, parent_id: Option<String> },
     CancelPlannedWorkItem { ticket_id: String, expected_revision: i64,
@@ -888,6 +891,25 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::QueueObservedIssue {
+                orchestration_id, worker_bot_id, request_key, objective_file, selection,
+            } = &command {
+                let result = (|| -> Result<String, String> {
+                    let objective = read_bounded_objective(objective_file)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_queue_observed_issue(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id,
+                        &objective, request_key, selection,
+                    )
+                })();
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent observed issue staging failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
                 // The objective is a bounded local file, never a command-line
                 // argument or console payload. This command stages but does not run.
@@ -1105,6 +1127,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
         | Command::ObserveCheckRun { .. } | Command::ObserveLinkedPrChecks { .. }
         | Command::QueueDemand { .. } | Command::QueueSelectedWorkerDemand { .. }
+        | Command::QueueObservedIssue { .. }
         | Command::PlanWorkItem { .. } | Command::CancelPlannedWorkItem { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
@@ -2015,6 +2038,36 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--queue-observed-issue" => {
+                let arg = |offset: usize| args.get(index + offset)
+                    .ok_or("--queue-observed-issue needs Team, Worker, source, source revision, delivery, Team revision, request key and objective file.");
+                let orchestration_id = arg(1)?;
+                validate_orchestration_id(orchestration_id)?;
+                let worker_bot_id = arg(2)?;
+                validate_ticket_id(worker_bot_id)?;
+                let source_id = arg(3)?;
+                validate_ticket_id(source_id)?;
+                let source_revision = parse_team_revision(arg(4)?)?;
+                let delivery_id = arg(5)?;
+                validate_ticket_id(delivery_id)?;
+                let team_revision = parse_team_revision(arg(6)?)?;
+                let request_key = arg(7)?;
+                validate_work_item_key(request_key)?;
+                let path = arg(8)?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::QueueObservedIssue {
+                    orchestration_id: orchestration_id.clone(), worker_bot_id: worker_bot_id.clone(),
+                    request_key: request_key.clone(), objective_file: PathBuf::from(path),
+                    selection: crate::superagent::events::ObservedIssueSelection {
+                        source_id: source_id.clone(), delivery_id: delivery_id.clone(),
+                        source_revision, team_revision,
+                    },
+                };
+                ops += 1;
+                index += 8;
+            }
             "--queue-worker-demand" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or("--queue-worker-demand needs a Team ID, Worker ID, request key and objective file.")?;
@@ -2793,6 +2846,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Read at most 100 authenticated Checks for the explicitly linked
                          PR head, store deduplicated Observe receipts and skip pending runs.
                          Incomplete/ambiguous windows fail; this never approves work.
+  --queue-observed-issue <team-id> <worker-id> <source-id> <source-revision> <delivery-id> <team-revision> <key> <objective-file>
+                         Explicitly stage a read-only Demand from an attested Observe
+                         issue-opened receipt and a local objective. No automatic launch.
   --queue-demand <team-id> <request-key> <objective-file>
                          Persist a blocked, read-only manual Ticket from a local UTF-8 file
                          (max 16 KiB). Does not grant tools or dispatch a provider.
@@ -3480,6 +3536,23 @@ mod tests {
         std::fs::write(&filename, [0xff, 0xfe]).unwrap();
         assert!(read_bounded_objective(&filename).is_err());
         std::fs::remove_file(&filename).unwrap();
+        assert_eq!(parsed("--queue-observed-issue team worker source 2 12345 3 key /tmp/objective.txt"),
+            Ok(Command::QueueObservedIssue {
+                orchestration_id:"team".into(), worker_bot_id:"worker".into(),
+                request_key:"key".into(), objective_file:PathBuf::from("/tmp/objective.txt"),
+                selection:crate::superagent::events::ObservedIssueSelection {
+                    source_id:"source".into(), delivery_id:"12345".into(),
+                    source_revision:2, team_revision:3,
+                },
+            }));
+        for invalid in [
+            "--queue-observed-issue team worker source 2 12345 3 key",
+            "--queue-observed-issue team worker source 0 12345 3 key /tmp/objective.txt",
+            "--queue-observed-issue team worker source 2 ../other 3 key /tmp/objective.txt",
+            "--queue-observed-issue team worker source 2 12345 3 key --stop-ticket",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--queue-demand team_123 request.1 /tmp/objective.txt"),
             Ok(Command::QueueDemand {
                 orchestration_id:"team_123".into(), request_key:"request.1".into(),

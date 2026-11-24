@@ -1221,3 +1221,13 @@ WorkItem to a native Assignment. The shared headless acceptance transition
 records only the current bound item; it returns a queued or blocked Ticket
 while more items remain. An attempted WorkItem cannot be cancelled as an
 unexecuted plan. No headless provider launch or automatic scheduling is implied.
+
+### Explicit staging from a GitHub Observe issue receipt
+
+After inspecting the Team policy revision and a source's permitted, attested `issues.opened` decision, a local operator may explicitly stage a Demand:
+
+```sh
+pandacode serve --queue-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVERY_ID TEAM_REVISION REQUEST_KEY objective.txt
+```
+
+The objective is the operator's bounded UTF-8 file, not GitHub issue text. The source must currently be in Observe and both revisions must match. The native transaction creates a blocked manual Ticket, its read-only Mandate, exact issue link and immutable receipt provenance together. A repeated key with identical inputs returns the existing Ticket; different selections or repeated admission of the same attested issue in the same Team are rejected even after unlinking. Observe polling itself never stages work. This command does not grant tools, start a provider, approve a Council review or enable Auto. Native explicit dispatch must still revalidate authority. Historical name-only receipts are not eligible; no remote repository write is performed.

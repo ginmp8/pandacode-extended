@@ -12084,7 +12084,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         store.db.execute(
             "UPDATE projects SET path=?1 WHERE id='project'",
-            [root.to_string_lossy().as_ref()],
+            [root.to_string_lossy().into_owned()],
         ).unwrap();
         let team = enabled(&store);
         let (ticket, started) = admit(&mut store, &team.id, "Inspect the scoped checkout",

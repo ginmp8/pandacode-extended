@@ -2828,6 +2828,19 @@ fn observe_linked_pr_check_batch(
     if issue_pull_context_fence(store, &context.ticket_id)? != context.revision_and_links {
         return Err("Ticket revision or source links changed during authenticated Check fetch.".into());
     }
+    // A pending-only or empty batch never enters the per-run receipt path.
+    // Validate repository identity here as well, without creating a receipt
+    // or pinning a previously unattested source merely for an empty window.
+    let repository_id_i64 = i64::try_from(repository_id)
+        .ok().filter(|id| *id > 0)
+        .ok_or("Authenticated GitHub repository identity is invalid.")?;
+    let pinned: Option<i64> = tx.query_row(
+        "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
+        [&current.id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if pinned.is_some_and(|id| id != repository_id_i64) {
+        return Err("GitHub repository identity changed since source attestation; cursor unchanged.".into());
+    }
     let mut observed = 0;
     let mut duplicates = 0;
     for (id, raw) in runs {
@@ -5939,6 +5952,59 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(linked_decisions(&reopened, "batch-ticket", 10).unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_linked_check_batch_rejects_repository_replacement_after_restart() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "empty-check-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        link_thread(&store, &off.id, "empty-check-ticket", "pull:42").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let context = linked_pr_check_context(
+            &store, &active.id, "empty-check-ticket", "pull:42",
+        ).unwrap();
+        // Empty observations must not claim a new source attestation.
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &context, &[], "local-operator", 900,
+        ).unwrap(), (0, 0));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&active.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let sha = "0123456789012345678901234567890123456789";
+        let raw = serde_json::json!({
+            "id":7711, "status":"completed", "conclusion":"success",
+            "head_sha":sha,
+            "completed_at":(chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &context, &[(7711, raw)], "local-operator", 900,
+        ).unwrap(), (1, 0));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let context = linked_pr_check_context(
+            &reopened, &active.id, "empty-check-ticket", "pull:42",
+        ).unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &reopened, &context, &[], "local-operator", 901,
+        ).unwrap_err().contains("repository identity changed"));
+        assert!(observe_linked_pr_check_batch(
+            &reopened, &context, &[], "local-operator", 0,
+        ).is_err());
+        assert_eq!(observe_linked_pr_check_batch(
+            &reopened, &context, &[], "local-operator", 900,
+        ).unwrap(), (0, 0));
+        assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(linked_decisions(&reopened, "empty-check-ticket", 10).unwrap().len(), 1);
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);

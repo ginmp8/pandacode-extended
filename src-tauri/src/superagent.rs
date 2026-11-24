@@ -5538,6 +5538,12 @@ fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
 fn prepare_coordinated_worker(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String, String)> {
+    // Serialize the native checkout/mandate checks with assignment creation.
+    // A separate headless connection can otherwise change the lease after
+    // preflight but before this Ticket's (independent) revision CAS.
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, ticket_id)?;
     if ticket.state != "queued" || ticket.active_assignment_id.is_some() {
         return Err("Coordinator has not produced a current, dispatchable plan.".into());
@@ -5600,7 +5606,6 @@ fn prepare_coordinated_worker(
     ).map_err(|e| e.to_string())?;
     let thread = format!("{ticket_id}:worker:{next_attempt}");
     let assignment_id = storage::id();
-    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id = bots::thread_session(store, &worker, CHANNEL, &thread,
         "SuperAgent · Coordinated worker")?.0;
     let now = storage::now();
@@ -14313,6 +14318,51 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn coordinated_worker_admission_serializes_checkout_across_connections() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let mut tickets = Vec::new();
+        for key in ["competing-coordination-one", "competing-coordination-two"] {
+            let (ticket, started) = admit_role(
+                &mut store, &cfg.id, "Inspect the shared checkout", key, false, true,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Read-only plan").unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+            tickets.push(ticket.id);
+        }
+
+        // Independent SQLite connections model overlapping desktop/headless
+        // admissions. Distinct Ticket revision CAS values cannot protect a
+        // shared checkout; the read/check/write transaction must do so.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = tickets.iter().cloned().map(|id| {
+            let path = store.path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut other = open_headless_transition_store(&path).unwrap();
+                barrier.wait();
+                prepare_coordinated_worker(&mut other, &id, false)
+            })
+        }).collect();
+        let results: Vec<_> = handles.into_iter()
+            .map(|handle| handle.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| result.as_ref().err()
+            .is_some_and(|error| error.contains("occupied"))));
+        let running: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE state='running' AND bot_id='worker'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(running, 1);
+        let queued = tickets.iter().find(|id|
+            get_ticket(&store, id).unwrap().state == "queued").unwrap();
+        assert_eq!(assignments(&store, queued, 20).unwrap().len(), 1);
+        assert!(!mandate(&store, queued).unwrap().allowed_side_effects);
     }
 
     #[test]

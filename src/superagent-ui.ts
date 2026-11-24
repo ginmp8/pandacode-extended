@@ -510,6 +510,22 @@ let demandArchived = false;
           parent.id === item.parentId && parent.ticketId === item.ticketId)));
     const plannedWorkItemIds = new Set(validWorkItems ? plannedWorkItems.map(item=>item.id) : []);
     const knownAssignmentIds = new Set(ticketDetails?.assignments.map(item => item.id) ?? []);
+    // A timeline key and its optional navigation identity must describe the
+    // same native record. A different valid Assignment ID is not sufficient.
+    const validTimelineIdentity = (entry: TaskTimelineEntry): boolean => {
+      if (entry.key.startsWith('assignment-start:')) {
+        const id = entry.key.slice('assignment-start:'.length);
+        return entry.assignmentId === id && knownAssignmentIds.has(id) &&
+          ticketDetails?.assignments.some(item => item.id === id && item.createdAt === entry.at) === true;
+      }
+      if (entry.assignmentId !== null) return false;
+      if (entry.key.startsWith('assignment-update:')) {
+        const id = entry.key.slice('assignment-update:'.length);
+        return ticketDetails?.assignments.some(item => item.id === id && item.updatedAt === entry.at &&
+          typeof item.createdAt === 'number' && entry.at > item.createdAt) === true;
+      }
+      return true;
+    };
     const validTimeline = Array.isArray(nativeTimeline) &&
       nativeTimeline.length <= 800 && nativeTimeline.every((entry, index) =>
         entry && Number.isSafeInteger(entry.at) && entry.at > 0 &&
@@ -521,14 +537,15 @@ let demandArchived = false;
               item.id === entry.key.slice('work-item:~cancel:'.length) &&
               item.state === 'cancelled' && item.cancelledAt === entry.at))) &&
         typeof entry.label === 'string' && typeof entry.detail === 'string' &&
-        (entry.assignmentId === null ||
-          (typeof entry.assignmentId === 'string' && knownAssignmentIds.has(entry.assignmentId))) &&
+        validTimelineIdentity(entry) &&
         (index === 0 || nativeTimeline[index - 1].at < entry.at ||
           (nativeTimeline[index - 1].at === entry.at &&
             nativeTimeline[index - 1].key < entry.key)));
-    const timelineKeys = new Set(validTimeline ? nativeTimeline.map(entry => entry.key) : []);
-    const taskTimeline: TaskTimelineEntry[] = validTimeline ? [...nativeTimeline] : [];
-    if (validTimeline && olderActivityTicketId === ticketDetails?.ticket.id) {
+    const uniqueTimeline = validTimeline &&
+      new Set(nativeTimeline.map(entry => entry.key)).size === nativeTimeline.length;
+    const timelineKeys = new Set(uniqueTimeline ? nativeTimeline.map(entry => entry.key) : []);
+    const taskTimeline: TaskTimelineEntry[] = uniqueTimeline ? [...nativeTimeline] : [];
+    if (uniqueTimeline && olderActivityTicketId === ticketDetails?.ticket.id) {
       for (const event of olderActivity) {
         const key = 'audit:' + event.id;
         if (!timelineKeys.has(key) && Number.isSafeInteger(event.at) && event.at > 0) {
@@ -538,7 +555,7 @@ let demandArchived = false;
         }
       }
       taskTimeline.sort((left, right) =>
-        left.at - right.at || left.key.localeCompare(right.key));
+        left.at - right.at || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
     }
     const taskTimelineContent = '<section class="sa-task-timeline" role="region" aria-label="Task timeline">' +
       '<h5>Task timeline</h5><p>Chronological native Ticket audit, assignment and operator-planned WorkItem records. ' +
@@ -552,7 +569,7 @@ let demandArchived = false;
             safe(entry.assignmentId) + '">Inspect timeline attempt ' +
             safe(ticketDetails?.assignments.find(item => item.id === entry.assignmentId)?.attempt) +
             '</button>' : '') + '</li>').join('') ||
-        '<li>' + (validTimeline ? 'No recorded native Task events or assignments.' :
+        '<li>' + (uniqueTimeline ? 'No recorded native Task events or assignments.' :
           'Native Task timeline unavailable or inconsistent; reload Ticket.') + '</li>') + '</ol></section>';
     const attempt = ticketDetails?.assignments.find(item => item.id === inspectedAssignmentId);
     const insight = ticketDetails?.attemptInsights?.find(item => item.assignmentId === inspectedAssignmentId);

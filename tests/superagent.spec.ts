@@ -717,7 +717,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.locator('ol li').first()).toContainText(' · admitted · ');
+  await expect(details.locator('.sa-audit-list li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
@@ -2730,6 +2730,9 @@ test('native Task timeline orders durable audit and assignment records and opens
     document.body.appendChild(host);
     const commands: string[] = [];
     const routes: unknown[] = [];
+    let invalidReceipt = false;
+    (window as unknown as {invalidateTaskTimeline:()=>void}).invalidateTaskTimeline =
+      () => { invalidReceipt = true; };
     (window as unknown as {
       taskTimelineEvidence: () => {commands:string[];routes:unknown[]};
     }).taskTimelineEvidence = () => ({commands, routes});
@@ -2765,7 +2768,8 @@ test('native Task timeline orders durable audit and assignment records and opens
         ],
         timeline:[
           {at:1800000000100,key:'assignment-start:attempt-1',
-            label:'Assignment 1 recorded',detail:'Bot worker · Session session-one',assignmentId:'attempt-1'},
+            label:'Assignment 1 recorded',detail:'Bot worker · Session session-one',
+            assignmentId:invalidReceipt ? 'attempt-2' : 'attempt-1'},
           {at:1800000000300,key:'audit:12',
             label:'admitted',detail:'Operator admitted a read-only task',assignmentId:null},
           {at:1800000000400,key:'assignment-update:attempt-1',
@@ -2794,7 +2798,7 @@ test('native Task timeline orders durable audit and assignment records and opens
   expect(texts[3]).toContain('Assignment 2 recorded');
   expect(texts[4]).toContain('callback_rejected');
   expect(texts[5]).toContain('Native assignment state: running');
-  await expect(timeline).toContainText('not proof of a file change');
+  await expect(timeline).toContainText('no provider text proves a file change, test pass or Council verdict');
   await timeline.getByRole('button',{name:'Inspect timeline attempt 2'}).click();
   const inspector = host.getByRole('region',{name:'Native assignment inspector'});
   await expect(inspector).toContainText('session-two');
@@ -2809,6 +2813,14 @@ test('native Task timeline orders durable audit and assignment records and opens
   }]);
   expect(evidence.commands.some(command =>
     /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
+  // A second valid Assignment ID must not be accepted as the navigation
+  // target of the first Assignment's timeline receipt.
+  await page.evaluate(() =>
+    (window as unknown as {invalidateTaskTimeline:()=>void}).invalidateTaskTimeline());
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(timeline).toContainText('Native Task timeline unavailable or inconsistent');
+  await expect(timeline.getByRole('button',{name:/Inspect timeline attempt/})).toHaveCount(0);
 });
 
 test('native operator WorkItem cancellation is confirmed, revision-bound and non-dispatching', async ({page}) => {

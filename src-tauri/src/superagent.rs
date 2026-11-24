@@ -5480,9 +5480,17 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String)> {
+    // Serialize recovery checks and lease reservation across independent
+    // SQLite connections, just as for initial and coordinated admission.
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
+    }
+    if effects::unresolved_count(store, ticket_id)? != 0 {
+        return Err("SuperAgent has unresolved external effects; reconcile before retry.".into());
     }
     let config = configuration(store,&ticket.orchestration_id)?;
     if !config.enabled || crate::feature_controls::get().bots_paused {
@@ -5551,7 +5559,6 @@ fn retry_blocked(
     let attempt=attempts+1;
     let thread=format!("{ticket_id}:attempt:{attempt}");
     let assignment_id=storage::id();
-    let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
     let now=storage::now();
     tx.execute(
@@ -5595,6 +5602,9 @@ fn prepare_coordinated_worker(
     let ticket = get_ticket(store, ticket_id)?;
     if ticket.state != "queued" || ticket.active_assignment_id.is_some() {
         return Err("Coordinator has not produced a current, dispatchable plan.".into());
+    }
+    if effects::unresolved_count(store, ticket_id)? != 0 {
+        return Err("SuperAgent has unresolved external effects; reconcile before coordinated dispatch.".into());
     }
     let config = configuration(store, &ticket.orchestration_id)?;
     if !config.enabled || crate::feature_controls::get().bots_paused {
@@ -14969,6 +14979,80 @@ mod tests {
         assert_eq!(resumed.state,"running");
         assert_eq!(worker,"other-worker");
         assert_ne!(assignment_session(&store,&second.id).unwrap(),Some(sid));
+    }
+
+    #[test]
+    fn simultaneous_retries_serialize_distinct_workers_on_shared_checkout() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Second Builder','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let first_cfg = enabled(&store);
+        let second_cfg = create_configuration(&store, NewOrchestration {
+            name: "Second retry team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        let second_cfg = change_enabled(&store, &second_cfg.id, 1, true).unwrap();
+        let (first, first_started) = admit(&mut store, &first_cfg.id, "First", "retry-a", true).unwrap();
+        let (second, second_started) = admit(&mut store, &second_cfg.id, "Second", "retry-b", true).unwrap();
+        assert!(!first_started && !second_started);
+        let tickets = [first.id, second.id];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = tickets.iter().cloned().map(|id| {
+            let path = store.path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut other = open_headless_transition_store(&path).unwrap();
+                barrier.wait();
+                retry_blocked(&mut other, &id, false)
+            })
+        }).collect();
+        let results: Vec<_> = handles.into_iter()
+            .map(|handle| handle.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| result.as_ref().err()
+            .is_some_and(|error| error.contains("occupied"))));
+        let blocked = tickets.iter().find(|id|
+            get_ticket(&store, id).unwrap().state == "blocked").unwrap();
+        assert!(assignments(&store, blocked, 10).unwrap().is_empty());
+        assert!(assignment_session(&store, blocked).unwrap().is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE state='running'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+
+    #[test]
+    fn unresolved_effects_fence_retry_and_coordinated_dispatch_without_new_sessions() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (blocked, started) = admit(&mut store, &cfg.id, "Blocked work", "effect-retry", true).unwrap();
+        assert!(!started);
+        let (planned, started) = admit_role(&mut store, &cfg.id, "Planned work", "effect-coord", false, true).unwrap();
+        assert!(started);
+        let coordinator_session = assignment_session(&store, &planned.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Read-only plan").unwrap());
+        let blocked_before = get_ticket(&store, &blocked.id).unwrap();
+        let planned_before = get_ticket(&store, &planned.id).unwrap();
+        // Seed receipts to model a persisted unresolved outcome. This is
+        // not evidence of an actual remote write or successful reconciliation.
+        for (id, state) in [(&blocked.id, "pending"), (&planned.id, "uncertain")] {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'effect',?2,?3,?4,?4)",
+                params![id, "a".repeat(64), state, storage::now()],
+            ).unwrap();
+        }
+        assert!(retry_blocked(&mut store, &blocked.id, false).unwrap_err().contains("unresolved external effects"));
+        assert!(prepare_coordinated_worker(&mut store, &planned.id, false).unwrap_err().contains("unresolved external effects"));
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().revision, blocked_before.revision);
+        assert_eq!(get_ticket(&store, &planned.id).unwrap().revision, planned_before.revision);
+        assert!(assignments(&store, &blocked.id, 10).unwrap().is_empty());
+        assert_eq!(assignments(&store, &planned.id, 10).unwrap().len(), 1);
+        assert_eq!(effects::unresolved_count(&store, &blocked.id).unwrap(), 1);
+        assert_eq!(effects::unresolved_count(&store, &planned.id).unwrap(), 1);
     }
 
     #[test]

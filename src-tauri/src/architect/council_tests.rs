@@ -8708,6 +8708,21 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     ).unwrap().host_checks, vec![receipt, bounded_receipt],
         "restoring the exact native check history must restore read-only inspection");
 
+    // Relinking after a host observation cannot append its evidence
+    // to a task now pointing at another checkout under the same project ID.
+    let original_path = store.project(&project).unwrap().path;
+    let other_root = std::env::temp_dir().join(format!("council-host-relinked-{}", storage::id()));
+    std::fs::create_dir(&other_root).unwrap();
+    store.relink_project(&project, &other_root).unwrap();
+    assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none());
+    assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err());
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+    ).is_err());
+    store.relink_project(&project, std::path::Path::new(&original_path)).unwrap();
+    std::fs::remove_dir(&other_root).unwrap();
+    assert_eq!(council_requests::active_native_task_for_checks(&store, &sid).unwrap(), Some(request.clone()));
+
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.objective.push_str(" changed");
     save(&store, &mut team).unwrap();
@@ -9030,6 +9045,29 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap(), receipt);
+
+    // A project relink preserves its ID and the session's worktree fields.
+    // It must not preserve a task's checkout authority or terminal verdict.
+    assert_eq!(request.schema_version, 3);
+    let original_path = store.project(&project).unwrap().path;
+    let other_root = std::env::temp_dir().join(format!("council-relinked-{}", storage::id()));
+    std::fs::create_dir(&other_root).unwrap();
+    store.relink_project(&project, &other_root).unwrap();
+    let denied = council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap_err();
+    assert!(denied.contains("council_task_stale"), "{denied}");
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).is_err());
+    assert!(council_requests::record_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).is_err());
+    store.relink_project(&project, std::path::Path::new(&original_path)).unwrap();
+    std::fs::remove_dir(&other_root).unwrap();
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap(), receipt, "restoring the pinned checkout restores the same receipt");
 
     // Even a persisted terminal receipt cannot authorize a changed objective.
     let mut tampered = load(&store, &sid).unwrap().unwrap();

@@ -480,16 +480,20 @@ fn native_task_candidate(
     // reusable task request even if the original root cycle is still active.
     config.validate().map_err(|reason|
         format!("council_task_denied: invalid native Council policy: {reason}"))?;
-    // V2 binds the task's effective native permission mode and checkout branch
-    // as well as its harness and project. A V1 request is deliberately stale
-    // rather than silently inheriting a different execution authority.
+    // V3 additionally freezes the resolved local checkout. A project can be
+    // relinked under the same ID (and without a session worktree). Neither a
+    // caller digest nor a V1/V2 scope pin proves which checkout was reviewed.
+    // Older requests therefore remain stale rather than silently inheriting
+    // authority over the current folder.
+    let workspace = store.workspace_root(project_id, Some(session_id))
+        .map_err(|_| "council_task_stale: native task checkout is unavailable.".to_string())?;
     let scope = serde_json::to_vec(&(
         &session.project_id, &session.worktree_path, &session.worktree_branch,
         &session.provider, &session.model, &session.reasoning_effort,
-        &session.mode,
+        &session.mode, &workspace,
     )).map_err(|e| e.to_string())?;
     Ok(NativeTaskCouncilRequest {
-        schema_version: 2, request_id, session_id: session_id.to_owned(),
+        schema_version: 3, request_id, session_id: session_id.to_owned(),
         project_id: project_id.to_owned(), assignment_key: assignment_key.to_owned(),
         cycle_id: format!("{}:{}", session_id, team.council_since),
         artifact_sha256: artifact_sha256.to_owned(),

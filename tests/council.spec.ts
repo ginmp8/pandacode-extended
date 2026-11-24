@@ -102,7 +102,7 @@ test('a late reviewer-options failure cannot replace a fresh lookup after reopen
 
 test('native Council inspector displays unknown usage and never trusts a display-only pass', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 5,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 5,
     status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
     verifiedPass: false,
     usage: { uniqueAttempts: 1, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
@@ -144,7 +144,7 @@ test('Council inspector omits malformed native round data without interpreting i
     tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, {
-    sessionId: 'native-task', mode: 'm2', cycleStartedAt: 1000, teamRevision: 2,
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 2,
     status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [],
     attempts: [attempt, { ...attempt, workerId: 'native-bad', name: 'Injected reviewer', round: injectedRound }],
@@ -162,11 +162,11 @@ test('Council inspector omits malformed native round data without interpreting i
 
 test('Council inspector refreshes an approved native snapshot without promoting stale approval', async ({ page }) => {
   const current = {
-    sessionId: 'native-review-1', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
     verifiedPass: true,
     verifiedCompletion: {
-      sessionId: 'native-review-1', cycleId: 'native-review-1:1000',
+      sessionId: 'session-1', cycleId: 'session-1:1000',
       teamRevision: 7, round: 1, lowest: 9.5,
     },
     attempts: [],
@@ -236,7 +236,7 @@ test('direct-chat native Council updates invalidate displayed approval without a
 
 test('keyboard refresh retains focus during a pending native Council read', async ({ page }) => {
   const inspection = {
-    sessionId: 'native-read', cycleStartedAt: 1000, teamRevision: 3,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 3,
     status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
   };
@@ -282,7 +282,7 @@ test('keyboard refresh retains focus during a pending native Council read', asyn
 
 test('Council inspector does not present stale human acceptance as current approval', async ({ page }) => {
   const accepted = {
-    sessionId: 'accepted-task', mode: 'm1', cycleStartedAt: 1000, teamRevision: 8,
+    sessionId: 'session-1', mode: 'm1', cycleStartedAt: 1000, teamRevision: 8,
     status: { state: 'accepted', round: 1, lowest: 8.8, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
   };
@@ -305,7 +305,7 @@ test('Council inspector does not present stale human acceptance as current appro
 
 test('the native Council inspector rejects foreign task responses before exposing evidence in direct or embedded views', async ({ page }) => {
   const own = {
-    sessionId: 'task', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [], reservedChildren: [],
   };
@@ -389,16 +389,16 @@ test('Council inspector rejects cross-task and malformed finding claims without 
     title, explanation: 'Reviewer claim', artifactRevision: 'revision-7',
     verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
   });
-  const own = finding('task:1000', 'Own current finding');
-  const history = finding('task:800', 'Own earlier-cycle finding');
+  const own = finding('session-1:1000', 'Own current finding');
+  const history = finding('session-1:800', 'Own earlier-cycle finding');
   const foreign = finding('another-task:2000', 'Private foreign task finding');
   const foreignHistory = finding('another-task:800', 'Foreign historical claim');
   const malformed = { ...own, id: 'bad-severity', title: 'Malformed claim', severity: null };
   const inspection = {
-    sessionId: 'task', mode: 'm2', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
     verifiedPass: true,
-    verifiedCompletion: { sessionId: 'task', cycleId: 'task:1000',
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
       teamRevision: 7, round: 1, lowest: 9.8 },
     criteria: [], attempts: [], reservedChildren: [],
     reportedFindings: [own, foreign, malformed],
@@ -424,7 +424,7 @@ test('Council inspector rejects cross-task and malformed finding claims without 
     const host = document.createElement('div');
     host.id = 'embedded-scope-council';
     document.body.append(host);
-    const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'task');
+    const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'session-1');
     host.append(detail);
     detail.open = true;
   }, inspection);
@@ -447,17 +447,50 @@ test('Council inspector rejects cross-task and malformed finding claims without 
   await expect(direct).toContainText('Own earlier-cycle finding');
   await expect(direct.getByRole('alert')).toHaveCount(0);
   await expect(embedded.getByRole('alert')).toHaveCount(0);
+
+  const foreignChild = { ...clean, reservedChildren: [{ botId: 'Private child bot',
+    rootCycleId: 'another-task:1000', childSessionId: 'foreign-child',
+    requiredLeafReviewers: 2, status: 'reviewing' }, { botId: 'Own child bot',
+    rootCycleId: 'session-1:1000', childSessionId: 'own-child',
+    requiredLeafReviewers: 2, status: 'reviewing' }] };
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+    (window as any).__embeddedScopeInspection = snapshot;
+  }, foreignChild);
+  for (const view of [direct, embedded]) {
+    await view.getByRole('button', { name: 'Refresh native evidence' }).click();
+    await expect(view.getByRole('alert')).toContainText('1 foreign-cycle or malformed child Council reservation(s) omitted');
+    await expect(view).not.toContainText('Private child bot');
+    await expect(view).toContainText('Own child bot');
+    await expect(view).not.toContainText('Verified native pass');
+    await view.locator(':scope > summary').click();
+    await expect(view.locator('.council-inspection-body')).toBeEmpty();
+  }
+  const revoked = { ...clean, verifiedPass: false, verifiedCompletion: undefined,
+    status: { ...clean.status, state: 'blocked', stale: true }, reportedFindings: [] };
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+    (window as any).__embeddedScopeInspection = snapshot;
+  }, revoked);
+  for (const view of [direct, embedded]) {
+    await view.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+    await expect(view.locator('.council-inspection-body')).toBeEmpty();
+    await view.locator(':scope > summary').click();
+    await expect(view).toContainText('Native pass not verified');
+    await expect(view).not.toContainText('Own current finding');
+    await expect(view).not.toContainText('Verified native pass');
+  }
 });
 
 test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
   const inspection = {
-    sessionId: 'task', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
     reservedChildren: [
-      { botId: 'security-child', childSessionId: 'child-a', rootCycleId: 'task:1000',
+      { botId: 'security-child', childSessionId: 'child-a', rootCycleId: 'session-1:1000',
         requiredLeafReviewers: 2, status: 'reviewing' },
-      { botId: 'quality-child', childSessionId: 'child-b', rootCycleId: 'task:1000',
+      { botId: 'quality-child', childSessionId: 'child-b', rootCycleId: 'session-1:1000',
         requiredLeafReviewers: 2, status: 'reviewing' },
     ],
   };
@@ -466,8 +499,8 @@ test('Council inspector preserves expanded child drill-down only for the same na
   const inspector = panel(page).locator('.council-inspection');
   await inspector.locator('summary').first().click();
   const children = inspector.getByRole('region', { name: 'Task-owned child Councils' });
-  const first = children.locator('details[data-council-child-key="task:1000:child-a"]');
-  const second = children.locator('details[data-council-child-key="task:1000:child-b"]');
+  const first = children.locator('details[data-council-child-key="session-1:1000:child-a"]');
+  const second = children.locator('details[data-council-child-key="session-1:1000:child-b"]');
   await first.locator('summary').focus();
   await page.keyboard.press('Enter');
   await expect(first).toHaveAttribute('open', '');
@@ -497,24 +530,26 @@ test('Council inspector preserves expanded child drill-down only for the same na
 
   // A new child reservation cannot inherit the prior task's expanded state.
   await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
-    ...inspection, teamRevision: 8,
+    ...inspection, cycleStartedAt: 2000, teamRevision: 8,
     reservedChildren: [
-      { ...inspection.reservedChildren[0], childSessionId: 'new-child-a', rootCycleId: 'task:2000' },
-      inspection.reservedChildren[1],
+      { ...inspection.reservedChildren[0], childSessionId: 'new-child-a', rootCycleId: 'session-1:2000' },
+      { ...inspection.reservedChildren[1], childSessionId: 'new-child-b', rootCycleId: 'session-1:2000' },
     ],
   });
   await refresh.click();
   await expect(refresh).toBeEnabled();
-  await expect(children.locator('details[data-council-child-key="task:2000:new-child-a"]'))
+  await expect(children.locator('details[data-council-child-key="session-1:2000:new-child-a"]'))
     .not.toHaveAttribute('open', '');
-  await expect(second).not.toHaveAttribute('open', '');
+  await expect(children.locator('details[data-council-child-key="session-1:2000:new-child-b"]'))
+    .not.toHaveAttribute('open', '');
+  await expect(second).toHaveCount(0);
   await expect(inspector).toContainText('Native pass not verified');
 });
 
 test('Council inspector exposes native mandatory evidence gaps without manufacturing a passed criterion', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
-    cycleStartedAt: 1000, teamRevision: 9,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
     verifiedPass: false,
     criteria: [{ id: '<svg onload=alert(1)>', lens: 'Security', required: true,
@@ -540,7 +575,7 @@ test('Council inspector exposes native mandatory evidence gaps without manufactu
 test('Council inspector presents native TOML syntax evidence without promoting a Council pass', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
-    cycleStartedAt: 1000, teamRevision: 11,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 11,
     status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
     verifiedPass: false,
     criteria: [{ id: 'cargo-syntax', lens: 'File valid TOML: Cargo.toml',
@@ -564,7 +599,7 @@ test('Council inspector presents native TOML syntax evidence without promoting a
 test('Council inspector distinguishes an exact native pinned-input check from unverified evidence and approval', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'parallel', criteriaSource: 'hybrid',
-    cycleStartedAt: 1000, teamRevision: 10,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
     status: { state: 'fixing', round: 1, lowest: 9.8, target: 9, stale: false },
     verifiedPass: false,
     criteria: [
@@ -609,7 +644,7 @@ test('Council inspector shows disjoint root usage per round/source without claim
     tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
   });
   const inspection = {
-    mode: 'm7', cycleStartedAt: 1000, teamRevision: 8,
+    sessionId: 'session-1', mode: 'm7', cycleStartedAt: 1000, teamRevision: 8,
     status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [],
     attempts: [
@@ -627,7 +662,7 @@ test('Council inspector shows disjoint root usage per round/source without claim
       { round: 1, reviewerSource: 'direct_bot', usage: usage(1, 300, 1000) },
       { round: 2, reviewerSource: 'automatic', usage: usage(1, null, null) },
     ],
-    reservedChildren: [{ botId: 'nested-bot', childSessionId: 'child-one', rootCycleId: 'task:1000',
+    reservedChildren: [{ botId: 'nested-bot', childSessionId: 'child-one', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
   };
   await page.setViewportSize({ width: 360, height: 640 });
@@ -651,7 +686,7 @@ test('Council inspector shows disjoint root usage per round/source without claim
 
 test('Council inspector does not present invalid native reviewer scores or usage as evidence', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 5,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 5,
     status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [],
     attempts: [{
@@ -681,11 +716,11 @@ test('native Council inspector rejects malformed usage sources and rounds withou
   };
   const malformedRound = '1"><img src=x onerror="window.__groupInjected=true">';
   const inspection = {
-    sessionId: 'scoped-group-task', mode: 'm7', cycleStartedAt: 1000, teamRevision: 9,
+    sessionId: 'session-1', mode: 'm7', cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
     reservedChildren: [{ botId: 'security-bot', childSessionId: 'child-group',
-      rootCycleId: 'scoped-group-task:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
     usageByRoundSource: [
       { round: 1, reviewerSource: 'direct_bot', usage },
       { round: malformedRound, reviewerSource: 'automatic', usage },
@@ -720,7 +755,7 @@ test('native Council inspector rejects malformed usage sources and rounds withou
     const host = document.createElement('div');
     host.id = 'embedded-group-inspector';
     document.body.append(host);
-    const view = createCouncilInspector(async () => snapshot, 'scoped-group-task');
+    const view = createCouncilInspector(async () => snapshot, 'session-1');
     host.append(view);
     view.open = true;
   }, inspection);
@@ -737,14 +772,14 @@ test('Council inspector rejects invalid root, child and composed metering but pr
     tokenCount: -800, costAmount: -42, costCurrency: 'USD', usageProvenance: 'unknown',
   };
   const inspection = {
-    mode: 'm4', cycleStartedAt: 1000, teamRevision: 12,
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 12,
     status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
     usage: invalid, composedUsage: invalid,
     usageByRoundSource: [{ round: 1, reviewerSource: 'automatic', usage: invalid }],
     composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_child', usage: invalid }],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'child-usage', rootCycleId: 'task:1000',
+      botId: 'security-child', childSessionId: 'child-usage', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'reviewing', observedLeafUsage: invalid,
     }],
   };
@@ -789,7 +824,7 @@ test('Council inspector rejects invalid root, child and composed metering but pr
 test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
   const inspection = {
     mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',
-    cycleStartedAt: 1000, teamRevision: 8,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 8,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
     verifiedPass: false, criteria: [
       { id: 'security', lens: '<img src=x onerror=alert(1)> Security', required: true,
@@ -814,10 +849,10 @@ test('Council inspector displays frozen user criterion targets and evidence requ
 
 test('M3 native read-only inspector discloses both reviewer sources without treating stale status as approval', async ({ page }) => {
   const inspection = {
-    mode: 'm3', strategy: 'escalated', forceEscalation: true, criteriaSource: 'hybrid', cycleStartedAt: 1000, teamRevision: 18,
+    sessionId: 'session-1', mode: 'm3', strategy: 'escalated', forceEscalation: true, criteriaSource: 'hybrid', cycleStartedAt: 1000, teamRevision: 18,
     status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: true },
     verifiedPass: true,
-    verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 18, round: 1, lowest: 9.5 },
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 18, round: 1, lowest: 9.5 },
     criteria: [], attempts: [
       { workerId: 'direct', round: 1, name: 'Security', lens: 'Security',
         reviewerSource: 'direct_bot', status: 'completed', score: 10,
@@ -845,16 +880,16 @@ test('M3 native read-only inspector discloses both reviewer sources without trea
 test('Council inspector shows verified triggered S2 child evidence without a passing first wave', async ({ page }) => {
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: false,
-    cycleStartedAt: 1000, teamRevision: 12,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 12,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'task:1000',
+      botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
       automaticEscalationTriggers: ['below_target'],
       verifiedChildReceipt: null,
       verifiedEscalationReceipt: {
-        rootCycleId: 'task:1000', childSessionId: 'child-s2', botId: 'security-child',
+        rootCycleId: 'session-1:1000', childSessionId: 'child-s2', botId: 'security-child',
         objectiveSha256: 'a'.repeat(64), policySha256: 'b'.repeat(64),
         childConfigSha256: 'c'.repeat(64), lowestScore: 9.8,
         leafWorkerIds: ['fresh-a', 'fresh-b'], criterionEvidence: [],
@@ -877,12 +912,12 @@ test('Council inspector shows verified triggered S2 child evidence without a pas
 
 test('Council blocked child state remains non-passing in shared native inspector', async ({ page }) => {
   const inspection = {
-    mode: 'm4', cycleStartedAt: 1000, teamRevision: 5,
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 5,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true,
       notice: 'Nested Council requires a task-isolated native child review before any root approval.' },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{ botId: '<img src=x onerror=alert(1)>', childSessionId: 'child-session-one',
-      rootCycleId: 'task-1:1000', requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
   };
   await page.setViewportSize({ width: 360, height: 640 });
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
@@ -907,10 +942,10 @@ test('Council blocked child state remains non-passing in shared native inspector
 test('Council inspector exposes authenticated unforced S2 triggers without presenting review or approval as completed', async ({ page }) => {
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: false,
-    cycleStartedAt: 1000, teamRevision: 9,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
-    reservedChildren: [{ botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'task:1000',
+    reservedChildren: [{ botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'child_escalation_required',
       automaticEscalationTriggers: ['below_target'] }],
   };
@@ -936,11 +971,11 @@ test('unforced S2 inspector distinguishes an admitted second wave from pending n
   }));
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: false,
-    cycleStartedAt: 1000, teamRevision: 10,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'isolated-s2-child', rootCycleId: 'task:1000',
+      botId: 'security-child', childSessionId: 'isolated-s2-child', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'child_escalation_reviewing',
       automaticEscalationTriggers: ['below_target'], leafAttempts,
     }],
@@ -963,23 +998,23 @@ test('unforced S2 inspector distinguishes an admitted second wave from pending n
 
 test('native child receipt inspector shows independent evidence without promoting root approval', async ({ page }) => {
   const receipt = {
-    rootCycleId: 'task:1000', childSessionId: 'child-session', botId: 'security-child',
+    rootCycleId: 'session-1:1000', childSessionId: 'child-session', botId: 'security-child',
     objectiveSha256: 'sha-objective', policySha256: 'sha-policy',
     childConfigSha256: 'sha-config', lowestScore: 9.5,
     leafWorkerIds: ['leaf-one', '<img src=x onerror=alert(1)>'],
   };
   const inspection = {
-    mode: 'm4', cycleStartedAt: 1000, teamRevision: 11,
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 11,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [
-      { botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
+      { botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'session-1:1000',
         requiredLeafReviewers: 2, status: 'child_evidence_ready_root_pending',
         observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
           cumulativeQueueWaitMs: 150, cumulativeObservedSpanMs: 950,
           tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
         verifiedChildReceipt: receipt },
-      { botId: 'stale-child', childSessionId: 'other-child', rootCycleId: 'task:1000',
+      { botId: 'stale-child', childSessionId: 'other-child', rootCycleId: 'session-1:1000',
         requiredLeafReviewers: 2, status: 'reviewing',
         verifiedChildReceipt: { ...receipt, botId: 'wrong-owner' } },
     ],
@@ -1009,7 +1044,7 @@ test('native child receipt inspector shows independent evidence without promotin
 
 test('Council inspector rejects malformed child reviewer receipt identifiers without rendering them', async ({ page }) => {
   const first = {
-    rootCycleId: 'task:1000', childSessionId: 'child-first', botId: 'bad-first',
+    rootCycleId: 'session-1:1000', childSessionId: 'child-first', botId: 'bad-first',
     objectiveSha256: 'objective', policySha256: 'policy', childConfigSha256: 'config',
     lowestScore: 9.5, leafWorkerIds: ['first-a', null],
   };
@@ -1017,14 +1052,14 @@ test('Council inspector rejects malformed child reviewer receipt identifiers wit
     leafWorkerIds: ['first-a', 'first-b'] };
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: true,
-    cycleStartedAt: 1000, teamRevision: 10,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
     status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
-      botId: 'bad-first', childSessionId: 'child-first', rootCycleId: 'task:1000',
+      botId: 'bad-first', childSessionId: 'child-first', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'reviewing', verifiedChildReceipt: first,
     }, {
-      botId: 'bad-second', childSessionId: 'child-second', rootCycleId: 'task:1000',
+      botId: 'bad-second', childSessionId: 'child-second', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
       verifiedChildReceipt: valid,
       verifiedEscalationReceipt: { ...valid, leafWorkerIds: ['fresh-a', '  '] },
@@ -1047,7 +1082,7 @@ test('Council inspector rejects malformed child reviewer receipt identifiers wit
 
 test('child Council drill-down shows actual native leaves without root votes or unsafe HTML', async ({ page }) => {
   const inspection = {
-    mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
     verifiedPass: false, criteria: [], attempts: [],
     usage: { uniqueAttempts: 0, queueMeasuredAttempts: 0, spanMeasuredAttempts: 0,
@@ -1063,7 +1098,7 @@ test('child Council drill-down shows actual native leaves without root votes or 
         tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
     }],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
+      botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'reviewing',
       observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
         cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
@@ -1125,16 +1160,16 @@ test('forced S2 child inspector exposes both native waves without promoting firs
   }));
   const inspection = {
     mode: 'm4', strategy: 'escalated', forceEscalation: true,
-    cycleStartedAt: 1000, teamRevision: 12,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 12,
     status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'isolated-child', rootCycleId: 'task:1000',
+      botId: 'security-child', childSessionId: 'isolated-child', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 8, status: 'child_escalation_reviewing',
       leafAttempts,
       // This is a genuine first-wave receipt, not a second-wave terminal receipt.
       verifiedChildReceipt: {
-        rootCycleId: 'task:1000', childSessionId: 'isolated-child', botId: 'security-child',
+        rootCycleId: 'session-1:1000', childSessionId: 'isolated-child', botId: 'security-child',
         objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
         childConfigSha256: 'frozen-child-policy', lowestScore: 9.8,
         leafWorkerIds: leafAttempts.slice(0, 8).map(attempt => attempt.workerId),
@@ -1170,19 +1205,19 @@ test('child S2 inspector distinguishes a native second-wave receipt from termina
     queueWaitMs: 25, observedSpanMs: 160,
   }));
   const receipt = {
-    rootCycleId: 'root:1000', childSessionId: 'child-only-task', botId: 'security-child',
+    rootCycleId: 'session-1:1000', childSessionId: 'child-only-task', botId: 'security-child',
     objectiveSha256: 'pinned-objective', policySha256: 'pinned-policy',
     childConfigSha256: 'pinned-criteria', lowestScore: 9.6,
     leafWorkerIds: ['first-a', 'first-b'],
   };
   const inspection = {
     mode: 'm5', strategy: 'escalated', forceEscalation: true,
-    cycleStartedAt: 1000, teamRevision: 16,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 16,
     status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
       botId: 'security-child', childSessionId: 'child-only-task',
-      rootCycleId: 'root:1000', requiredLeafReviewers: 2,
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2,
       status: 'child_escalation_evidence_ready_root_pending',
       leafAttempts: attempts,
       verifiedChildReceipt: receipt,
@@ -1218,19 +1253,19 @@ test('child S2 inspector distinguishes a native second-wave receipt from termina
 
 test('verified M4 S2 inspector distinguishes authenticated root completion from pending child evidence', async ({ page }) => {
   const nativeReceipt = {
-    rootCycleId: 'root:1000', childSessionId: 'child-task', botId: 'security-child',
+    rootCycleId: 'session-1:1000', childSessionId: 'child-task', botId: 'security-child',
     objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
     childConfigSha256: 'frozen-child', lowestScore: 9.6, leafWorkerIds: ['fresh-a', 'fresh-b'],
   };
   const inspection = {
-    sessionId: 'root', mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    sessionId: 'session-1', mode: 'm4', strategy: 'escalated', forceEscalation: false,
     cycleStartedAt: 1000, teamRevision: 22,
     status: { state: 'passed', round: 1, lowest: 9.6, target: 9.0, stale: false },
     verifiedPass: true,
-    verifiedCompletion: { sessionId: 'root', cycleId: 'root:1000', teamRevision: 22, round: 1, lowest: 9.6 },
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 22, round: 1, lowest: 9.6 },
     criteria: [], attempts: [],
     reservedChildren: [{
-      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'root:1000',
+      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'session-1:1000',
       requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
       automaticEscalationTriggers: ['below_target'],
       verifiedEscalationReceipt: nativeReceipt,
@@ -1265,18 +1300,18 @@ test('verified M4 S2 inspector distinguishes authenticated root completion from 
 
 test('native M4 S3 child challenge inspector correlates distinct phases without approving the root', async ({ page }) => {
   const receipt = {
-    rootCycleId: 'cycle:1000', childSessionId: 'task-owned-child', botId: 'child-reviewer',
+    rootCycleId: 'session-1:1000', childSessionId: 'task-owned-child', botId: 'child-reviewer',
     objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
     childConfigSha256: 'frozen-child-policy', lowestScore: 9.7,
     leafWorkerIds: ['first-a', 'first-b'],
   };
   const inspection = {
-    mode: 'm4', strategy: 'two_phase', cycleStartedAt: 1000, teamRevision: 20,
+    sessionId: 'session-1', mode: 'm4', strategy: 'two_phase', cycleStartedAt: 1000, teamRevision: 20,
     status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
     reservedChildren: [{
       botId: 'child-reviewer', childSessionId: 'task-owned-child',
-      rootCycleId: 'cycle:1000', requiredLeafReviewers: 2,
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2,
       status: 'child_challenge_evidence_ready_root_pending',
       leafAttempts: ['first-a', 'first-b', 'challenger-a', 'challenger-b'].map((workerId, i) => ({
         workerId, round: i < 2 ? 1 : 2, name: workerId,
@@ -1286,7 +1321,7 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
       })),
       verifiedChildReceipt: receipt,
       verifiedChallengeReceipt: {
-        rootCycleId: 'cycle:1000', childSessionId: 'task-owned-child',
+        rootCycleId: 'session-1:1000', childSessionId: 'task-owned-child',
         botId: 'child-reviewer', phaseOneReceiptSha256: 'a'.repeat(64),
         phaseTwo: { ...receipt, leafWorkerIds: ['challenger-a', 'challenger-b'] },
       },
@@ -1309,11 +1344,11 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
   // native root completion, then fail closed if its revision no longer matches.
   const approvedInspection = {
     ...inspection,
-    sessionId: 'root-task',
+    sessionId: 'session-1',
     status: { state: 'passed', round: 2, lowest: 9.7, target: 9.0, stale: false },
     verifiedPass: true,
     verifiedCompletion: {
-      sessionId: 'root-task', cycleId: 'root-task:1000',
+      sessionId: 'session-1', cycleId: 'session-1:1000',
       teamRevision: 20, round: 2, lowest: 9.7,
     },
   };
@@ -1370,14 +1405,14 @@ test('Council inspector keeps focused reviewer findings only for the same native
     costAmount: null, costCurrency: null, usageProvenance: 'unknown',
   };
   const finding = {
-    schemaVersion: 1, id: 'report:1', cycleId: 'task:1000', round: 1,
+    schemaVersion: 1, id: 'report:1', cycleId: 'session-1:1000', round: 1,
     workerId: 'security-worker', reportMessageId: 22, lens: 'Security',
     severity: 'high', category: 'authorization', title: 'Missing guard',
     explanation: 'Reviewer-reported claim only', artifactRevision: 'revision-7',
     verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
   };
   const inspection = {
-    sessionId: 'task', cycleStartedAt: 1000, teamRevision: 7,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'fixing', round: 1, lowest: 7.5, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [attempt], reportedFindings: [finding],
   };
@@ -1423,12 +1458,12 @@ test('Council inspector keeps focused reviewer findings only for the same native
 
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 9,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'fixing', round: 1, lowest: 6, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
     findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 },
     reportedFindings: [
-      { schemaVersion: 1, id: 'cycle:worker:22:0', cycleId: 'cycle', round: 1,
+      { schemaVersion: 1, id: 'cycle:worker:22:0', cycleId: 'session-1:1000', round: 1,
         workerId: 'worker-1', reportMessageId: 22, lens: 'Security', severity: 'high',
         category: 'authorization', title: '<img src=x onerror=alert(1)>',
         explanation: 'The route is missing a guard', artifactRevision: null,
@@ -1451,12 +1486,12 @@ test('native Council findings remain attributed unverified and safe to render', 
 });
 test('a newer reviewer turn retains unverified history without approving a fix', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 11,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 11,
     status: { state: 'fixing', round: 2, lowest: 6, target: 9, stale: true },
     verifiedPass: false, criteria: [], attempts: [], reportedFindings: [],
     findingTriage: { reported: 0, highPriorityClaims: 0, unverifiedClaims: 0 },
     historicalReportedFindings: [
-      { schemaVersion: 1, id: 'old:cycle:worker:22:0', cycleId: 'old:cycle', round: 1,
+      { schemaVersion: 1, id: 'old:cycle:worker:22:0', cycleId: 'session-1:800', round: 1,
         workerId: 'former-reviewer', reportMessageId: 22, lens: 'Security',
         severity: 'high', category: 'authorization',
         title: '<img src=x onerror=alert(1)>', explanation: 'Earlier report identified a missing guard',
@@ -1485,13 +1520,13 @@ test('native inspector attributes reported findings to the exact reviewer and ro
     tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
   });
   const finding = (workerId: string, round: number, title: string) => ({
-    schemaVersion: 1, id: workerId + ':' + round, cycleId: 'cycle', round,
+    schemaVersion: 1, id: workerId + ':' + round, cycleId: 'session-1:1000', round,
     workerId, reportMessageId: 22, lens: 'Security', severity: 'high',
     category: 'security', title, explanation: 'Reviewer-reported claim only',
     artifactRevision: null, verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
   });
   const inspection = {
-    mode: 'm2', cycleStartedAt: 1000, teamRevision: 9,
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'fixing', round: 2, lowest: 8, target: 9, stale: false },
     verifiedPass: false, criteria: [],
     attempts: [attempt('alice', 'Alice', 1), attempt('bob', 'Bob', 1), attempt('alice', 'Alice', 2)],
@@ -1526,10 +1561,10 @@ test('native inspector attributes reported findings to the exact reviewer and ro
 
 test('Council inspector discloses only a correlated native terminal completion', async ({ page }) => {
   const inspection = {
-    sessionId: 'task-1', cycleStartedAt: 1000, teamRevision: 17,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
     status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
     verifiedPass: true,
-    verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
     criteria: [], attempts: [],
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
@@ -1537,7 +1572,7 @@ test('Council inspector discloses only a correlated native terminal completion',
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).getByText('Verified native pass', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('Completed native review cycle')).toBeVisible();
-  await expect(panel(page).getByText('task-1:1000', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('session-1:1000', { exact: false })).toBeVisible();
 });
 
 for (const [tamper, receipt] of [
@@ -1551,11 +1586,11 @@ for (const [tamper, receipt] of [
 ] as const) {
   test(`Council inspector rejects a claimed native pass with ${tamper}`, async ({ page }) => {
     const inspection = {
-      sessionId: 'task-1', cycleStartedAt: 1000, teamRevision: 17,
+      sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
       status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
       verifiedPass: true,
       verifiedCompletion: {
-        sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 17, round: 1, lowest: 9.4,
+        sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4,
         ...receipt,
       },
       criteria: [], attempts: [],
@@ -1573,21 +1608,21 @@ test('Council inspector never promotes a legacy pass without a root task identit
     cycleStartedAt: 1000, teamRevision: 17,
     status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
     verifiedPass: true,
-    verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
     criteria: [], attempts: [],
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
   await button(page).click();
   await panel(page).getByText('Review evidence and usage').click();
-  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).getByRole('alert')).toContainText('Council evidence does not match this task');
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 test('Council inspector never promotes an unverified terminal hint', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 17,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
     status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
     verifiedPass: false,
-    verifiedCompletion: { sessionId: 'task-1', cycleId: 'unverified-cycle', teamRevision: 17, round: 1, lowest: 9.4 },
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'unverified-cycle', teamRevision: 17, round: 1, lowest: 9.4 },
     criteria: [], attempts: [],
   };
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);

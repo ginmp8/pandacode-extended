@@ -64,6 +64,16 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     - currentFindings.length - historyFindings.length;
   // Display-only hints are not approval. Require a matching native completion
   // for this exact session/cycle, revision, round and minimum score.
+  // Child reservations are current-cycle projections, never cross-task history.
+  // A self-consistent child receipt cannot establish that it belongs to this root.
+  const childInputs = Array.isArray(inspection.reservedChildren) ? inspection.reservedChildren : [];
+  const childReservations = childInputs.filter(child => child != null && sessionId !== null
+    && child.rootCycleId === `${sessionId}:${inspection.cycleStartedAt}`
+    && typeof child.childSessionId === 'string' && child.childSessionId.trim().length > 0
+    && typeof child.botId === 'string' && child.botId.trim().length > 0
+    && typeof child.status === 'string' && Number.isSafeInteger(child.requiredLeafReviewers)
+    && child.requiredLeafReviewers >= 2 && child.requiredLeafReviewers <= 8);
+  const omittedChildren = childInputs.length - childReservations.length;
   const proof = inspection.verifiedCompletion;
   const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale
     && proof != null && typeof inspection.sessionId === 'string' && inspection.sessionId.length > 0
@@ -72,10 +82,10 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && proof.teamRevision === inspection.teamRevision
     && proof.round === inspection.status.round
     && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
-    && proof.lowest >= inspection.status.target && omittedFindingCount === 0;
+    && proof.lowest >= inspection.status.target && omittedFindingCount === 0 && omittedChildren === 0;
   // A historical user exception is not authorization for a newer revision.
   // The read-only presenter must never promote stale acceptance to a current gate.
-  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0
+  const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0 && omittedChildren === 0
     ? 'Accepted by user (not a native pass)'
     : verified ? 'Verified native pass' : 'Native pass not verified';
   const modeLabels: Record<CouncilInspection['mode'], string> = {
@@ -100,7 +110,6 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   // A reserved child is neither a native leaf attempt nor a passing parent
   // seat. Display root reviewer activity separately from the task-owned
   // child reservations, including when M4 has no root reviewer attempts.
-  const childReservations = Array.isArray(inspection.reservedChildren) ? inspection.reservedChildren : [];
   // Native Rust serializes rounds as integers. Treat malformed/foreign projections
   // as untrusted data before using round labels to construct HTML attributes.
   const validAttempts = inspection.attempts.filter(attempt => Number.isSafeInteger(attempt.round) && attempt.round > 0);
@@ -422,7 +431,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '</p>'
     : '';
   const composed = inspection.composedUsage;
-  const composedHtml = composed && children.length
+  const composedHtml = composed && children.length && omittedChildren === 0
     ? '<p class="council-composed-usage">Root + child native attempts: ' + escape(nonNegativeCount(composed.uniqueAttempts)) +
       ' · Cumulative queue ' + escape(observedDuration('', composed.cumulativeQueueWaitMs).trim()) +
       ' (' + escape(nonNegativeCount(composed.queueMeasuredAttempts)) + ' measured)' +
@@ -456,7 +465,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   const composedGroupInputs = Array.isArray(inspection.composedUsageByRoundSource) ? inspection.composedUsageByRoundSource : [];
   const allGroups = composedGroupInputs.filter(group => validUsageGroup(group, true));
   const omittedComposedGroups = composedGroupInputs.length - allGroups.length;
-  const allGroupsHtml = children.length && (allGroups.length || omittedComposedGroups)
+  const allGroupsHtml = children.length && omittedChildren === 0 && (allGroups.length || omittedComposedGroups)
     ? '<section aria-label="Root and child usage by round and source" class="council-usage-breakdown">' +
       '<h4>Root and child native usage by round and source</h4>' +
       '<p>Each valid admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p>' +
@@ -470,6 +479,9 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         ' · Settled review window ' + escape(observedDuration('', group.usage.settledReviewWindowMs).trim()) + '</li>').join('') +
       '</ul></section>'
     : '';
+  const childScopeWarning = omittedChildren > 0
+    ? '<p role="alert">' + escape(String(omittedChildren)) +
+      ' foreign-cycle or malformed child Council reservation(s) omitted; composed usage and approval are not verified.</p>' : '';
   const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
@@ -479,7 +491,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
+    (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childScopeWarning + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */
@@ -593,6 +605,9 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       refresh.disabled = true;
       refresh.removeAttribute('aria-disabled');
       refresh.removeAttribute('aria-busy');
+      // Do not retain a private or approved snapshot in the collapsed DOM.
+      shownScope = null;
+      body.replaceChildren();
       return;
     }
     load();
@@ -602,6 +617,16 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   // serial guard as manual refresh to reject older asynchronous responses.
   details.addEventListener('council-evidence-invalidated', () => {
     if (details.open && details.isConnected) load();
+    else {
+      // Invalidation must also erase a closed snapshot and fence in-flight reads.
+      serial++;
+      loading = false;
+      shownScope = null;
+      body.replaceChildren();
+      refresh.disabled = true;
+      refresh.removeAttribute('aria-disabled');
+      refresh.removeAttribute('aria-busy');
+    }
   });
   refresh.addEventListener('click', () => {
     if (details.open && !loading) load();

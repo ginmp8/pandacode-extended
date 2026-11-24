@@ -352,7 +352,7 @@ test.describe('shared bot channels', () => {
           id: 'delivery-one', kind: 'assigned', authorBotId: null,
           text: '', status: 'Completed', createdAt: 1,
           council: {
-            cycleId: 'cycle-one', sessionId: 'channel-cycle-task', state: 'Passed',
+            cycleId: 'cycle-one', sessionId: 'channel-root', state: 'Passed',
             round: 1, target: 9, lowest: 9.7, artifactRevision: 'artifact',
             reviewers: [],
           },
@@ -421,6 +421,20 @@ test.describe('shared bot channels', () => {
     await expect(dialog.getByText('Stale revision', { exact: false })).toBeVisible();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toHaveCount(0);
     await expect(refresh).toBeFocused();
+    // A collapsed inspector must not retain a private snapshot in the DOM.
+    await details.locator(':scope > summary').click();
+    await expect(details.locator('.council-inspection-body')).toBeEmpty();
+    await page.evaluate(snapshot => {
+      (window as any).__channelCouncilInspectorOverride = snapshot;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    }, { ...inspection, reportedFindings: [], reservedChildren: [{ botId: 'Foreign child bot',
+      childSessionId: 'foreign-child', rootCycleId: 'other-channel:1000', requiredLeafReviewers: 2, status: 'reviewing' }] });
+    await expect(details.locator('.council-inspection-body')).toBeEmpty();
+    await details.locator(':scope > summary').click();
+    await expect(dialog.getByRole('alert')).toContainText('1 foreign-cycle or malformed child Council reservation(s) omitted');
+    await expect(dialog).not.toContainText('Foreign child bot');
+    await expect(dialog).not.toContainText('Channel finding');
+    await expect(dialog).not.toContainText('Verified native pass');
     // The browser must use the channel's delivery identity rather than allowing
     // an arbitrary DOM session id to select an unrelated Council.
     await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))

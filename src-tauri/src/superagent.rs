@@ -4262,6 +4262,32 @@ pub(crate) fn guard_run_admission(
     Ok(())
 }
 
+/// Called only inside an exact native Assignment settlement transaction.
+/// A finished turn or a failed launch cannot establish the outcome of a
+/// reserved external effect. Retain the original key/digest and never replay.
+fn quarantine_assignment_effects(
+    tx: &rusqlite::Transaction<'_>, ticket_id: &str, now: i64,
+) -> Result<bool> {
+    let changed = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    if changed > 0 {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'assignment_effect_quarantined',
+               'Native assignment settled with unverified external effects; independent reconciliation required',?2)",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND state IN ('pending','uncertain'))",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string().into())
+}
+
 fn fail_launch(store: &Store, ticket: &Ticket, reason: &str) -> Result<()> {
     // The caller carries the admitted Ticket snapshot across gateway IO.
     // A delayed failure must not settle a successor admitted during recovery.
@@ -4293,6 +4319,7 @@ fn fail_launch(store: &Store, ticket: &Ticket, reason: &str) -> Result<()> {
     if ticket != 1 {
         return Err("SuperAgent ticket changed before launch failure settlement.".into());
     }
+    quarantine_assignment_effects(&tx, ticket_id, now)?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'launch_failed',?2,?3)",
@@ -4371,12 +4398,16 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             && session_profile_current,
         crate::feature_controls::get().bots_paused,
     );
+    let now = storage::now();
+    let unresolved_effects = quarantine_assignment_effects(&tx, &task_id, now)?;
+    // A provider response is not remote reconciliation. Do not stage its
+    // result for approval or Coordinator dispatch while any effect is unknown.
+    let authorized = authorized && !unresolved_effects;
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
         else if coordinator { "queued" }
         else { "waiting_approval" };
-    let now = storage::now();
     // A stale, revoked or remapped task may transition to blocked, but its
     // provider output must not survive as trusted worker evidence or an
     // assignment result consumed by later review/recovery paths.
@@ -4406,7 +4437,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,?2,?3,?4)",
-        params![task_id,if !within_budget { "assignment_timed_out" }
+        params![task_id,if unresolved_effects { "callback_effect_unresolved" }
+            else if !within_budget { "assignment_timed_out" }
             else if !authorized { "callback_rejected" }
             else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
     ).map_err(|e| e.to_string())?;
@@ -13513,6 +13545,70 @@ mod tests {
         assert_eq!(blocked.unresolved_external_effects, 1);
         assert!(accept(&store, &task.id, blocked.ticket.revision).is_err());
         assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
+    }
+
+
+    #[test]
+    fn assignment_settlement_quarantines_unresolved_effects_without_trusting_provider_text() {
+        for outcome in ["success", "failure", "launch_failure"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, started) = admit(
+                &mut store, &cfg.id, "Recover effect", "assignment-effect-settlement", false,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let now = storage::now();
+            for (key, state) in [("pending", "pending"), ("uncertain", "uncertain"), ("applied", "applied")] {
+                store.db.execute(
+                    "INSERT INTO sa_effect_receipts
+                     (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,?5,?5)",
+                    params![&ticket.id,key,"a".repeat(64),state,now-1],
+                ).unwrap();
+            }
+            // An audit failure must roll back both the receipt and the native
+            // assignment settlement, never release a partially settled lease.
+            store.db.execute_batch(
+                "CREATE TRIGGER deny_effect_settlement_audit BEFORE INSERT ON sa_audit
+                 WHEN NEW.kind='assignment_effect_quarantined'
+                 BEGIN SELECT RAISE(ABORT,'injected effect audit failure'); END;",
+            ).unwrap();
+            let settle = |store: &Store| -> Result<()> {
+                if outcome == "launch_failure" {
+                    fail_launch(store, &ticket, "Gateway transport failed")
+                } else {
+                    assert!(on_run_finished(store, &session, outcome == "success", "Unverified result")?);
+                    Ok(())
+                }
+            };
+            assert!(settle(&store).is_err(), "{outcome}");
+            assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+            assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+            let receipts = effects::receipt_history(&store,&ticket.id,10).unwrap();
+            assert_eq!(receipts.iter().find(|r| r.effect_key=="pending").unwrap().state,"pending");
+            store.db.execute_batch("DROP TRIGGER deny_effect_settlement_audit").unwrap();
+            settle(&store).unwrap();
+            let blocked = get_ticket(&store,&ticket.id).unwrap();
+            assert_eq!(blocked.state,"blocked", "{outcome}");
+            assert!(blocked.evidence.is_none());
+            assert!(blocked.active_assignment_id.is_none());
+            assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"failed");
+            let receipts = effects::receipt_history(&store,&ticket.id,10).unwrap();
+            assert_eq!(receipts.iter().find(|r| r.effect_key=="pending").unwrap().state,"uncertain");
+            assert_eq!(receipts.iter().find(|r| r.effect_key=="uncertain").unwrap().updated_at,now-1);
+            assert_eq!(receipts.iter().find(|r| r.effect_key=="applied").unwrap().state,"applied");
+            assert_eq!(effects::unresolved_count(&store,&ticket.id).unwrap(),2);
+            assert!(retry_blocked(&mut store,&ticket.id,false).unwrap_err().contains("unresolved external effects"));
+            assert!(!on_run_finished(&store,&session,true,"Late result").unwrap());
+            assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+                .filter(|entry| entry.kind=="assignment_effect_quarantined").count(),1);
+            let path=store.path.clone();
+            drop(store);
+            let reopened=Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"blocked");
+            assert_eq!(effects::unresolved_count(&reopened,&ticket.id).unwrap(),2);
+        }
     }
 
     #[test]

@@ -1244,3 +1244,14 @@ pandacode serve --queue-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVE
 ```
 
 The objective is the operator's bounded UTF-8 file, not GitHub issue text. The source must currently be in Observe and both revisions must match. The native transaction creates a blocked manual Ticket, its read-only Mandate, exact issue link and immutable receipt provenance together. A repeated key with identical inputs returns the existing Ticket; different selections or repeated admission of the same attested issue in the same Team are rejected even after unlinking. Observe polling itself never stages work. This command does not grant tools, start a provider, approve a Council review or enable Auto. Native explicit dispatch must still revalidate authority. Historical name-only receipts are not eligible; no remote repository write is performed.
+
+
+### Explicit live headless Worker dispatch (schema v57)
+
+After staging a manual Demand and optionally planning WorkItems, inspect the exact Ticket revision. On the same local installation as a running `pandacode serve` host, submit:
+
+```sh
+pandacode serve --dispatch-ticket <ticket-id> <revision> <stable-request-key>
+```
+
+The detached command records only a local operator intent and exits without launching a provider, opening a live runtime, granting tools, or replaying an effect. The live host polls explicit intents and uses the same native retry/coordinated Worker admission and gateway as Desktop. It rechecks the exact Ticket revision, mandate, role, bot profile, work-item dependencies, occupancy, checkout lease and attempt budget. The intent expires after five minutes, including time spent offline. An admitted receipt means an Assignment reservation was committed, not that a provider completed work; inspect the native Ticket for actual execution and human acceptance. Repeat the identical command to inspect its durable receipt without starting another attempt. A rejected or expired intent requires fresh operator confirmation with a new key and current revision. The reservation and intent consumption commit atomically; a crash after admission cannot automatically replay the intent. Existing watchdog and recovery govern the reserved Assignment. This is manual read-only dispatch, not GitHub Auto, unrestricted write authorization, or Council acceptance. Upgrade the database with the native host before detached v57 operations.

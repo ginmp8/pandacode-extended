@@ -11,6 +11,7 @@ pub(crate) mod council_adapter;
 pub mod member_activity;
 pub mod effects;
 pub mod work_items;
+pub(crate) mod headless_dispatch;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -5821,6 +5822,13 @@ fn retry_worker_message(ticket: &Ticket, context: &str) -> String {
 fn retry_blocked_at_revision(
     store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
 ) -> Result<(Ticket, String, String, String)> {
+    retry_blocked_with_request(store, ticket_id, expected_revision, busy, None)
+}
+
+fn retry_blocked_with_request(
+    store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
+    dispatch_request: Option<&headless_dispatch::DispatchRequest>,
+) -> Result<(Ticket, String, String, String)> {
     // Serialize recovery checks and lease reservation across independent
     // SQLite connections, just as for initial and coordinated admission.
     let tx = rusqlite::Transaction::new_unchecked(
@@ -5932,6 +5940,9 @@ fn retry_blocked_at_revision(
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
+    if let Some(request) = dispatch_request {
+        headless_dispatch::consume(&tx, request, &ticket, &assignment_id, now)?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,thread,worker.id,work_context))
 }
@@ -5954,6 +5965,13 @@ fn prepare_coordinated_worker(
 
 fn prepare_coordinated_worker_at_revision(
     store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
+) -> Result<(Ticket, String, String, String)> {
+    prepare_coordinated_worker_with_request(store, ticket_id, expected_revision, busy, None)
+}
+
+fn prepare_coordinated_worker_with_request(
+    store: &mut Store, ticket_id: &str, expected_revision: i64, busy: bool,
+    dispatch_request: Option<&headless_dispatch::DispatchRequest>,
 ) -> Result<(Ticket, String, String, String)> {
     // Serialize the native checkout/mandate checks with assignment creation.
     // A separate headless connection can otherwise change the lease after
@@ -6071,6 +6089,9 @@ fn prepare_coordinated_worker_at_revision(
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
+    if let Some(request) = dispatch_request {
+        headless_dispatch::consume(&tx, request, &ticket, &assignment_id, now)?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,thread,worker.id,worker_context))
 }
@@ -6124,71 +6145,97 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
     get_ticket(&store,&ticket.id)
 }
 
+/// Both trusted operator surfaces reserve and dispatch through this same
+/// native gateway. The optional durable headless request adds an atomic CAS,
+/// not an alternate permission model or runtime.
+async fn dispatch_worker_native(
+    app: &tauri::AppHandle, state: &AppState, ticket_id: &str,
+    expected_revision: i64, coordinated: bool,
+    request: Option<&headless_dispatch::DispatchRequest>,
+) -> Result<Ticket> {
+    let (ticket, thread, worker_id, context) = {
+        let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
+            .keys().cloned().collect();
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let worker = ticket_worker(&store, ticket_id)?;
+        let ticket = get_ticket(&store, ticket_id)?;
+        let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
+        match (coordinated, request) {
+            (true, Some(request)) => prepare_coordinated_worker_with_request(
+                &mut store, ticket_id, expected_revision, busy, Some(request)),
+            (false, Some(request)) => retry_blocked_with_request(
+                &mut store, ticket_id, expected_revision, busy, Some(request)),
+            (true, None) => prepare_coordinated_worker_at_revision(
+                &mut store, ticket_id, expected_revision, busy),
+            (false, None) => retry_blocked_at_revision(
+                &mut store, ticket_id, expected_revision, busy),
+        }?
+    };
+    let (sender_name, text) = if coordinated {
+        ("Manual delegated task", coordinated_worker_message(&ticket, &context))
+    } else {
+        ("Manual retry", retry_worker_message(&ticket, &context))
+    };
+    let delivered = bots::gateway::deliver(app, bots::gateway::Inbound {
+        bot_id: worker_id, channel_id: CHANNEL.into(), thread,
+        sender_id: "local-user".into(), sender_name: sender_name.into(), text,
+        trusted: true, image_ids: None, moodboard_ids: None,
+    }).await;
+    if let Err(error) = delivered {
+        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store, &ticket, &error); }
+        let action = if coordinated { "Worker" } else { "Retry" };
+        return Err(format!("{action} dispatch failed; ticket {} retained: {error}", ticket.id));
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    get_ticket(&store, &ticket.id)
+}
+
+/// Poll only explicit local-operator intents. Pending requests expire; an
+/// admitted request never launches again, even after host restart. Ordinary
+/// queue drains, GitHub events and provider text cannot create these intents.
+pub(crate) async fn dispatch_pending_headless(app: &tauri::AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return Ok(());
+    }
+    let request = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        headless_dispatch::next_pending(&store)?
+    };
+    let Some(request) = request else { return Ok(()) };
+    let result = if !headless_dispatch::is_current(&request, storage::now()) {
+        Err("Explicit headless dispatch request expired; inspect the Demand and confirm a new request.".into())
+    } else if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return Ok(());
+    } else {
+        dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
+            request.kind == "coordinated", Some(&request)).await
+    };
+    if let Err(error) = result {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        headless_dispatch::reject_pending(&store, &request, &error)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow, 
+pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
     app: tauri::AppHandle, state: State<'_, AppState>, ticket_id: String,
     expected_revision: i64,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id,plan) = {
-        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
-            .keys().cloned().collect();
-        let mut store = state.store.lock().map_err(|e|e.to_string())?;
-        let worker = ticket_worker(&store,&ticket_id)?;
-        let ticket = get_ticket(&store, &ticket_id)?;
-        let cfg = configuration(&store, &ticket.orchestration_id)?;
-        let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
-        prepare_coordinated_worker_at_revision(&mut store,&ticket_id,expected_revision,busy)?
-    };
-    let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
-        bot_id: worker_id, channel_id: CHANNEL.into(), thread,
-        sender_id: "local-user".into(), sender_name: "Manual delegated task".into(),
-        text: coordinated_worker_message(&ticket, &plan),
-        trusted: true, image_ids: None, moodboard_ids: None,
-    }).await;
-    if let Err(error) = delivered {
-        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket,&error); }
-        return Err(format!("Worker dispatch failed; ticket {} retained: {error}",ticket.id));
-    }
-    let store = state.store.lock().map_err(|e|e.to_string())?;
-    get_ticket(&store,&ticket.id)
+    dispatch_worker_native(&app, &state, &ticket_id, expected_revision, true, None).await
 }
 
 #[tauri::command]
-pub async fn superagent_retry(window: tauri::WebviewWindow, 
-    app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
+pub async fn superagent_retry(window: tauri::WebviewWindow,
+    app: tauri::AppHandle, state: State<'_, AppState>, ticket_id: String,
     expected_revision: i64,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id,work_context)={
-        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
-            .keys().cloned().collect();
-        let mut store=state.store.lock().map_err(|e|e.to_string())?;
-        let bot_id=ticket_worker(&store,&ticket_id)?;
-        let ticket = get_ticket(&store, &ticket_id)?;
-        let cfg = configuration(&store, &ticket.orchestration_id)?;
-        let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
-        retry_blocked_at_revision(&mut store,&ticket_id,expected_revision,busy)?
-    };
-    let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
-        bot_id: worker_id,
-        channel_id: CHANNEL.into(),
-        thread,
-        sender_id: "local-user".into(),
-        sender_name: "Manual retry".into(),
-        text: retry_worker_message(&ticket, &work_context),
-        trusted: true,
-        image_ids: None,
-        moodboard_ids: None,
-    }).await;
-    if let Err(error)=delivered {
-        if let Ok(store)=state.store.lock() { let _=fail_launch(&store,&ticket,&error); }
-        return Err(format!("Retry dispatch failed; ticket {} retained: {error}",ticket.id));
-    }
-    let store=state.store.lock().map_err(|e|e.to_string())?;
-    get_ticket(&store,&ticket.id)
+    dispatch_worker_native(&app, &state, &ticket_id, expected_revision, false, None).await
 }
-
 
 #[tauri::command]
 pub async fn superagent_accept(window: tauri::WebviewWindow, state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
@@ -7300,6 +7347,97 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, &worker, &thread, "local-user", true,
         ).is_err());
+    }
+
+    #[test]
+    fn headless_dispatch_intent_is_consumed_with_exact_native_assignment_or_rolled_back() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id,
+            "Private headless objective", "headless-dispatch-fixture").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let original = get_ticket(&store, id).unwrap();
+        let item = work_items::plan(&store, id, original.revision,
+            "headless-item", "Inspect the checkout", None).unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let receipt = headless_dispatch::headless_enqueue(
+            &store.path, id, revision, "operator-dispatch-1").unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(receipt["providerDispatchedByCommand"], false);
+        assert_eq!(receipt["dispatchRequest"]["state"], "pending");
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        let request = headless_dispatch::next_pending(&store).unwrap().unwrap();
+        assert!(headless_dispatch::enqueue(&store, id, revision, "different-key").is_err());
+        assert!(headless_dispatch::enqueue(&store, id, revision + 1, "operator-dispatch-1").is_err());
+
+        // An injected failure while consuming the request must roll back the
+        // native Assignment, WorkItem binding, session and Ticket revision.
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_headless_consume BEFORE UPDATE ON sa_headless_dispatch_requests
+             WHEN NEW.state='admitted' BEGIN SELECT RAISE(ABORT,'test consume failure'); END;",
+        ).unwrap();
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&request)).is_err());
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_work_item_attempts", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_some());
+        store.db.execute_batch("DROP TRIGGER deny_headless_consume;").unwrap();
+
+        let (running, thread, worker, context) = retry_blocked_with_request(
+            &mut store, id, revision, false, Some(&request)).unwrap();
+        assert_eq!(running.state, "running");
+        assert!(context.contains(&item.id));
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        let assignment_id = running.active_assignment_id.as_deref().unwrap();
+        let replay = headless_dispatch::headless_enqueue(
+            &store.path, id, revision, "operator-dispatch-1").unwrap();
+        let replay: serde_json::Value = serde_json::from_str(&replay).unwrap();
+        assert_eq!(replay["dispatchRequest"]["state"], "admitted");
+        assert_eq!(replay["dispatchRequest"]["assignmentId"], assignment_id);
+        assert_eq!(replay["providerDispatchedByCommand"], false);
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&request)).is_err());
+        assert!(guard_gateway_inbound(&store, &worker, &thread, "local-user", true).is_ok());
+        let session = assignment_session(&store, id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(on_run_finished(&store, &session, true, "Native evidence").unwrap());
+        let awaiting = get_ticket(&store, id).unwrap();
+        assert_eq!(awaiting.state, "waiting_approval");
+        assert_eq!(accept(&store, id, awaiting.revision).unwrap().state, "completed");
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(headless_dispatch::next_pending(&reopened).unwrap().is_none());
+        assert_eq!(get_ticket(&reopened, id).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn headless_dispatch_intent_cannot_reauthorize_stopped_or_expired_demand() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id, "Read only", "dispatch-stop").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let request = headless_dispatch::enqueue(&store, id, revision, "request-stop").unwrap();
+        store.db.execute(
+            "UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1", [&request.id],
+        ).unwrap();
+        let expired = headless_dispatch::next_pending(&store).unwrap().unwrap();
+        assert!(!headless_dispatch::is_current(&expired, storage::now()));
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&expired)).is_err());
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        headless_dispatch::reject_pending(&store, &expired, "expired").unwrap();
+        let second = headless_dispatch::enqueue(&store, id, revision, "new-confirmation").unwrap();
+        headless_stop_ticket(&store.path, id).unwrap();
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&second)).is_err());
+        headless_dispatch::reject_pending(&store, &second, "stopped").unwrap();
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert_eq!(get_ticket(&store, id).unwrap().state, "stopped");
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert!(headless_dispatch::enqueue(&store, id, revision, "third-confirmation").is_err());
     }
 
     #[test]

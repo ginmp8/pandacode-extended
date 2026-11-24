@@ -81,6 +81,7 @@ enum Command {
     ObserveCheckRun { source_id: String, check_run_id: i64 },
     ObserveLinkedPrChecks { source_id: String, ticket_id: String, pull_key: String },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
+    DispatchTicket { ticket_id: String, expected_revision: i64, request_key: String },
     QueueObservedIssue { orchestration_id: String, worker_bot_id: String,
         request_key: String, objective_file: PathBuf,
         selection: crate::superagent::events::ObservedIssueSelection },
@@ -984,7 +985,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let native_action = matches!(&command,
-                Command::PlanWorkItem { .. } | Command::PlanWorkItemBatch { .. } | Command::CancelPlannedWorkItem { .. }
+                Command::PlanWorkItem { .. } | Command::PlanWorkItemBatch { .. } | Command::CancelPlannedWorkItem { .. } | Command::DispatchTicket { .. }
                 | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
                 | Command::ArchiveDemand { .. } | Command::RestoreDemand { .. }
@@ -1006,6 +1007,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::DispatchTicket { ticket_id, expected_revision, request_key } =>
+                                crate::superagent::headless_dispatch::headless_enqueue(
+                                    &database, ticket_id, *expected_revision, request_key,
+                                ),
                             Command::PlanWorkItem { ticket_id, expected_revision, request_key, summary_file, parent_id } => {
                                 let summary=read_bounded_work_item_summary(summary_file)?;
                                 crate::superagent::work_items::headless_plan(
@@ -1145,7 +1150,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveCheckRun { .. } | Command::ObserveLinkedPrChecks { .. }
         | Command::QueueDemand { .. } | Command::QueueSelectedWorkerDemand { .. }
         | Command::QueueObservedIssue { .. }
-        | Command::PlanWorkItem { .. } | Command::PlanWorkItemBatch { .. } | Command::CancelPlannedWorkItem { .. }
+        | Command::PlanWorkItem { .. } | Command::PlanWorkItemBatch { .. } | Command::CancelPlannedWorkItem { .. } | Command::DispatchTicket { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
         | Command::ArchiveDemand { .. } | Command::RestoreDemand { .. }
@@ -1279,6 +1284,18 @@ fn start_services(app: tauri::AppHandle) {
             if line != last {
                 println!("{line}");
                 last = line;
+            }
+        }
+    });
+    let dispatch_host = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let state = dispatch_host.state::<AppState>();
+            if state.shutdown.load(Ordering::SeqCst) != 0 { break; }
+            if crate::superagent::dispatch_pending_headless(&dispatch_host).await.is_err() {
+                // Do not print private native evidence or provider errors to stdout.
+                eprintln!("serve: SuperAgent dispatch intent processing failed; inspect native Ticket activity.");
             }
         }
     });
@@ -2113,6 +2130,21 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 4;
             }
+            "--dispatch-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--dispatch-ticket needs a Ticket ID, revision and request key.")?;
+                validate_ticket_id(ticket_id)?;
+                let expected_revision = parse_ticket_revision(args.get(index + 2)
+                    .ok_or("--dispatch-ticket needs the expected Ticket revision.")?)?;
+                let request_key = args.get(index + 3)
+                    .ok_or("--dispatch-ticket needs a stable request key.")?;
+                validate_work_item_key(request_key)?;
+                command = Command::DispatchTicket {
+                    ticket_id: ticket_id.clone(), expected_revision, request_key: request_key.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--queue-demand" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or("--queue-demand needs a Team ID, request key and objective file.")?;
@@ -2772,7 +2804,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2799,6 +2831,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                           Create one disabled Team with ordered Workers, optional
                           Reviewers and future-task policy from bounded local JSON.
                           No provider, task grant, GitHub Auto or effect is started.
+  --dispatch-ticket <id> <revision> <request-key>
+                         Queue one explicit, five-minute local dispatch intent for the live
+                         serve host. No provider launch in the detached CLI; inspect receipt
+                         and Ticket state. Admission remains native, read-only and revisioned.
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         Legacy first 200 redacted native SuperAgent Tickets (JSON array).
@@ -2981,6 +3017,23 @@ mod tests {
     /// The command half of a parse, for tests that don't care about the import path.
     fn parsed(flags: &str) -> Result<Command, String> {
         parse(&argv(flags)).map(|(command, _)| command)
+    }
+
+    #[test]
+    fn headless_dispatch_cli_requires_exact_revision_and_stable_key() {
+        assert_eq!(parsed("--dispatch-ticket ticket_123 8 dispatch.key"),
+            Ok(Command::DispatchTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 8,
+                request_key: "dispatch.key".into(),
+            }));
+        for bad in [
+            "--dispatch-ticket", "--dispatch-ticket ../foreign 8 key",
+            "--dispatch-ticket ticket_123 -1 key", "--dispatch-ticket ticket_123 8 bad/key",
+            "--dispatch-ticket ticket_123 8 key --stop-ticket ticket_123",
+            "--dispatch-ticket ticket_123 8 key --import-bots bots.json",
+        ] {
+            assert!(parsed(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -4068,6 +4121,7 @@ mod tests {
             "--inspect-ticket-source",
             "--list-ticket-source-links",
             "--queue-worker-demand",
+            "--dispatch-ticket",
             "--inspect-source-decisions",
             "--link-source-thread",
             "--unlink-source-thread",

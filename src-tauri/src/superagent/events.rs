@@ -379,11 +379,24 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
     link_issue_to_pull_scoped(store, source_id, ticket_id, issue_key, pull_key, None)
 }
 
+/// Bind a network verification to the Ticket revision and its durable source
+/// link generation. Audit IDs, unlike millisecond timestamps, detect even
+/// same-clock unlink/relink (ABA). Unrelated Tickets do not invalidate it.
+fn issue_pull_context_fence(store: &Store, ticket_id: &str) -> Result<(i64, i64)> {
+    store.db.query_row(
+        "SELECT t.revision, COALESCE((SELECT MAX(a.id) FROM sa_audit a
+          WHERE a.ticket_id=t.id AND a.kind IN ('source_thread_linked',
+          'source_thread_unlinked','source_issue_pull_associated')),0)
+         FROM sa_tickets t WHERE t.id=?1",
+        [ticket_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())
+}
+
 /// Only native GitHub verification may supply an attestation. It is never
 /// accepted from model text, an event envelope, or the desktop Webview.
 fn link_issue_to_pull_scoped(store: &Store, source_id: &str, ticket_id: &str,
     issue_key: &str, pull_key: &str,
-    attestation: Option<(&str, i64, u64)>,
+    attestation: Option<(&str, i64, u64, (i64, i64))>,
 ) -> Result<SourceThreadLink>
 {
     if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
@@ -391,12 +404,15 @@ fn link_issue_to_pull_scoped(store: &Store, source_id: &str, ticket_id: &str,
         return Err("Issue-to-PR association requires exact issue:123 and pull:123 keys.".into());
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    if let Some((repository, expected_revision, repository_id)) = attestation {
+    if let Some((repository, expected_revision, repository_id, expected_context)) = attestation {
         let current = source(store, source_id)?;
         if current.policy_revision != expected_revision
             || !current.repository.eq_ignore_ascii_case(repository)
         {
             return Err("GitHub source changed during authenticated Issue/PR verification; link denied.".into());
+        }
+        if issue_pull_context_fence(store, ticket_id)? != expected_context {
+            return Err("Ticket revision or source links changed during authenticated Issue/PR verification; link denied.".into());
         }
         pin_authenticated_repository_identity(&tx, source_id, repository_id)?;
     }
@@ -2991,7 +3007,7 @@ pub async fn superagent_source_verify_link_issue_pull(
     source_id: String, ticket_id: String, issue_key: String, pull_key: String,
 ) -> Result<SourceThreadLink> {
     require_main_window(&window)?;
-    let (repository, expected_revision) = {
+    let (repository, expected_revision, expected_context) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         verified_issue_pull_preflight(
             &store, &source_id, &ticket_id, &issue_key, &pull_key,
@@ -3008,7 +3024,7 @@ pub async fn superagent_source_verify_link_issue_pull(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     link_issue_to_pull_scoped(
         &store, &source_id, &ticket_id, &issue_key, &pull_key,
-        Some((&repository, expected_revision, repository_id)),
+        Some((&repository, expected_revision, repository_id, expected_context)),
     )
 }
 
@@ -3180,12 +3196,13 @@ pub(crate) fn headless_link_issue_pull(
 fn verified_issue_pull_preflight(
     store: &Store, source_id: &str, ticket_id: &str,
     issue_key: &str, pull_key: &str,
-) -> Result<(String, i64)> {
+) -> Result<(String, i64, (i64, i64))> {
     if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
         || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:")
     {
         return Err("Verified association requires exact issue:123 and pull:123 keys.".into());
     }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let src = source(store, source_id)?;
     let ticket = super::get_ticket(store, ticket_id)?;
     if ticket.orchestration_id != src.orchestration_id
@@ -3207,7 +3224,9 @@ fn verified_issue_pull_preflight(
     if !linked {
         return Err("Verified PR association requires an existing operator-linked Issue.".into());
     }
-    Ok((src.repository, src.policy_revision))
+    let context = issue_pull_context_fence(store, ticket_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((src.repository, src.policy_revision, context))
 }
 
 /// Native local-user command: authenticated GitHub object existence/identity,
@@ -3216,7 +3235,7 @@ pub(crate) fn headless_verify_link_issue_pull(
     path: &std::path::Path, source_id: &str, ticket_id: &str,
     issue_key: &str, pull_key: &str,
 ) -> Result<String> {
-    let (repository, expected_revision) = {
+    let (repository, expected_revision, expected_context) = {
         let store = Store::open_read_only(path)?;
         verified_issue_pull_preflight(
             &store, source_id, ticket_id, issue_key, pull_key,
@@ -3230,7 +3249,7 @@ pub(crate) fn headless_verify_link_issue_pull(
     let store = super::open_headless_transition_store(path)?;
     let link = link_issue_to_pull_scoped(
         &store, source_id, ticket_id, issue_key, pull_key,
-        Some((&repository, expected_revision, github_repo_id)),
+        Some((&repository, expected_revision, github_repo_id, expected_context)),
     )?;
     serde_json::to_string(&serde_json::json!({
         "sourceId":link.source_id, "ticketId":link.ticket_id,
@@ -6970,7 +6989,8 @@ mod tests {
         assert_eq!(id, 900);
         link_issue_to_pull_scoped(
             &store, &pull_source.id, "ticket-one", "issue:42", "pull:99",
-            Some(("test/fixture", pull_source.policy_revision, id)),
+            Some(("test/fixture", pull_source.policy_revision, id,
+                issue_pull_context_fence(&store, "ticket-one").unwrap())),
         ).unwrap();
         assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 2);
         drop(store);
@@ -6996,26 +7016,32 @@ mod tests {
         tx.commit().unwrap();
         assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision+1,900))).is_err());
+            Some(("test/fixture",pull.policy_revision+1,900,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).is_err());
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
             [&pull.id],|row|row.get::<_,i64>(0)).unwrap(),0);
         assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-two",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision,900))).is_err());
+            Some(("test/fixture",pull.policy_revision,900,
+                issue_pull_context_fence(&store,"ticket-two").unwrap()))).is_err());
         assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("other/repo",pull.policy_revision,900))).is_err());
+            Some(("other/repo",pull.policy_revision,900,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).is_err());
         let link=link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision,900))).unwrap();
+            Some(("test/fixture",pull.policy_revision,900,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).unwrap();
         assert_eq!(link.subject_key,"pull:99");
         assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision,901))).is_err());
+            Some(("test/fixture",pull.policy_revision,901,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).is_err());
         link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision,900))).unwrap();
+            Some(("test/fixture",pull.policy_revision,900,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).unwrap();
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='ticket-one'
              AND kind='source_issue_pull_associated'",[],
@@ -7023,7 +7049,8 @@ mod tests {
         let changed=set_mode(&store,&pull.id,pull.policy_revision,"observe").unwrap();
         assert!(link_issue_to_pull_scoped(&store,&pull.id,"ticket-one",
             "issue:42","pull:99",
-            Some(("test/fixture",pull.policy_revision,900))).is_err());
+            Some(("test/fixture",pull.policy_revision,900,
+                issue_pull_context_fence(&store,"ticket-one").unwrap()))).is_err());
         assert_eq!(changed.policy_revision,pull.policy_revision+1);
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],
             |row|row.get::<_,i64>(0)).unwrap(),0);
@@ -7047,7 +7074,7 @@ mod tests {
             &store, &src.id, "ticket-one", "issue:42", "pull:99",
         ).is_err());
         link_thread(&store, &src.id, "ticket-one", "issue:42").unwrap();
-        let (repo, initial_revision) = verified_issue_pull_preflight(
+        let (repo, initial_revision, initial_context) = verified_issue_pull_preflight(
             &store, &src.id, "ticket-one", "issue:42", "pull:99",
         ).unwrap();
         assert_eq!(repo, "test/fixture");
@@ -7062,19 +7089,69 @@ mod tests {
         // persist a repository identity or a context association.
         assert!(link_issue_to_pull_scoped(
             &store, &src.id, "ticket-one", "issue:42", "pull:99",
-            Some((&repo, initial_revision, 900)),
+            Some((&repo, initial_revision, 900, initial_context)),
         ).is_err());
         assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 1);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
             [&src.id], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
-        let (repo, revision) = verified_issue_pull_preflight(
+        let (repo, revision, context) = verified_issue_pull_preflight(
             &store, &src.id, "ticket-one", "issue:42", "pull:99",
         ).unwrap();
         link_issue_to_pull_scoped(
             &store, &src.id, "ticket-one", "issue:42", "pull:99",
-            Some((&repo, revision, 900)),
+            Some((&repo, revision, 900, context)),
+        ).unwrap();
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&restarted, "ticket-one").unwrap().len(), 2);
+        assert_eq!(restarted.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn verified_issue_pull_denies_revoked_and_recreated_link_and_stale_ticket_revision() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        let src = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "issues.opened",
+        ).unwrap();
+        link_thread(&store, &src.id, "ticket-one", "issue:42").unwrap();
+        let (repo, revision, context) = verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).unwrap();
+        // The same link key exists again, but its authority was revoked
+        // after preflight. A late verified response must not act on it.
+        unlink_thread(&store, &src.id, "ticket-one", "issue:42").unwrap();
+        link_thread(&store, &src.id, "ticket-one", "issue:42").unwrap();
+        assert!(link_issue_to_pull_scoped(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+            Some((&repo, revision, 900, context)),
+        ).is_err());
+        let (_, _, fresh_context) = verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).unwrap();
+        assert_ne!(context, fresh_context);
+        store.db.execute(
+            "UPDATE sa_tickets SET revision=revision+1 WHERE id='ticket-one'", [],
+        ).unwrap();
+        assert!(link_issue_to_pull_scoped(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+            Some((&repo, revision, 900, fresh_context)),
+        ).is_err());
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&src.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let (_, _, current_context) = verified_issue_pull_preflight(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+        ).unwrap();
+        link_issue_to_pull_scoped(
+            &store, &src.id, "ticket-one", "issue:42", "pull:99",
+            Some((&repo, revision, 900, current_context)),
         ).unwrap();
         drop(store);
         let restarted = Store::open(&path).unwrap();

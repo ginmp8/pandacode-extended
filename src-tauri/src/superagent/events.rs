@@ -3032,11 +3032,26 @@ fn linked_decisions_page(
     {
         return Err("Invalid linked source decision page cursor.".into());
     }
+    // Hold one read snapshot for Ticket ownership, cursor authorization and
+    // page selection. A detached operator may change thread links while the
+    // desktop or a read-only headless inspector is paging through receipts.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = super::get_ticket(store, ticket_id)?;
+    let page = linked_decisions_page_in_tx(
+        &tx, ticket_id, &ticket.orchestration_id, limit, before,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(page)
+}
+
+fn linked_decisions_page_in_tx(
+    tx: &rusqlite::Transaction<'_>, ticket_id: &str, orchestration_id: &str,
+    limit: i64, before: Option<&LinkedActivityCursor>,
+) -> Result<LinkedActivityPage> {
     // Do not use a boundary from another Ticket, an unlinked thread, or a
     // stale repository identity: the cursor must still be visible here.
     if let Some(cursor) = before {
-        let anchored: bool = store.db.query_row(
+        let anchored: bool = tx.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM sa_event_decisions d
                JOIN sa_event_sources observed ON observed.id=d.source_id
@@ -3059,7 +3074,7 @@ fn linked_decisions_page(
                  )
              )",
             params![ticket_id, &cursor.source_id, &cursor.delivery_id,
-                    cursor.at, &ticket.orchestration_id],
+                    cursor.at, orchestration_id],
             |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if !anchored {
@@ -3069,7 +3084,7 @@ fn linked_decisions_page(
     // A same-source legacy receipt remains visible after upgrade. A different
     // event class needs matching, positive GitHub repository IDs, never a name
     // match or two NULL identity records.
-    let mut stmt = store.db.prepare(
+    let mut stmt = tx.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
                 d.sequence,d.decision,d.policy_revision,d.at,
                 checks.conclusion,checks.head_sha,checks.completed_at
@@ -3099,7 +3114,7 @@ fn linked_decisions_page(
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![
-        ticket_id, ticket.orchestration_id, limit + 1,
+        ticket_id, orchestration_id, limit + 1,
         before.map(|cursor| cursor.at),
         before.map(|cursor| cursor.source_id.as_str()),
         before.map(|cursor| cursor.delivery_id.as_str()),
@@ -7350,6 +7365,54 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn linked_activity_cursor_and_page_share_read_snapshot_during_unlink() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "snapshot-ticket", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &on.id, "snapshot-ticket", "issue:42").unwrap();
+        link_thread(&store, &on.id, "snapshot-ticket", "issue:43").unwrap();
+
+        let mut other = event("snapshot-other", &on, 1);
+        other.subject_key = "issue:43".into();
+        observe(&store, &other).unwrap();
+        observe(&store, &event("snapshot-anchor", &on, 2)).unwrap();
+        // Give the revoked thread the newest receipt, leaving another linked
+        // thread visible below its cursor after revocation.
+        store.db.execute(
+            "UPDATE sa_event_decisions SET at=sequence WHERE source_id=?1",
+            [&on.id],
+        ).unwrap();
+        let first = linked_decisions_page(&store, "snapshot-ticket", 1, None).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        assert_eq!(cursor.delivery_id, "snapshot-anchor");
+
+        let reader = Store::open_read_only(&path).unwrap();
+        let tx = reader.db.unchecked_transaction().unwrap();
+        let ticket = super::super::get_ticket(&reader, "snapshot-ticket").unwrap();
+        // WAL permits the operator to revoke the link on a separate connection
+        // while the inspector retains the already established read snapshot.
+        unlink_thread(&store, &on.id, "snapshot-ticket", "issue:42").unwrap();
+        let page = linked_decisions_page_in_tx(
+            &tx, &ticket.id, &ticket.orchestration_id, 1, Some(&cursor),
+        ).unwrap();
+        assert_eq!(page.decisions.len(), 1);
+        assert_eq!(page.decisions[0].delivery_id, "snapshot-other");
+        tx.commit().unwrap();
+
+        // A new request must not resume the revoked anchor, even though the
+        // other thread remains visible and all source receipts are durable.
+        assert!(headless_linked_activity_page(
+            &path, "snapshot-ticket", 1, Some(&cursor),
+        ).is_err());
+        let fresh = linked_decisions_page(&reader, "snapshot-ticket", 10, None).unwrap();
+        assert_eq!(fresh.decisions.len(), 1);
+        assert_eq!(fresh.decisions[0].delivery_id, "snapshot-other");
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
     }
 
     #[test]

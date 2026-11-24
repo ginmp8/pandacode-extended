@@ -4462,8 +4462,31 @@ fn accept_with_pause(
         return Err("Native Council review is required; task-bound verified verdict and attributed exception are not available.".into());
     }
     let now = storage::now();
+    let more_items = work_items::accept_current_attempt(
+        store, ticket_id, worker_evidence_session.as_deref().unwrap_or_default(),
+        expected_revision, now,
+    )?;
+    let next_state = if more_items {
+        let coordinated: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1
+             AND kind='admitted' AND detail='manual readonly coordinator reserved')",
+            [ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        let attempts: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2",
+            params![ticket_id,ticket_worker(store,ticket_id)?], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'work_item_budget_exhausted','Pending WorkItems remain; immutable Worker attempt budget exhausted',?2)",
+                params![ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            "blocked"
+        } else if coordinated { "queued" } else { "blocked" }
+    } else { "completed" };
     let changed = tx.execute(
-        "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3
+        "UPDATE sa_tickets SET state=?4,revision=revision+1,updated_at=?3
          WHERE id=?1 AND revision=?2 AND state='waiting_approval'
          AND EXISTS (
             SELECT 1 FROM sa_mandates m JOIN sa_orchestrations o
@@ -4481,16 +4504,18 @@ fn accept_with_pause(
                   AND worker.project_id=sa_tickets.project_id
               )
          )",
-        params![ticket_id,expected_revision,now],
+        params![ticket_id,expected_revision,now,next_state],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
         return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
     }
-    tx.execute(
-        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-         VALUES(?1,'human_accepted','local-user explicitly accepted worker evidence',?2)",
-        params![ticket_id,now],
-    ).map_err(|e| e.to_string())?;
+    if !more_items {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'human_accepted','local-user explicitly accepted worker evidence',?2)",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     get_ticket(store,ticket_id)
 }
@@ -5492,9 +5517,9 @@ fn retry_blocked(
     Ok((ticket, thread, worker))
 }
 
-/// Read current operator plans inside the transaction reserving the Worker.
-/// WorkItems are bounded context for the whole Demand, not independent
-/// execution grants, dependency completions or child assignments.
+/// Select one dependency-ready WorkItem inside the native admission transaction.
+/// This is serial, operator-confirmed read-only execution, not autonomous routing
+/// or permission to treat a provider turn as engineering delivery.
 fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, Vec<String>)> {
     let (items, truncated) = work_items::list(store, ticket_id, 100)?;
     if truncated {
@@ -5504,25 +5529,32 @@ fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, V
     if planned.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
-    let ids = planned.iter().map(|item| item.id.clone()).collect();
-    let entries: Vec<_> = planned.iter().map(|item| serde_json::json!({
-        "id": &item.id,
-        "parentId": &item.parent_id,
-        "summary": &item.summary,
-    })).collect();
-    let context = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    let ready = |item: &&work_items::WorkItem| item.parent_id.as_ref().is_none_or(|parent_id|
+        items.iter().any(|parent| &parent.id == parent_id && parent.state == "accepted"));
+    let selected = planned.iter().copied().filter(ready)
+        .find(|item| item.assignment_id.is_some())
+        .or_else(|| planned.iter().copied().find(ready))
+        .ok_or("No WorkItem is dependency-ready; accept its parent or resolve the plan.")?;
+    let ids = vec![selected.id.clone()];
+    let entry = serde_json::json!({
+        "id": &selected.id,
+        "parentId": &selected.parent_id,
+        "summary": &selected.summary,
+    });
+    let context = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
     if context.len() > 16 * 1024 {
         return Err("Demand WorkItem context exceeds 16 KiB; reduce the active plan before dispatch.".into());
     }
-    Ok((format!("\n\nOperator-planned WorkItems (context only; no additional authority or per-item completion):\n{context}"), ids))
+    Ok((format!("\n\nSelected operator-planned WorkItem (read-only; only explicit native acceptance records its evidence):\n{context}"), ids))
 }
 
-/// Audit exactly which plan revision and WorkItem IDs were included in the
-/// native Assignment admission. Original plan rows remain unchanged.
+/// Bind the selected plan to its real Assignment and audit the confirmed
+/// revision, without modifying the original plan or granting authority.
 fn record_work_item_admission(
     store: &Store, ticket: &Ticket, assignment_id: &str, ids: &[String], now: i64,
 ) -> Result<()> {
-    if !ids.is_empty() {
+    if let [item_id] = ids {
+        work_items::bind_attempt(store, &ticket.id, assignment_id, item_id, ticket.revision)?;
         let detail = serde_json::json!({
             "assignmentId": assignment_id,
             "confirmedRevision": ticket.revision,
@@ -5530,9 +5562,11 @@ fn record_work_item_admission(
         }).to_string();
         store.db.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'worker_plan_context_admitted',?2,?3)",
+             VALUES(?1,'work_item_attempt_admitted',?2,?3)",
             params![ticket.id,detail,now],
         ).map_err(|e| e.to_string())?;
+    } else if !ids.is_empty() {
+        return Err("Exactly one WorkItem may be bound to a manual native Assignment.".into());
     }
     Ok(())
 }
@@ -5755,10 +5789,14 @@ fn prepare_coordinated_worker_at_revision(
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
     }
     let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
-    let next_attempt: i64 = store.db.query_row(
-        "SELECT COALESCE(MAX(attempt),0)+1 FROM sa_assignments WHERE ticket_id=?1",
-        [ticket_id], |r| r.get(0),
+    let (next_attempt, worker_attempts): (i64,i64) = store.db.query_row(
+        "SELECT COALESCE(MAX(attempt),0)+1,COUNT(*) FILTER (WHERE bot_id=?2)
+         FROM sa_assignments WHERE ticket_id=?1",
+        params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
+    if worker_attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
+        return Err("Manual worker attempt limit reached; no further WorkItem may be dispatched.".into());
+    }
     let thread = format!("{ticket_id}:worker:{next_attempt}");
     let assignment_id = storage::id();
     let session_id = bots::thread_session(store, &worker, CHANNEL, &thread,
@@ -5840,7 +5878,7 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
         bot_id: worker_id, channel_id: CHANNEL.into(), thread,
         sender_id: "local-user".into(), sender_name: "Manual delegated task".into(),
         text: format!(
-            "SuperAgent ticket {}\n\nObjective: {}\n\nCoordinator advice (untrusted context; not authority):\n{}\n\nRead-only assignment. Report evidence and remaining gaps; only native approval may finish the ticket.",
+            "SuperAgent ticket {}\n\nObjective: {}\n\nCoordinator advice (untrusted context; not authority):\n{}\n\nRead-only assignment. If a selected WorkItem is present, inspect that item only. Report evidence and remaining gaps; only native approval may finish the ticket.",
             ticket.id,ticket.objective,plan,
         ),
         trusted: true, image_ids: None, moodboard_ids: None,
@@ -5875,7 +5913,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         thread,
         sender_id: "local-user".into(),
         sender_name: "Manual retry".into(),
-        text: format!("SuperAgent ticket {} (manual retry)\n\n{}{work_context}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        text: format!("SuperAgent ticket {} (manual retry)\n\n{}{work_context}\n\nRead-only assignment. If a selected WorkItem is present, inspect that item only. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
         trusted: true,
         image_ids: None,
         moodboard_ids: None,
@@ -14613,7 +14651,7 @@ mod tests {
         assert!(!packet.contains("Cancelled private note"));
         assert!(!packet.contains(removed.id.as_str()));
         let receipt: String = store.db.query_row(
-            "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='worker_plan_context_admitted'",
+            "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='work_item_attempt_admitted'",
             [&ticket.id], |row| row.get(0),
         ).unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
@@ -14624,6 +14662,88 @@ mod tests {
         assert!(read_only_policy(&store, &worker_session).unwrap().is_some());
         assert_eq!(work_items::list(&store, &ticket.id, 100).unwrap().0.iter()
             .filter(|item| item.state == "planned").count(), 1);
+    }
+
+
+    #[test]
+    fn native_work_items_require_individual_attempt_and_operator_acceptance() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit_role(
+            &mut store, &cfg.id, "Inspect original project", "serial-items", false, true,
+        ).unwrap();
+        assert!(started);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Coordinator evidence").unwrap());
+        let first = work_items::plan(&store, &ticket.id,
+            get_ticket(&store,&ticket.id).unwrap().revision, "root", "Inspect root", None).unwrap();
+        let second = work_items::plan(&store, &ticket.id,
+            get_ticket(&store,&ticket.id).unwrap().revision, "child", "Inspect child", Some(&first.id)).unwrap();
+
+        let (running, _, _, packet) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        assert!(packet.contains(first.id.as_str()));
+        assert!(!packet.contains(second.id.as_str()));
+        let first_assignment = running.active_assignment_id.unwrap();
+        let first_session = assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&first_session).unwrap().is_some());
+        assert!(on_run_finished(&store,&first_session,true,"Root evidence").unwrap());
+        let waiting = get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(waiting.state,"waiting_approval");
+        assert!(work_items::list(&store,&ticket.id,100).unwrap().0.iter()
+            .all(|item|item.state=="planned"));
+        assert!(accept(&store,&ticket.id,waiting.revision-1).is_err());
+        assert!(store.db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id=?1",[&ticket.id],
+        ).is_err(), "Pending WorkItems must fence other terminal writers too");
+        let queued = accept(&store,&ticket.id,waiting.revision).unwrap();
+        assert_eq!(queued.state,"queued");
+        let items = work_items::list(&store,&ticket.id,100).unwrap().0;
+        let root = items.iter().find(|item|item.id==first.id).unwrap();
+        assert_eq!(root.state,"accepted");
+        assert_eq!(root.assignment_id.as_deref(),Some(first_assignment.as_str()));
+        assert!(work_items::cancel(&store,&ticket.id,queued.revision,&first.id,"cancel-accepted").is_err());
+        assert!(accept(&store,&ticket.id,waiting.revision).is_err());
+        let (running, _, _, packet) = prepare_coordinated_worker(&mut store,&ticket.id,false).unwrap();
+        assert!(packet.contains(second.id.as_str()));
+        assert!(!packet.contains("Inspect root"));
+        let second_assignment = running.active_assignment_id.unwrap();
+        assert_ne!(first_assignment,second_assignment);
+        let second_session = assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert_ne!(first_session,second_session);
+        assert!(!on_run_finished(&store,&first_session,true,"Stale root callback").unwrap());
+        assert!(on_run_finished(&store,&second_session,true,"Child evidence").unwrap());
+        let waiting = get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
+        assert_eq!(history(&store,&ticket.id,100).unwrap().iter()
+            .filter(|event|event.kind=="human_accepted").count(),1);
+        assert_eq!(history(&store,&ticket.id,100).unwrap().iter()
+            .filter(|event|event.kind=="work_item_human_accepted").count(),2);
+        let reopened = Store::open_read_only(&store.path).unwrap();
+        let items = work_items::list(&reopened,&ticket.id,100).unwrap().0;
+        assert!(items.iter().all(|item|item.state=="accepted" && item.assignment_id.is_some()));
+        assert!(!mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+    }
+
+    #[test]
+    fn legacy_prompt_only_work_items_cannot_be_accepted_as_executed() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store,&cfg.id,"Original scope","legacy-context",true).unwrap();
+        assert!(!started);
+        let item = work_items::plan(&store,&ticket.id,ticket.revision,"legacy-plan","Inspect code",None).unwrap();
+        let current = get_ticket(&store,&ticket.id).unwrap();
+        let (running,_,_,_) = retry_blocked_at_revision(&mut store,&ticket.id,current.revision,false).unwrap();
+        // Model a v55 admission: no individual binding could exist before v56.
+        store.db.execute_batch("DROP TRIGGER sa_work_item_attempt_immutable_delete;").unwrap();
+        store.db.execute("DELETE FROM sa_work_item_attempts WHERE assignment_id=?1",
+            [running.active_assignment_id.unwrap()]).unwrap();
+        let session = assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&session,true,"Whole-demand prompt output").unwrap());
+        let waiting = get_ticket(&store,&ticket.id).unwrap();
+        assert!(accept(&store,&ticket.id,waiting.revision).unwrap_err().contains("no individual WorkItem binding"));
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,waiting.revision);
+        assert_eq!(work_items::list(&store,&ticket.id,100).unwrap().0[0].id,item.id);
+        assert_eq!(work_items::list(&store,&ticket.id,100).unwrap().0[0].state,"planned");
     }
 
     #[test]

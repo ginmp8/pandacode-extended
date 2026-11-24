@@ -1215,3 +1215,9 @@ The returned JSON includes native Ticket revision and WorkItem identity,
 but never implies execution, authorization, a Council verdict or a remote
 effect. The administrative database connection does not run startup recovery
 against a concurrently running PandaCode host.
+
+With schema v56, Desktop manual dispatch/retry binds exactly one dependency-ready
+WorkItem to a native Assignment. The shared headless acceptance transition
+records only the current bound item; it returns a queued or blocked Ticket
+while more items remain. An attempted WorkItem cannot be cancelled as an
+unexecuted plan. No headless provider launch or automatic scheduling is implied.

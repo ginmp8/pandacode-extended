@@ -36,6 +36,32 @@ idempotency and revocation. Playwright scenarios cover both direct and
 coordinated preflight/submit with the explicit Worker ID. These tests require a
 passing exact-HEAD CI run before the slice is considered verified.
 
+## Serial native WorkItem attempts (partial S2)
+
+An operator can plan individual WorkItems on a blocked or queued manual Demand.
+The existing **Dispatch worker** or **Retry** confirmation authorizes the current
+Ticket revision and selects exactly one ready item, prioritizing an attempted
+but unaccepted item before new items. A child becomes ready only after its
+parent's explicit acceptance. SQLite schema v56 binds the selected item to its
+actual native Assignment in the same admission transaction; historical v55
+prompt-only context is not backfilled into execution receipts.
+
+A finished Worker turn is still only evidence awaiting operator acceptance.
+**Accept evidence** records the matching WorkItem receipt after the original
+mandate, session, Council and external-effect guards pass. The Demand remains
+queued (coordinated path) or blocked (manual retry path) while additional items
+remain; exhausted immutable attempt budgets also leave it blocked. Only when
+all planned items have been accepted or cancelled can the current native
+acceptance transition complete the Demand. Unattempted plans can be cancelled;
+attempted ones retain their Assignment history and use native Demand recovery
+or Stop. Existing no-item Council-Off behavior is unchanged.
+
+This is a serial read-only, human-confirmed slice, not autonomous scheduling,
+verified code changes, positive tool grants, native task Council, or independent
+engineering delivery. A v55 waiting-approval Demand with unresolved plans but
+only prompt-context evidence must reject that evidence and dispatch a current
+item rather than retroactively accepting every plan.
+
 ## Native-backed surfaces
 
 The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.

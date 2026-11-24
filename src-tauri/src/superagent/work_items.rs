@@ -1,5 +1,5 @@
-//! Operator-authored WorkItem plan entries. Planning is not Worker delegation,
-//! provider execution, task-scoped authorization, or Council approval.
+//! Operator-authored WorkItem plans and native manual attempt receipts.
+//! Planning alone grants no provider execution, tool authority or Council approval.
 use crate::{storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -55,6 +55,79 @@ CREATE TRIGGER IF NOT EXISTS sa_work_item_cancel_immutable_delete
  BEGIN SELECT RAISE(ABORT,'WorkItem cancellation evidence is immutable'); END;
 "#;
 
+
+/// Append-only native WorkItem execution receipts; no authority is inferred
+/// from historical prompt-only context.
+pub(crate) const EXECUTION_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_work_item_attempts (
+ assignment_id TEXT PRIMARY KEY REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+ item_id TEXT NOT NULL REFERENCES sa_work_items(id) ON DELETE RESTRICT,
+ ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ confirmed_revision INTEGER NOT NULL CHECK(confirmed_revision>=0)
+);
+CREATE INDEX IF NOT EXISTS sa_work_item_attempts_item ON sa_work_item_attempts(item_id);
+CREATE TABLE IF NOT EXISTS sa_work_item_acceptances (
+ item_id TEXT PRIMARY KEY REFERENCES sa_work_items(id) ON DELETE RESTRICT,
+ assignment_id TEXT NOT NULL UNIQUE REFERENCES sa_work_item_attempts(assignment_id) ON DELETE RESTRICT,
+ accepted_revision INTEGER NOT NULL CHECK(accepted_revision>=0),
+ accepted_at INTEGER NOT NULL CHECK(accepted_at>0)
+);
+CREATE TRIGGER IF NOT EXISTS sa_work_item_attempt_guard
+ BEFORE INSERT ON sa_work_item_attempts
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_items w
+   JOIN sa_assignments a ON a.id=NEW.assignment_id AND a.ticket_id=w.ticket_id
+   JOIN sa_tickets t ON t.id=w.ticket_id
+   WHERE w.id=NEW.item_id AND w.ticket_id=NEW.ticket_id
+     AND t.active_assignment_id=a.id AND t.state='running'
+     AND t.revision=NEW.confirmed_revision+1 AND a.state='running'
+     AND a.bot_id=t.worker_bot_id
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances c WHERE c.item_id=w.id)
+     AND (w.parent_id IS NULL OR EXISTS(
+         SELECT 1 FROM sa_work_item_acceptances p WHERE p.item_id=w.parent_id))
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem attempt must match its active native Worker and ready plan'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_acceptance_guard
+ BEFORE INSERT ON sa_work_item_acceptances
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_item_attempts b
+   JOIN sa_assignments a ON a.id=b.assignment_id AND a.ticket_id=b.ticket_id
+   JOIN sa_tickets t ON t.id=b.ticket_id
+   WHERE b.item_id=NEW.item_id AND b.assignment_id=NEW.assignment_id
+     AND t.state='waiting_approval' AND t.revision=NEW.accepted_revision
+     AND a.state='finished' AND a.bot_id=t.worker_bot_id
+     AND a.result=t.evidence AND length(trim(a.result))>0
+     AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=t.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=b.item_id)
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem acceptance requires current native Worker evidence'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_attempt_immutable_update
+ BEFORE UPDATE ON sa_work_item_attempts
+ BEGIN SELECT RAISE(ABORT,'WorkItem attempt evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_attempt_immutable_delete
+ BEFORE DELETE ON sa_work_item_attempts
+ BEGIN SELECT RAISE(ABORT,'WorkItem attempt evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_acceptance_immutable_update
+ BEFORE UPDATE ON sa_work_item_acceptances
+ BEGIN SELECT RAISE(ABORT,'WorkItem acceptance evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_acceptance_immutable_delete
+ BEFORE DELETE ON sa_work_item_acceptances
+ BEGIN SELECT RAISE(ABORT,'WorkItem acceptance evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_cancel_unattempted
+ BEFORE INSERT ON sa_work_item_cancellations
+ WHEN EXISTS(SELECT 1 FROM sa_work_item_attempts b WHERE b.item_id=NEW.item_id)
+ BEGIN SELECT RAISE(ABORT,'Attempted WorkItems cannot be cancelled as unexecuted plans'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_completion_guard
+ BEFORE UPDATE OF state ON sa_tickets
+ WHEN NEW.state='completed' AND OLD.state<>'completed' AND EXISTS(
+   SELECT 1 FROM sa_work_items w WHERE w.ticket_id=NEW.id
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+ )
+ BEGIN SELECT RAISE(ABORT,'Demand has unresolved WorkItems'); END;
+"#;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct WorkItem {
@@ -67,13 +140,15 @@ pub struct WorkItem {
     pub created_at: i64,
     /// Durable native cancellation receipt, separate from the immutable plan.
     pub cancelled_at: Option<i64>,
+    /// Latest real native attempt; an attempt is not accepted delivery.
+    pub assignment_id: Option<String>,
 }
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
     Ok(WorkItem {
         id:row.get(0)?,ticket_id:row.get(1)?,request_key:row.get(2)?,
         parent_id:row.get(3)?,summary:row.get(4)?,state:row.get(5)?,
-        created_at:row.get(6)?,cancelled_at:row.get(7)?,
+        created_at:row.get(6)?,cancelled_at:row.get(7)?,assignment_id:row.get(8)?,
     })
 }
 
@@ -83,7 +158,12 @@ pub(super) fn list(store:&Store,ticket_id:&str,limit:i64)->Result<(Vec<WorkItem>
     }
     let mut statement=store.db.prepare(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
+                CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
+                     WHEN EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+                     THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
+                (SELECT b.assignment_id FROM sa_work_item_attempts b
+                 JOIN sa_assignments a ON a.id=b.assignment_id
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.ticket_id=?1 ORDER BY w.created_at,w.id LIMIT ?2",
     ).map_err(|e|e.to_string())?;
@@ -118,7 +198,12 @@ pub(super) fn plan(
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let previous=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
+                CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
+                     WHEN EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+                     THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
+                (SELECT b.assignment_id FROM sa_work_item_attempts b
+                 JOIN sa_assignments a ON a.id=b.assignment_id
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.ticket_id=?1 AND w.request_key=?2",
         params![ticket_id,request_key],from_row,
@@ -179,7 +264,12 @@ pub(super) fn plan(
     tx.commit().map_err(|e|e.to_string())?;
     store.db.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at
+                CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
+                     WHEN EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+                     THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
+                (SELECT b.assignment_id FROM sa_work_item_attempts b
+                 JOIN sa_assignments a ON a.id=b.assignment_id
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.id=?1",
         [&id],from_row,
@@ -204,17 +294,25 @@ pub(super) fn cancel(
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let previous:Option<(WorkItem,Option<String>)>=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
-                CASE WHEN c.item_id IS NULL THEN w.state ELSE 'cancelled' END,w.created_at,c.cancelled_at,
+                CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
+                     WHEN EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+                     THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
+                (SELECT b.assignment_id FROM sa_work_item_attempts b
+                 JOIN sa_assignments a ON a.id=b.assignment_id
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1),
                 c.request_key
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
          WHERE w.id=?1 AND w.ticket_id=?2",
         params![item_id,ticket_id],
-        |row|Ok((from_row(row)?,row.get(8)?)),
+        |row|Ok((from_row(row)?,row.get(9)?)),
     ).optional().map_err(|e|e.to_string())?;
     let (item,prior_key)=previous.ok_or("WorkItem does not belong to this Demand.")?;
     if item.state=="cancelled" {
         if prior_key.as_deref()==Some(request_key) {return Ok(item);}
         return Err("WorkItem was already cancelled by another operator request.".into());
+    }
+    if item.state != "planned" || item.assignment_id.is_some() {
+        return Err("An attempted WorkItem is not an unexecuted plan; use native Demand recovery or Stop.".into());
     }
     let now=storage::now();
     let changed=tx.execute(
@@ -258,6 +356,59 @@ pub(super) fn cancel(
     Ok(WorkItem{state:"cancelled".into(),cancelled_at:Some(now),..item})
 }
 
+
+/// Bind one ready plan inside the native Assignment admission transaction.
+pub(super) fn bind_attempt(
+    store: &Store, ticket_id: &str, assignment_id: &str, item_id: &str, revision: i64,
+) -> Result<()> {
+    store.db.execute(
+        "INSERT INTO sa_work_item_attempts(assignment_id,item_id,ticket_id,confirmed_revision)
+         VALUES(?1,?2,?3,?4)",
+        params![assignment_id,item_id,ticket_id,revision],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Accept only the exact item bound to the already validated Worker evidence.
+/// Return whether another item remains. Historical prompt-only context is not
+/// a binding and can never be promoted to accepted WorkItems.
+pub(super) fn accept_current_attempt(
+    store: &Store, ticket_id: &str, session_id: &str, revision: i64, now: i64,
+) -> Result<bool> {
+    let pending = || -> Result<bool> {
+        store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_items w WHERE w.ticket_id=?1
+             AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+             AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id))",
+            [ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    };
+    let binding: Option<(String,String)> = store.db.query_row(
+        "SELECT b.item_id,b.assignment_id FROM sa_work_item_attempts b
+         JOIN sa_assignments a ON a.id=b.assignment_id AND a.ticket_id=b.ticket_id
+         WHERE b.ticket_id=?1 AND a.session_id=?2 AND a.state='finished'
+           AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=?1)",
+        params![ticket_id,session_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((item_id,assignment_id)) = binding else {
+        if pending()? {
+            return Err("Current Worker evidence has no individual WorkItem binding; reject it and dispatch a current item.".into());
+        }
+        return Ok(false);
+    };
+    store.db.execute(
+        "INSERT INTO sa_work_item_acceptances(item_id,assignment_id,accepted_revision,accepted_at)
+         VALUES(?1,?2,?3,?4)",
+        params![item_id,assignment_id,revision,now],
+    ).map_err(|e| e.to_string())?;
+    store.db.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'work_item_human_accepted',?2,?3)",
+        params![ticket_id,serde_json::json!({
+            "workItemId":item_id,"assignmentId":assignment_id,"acceptedRevision":revision,
+        }).to_string(),now],
+    ).map_err(|e| e.to_string())?;
+    pending()
+}
 
 /// Headless operators share Desktop WorkItem policy and Ticket CAS without
 /// invoking startup recovery on a concurrently running PandaCode host.

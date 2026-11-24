@@ -92,7 +92,8 @@ interface TaskTimelineEntry {
 }
 interface PlannedWorkItem {
   id:string; ticketId:string; requestKey:string; parentId:string|null;
-  summary:string; state:'planned'|'cancelled'; createdAt:number; cancelledAt:number|null;
+  summary:string; state:'planned'|'cancelled'|'accepted'; createdAt:number; cancelledAt:number|null;
+  assignmentId?:string|null;
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
@@ -504,8 +505,10 @@ let demandArchived = false;
         item.ticketId === ticketDetails?.ticket.id &&
         typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id) &&
         typeof item.summary === 'string' && item.summary.length > 0 && item.summary.length <= 1000 &&
-        (item.state === 'planned' || item.state === 'cancelled') &&
-        (item.state === 'planned' ? item.cancelledAt === null :
+        (item.state === 'planned' || item.state === 'cancelled' || item.state === 'accepted') &&
+        (item.assignmentId == null || (typeof item.assignmentId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.assignmentId))) &&
+        (item.state === 'cancelled' ? item.assignmentId == null : item.state !== 'accepted' || !!item.assignmentId) &&
+        (item.state !== 'cancelled' ? item.cancelledAt === null :
           Number.isSafeInteger(item.cancelledAt) && (item.cancelledAt ?? 0) > 0) &&
         (item.parentId === null || plannedWorkItems.some(parent =>
           parent.id === item.parentId && parent.ticketId === item.ticketId)));
@@ -560,7 +563,7 @@ let demandArchived = false;
     }
     const taskTimelineContent = '<section class="sa-task-timeline" role="region" aria-label="Task timeline">' +
       '<h5>Task timeline</h5><p>Chronological native Ticket audit, assignment and operator-planned WorkItem records. ' +
-      'Planned WorkItems are not dispatched, executed or completed child Tasks; no provider text proves ' +
+      'WorkItem attempts are recorded separately; explicit item acceptance does not prove engineering delivery; no provider text proves ' +
       'a file change, test pass or Council verdict. Older audit events require explicit page loading.</p>' +
       '<ol>' + (taskTimeline.map(entry =>
         '<li><time>' + safe(activityTime(entry.at)) + '</time> · <strong>' +
@@ -652,13 +655,14 @@ let demandArchived = false;
           : '<p>Legacy or inconsistent admission snapshot unavailable; no role, model or Skill provenance inferred.</p>') +
         '</section>' +
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
-        '<h5>Planned WorkItems</h5><p>Native, durable operator plans only; no automatic Worker dispatch, ' +
-        'task completion, permission grant or Council result.</p>' +
+        '<h5>Planned WorkItems</h5><p>Manual dispatch selects one dependency-ready item. Accept its evidence before dispatching the next; ' +
+        'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
           safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.state==='cancelled' ? ' · Cancelled ' + safe(activityTime(item.cancelledAt ?? undefined)) : '') +
           (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
-          (item.state==='planned' && ['blocked','queued'].includes(ticketDetails?.ticket.state ?? '')
+          (item.assignmentId ? ' · Native attempt ' + safe(item.assignmentId) : '') +
+          (item.state==='planned' && !item.assignmentId && ['blocked','queued'].includes(ticketDetails?.ticket.state ?? '')
             && !ticketDetails?.truncatedWorkItems &&
             !plannedWorkItems.some(child=>child.parentId===item.id && child.state==='planned')
               ? ' <button type="button" data-sa-cancel-work-item="' + safe(item.id) +
@@ -674,7 +678,7 @@ let demandArchived = false;
             '<input type="text" name="summary" maxlength="1000" required ' +
             'placeholder="Describe a discrete task"></label>' +
             '<label>Parent work item<select name="parentId"><option value="">Demand root</option>' +
-            plannedWorkItems.filter(item=>item.state==='planned').map(item =>
+            plannedWorkItems.filter(item=>item.state!=='cancelled').map(item =>
               '<option value="' + safe(item.id) + '">' + safe(item.summary) +
               '</option>').join('') + '</select></label>' +
             '<button type="submit">Save plan without dispatch</button></form>' : '') +
@@ -699,7 +703,7 @@ let demandArchived = false;
               (node.botId ? ' · Bot ' + safe(botName(node.botId)) : '') +
               (node.active ? ' · Active native assignment' : '') +
               '<small>' + (node.kind === 'ticket' ? 'Root Ticket' :
-                node.kind === 'work_item' ? 'Operator plan only · not dispatched' :
+                node.kind === 'work_item' ? 'Operator WorkItem · native attempt recorded in history when admitted' :
                 runGraph!.edges.find(edge => edge.to === node.id)?.relation === 'owns_attempt'
                   ? 'Ticket owns attempt' : 'Ticket awaits decision') +
               '</small>' +
@@ -3175,7 +3179,7 @@ let demandArchived = false;
       if (!detail || ticketId!==detail.ticket.id ||
           detail.ticket.orchestrationId!==selected ||
           !['blocked','queued'].includes(detail.ticket.state) ||
-          detail.truncatedWorkItems || item?.state!=='planned' ||
+          detail.truncatedWorkItems || item?.state!=='planned' || item.assignmentId ||
           detail.workItems?.some(child=>child.parentId===itemId && child.state==='planned')) return;
       if (!pendingCancelWorkItem || pendingCancelWorkItem.ticketId!==ticketId ||
           pendingCancelWorkItem.itemId!==itemId) {
@@ -3204,7 +3208,7 @@ let demandArchived = false;
     }
     if (target.dataset.saAccept) {
       const t = tickets.find(item => item.id === target.dataset.saAccept);
-      if (t?.state === 'waiting_approval') ask('Accept the recorded worker evidence at ticket revision ' + t.revision + '?', async () => {
+      if (t?.state === 'waiting_approval') ask('Accept the recorded worker evidence at ticket revision ' + t.revision + '? If another WorkItem remains, the Demand stays open.', async () => {
         await call('superagent_accept',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
       });
       return;
@@ -3294,7 +3298,7 @@ let demandArchived = false;
             item.state === 'waiting_approval')) return;
       ask('Accept native Worker evidence for Demand ' + currentDecision.id +
         ' at revision ' + currentDecision.revision +
-        '? This completes the Council-Off Ticket only if all native finalization guards still pass.', async () => {
+        '? This records the current Council-Off evidence; the Demand stays open if WorkItems remain. All native guards must pass.', async () => {
         if (globalAcceptance !== currentDecision || workspaceView !== 'review' ||
             currentDecision.filter !== reviewTeamFilter) {
           throw new Error('Review selection changed before confirmation.');
@@ -3313,6 +3317,8 @@ let demandArchived = false;
             fresh.finalizationGate === 'not_pending') {
           throw new Error('Native finalization gate changed; acceptance denied.');
         }
+        const pendingItems = (fresh.workItems ?? []).filter(item => item.state === 'planned').length;
+        if (fresh.truncatedWorkItems) throw new Error('Native WorkItem snapshot is incomplete; acceptance denied.');
         try {
           const accepted = await call<Ticket>('superagent_accept', {
             ticketId:currentDecision.id, expectedRevision:currentDecision.revision,
@@ -3320,11 +3326,12 @@ let demandArchived = false;
           if (accepted.id !== currentDecision.id ||
               accepted.orchestrationId !== currentDecision.teamId ||
               accepted.revision !== currentDecision.revision + 1 ||
-              accepted.state !== 'completed') {
+              (pendingItems > 1 ? !['queued','blocked'].includes(accepted.state) : accepted.state !== 'completed')) {
             throw new Error('Native acceptance returned an inconsistent Ticket; inspect the latest history.');
           }
           feedback = 'Native human acceptance recorded for Demand ' + currentDecision.id +
-            '. No Council verdict or external effect was inferred.';
+            (accepted.state === 'completed' ? '. Demand completed.' : '. WorkItems remain; dispatch the next ready item.') +
+            ' No Council verdict or external effect was inferred.';
         } finally {
           // IPC may fail after committing a native decision; never retain an
           // active approval button until the exact authoritative inbox is read.

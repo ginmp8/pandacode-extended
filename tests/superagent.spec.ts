@@ -3993,7 +3993,7 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
     const host=document.createElement('div');
     host.id='sa-global-acceptance-test';
     document.body.appendChild(host);
-    type Mode='stale-first'|'stale-confirm'|'council-required'|'effects-unresolved'|'native-denied'|'valid';
+    type Mode='stale-first'|'stale-confirm'|'council-required'|'effects-unresolved'|'native-denied'|'valid'|'partial';
     type Trace={command:string;args?:Record<string,unknown>};
     const trace:Trace[]=[];
     let mode:Mode='stale-first', reads=0;
@@ -4002,7 +4002,10 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
       revision:7,updatedAt:2000,
       evidence:'Evidence <img src=x onerror=alert(1)> is inert'};
     (window as unknown as {saGlobalAcceptTest:{trace:Trace[];setMode:(value:Mode)=>void}})
-      .saGlobalAcceptTest={trace,setMode:value=>{mode=value;reads=0;}};
+      .saGlobalAcceptTest={trace,setMode:value=>{
+        mode=value;reads=0;
+        if(value==='partial') decision={...decision,state:'waiting_approval',revision:decision.revision+1};
+      }};
     mountSuperagent(host,async(command,args)=>{
       trace.push({command,args});
       if(command==='bots_list')return [
@@ -4032,13 +4035,19 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
           assignments:[],activity:[],
           finalizationGate:mode==='council-required'?'council_required':
             mode==='effects-unresolved'?'effects_unresolved':'native_recheck_required',
+          ...(mode==='partial' ? {workItems:[
+            {id:'root',ticketId:decision.id,requestKey:'root',parentId:null,summary:'First item',
+              state:'planned',createdAt:1000,cancelledAt:null,assignmentId:'root-attempt'},
+            {id:'child',ticketId:decision.id,requestKey:'child',parentId:'root',summary:'Next item',
+              state:'planned',createdAt:1001,cancelledAt:null,assignmentId:null},
+          ],truncatedWorkItems:false} : {}),
         } as never;
       }
       if(command==='superagent_accept'){
         if(mode==='native-denied')throw Error('Native mandate CAS denied');
-        if(mode!=='valid'||args?.ticketId!==decision.id||
+        if((mode!=='valid'&&mode!=='partial')||args?.ticketId!==decision.id||
             args?.expectedRevision!==decision.revision)throw Error('Unexpected native acceptance');
-        decision={...decision,state:'completed',revision:decision.revision+1};
+        decision={...decision,state:mode==='partial'?'queued':'completed',revision:decision.revision+1};
         return {...decision} as never;
       }
       throw Error('Unexpected native operation: '+command);
@@ -4094,6 +4103,19 @@ test('cross-Team native human acceptance rechecks evidence and Council/effect ga
     .toMatchObject({ticketId:'human-review',expectedRevision:7});
   expect(calls.some(item=>/superagent_reject|dispatch|effect_reserve|council_pass/.test(item.command)))
     .toBe(false);
+
+  // Acceptance of one native item is not acceptance of the whole Demand.
+  await setMode('partial');
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await inbox.getByRole('button',{name:'Accept evidence'}).click();
+  await form.getByRole('button',{name:'Review acceptance'}).click();
+  await host.getByRole('alertdialog').getByRole('button',{name:'Confirm'}).click();
+  await expect(inbox.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
+  await expect(host.getByRole('status').filter({hasText:'WorkItems remain; dispatch the next ready item.'})).toBeVisible();
+  calls=await page.evaluate(()=>
+    (window as unknown as {saGlobalAcceptTest:{trace:{command:string;args?:Record<string,unknown>}[]}}).saGlobalAcceptTest.trace);
+  expect(calls.filter(item=>item.command==='superagent_accept')).toHaveLength(3);
+  expect(calls.some(item=>/dispatch|effect_reserve|council_pass/.test(item.command))).toBe(false);
 });
 
 

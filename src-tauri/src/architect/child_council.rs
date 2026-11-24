@@ -1810,13 +1810,16 @@ pub(super) fn verified_s3_receipts(
     let mut worker_ids = HashSet::new();
     let mut sessions = HashSet::new();
     let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
+    let mut ready = true;
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?
             .ok_or("child_council_stale: missing S3 child reservation.")?;
         let child = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: missing S3 child Council.")?;
         let Some(challenge) = read_challenge_receipt(store, root, &record, &child, choice)? else {
-            return Ok(None);
+            // Pending evidence must not hide a conflicting sibling receipt.
+            ready = false;
+            continue;
         };
         for leaf in &child.workers {
             if leaf.council.as_ref().is_none_or(|seat| seat.round != 1 && seat.round != 2)
@@ -1839,7 +1842,7 @@ pub(super) fn verified_s3_receipts(
     if recorded != receipts.len() as i64 {
         return Err("child_council_stale: unexpected S3 challenge receipt in root cycle.".into());
     }
-    Ok(Some(receipts))
+    Ok(ready.then_some(receipts))
 }
 
 /// Bind the real child receipt to one root-owned native worker identity.
@@ -2143,16 +2146,19 @@ pub(super) fn verified_s2_receipts(
     let mut worker_ids = HashSet::new();
     let mut sessions = HashSet::new();
     let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
+    let mut ready = true;
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?
             .ok_or("child_council_stale: missing S2 child reservation.")?;
         let child = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: missing S2 child team.")?;
-        let Some(first) = read_verified_receipt(store, root, &record, &child)? else {
-            return Ok(None);
-        };
-        let Some(second) = read_escalation_receipt(store, root, &record, &child, choice)? else {
-            return Ok(None);
+        let first = read_verified_receipt(store, root, &record, &child)?;
+        // Even if phase one is absent, an occupied second-wave slot must
+        // revalidate rather than be hidden by an early pending result.
+        let second = read_escalation_receipt(store, root, &record, &child, choice)?;
+        let (Some(first), Some(second)) = (first, second) else {
+            ready = false;
+            continue;
         };
         if first.root_cycle_id != second.root_cycle_id
             || first.child_session_id != second.child_session_id
@@ -2186,7 +2192,7 @@ pub(super) fn verified_s2_receipts(
     if recorded != receipts.len() as i64 {
         return Err("child_council_stale: unexpected S2 child receipt in root cycle.".into());
     }
-    Ok(Some(receipts))
+    Ok(ready.then_some(receipts))
 }
 
 /// Account for every issued leaf in the current root cycle, including

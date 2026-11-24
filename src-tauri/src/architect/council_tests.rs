@@ -9391,6 +9391,57 @@ fn assert_child_receipt_metadata_is_bound(
     }
 }
 
+/// A pending sibling is not a license to skip validation of an occupied
+/// later phase receipt. The native verifier must distinguish pending from
+/// corrupt regardless of the order of configured child reviewers.
+fn assert_pending_child_does_not_hide_conflicting_sibling(
+    store: &Store, root: &TeamSnapshot, s3: bool,
+) {
+    let prefix = if s3 { "native-council-child-s3-receipt" }
+        else { "native-council-child-s2-receipt" };
+    let choices = &root.config.council.as_ref().unwrap().nested_bot_reviewers;
+    assert_eq!(choices.len(), 2);
+    let first = format!("{prefix}:{}:{}", root.council_since, choices[0].bot_id);
+    let second = format!("{prefix}:{}:{}", root.council_since, choices[1].bot_id);
+    let held = format!("test-held-{first}");
+    let verify = || {
+        if s3 {
+            child_council::verified_s3_receipts(store, root).map(|r| r.is_some())
+        } else {
+            child_council::verified_s2_receipts(store, root).map(|r| r.is_some())
+        }
+    };
+    assert!(verify().unwrap());
+    assert_eq!(store.db.execute(
+        "UPDATE architect_requests SET key=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, first, held],
+    ).unwrap(), 1);
+    assert!(!verify().unwrap(), "a missing phase receipt remains pending");
+    let owner: String = store.db.query_row(
+        "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, second], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(store.db.execute(
+        "UPDATE architect_requests SET worker_id='foreign-native-owner'
+         WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, second],
+    ).unwrap(), 1);
+    assert!(verify().unwrap_err().contains("receipt kind or native ownership changed"),
+        "a missing earlier sibling must not hide conflicting phase evidence");
+    assert!(!verified_council_pass(store, root));
+    store.db.execute(
+        "UPDATE architect_requests SET worker_id=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, second, owner],
+    ).unwrap();
+    assert!(!verify().unwrap());
+    store.db.execute(
+        "UPDATE architect_requests SET key=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, held, first],
+    ).unwrap();
+    assert!(verify().unwrap());
+    assert!(verified_council_pass(store, root));
+}
+
 #[test]
 fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering() {
     let (state, sid) = state_fixture();
@@ -9733,11 +9784,12 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
     let expected = format!("{:x}", sha2::Sha256::digest(contents));
     {
         let store = state.store.lock().unwrap();
-        store.db.execute(
-            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
-            rusqlite::params![sid, checkout.to_str().unwrap()],
-        ).unwrap();
         let project = store.session(&sid).unwrap().project_id;
+        // This fixture is an ordinary project checkout, not a Git worktree.
+        // Use the native resolver without manufacturing worktree metadata.
+        store.relink_project(&project, &checkout).unwrap();
+        assert_eq!(store.workspace_root(&project, Some(&sid)).unwrap(),
+            checkout.canonicalize().unwrap());
         for bot in ["file-security-child", "file-architecture-child"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
@@ -11514,6 +11566,7 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     ).unwrap(), terminal, "M4/S3 task proof must be idempotent");
     let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
     assert_eq!(challenges.len(), 2, "both native S3 child phases must have authenticated receipts");
+    assert_pending_child_does_not_hide_conflicting_sibling(&store, &root, true);
     assert!(challenges.iter().all(|receipt|
         receipt.phase_one_receipt_sha256.len() == 64
             && receipt.phase_two.leaf_worker_ids.len() == 2
@@ -11676,6 +11729,7 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     assert_eq!(sibling_leaf_ids.iter().collect::<std::collections::HashSet<_>>().len(), 8,
         "leaf identities must be distinct across both child Councils and both S2 waves");
     assert!(child_council::verified_s2_receipts(&store, &saved).unwrap().is_some());
+    assert_pending_child_does_not_hide_conflicting_sibling(&store, &saved, false);
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
     assert_child_receipt_metadata_is_bound(&store, &saved, &key);
     assert!(verified_council_pass(&store, &saved));

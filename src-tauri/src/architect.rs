@@ -1897,8 +1897,11 @@ pub(crate) fn start_state(
         && team.council_since > 0
         && team.config.council.as_ref()
             .is_some_and(|config| !config.nested_bot_reviewers.is_empty());
-    if restarted_nested_cycle && child_council::active_leaf_agents(&store, session_id, &agents)? {
-        return Err(AGENTS_STOPPING.into());
+    if restarted_nested_cycle {
+        if child_council::active_leaf_agents(&store, session_id, &agents)? {
+            return Err(AGENTS_STOPPING.into());
+        }
+        child_council::require_quiescent_native_restart(&store, &team)?;
     }
     // A fully verified nested terminal must start a new frozen cycle. Capture
     // this before replacing the old objective: its authenticated child receipts

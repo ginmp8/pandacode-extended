@@ -332,7 +332,9 @@ fn require_stopped_native_root_workers(store: &Store, root: &TeamSnapshot) -> Re
     // Persisted native ownership can outlive an Architect TeamSnapshot after a
     // crash. Do not conclude that every root reviewer stopped merely because
     // the snapshot omitted a still-active, independently issued worker.
-    // Child coordinator sessions have their own stricter recovery checks.
+    // Only current-cycle child coordinators have their own recovery checks.
+    // An active coordinator from a historical cycle must not be excluded.
+    let prefix = format!("native-council-child:{}:", root.council_since);
     let untracked_active: i64 = store.db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM architect_workers AS owned
@@ -344,9 +346,10 @@ fn require_stopped_native_root_workers(store: &Store, root: &TeamSnapshot) -> Re
                   WHERE child.parent_session_id=owned.parent_session_id
                     AND child.kind='council_child'
                     AND child.worker_id=owned.session_id
+                    AND substr(child.key,1,length(?2))=?2
               )
         )",
-        [&root.session_id], |row| row.get(0),
+        params![&root.session_id, prefix], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
     if untracked_active != 0 {
         return Err("child_council_revoked: untracked native root worker session remains active; stop it before resuming or recovering child Councils.".into());
@@ -363,6 +366,34 @@ fn require_stopped_native_leaves_on_resume(store: &Store, root: &TeamSnapshot) -
         if matches!(session.status.as_str(), "running" | "waiting") {
             return Err("child_council_revoked: native leaf reviewer session remains active; stop it before resuming the Council.".into());
         }
+    }
+    Ok(())
+}
+
+/// A fresh objective after interruption must not overtake a still-active
+/// native root, coordinator or leaf. The process registry may be empty after
+/// restart while independently persisted provider sessions remain active.
+pub(super) fn require_quiescent_native_restart(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    let active: i64 = store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sessions AS native
+            WHERE native.status IN ('running','waiting')
+              AND (
+                  native.id=?1
+                  OR native.id IN (
+                      SELECT session_id FROM architect_workers WHERE parent_session_id=?1
+                  )
+                  OR native.id IN (
+                      SELECT leaf.session_id FROM architect_workers AS child
+                      JOIN architect_workers AS leaf ON leaf.parent_session_id=child.session_id
+                      WHERE child.parent_session_id=?1
+                  )
+              )
+        )",
+        [&root.session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if active != 0 {
+        return Err("child_council_revoked: native hierarchy still has active sessions; stop them before starting a fresh Council task.".into());
     }
     Ok(())
 }

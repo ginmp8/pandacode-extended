@@ -7563,6 +7563,34 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             before_sibling, "a second interrupted child cannot accept a late callback"
         );
     }
+    // An empty process registry after reopening SQLite is insufficient:
+    // each independently active native session must block a fresh objective.
+    for id in [&sid, &launch.admission.parent, &launch.sid,
+        &sibling_launch.admission.parent, &sibling_launch.sid] {
+        for status in ["running", "waiting"] {
+            {
+                let store = state.store.lock().unwrap();
+                store.db.execute(
+                    "UPDATE sessions SET status=?2 WHERE id=?1",
+                    rusqlite::params![id, status],
+                ).unwrap();
+            }
+            let denied = start_state(
+                &state, &sid, "Must not overtake a live native session", None, None,
+            ).unwrap_err();
+            assert!(denied.contains("native hierarchy still has active sessions"), "{denied}");
+            let store = state.store.lock().unwrap();
+            assert_eq!(serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(),
+                before_root);
+            assert_eq!(serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+                before_child);
+            assert_eq!(serde_json::to_value(load(&store, &sibling_launch.admission.parent).unwrap().unwrap()).unwrap(),
+                before_sibling);
+            store.db.execute(
+                "UPDATE sessions SET status='interrupted' WHERE id=?1", [id],
+            ).unwrap();
+        }
+    }
     // A new user objective is not a Resume: restart recovery must allocate
     // fresh child sessions and never reactivate interrupted reviewer grants.
     let (fresh, _) = start_state(
@@ -7613,6 +7641,30 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
         let store = state.store.lock().unwrap();
         assert_eq!(store.session(&sid).unwrap().status, "interrupted");
         let fresh_root = load(&store, &sid).unwrap().unwrap();
+        // A historical child reservation must not exempt its coordinator
+        // from the active-native-worker Resume preflight of the new cycle.
+        for old in [&launch.admission.parent, &sibling_launch.admission.parent] {
+            let historical_claims: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests
+                 WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, old], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(historical_claims, 1);
+            for status in ["running", "waiting"] {
+                store.db.execute(
+                    "UPDATE sessions SET status=?2 WHERE id=?1",
+                    rusqlite::params![old, status],
+                ).unwrap();
+                let denied = child_council::require_resumable_child_cycles(
+                    &store, &fresh_root,
+                ).unwrap_err();
+                assert!(denied.contains("untracked native root worker session remains active"),
+                    "{denied}");
+                store.db.execute(
+                    "UPDATE sessions SET status='interrupted' WHERE id=?1", [old],
+                ).unwrap();
+            }
+        }
         let denied = child_council::next_leaf_launch(
             &store, &std::collections::HashMap::new(), &fresh_root,
         ).err().expect("an interrupted native root must deny child launch");

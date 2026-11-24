@@ -3770,8 +3770,15 @@ fn admit_role_with_staging_member(
              else if coordinate { "manual readonly coordinator reserved" }
              else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
+    let ticket = get_ticket(store, &ticket_id)?;
+    if coordinate {
+        // Validate the complete planning packet before committing the initial
+        // native Ticket, thread and lease. No partial or silently truncated
+        // capability inventory may reach the Coordinator.
+        coordinator_capability_packet(store, &ticket)?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
-    Ok((get_ticket(store, &ticket_id)?, !blocked))
+    Ok((ticket, !blocked))
 }
 
 /// A recorded coordinator plan is not a transferable authorization. Its
@@ -4285,7 +4292,7 @@ fn quarantine_assignment_effects(
         "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
          WHERE ticket_id=?1 AND state IN ('pending','uncertain'))",
         [ticket_id], |row| row.get(0),
-    ).map_err(|e| e.to_string().into())
+    ).map_err(|e| e.to_string())
 }
 
 fn fail_launch(store: &Store, ticket: &Ticket, reason: &str) -> Result<()> {
@@ -5395,6 +5402,53 @@ fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
     format!("SuperAgent ticket {}\n\n{}\n\n{}", ticket.id, ticket.objective, instructions)
 }
 
+/// Build the Coordinator's actual planning input from admitted native Team
+/// membership, not a global bot catalog or a model's claimed capabilities.
+/// Role descriptions and assigned Skill IDs are advisory configuration;
+/// they are not verified execution capabilities or permission grants.
+fn coordinator_capability_packet(store: &Store, ticket: &Ticket) -> Result<String> {
+    let profile = roster::ticket_profile(store, &ticket.id)?
+        .ok_or("Coordinator planning requires an admitted Team profile.")?;
+    let selected_id = ticket_worker(store, &ticket.id)?;
+    let mut candidates = Vec::new();
+    for member in profile.members.iter().filter(|member| member.role == "worker") {
+        // Revalidate the original prompt digest, Skills, provider, project
+        // and checkout before exposing any current configuration. Never read
+        // other bots' instructions, goals, memory, credentials or transcripts
+        // into the planning packet.
+        roster::require_current_profile(store, &ticket.id, "worker", &member.bot_id)?;
+        let bot = bots::get(store, &member.bot_id)?;
+        if bot.paused {
+            return Err("An admitted Worker is paused; Coordinator capability context is stale.".into());
+        }
+        candidates.push(serde_json::json!({
+            "botId": &member.bot_id,
+            "selectedForThisDemand": member.bot_id == selected_id,
+            "declaredRolePreview": bot.role.chars().take(128).collect::<String>(),
+            "declaredRoleTruncated": bot.role.chars().nth(128).is_some(),
+            "provider": &member.provider,
+            "model": &member.model,
+            "assignedSkillIds": &member.assigned_skill_ids,
+            "executionAuthority": "read-only; operator-selected Worker only",
+        }));
+    }
+    let context = serde_json::json!({
+        "teamPolicyRevision": profile.policy_revision,
+        "selectedWorkerId": selected_id,
+        "workers": candidates,
+    });
+    let packet = format!(
+        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a plan for the operator-selected Worker. Recommendations about other Workers are advisory only; never change the native assignment.",
+        initial_manual_packet(ticket, true), context,
+    );
+    // The native gateway truncates messages at 32 Ki characters. Enforce a
+    // stricter byte bound so neither metadata nor the scope reminder is lost.
+    if packet.len() > 32 * 1024 {
+        return Err("Coordinator capability packet exceeds 32 KiB; reduce the Team metadata or Demand objective before admission.".into());
+    }
+    Ok(packet)
+}
+
 #[tauri::command]
 pub async fn superagent_preflight_worker(
     window:tauri::WebviewWindow,state:State<'_,AppState>,
@@ -5891,14 +5945,28 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
     worker_bot_id: Option<String>,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket, launch, coordinator_id) = {
+    let (ticket, launch, coordinator_id, packet) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        admit_desktop_manual_request(
+        let (ticket, launch, coordinator_id) = admit_desktop_manual_request(
             &mut store, &active, &orchestration_id, &objective, &request_key,
             true, worker_bot_id.as_deref(),
-        )?
+        )?;
+        let packet = if launch {
+            match coordinator_capability_packet(&store, &ticket) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    // An external SQLite writer can invalidate a snapshot
+                    // after admission. Settle only this exact reservation.
+                    fail_launch(&store, &ticket, &error)?;
+                    return Err(error);
+                }
+            }
+        } else {
+            String::new()
+        };
+        (ticket, launch, coordinator_id, packet)
     };
     if !launch { return Ok(ticket); }
     let coordinator_id = coordinator_id.ok_or("Native Coordinator admission has no dispatch recipient.")?;
@@ -5908,7 +5976,7 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
         thread: ticket.id.clone(),
         sender_id: "local-user".into(),
         sender_name: "Manual coordination".into(),
-        text: initial_manual_packet(&ticket, true),
+        text: packet,
         trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
     if let Err(error) = delivered {
@@ -13349,6 +13417,72 @@ mod tests {
         let path=store.path.clone();drop(store);
         let persisted=Store::open(&path).unwrap();
         assert_eq!(ticket_worker(&persisted,&ticket.id).unwrap(),"second");
+    }
+
+    #[test]
+    fn coordinator_capabilities_are_native_bounded_and_demand_scoped() {
+        let mut store = fixture();
+        for (id, role) in [("second", "Frontend specialist"), ("outsider", "Other Team private role")] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'private-instruction-marker','private-goal-marker','private-soul-marker','project','codex','default','plan',?3,?3)",
+                params![id,role,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute("UPDATE bots SET role='Backend specialist' WHERE id='worker'", []).unwrap();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Capability fixture".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let roles = roster::set(&store, &team.id, team.policy_revision, &roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "second".into()], reviewer_bot_ids: vec![],
+        }).unwrap();
+        let team = change_enabled(&store, &team.id, roles.policy_revision, true).unwrap();
+        let (ticket, launched) = admit_role_with_staging_member(
+            &mut store, &team.id, "Inspect frontend", "capability-packet", false,
+            ManualAdmissionOptions { coordinate: true, headless_staging: false, selected_worker_id: Some("second") },
+        ).unwrap();
+        assert!(launched);
+        let packet = coordinator_capability_packet(&store, &ticket).unwrap();
+        let inventory = packet.lines().find(|line| line.starts_with('{')).unwrap();
+        let value: serde_json::Value = serde_json::from_str(inventory).unwrap();
+        let workers = value["workers"].as_array().unwrap();
+        assert_eq!(workers.len(), 2);
+        assert_eq!(value["selectedWorkerId"], "second");
+        assert_eq!(workers[0]["declaredRolePreview"], "Backend specialist");
+        assert_eq!(workers[0]["selectedForThisDemand"], false);
+        assert_eq!(workers[1]["declaredRolePreview"], "Frontend specialist");
+        assert_eq!(workers[1]["selectedForThisDemand"], true);
+        assert_eq!(workers[1]["executionAuthority"], "read-only; operator-selected Worker only");
+        for secret in ["outsider", "Other Team private role", "private-instruction-marker", "private-goal-marker", "private-soul-marker"] {
+            assert!(!packet.contains(secret));
+        }
+        assert!(packet.len() <= 32 * 1024);
+        assert_eq!(ticket_worker(&store, &ticket.id).unwrap(), "second");
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        store.db.execute("UPDATE bots SET role='Changed after admission' WHERE id='second'", []).unwrap();
+        assert!(coordinator_capability_packet(&store, &ticket).is_err());
+        // A drifted profile cannot change the selected Worker or widen the grant.
+        assert_eq!(ticket_worker(&store, &ticket.id).unwrap(), "second");
+    }
+
+    #[test]
+    fn oversized_coordinator_inventory_rolls_back_native_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        // A malformed but JSON-valid stored Skill reference must not cause
+        // gateway truncation of the objective or authority reminder.
+        let skills = serde_json::json!(["x".repeat(20 * 1024)]).to_string();
+        store.db.execute("UPDATE bots SET skills=?1 WHERE id='worker'", [&skills]).unwrap();
+        let objective = "a".repeat(MAX_OBJECTIVE_BYTES);
+        let error = admit_role(&mut store, &cfg.id, &objective, "oversized-inventory", false, true)
+            .unwrap_err();
+        assert!(error.contains("Coordinator capability packet exceeds 32 KiB"), "{error}");
+        for table in ["sa_tickets", "sa_assignments", "sa_mandates", "sa_ticket_profiles"] {
+            let count: i64 = store.db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "failed admission retained rows in {table}");
+        }
     }
 
     #[test]

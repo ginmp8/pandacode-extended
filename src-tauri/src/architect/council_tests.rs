@@ -9834,6 +9834,7 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
     assert_eq!(pending["completed"], false);
     let mut checked_child_sessions = std::collections::HashSet::new();
     let mut unassigned_denied = 0;
+    let mut relink_denied = false;
     for _ in 0..4 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         let (worker_id, attempt, generation, assigned) = {
@@ -9846,6 +9847,25 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
             (worker.id.clone(), worker.attempt, child.generation, assigned)
         };
         let actor = coordination::Actor::Worker { id: worker_id, attempt };
+        if assigned && !relink_denied {
+            let other = checkout.join("relinked");
+            std::fs::create_dir_all(&other).unwrap();
+            std::fs::write(other.join("proof.txt"), contents).unwrap();
+            let project = {
+                let store = state.store.lock().unwrap();
+                let project = store.session(&sid).unwrap().project_id;
+                store.relink_project(&project, &other).unwrap();
+                project
+            };
+            let denied = reviewer_skill_evidence::dispatch_state(
+                &state, &launch.admission.parent, generation, &actor,
+                "pandacode_reviewer_file_verify",
+                json!({"criterionId":"child-file-proof"}),
+            ).unwrap_err();
+            assert!(denied.contains("child_council_stale"), "{denied}");
+            state.store.lock().unwrap().relink_project(&project, &checkout).unwrap();
+            relink_denied = true;
+        }
         let receipt = reviewer_skill_evidence::dispatch_state(
             &state, &launch.admission.parent, generation, &actor,
             "pandacode_reviewer_file_verify",
@@ -9874,6 +9894,7 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
     assert_eq!(checked_child_sessions.len(), 2,
         "each isolated child must have its own current native host-verified criterion");
     assert!(unassigned_denied > 0, "the test must exercise a rejected unassigned leaf");
+    assert!(relink_denied, "the test must reject a retained child grant after relinking");
     let (settled, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
         json!({"summary":"Native child file checks passed"}),

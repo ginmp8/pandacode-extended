@@ -436,6 +436,17 @@ test.describe('shared bot channels', () => {
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
     await refresh.click();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    // Missing required phase evidence is pending, not a conflicting receipt.
+    await page.evaluate(snapshot => {
+      (window as any).__channelCouncilInspectorOverride = snapshot;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    }, { ...accepted, strategy: 'escalated', forceEscalation: true });
+    await expect(dialog).toContainText('Required child phase receipts are pending');
+    await expect(dialog).not.toContainText('Conflicting child receipts in this inspection');
+    await expect(dialog).not.toContainText('Verified native pass');
+    await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
+    await refresh.click();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'other-channel' }));
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     await refresh.focus();

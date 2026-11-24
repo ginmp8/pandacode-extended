@@ -1420,6 +1420,28 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
   await expect(embeddedConflict).toContainText('Verified native pass');
   await expect(embeddedConflict).not.toContainText('Conflicting child receipts in this inspection');
 
+  // A valid sibling challenge cannot cover an absent required phase receipt.
+  const pendingSibling = {
+    ...approvedInspection,
+    reservedChildren: [...approvedInspection.reservedChildren, {
+      ...approvedInspection.reservedChildren[0], botId: 'pending-child',
+      childSessionId: 'pending-child-task', status: 'child_challenge_reviewing',
+      verifiedChildReceipt: { ...receipt, botId: 'pending-child',
+        childSessionId: 'pending-child-task', leafWorkerIds: ['pending-a', 'pending-b'] },
+      verifiedChallengeReceipt: null, leafAttempts: [],
+    }],
+  };
+  await page.evaluate(snapshot => { (window as any).__conflictingCouncilSnapshot = snapshot; }, pendingSibling);
+  await embeddedConflict.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embeddedConflict).toContainText('Required child phase receipts are pending');
+  await expect(embeddedConflict).not.toContainText('Conflicting child receipts in this inspection');
+  await expect(embeddedConflict).not.toContainText('Verified native pass');
+  await open(page, '/?council', {}, 0, '', {}, undefined, pendingSibling);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('Required child phase receipts are pending');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
   const staleInspection = {
     ...approvedInspection,
     verifiedCompletion: { ...approvedInspection.verifiedCompletion, teamRevision: 19 },

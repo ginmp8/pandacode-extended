@@ -107,7 +107,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       && inspection.strategy === 'escalated' && !inspection.forceEscalation
       && child.status === 'child_escalation_evidence_ready_root_pending'
       && (child.automaticEscalationTriggers ?? []).some(reason =>
-        ['below_target', 'required_criterion', 'conflicting_verdict', 'required_evidence'].includes(reason));
+        ['below_target', 'high_severity_finding', 'required_criterion', 'conflicting_verdict', 'required_evidence'].includes(reason));
     const escalationCorrelated = escalationReceipt && (correlated || triggeredWithoutPassingFirst)
       && escalationReceipt.rootCycleId === child.rootCycleId
       && escalationReceipt.childSessionId === child.childSessionId
@@ -152,6 +152,19 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     (evidence.receipt != null && !evidence.correlated)
     || (evidence.escalationReceipt != null && !evidence.escalationCorrelated)
     || (evidence.challengeReceipt != null && !evidence.challengeCorrelated));
+  // Missing required phases are pending, not conflicting receipts. Check
+  // every child independently; a completed sibling cannot cover a missing wave.
+  const pendingChildPhase = childEvidence.some(evidence => {
+    if (inspection.strategy === 'two_phase') return evidence.challengeReceipt == null;
+    if (inspection.strategy !== 'escalated') return false;
+    const child = evidence.child;
+    const needsSecondWave = inspection.forceEscalation === true
+      || (child.automaticEscalationTriggers ?? []).length > 0
+      || child.status === 'child_escalation_required'
+      || child.status === 'child_escalation_reviewing'
+      || child.status === 'child_escalation_evidence_ready_root_pending';
+    return needsSecondWave && evidence.escalationReceipt == null;
+  });
   const proof = inspection.verifiedCompletion;
   const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale
     && proof != null && typeof inspection.sessionId === 'string' && inspection.sessionId.length > 0
@@ -160,7 +173,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     && proof.teamRevision === inspection.teamRevision
     && proof.round === inspection.status.round
     && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
-    && proof.lowest >= inspection.status.target && omittedFindingCount === 0 && omittedChildren === 0 && !conflictingChildEvidence;
+    && proof.lowest >= inspection.status.target && omittedFindingCount === 0 && omittedChildren === 0 && !conflictingChildEvidence && !pendingChildPhase;
   // A historical user exception is not authorization for a newer revision.
   // The read-only presenter must never promote stale acceptance to a current gate.
   const verdict = inspection.status.state === 'accepted' && !inspection.status.stale && omittedFindingCount === 0 && omittedChildren === 0 && !conflictingChildEvidence
@@ -509,6 +522,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ? '<p role="status">The recorded passed status has no current verified native proof. Do not treat it as approval.</p>' : '';
   const conflictWarning = conflictingChildEvidence && (inspection.status.state === 'passed' || inspection.status.state === 'accepted')
     ? '<p role="status">Conflicting child receipts in this inspection; the recorded root verdict cannot be verified.</p>' : '';
+  const pendingPhaseWarning = pendingChildPhase
+    ? '<p role="status">Required child phase receipts are pending in this inspection; native pass is not verified.</p>' : '';
   const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
@@ -517,7 +532,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Status at last native inspection') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
-    passWarning + conflictWarning + completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    passWarning + conflictWarning + pendingPhaseWarning + completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No valid-round reviewer attempts are available.</p>') + malformedRoundsHtml + childScopeWarning + childHtml + findingScopeWarning + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 

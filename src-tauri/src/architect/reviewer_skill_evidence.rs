@@ -397,10 +397,23 @@ fn dispatch_file_state(
     let check = criterion.native_evidence.as_ref().unwrap();
     let relative = check.path.as_deref().unwrap_or("");
     let expected = check.expected_sha256.as_deref().unwrap_or("");
-    let checkout = root.worktree_path.as_deref().filter(|path| !path.is_empty())
-        .ok_or("reviewer_file_evidence_unavailable: reviewed checkout unavailable.")?;
-    let root_path = std::fs::canonicalize(checkout)
-        .map_err(|_| "reviewer_file_evidence_unavailable: reviewed checkout unavailable.".to_string())?;
+    // Child reviewers inherit the frozen canonical project/worktree scope
+    // of their reservation. Revalidate the native grant before resolving any
+    // file, including an ordinary project without a worktree path. Relinking
+    // must never expose new files to a retained child tool host.
+    let root_path = if super::parent_of(&store, parent)?.is_some() {
+        super::child_council::authorize_leaf(&store, &native.id, &Admission {
+            parent: parent.to_owned(), generation,
+        })?;
+        store.workspace_root(&root.project_id, Some(parent))
+            .map_err(|_| "reviewer_file_evidence_unavailable: reviewed checkout unavailable.".to_string())?
+    } else {
+        // Preserve the existing direct Council file-check authority boundary.
+        let checkout = root.worktree_path.as_deref().filter(|path| !path.is_empty())
+            .ok_or("reviewer_file_evidence_unavailable: reviewed checkout unavailable.")?;
+        std::fs::canonicalize(checkout)
+            .map_err(|_| "reviewer_file_evidence_unavailable: reviewed checkout unavailable.".to_string())?
+    };
     // Frozen, checkout-relative evidence paths must not traverse mutable links.
     // Even an in-checkout symlink can later be redirected to a private file.
     let mut candidate = root_path.clone();

@@ -750,8 +750,14 @@ fn native_root_reviewer_session_is_current(
         params![parent_session_id, &worker.id, &worker.session_id],
         |row| row.get(0),
     ).unwrap_or(0);
+    // The native owner link alone does not prove which checkout the reviewer
+    // assessed. Recheck the same project/worktree boundary as admission when
+    // a persisted score is used for escalation, inspection or terminal proof.
+    let Ok(parent) = store.session(parent_session_id) else { return false };
     linked == 1 && store.session(&worker.session_id).is_ok_and(|session| {
-        !session.archived
+        session.project_id == parent.project_id
+            && session.worktree_path == parent.worktree_path
+            && !session.archived
             && !matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped")
     })
 }

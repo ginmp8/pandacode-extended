@@ -10306,6 +10306,39 @@ fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
 }
 
 
+/// Native callback ownership must also remain bound to the assessed checkout.
+/// A retained score cannot authorize another workspace, even with intact grants.
+fn assert_native_root_reviewer_checkout(
+    store: &crate::storage::Store, sid: &str, project: &str,
+    assignment: &str, artifact: &str, request_id: &str,
+    expected: &council_requests::NativeTaskCouncilReceipt,
+) {
+    let root = load(store, sid).unwrap().unwrap();
+    for reviewer in root.workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.score.is_some())
+    ) {
+        let original = store.session(&reviewer.session_id).unwrap().worktree_path;
+        let different = format!("{}-foreign-review-checkout", original.as_deref().unwrap_or(""));
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&reviewer.session_id, different],
+        ).unwrap();
+        assert!(!verified_council_pass(store, &root),
+            "{assignment}: a reviewer on another checkout must revoke approval");
+        assert!(council_requests::read_native_terminal(
+            store, sid, project, assignment, artifact, request_id,
+        ).is_err(), "{assignment}: a foreign checkout cannot replay a receipt");
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&reviewer.session_id, original],
+        ).unwrap();
+        assert_eq!(council_requests::read_native_terminal(
+            store, sid, project, assignment, artifact, request_id,
+        ).unwrap(), expected.clone(),
+            "{assignment}: restoring the admitted checkout must recover the same receipt");
+    }
+}
+
 /// A cached task result must cease to be live approval when its real root
 /// session is paused or interrupted, regardless of the still-passing team snapshot.
 fn assert_native_task_root_liveness(
@@ -10313,6 +10346,7 @@ fn assert_native_task_root_liveness(
     assignment: &str, artifact: &str, request_id: &str,
     expected: &council_requests::NativeTaskCouncilReceipt,
 ) {
+    assert_native_root_reviewer_checkout(store, sid, project, assignment, artifact, request_id, expected);
     let original_status = store.session(sid).unwrap().status;
     for revoked in ["paused", "stopped", "interrupted", "error"] {
         store.db.execute(
@@ -12590,6 +12624,10 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                         // gate. Every opt-in automatic wave, including phase
                         // one, must retain its independent native authority.
                         if mode != "m1" || strategy != council::CouncilExecutionStrategy::Parallel {
+                            assert_native_root_reviewer_checkout(
+                                &store, &sid, &project, "root-matrix-task", &artifact,
+                                &request.request_id, &receipt,
+                            );
                             let snapshot = load(&store, &sid).unwrap().unwrap();
                             for reviewer in snapshot.workers.iter().filter(|worker|
                                 worker.council.as_ref().is_some_and(|seat| seat.score.is_some())

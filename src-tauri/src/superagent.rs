@@ -5745,6 +5745,13 @@ fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::W
     }
     let planned: Vec<_> = items.iter().filter(|item| item.state == "planned").collect();
     if planned.is_empty() {
+        // A reviewed plan is an execution scope, not merely a hint. Once
+        // all of its items are cancelled or accepted, never fall back to
+        // the original, broader Demand objective. Only a never-planned
+        // legacy Demand may use the unbound manual Worker path.
+        if !items.is_empty() {
+            return Err("No remaining planned WorkItem; review the Demand, add a new plan or stop before dispatch.".into());
+        }
         return Ok(None);
     }
     let ready = |item: &&work_items::WorkItem| item.parent_id.as_ref().is_none_or(|parent_id|
@@ -6574,6 +6581,55 @@ mod tests {
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().revision,fourth.revision);
         assert_eq!(work_items::cancel(&reopened,&ticket.id,second.revision,
             &child.id,"cancel-child-once").unwrap().state,"cancelled");
+        assert!(next_dispatch_worker(&reopened, &ticket.id).unwrap_err()
+            .contains("No remaining planned WorkItem"));
+    }
+
+    #[test]
+    fn fully_cancelled_plan_cannot_dispatch_an_unbound_worker_but_explicit_replan_can() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit_role_with_staging(
+            &mut store, &team.id, "Original broad objective", "cancelled-plan-dispatch",
+            false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        assert!(next_work_item(&store, &ticket.id).unwrap().is_none(),
+            "legacy never-planned Demands retain their native manual path");
+        let item = work_items::plan(&store, &ticket.id, ticket.revision,
+            "cancelled-scope", "Narrow reviewed scope", None).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let old_request = headless_dispatch::enqueue(
+            &store, &ticket.id, revision, "old-confirmation",
+        ).unwrap();
+        work_items::cancel(&store, &ticket.id, revision,
+            &item.id, "cancel-scope").unwrap();
+        let cancelled = get_ticket(&store, &ticket.id).unwrap();
+        assert!(retry_blocked_with_request(&mut store, &ticket.id, revision,
+            false, Some(&old_request)).is_err());
+        assert!(retry_blocked_at_revision(&mut store, &ticket.id, cancelled.revision,
+            false).err().unwrap().contains("No remaining planned WorkItem"));
+        assert!(headless_dispatch::enqueue(&store, &ticket.id, cancelled.revision,
+            "new-confirmation").unwrap_err().contains("No remaining planned WorkItem"));
+        assert!(assignments(&store, &ticket.id, 100).unwrap().is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, cancelled.revision);
+        assert!(headless_dispatch::enqueue(&store, &ticket.id, revision,
+            "old-confirmation").is_ok(), "old confirmation remains an inspection receipt");
+        headless_dispatch::cancel(&store, &ticket.id, revision, "old-confirmation").unwrap();
+        let replacement = work_items::plan(&store, &ticket.id, cancelled.revision,
+            "replacement-scope", "New explicitly reviewed scope", None).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let fresh = headless_dispatch::enqueue(
+            &store, &ticket.id, revision, "replacement-confirmation",
+        ).unwrap();
+        let (running, _, _, context) = retry_blocked_with_request(
+            &mut store, &ticket.id, revision, false, Some(&fresh),
+        ).unwrap();
+        assert_eq!(running.state, "running");
+        assert!(context.contains(&replacement.id));
+        assert!(!context.contains(&item.id));
+        assert_eq!(assignments(&store, &ticket.id, 100).unwrap().len(), 1);
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
     }
 
     #[test]

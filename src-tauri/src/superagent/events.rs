@@ -6953,7 +6953,7 @@ mod tests {
             Ok(("operator".into(), serde_json::json!([{
                 "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
                 "type":kind, "repo":{"name":"test/fixture","id":101},
-                "actor":{"login":"trusted-bot"}, "payload":payload
+                "actor":{"login":"trusted-bot","id":202}, "payload":payload
             }]), 1, 101, 999))
         };
         let first = observe_team_sources_with(&store, "orch", &mut provider).unwrap();
@@ -6993,7 +6993,7 @@ mod tests {
             Ok(("operator".into(),serde_json::json!([{
                 "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
                 "type":kind, "repo":{"name":"test/fixture","id":101},
-                "actor":{"login":"trusted-bot"}, "payload":payload
+                "actor":{"login":"trusted-bot","id":202}, "payload":payload
             }]),1,101,999))
         }).unwrap_err();
         assert!(error.contains("simulated provider outage"));
@@ -7038,7 +7038,7 @@ mod tests {
             ("operator".into(), serde_json::json!([{
                 "id":event_id, "created_at":chrono::Utc::now().to_rfc3339(),
                 "type":event_type, "repo":{"name":"test/fixture","id":101},
-                "actor":{"login":"trusted-bot"},
+                "actor":{"login":"trusted-bot","id":202},
                 "payload":{"action":action,
                     "issue":{"number":number},
                     "pull_request":{"number":number}}

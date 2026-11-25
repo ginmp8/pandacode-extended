@@ -1233,7 +1233,12 @@ With schema v56, Desktop manual dispatch/retry binds exactly one dependency-read
 WorkItem to a native Assignment. The shared headless acceptance transition
 records only the current bound item; it returns a queued or blocked Ticket
 while more items remain. An attempted WorkItem cannot be cancelled as an
-unexecuted plan. No headless provider launch or automatic scheduling is implied.
+unexecuted plan. A Demand with a recorded plan but no remaining planned
+WorkItems cannot dispatch an unbound Worker against the original objective.
+Inspect the Demand, explicitly plan a replacement item, or stop the Demand.
+The same ready-plan fence applies to new headless dispatch intents and native
+Desktop/headless admission; a replay of an existing intent is inspection only.
+No headless provider launch or automatic scheduling is implied.
 
 ### Explicit staging from a GitHub Observe issue receipt
 

@@ -126,6 +126,10 @@ pub(super) fn enqueue(
     {
         return Err("Demand no longer has a current read-only native mandate.".into());
     }
+    // Reuse the same ready-plan fence as native retry/coordinated admission.
+    // A fresh confirmation cannot widen a cancelled plan into an unbound
+    // objective; old request keys above remain inspectable.
+    super::next_work_item(store, ticket_id)?;
     let unsafe_state: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1 AND state='running')
             OR EXISTS(SELECT 1 FROM sa_demand_archives WHERE ticket_id=?1)

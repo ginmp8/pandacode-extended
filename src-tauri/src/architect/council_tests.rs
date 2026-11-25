@@ -13412,7 +13412,7 @@ fn nested_m5_unforced_s2_respects_stricter_required_criterion_with_native_termin
         config.automatic_reviewers = 1;
         config.criteria_source = council::CouncilCriteriaSource::User;
         config.criteria.push(council::CouncilCriterion {
-            id: "correctness".into(), lens: "correctness".into(),
+            id: "correctness".into(), lens: "Child review 2".into(),
             required: true, target: 9.7,
             evidence_required: false, native_evidence: None,
         });
@@ -13439,14 +13439,14 @@ fn nested_m5_unforced_s2_respects_stricter_required_criterion_with_native_termin
         (project, artifact, request)
     };
     call(&state, &sid, "pandacode_dispatch_workers", json!({
-        "assignments":[reviewer_assignment("root-original", "correctness")]
+        "assignments":[reviewer_assignment("root-original", "Child review 2")]
     })).unwrap();
     let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     let (first_run, _) = claim(&state, action);
     finish(&state, &first_run,
         "Global target met, required criterion missed.\nCouncil score: 9.3/10", true);
     let second = json!({
-        "assignments":[reviewer_assignment("root-fresh", "correctness")]
+        "assignments":[reviewer_assignment("root-fresh", "Child review 2")]
     });
     assert!(call(&state, &sid, "pandacode_dispatch_workers", second.clone()).is_err(),
         "a missing child receipt cannot authorize a fresh root wave");
@@ -13454,6 +13454,17 @@ fn nested_m5_unforced_s2_respects_stricter_required_criterion_with_native_termin
         "pandacode_finish_team", json!({"summary":"Wait for pinned child findings"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let child = child_council::inspect(&store, &root).unwrap().remove(0);
+        let child_team = load(&store, &child.child_session_id).unwrap().unwrap();
+        let lenses = child_team.workers.iter()
+            .map(|worker| worker.council.as_ref().unwrap().lens.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(lenses, vec!["Child review 2", "Child review 3"],
+            "generated child lenses must not duplicate a required user lens");
+    }
     for _ in 0..2 {
         let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
@@ -13946,6 +13957,20 @@ fn child_s2_criterion_trigger_uses_the_native_normalized_lens_and_target() {
     assert!(!child_council::missing_required_first_wave_criterion(
         &[&reviewer], &config,
     ), "a completed child criterion must not trigger a false S2 wave from formatting");
+
+    let mut second = seat("second-child", 1, Some(9.6), SINCE + 1);
+    second.council.as_mut().unwrap().lens = "correctness".into();
+    assert!(child_council::missing_required_first_wave_criterion(
+        &[&reviewer, &second], &config,
+    ), "a passing report cannot conceal another below-target report for the same criterion");
+    second.council.as_mut().unwrap().score = None;
+    assert!(child_council::missing_required_first_wave_criterion(
+        &[&reviewer, &second], &config,
+    ), "an unknown score cannot be concealed by a passing report");
+    second.council.as_mut().unwrap().score = Some(9.9);
+    assert!(!child_council::missing_required_first_wave_criterion(
+        &[&reviewer, &second], &config,
+    ), "all matching reports independently satisfy the required threshold");
 
     reviewer.council.as_mut().unwrap().score = Some(9.6);
     assert!(child_council::missing_required_first_wave_criterion(

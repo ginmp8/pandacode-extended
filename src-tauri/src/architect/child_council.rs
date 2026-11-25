@@ -2403,10 +2403,21 @@ fn issue_leaf_wave(
     super::validate_worker_role(&session.provider, true)?;
     // A valid child may have only enough seats for the required criteria.
     // Optional suggestions must never displace an immutable user-required lens.
-    let lenses: Vec<String> = config.criteria.iter()
+    let mut lenses: Vec<String> = config.criteria.iter()
         .filter(|criterion| criterion.required)
         .chain(config.criteria.iter().filter(|criterion| !criterion.required))
         .map(|criterion| criterion.lens.clone()).collect();
+    // A generated lens must never alias a user-required or optional lens.
+    // Use the same normalization as native criterion evidence and keep the
+    // configured ordering unchanged across independently issued waves.
+    let mut next_lens = lenses.len() + 1;
+    while lenses.len() < choice.child_reviewers {
+        let candidate = format!("Child review {next_lens}");
+        next_lens += 1;
+        if !lenses.iter().any(|lens| super::council::same_lens(lens, &candidate)) {
+            lenses.push(candidate);
+        }
+    }
     let challenge_handoff = if round == 2
         && config.strategy == super::council::CouncilExecutionStrategy::TwoPhase
     {
@@ -2444,7 +2455,7 @@ fn issue_leaf_wave(
         ))
     } else { None };
     for index in 0..choice.child_reviewers {
-        let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
+        let lens = lenses[index].clone();
         let mut assignment = format!(
                 "Review the frozen task artifact independently for the {lens} criterion. \
                  You are a task-scoped Council leaf, never the coordinating bot. \
@@ -3068,11 +3079,23 @@ pub(super) fn missing_required_first_wave_criterion(
     first: &[&Worker], config: &CouncilConfig,
 ) -> bool {
     config.criteria.iter().filter(|criterion| criterion.required)
-        .any(|criterion| !first.iter().any(|leaf|
-            leaf.council.as_ref().is_some_and(|seat|
-                super::council::same_lens(&seat.lens, &criterion.lens)
-                    && seat.score.is_some_and(|score|
-                        score >= config.target.max(criterion.target)))))
+        .any(|criterion| {
+            let mut matched = false;
+            for leaf in first {
+                let Some(seat) = leaf.council.as_ref().filter(|seat|
+                    super::council::same_lens(&seat.lens, &criterion.lens))
+                else { continue };
+                matched = true;
+                // Match the native receipt gate: one high score cannot hide
+                // another below-target or unverified report for this lens.
+                if seat.score.is_none_or(|score| !score.is_finite()
+                    || score < config.target.max(criterion.target) || score > 10.0)
+                {
+                    return true;
+                }
+            }
+            !matched
+        })
 }
 
 fn authenticated_first_wave_s2_triggers(

@@ -61,7 +61,7 @@ pub(super) fn page(
 }
 
 /// Read-only native Demand filter applied before keyset pagination.
-fn page_for_demand(
+pub(super) fn page_for_demand(
     store: &Store, orchestration_id: &str, bot_id: &str,
     before: Option<MemberActivityCursor>, limit: i64, demand_id: Option<&str>,
 ) -> Result<MemberActivityPage> {
@@ -373,7 +373,7 @@ mod tests {
         ).unwrap();
         let headless: serde_json::Value = serde_json::from_str(
             &superagent::list_headless_team_member_activity(
-                &stored_path, &team.id, "worker", None, None,
+                &stored_path, &team.id, "worker", None, None, None,
             ).unwrap(),
         ).unwrap();
         assert_eq!(headless["pageLimit"], 100);
@@ -382,19 +382,47 @@ mod tests {
         assert_eq!(headless["providerDispatched"], false);
         assert_eq!(headless["items"][0]["ticketId"], ticket.id);
         assert!(!headless.to_string().contains("Private authorized work"));
+        assert_eq!(headless["assignmentCount"], 1);
+        assert_eq!(headless["demandCount"], 1);
+        assert_eq!(headless["attentionDemandCount"], 1);
+        let filtered: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_team_member_activity(
+                &stored_path, &team.id, "worker", None, None, Some(&ticket.id),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(filtered["demandId"], ticket.id);
+        assert_eq!(filtered["items"], headless["items"]);
+        assert_eq!(filtered["assignmentCount"], 1);
+        let filtered_next: serde_json::Value = serde_json::from_str(
+            &superagent::list_headless_team_member_activity(
+                &stored_path, &team.id, "worker", Some(cursor.created_at),
+                Some(&cursor.assignment_id), Some(&ticket.id),
+            ).unwrap(),
+        ).unwrap();
+        assert!(filtered_next["items"].as_array().unwrap().is_empty());
+        assert_eq!(filtered_next["assignmentCount"], 1);
+        assert!(superagent::list_headless_team_member_activity(
+            &stored_path, &other.id, "other-worker", None, None, Some(&ticket.id),
+        ).is_err());
+        assert!(superagent::list_headless_team_member_activity(
+            &stored_path, &team.id, "coordinator", None, None, Some(&ticket.id),
+        ).is_err());
+        assert!(superagent::list_headless_team_member_activity(
+            &stored_path, &team.id, "worker", None, None, Some("unknown-ticket"),
+        ).is_err());
         let next: serde_json::Value = serde_json::from_str(
             &superagent::list_headless_team_member_activity(
                 &stored_path, &team.id, "worker",
-                Some(cursor.created_at), Some(&cursor.assignment_id),
+                Some(cursor.created_at), Some(&cursor.assignment_id), None,
             ).unwrap(),
         ).unwrap();
         assert!(next["items"].as_array().unwrap().is_empty());
         assert!(superagent::list_headless_team_member_activity(
             &stored_path, &other.id, "other-worker",
-            Some(cursor.created_at), Some(&cursor.assignment_id),
+            Some(cursor.created_at), Some(&cursor.assignment_id), None,
         ).is_err());
         assert!(superagent::list_headless_team_member_activity(
-            &stored_path, &team.id, "worker", Some(cursor.created_at), None,
+            &stored_path, &team.id, "worker", Some(cursor.created_at), None, None,
         ).is_err());
         let audit_after: i64 = reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),

@@ -180,7 +180,7 @@ let demandArchived = false;
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
   let preview: Preview | null = null, inspected: unknown = null;
-  let confirm: { message: string; action: () => Promise<void> } | null = null;
+  let confirm: { message: string; action: () => Promise<void>; returnFocus?: () => HTMLElement | null } | null = null;
   let taskKey = crypto.randomUUID();
   let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
   let selectedDemandWorkerId = '';
@@ -1853,8 +1853,8 @@ let demandArchived = false;
     try { await action(); } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
     finally { busy = false; render(); }
   }
-  function ask(message: string, action: () => Promise<void>): void {
-    confirm = { message, action }; render();
+  function ask(message: string, action: () => Promise<void>, returnFocus?: () => HTMLElement | null): void {
+    confirm = { message, action, returnFocus }; render();
     host.querySelector<HTMLButtonElement>('[data-sa-cancel]')?.focus();
   }
   // Templates suggest only a name and retry cap, never a bot, tool or task.
@@ -2170,7 +2170,12 @@ let demandArchived = false;
           button.dataset.saDirection === direction)?.focus({preventScroll:true});
       return;
     }
-    if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
+    if (target.hasAttribute('data-sa-cancel')) {
+      const returnFocus = confirm?.returnFocus;
+      confirm = null; render();
+      returnFocus?.()?.focus();
+      return;
+    }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
       return;
@@ -3332,7 +3337,8 @@ let demandArchived = false;
         }
         await refreshTicketDetails();
         feedback='Pending dispatch cancelled or already rejected. Native Demand history is preserved.';
-      });
+      }, () => ticketDetails===detail && inspectedTicket===request.ticketId
+        ? host.querySelector<HTMLElement>('[data-sa-cancel-dispatch]') : null);
       return;
     }
     if (target.hasAttribute('data-sa-dispatch-reviewed-plan')) {
@@ -3362,7 +3368,8 @@ let demandArchived = false;
         feedback=receipt.state==='rejected'
           ? 'Plan dispatch was rejected. Inspect native Ticket activity before authorizing again.'
           : 'Reviewed read-only plan authorization recorded ('+receipt.state+'). Refresh for native execution activity; human acceptance is still required.';
-      });
+      }, () => ticketDetails===detail && inspectedTicket===ticketId
+        ? host.querySelector<HTMLElement>('[data-sa-dispatch-reviewed-plan]') : null);
       return;
     }
     if (target.dataset.saCancelWorkItem) {

@@ -397,6 +397,15 @@ Counts are observational only: they grant no tools and imply no verified Council
 approval. Team and bot identity filters are applied in SQLite; cursor pages,
 including the final empty page, retain the full-history summary.
 
+The read-only headless equivalent accepts
+`--list-team-member-activity <team-id> <bot-id> --demand <ticket-id>` and
+the existing optional `--before <created-ms> <assignment-id>` cursor in
+either order. Omitting `--demand` preserves the unfiltered history.
+The native query checks Team, bot, Demand and cursor ownership before
+pagination; counts describe the filtered scope, even on its final empty page.
+The JSON response includes `demandId`, `assignmentCount`, `demandCount`
+and `attentionDemandCount`. No task, audit, chat or provider state is changed.
+
 ### Team activity chat navigation boundary
 
 Team member Activity uses the immutable native Team, Ticket, Assignment and bot

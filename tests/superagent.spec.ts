@@ -5055,6 +5055,7 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
   expect(await requests()).toHaveLength(0);
   await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
   expect(await requests()).toHaveLength(0);
+  await expect(action).toBeFocused();
   await action.click();
   await confirmation.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host).toContainText('Reviewed read-only plan authorization recorded (pending)');
@@ -5064,10 +5065,12 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
   expect(typeof recorded[0].requestKey).toBe('string');
   await expect(action).toHaveCount(0);
   await expect(host.getByRole('region',{name:'Pending dispatch request'})).toContainText('Not admitted');
-  await host.getByRole('button',{name:'Cancel pending dispatch'}).click();
+  const cancelDispatch=host.getByRole('button',{name:'Cancel pending dispatch'});
+  await cancelDispatch.click();
   await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
   expect(await requests()).toHaveLength(1);
-  await host.getByRole('button',{name:'Cancel pending dispatch'}).click();
+  await expect(cancelDispatch).toBeFocused();
+  await cancelDispatch.click();
   await confirmation.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host).toContainText('Pending dispatch cancelled');
   expect(await requests()).toEqual([recorded[0],recorded[0]]);

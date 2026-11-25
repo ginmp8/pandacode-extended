@@ -1296,6 +1296,7 @@ pub(crate) fn inspect_headless_ticket_graph(
 pub(crate) fn list_headless_team_member_activity(
     database_path: &std::path::Path, orchestration_id: &str, bot_id: &str,
     before_created_at: Option<i64>, before_assignment_id: Option<&str>,
+    demand_id: Option<&str>,
 ) -> Result<String> {
     let before = match (before_created_at, before_assignment_id) {
         (None, None) => None,
@@ -1306,10 +1307,17 @@ pub(crate) fn list_headless_team_member_activity(
         _ => return Err("An activity cursor requires both creation time and assignment ID.".into()),
     };
     let store = Store::open_read_only(database_path)?;
-    let page = member_activity::page(&store, orchestration_id, bot_id, before, 100)?;
+    let page = match demand_id {
+        Some(id) => member_activity::page_for_demand(&store, orchestration_id, bot_id, before, 100, Some(id))?,
+        None => member_activity::page(&store, orchestration_id, bot_id, before, 100)?,
+    };
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": page.orchestration_id,
         "botId": page.bot_id,
+        "demandId": demand_id,
+        "assignmentCount": page.assignment_count,
+        "demandCount": page.demand_count,
+        "attentionDemandCount": page.attention_demand_count,
         "items": page.items,
         "hasMore": page.has_more,
         "nextCursor": page.next_cursor,

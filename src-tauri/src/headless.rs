@@ -36,7 +36,8 @@ enum Command {
     ListTicketsPage { before_created_at: Option<i64>, before_id: Option<String> },
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListTeamMemberActivity { orchestration_id: String, bot_id: String,
-        before_created_at: Option<i64>, before_assignment_id: Option<String> },
+        before_created_at: Option<i64>, before_assignment_id: Option<String>,
+        demand_id: Option<String> },
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
     ListTeamReviewInbox { orchestration_id: String, before_updated_at: Option<i64>, before_id: Option<String> },
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
@@ -592,14 +593,14 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::ListTeamMemberActivity {
-                orchestration_id, bot_id, before_created_at, before_assignment_id,
+                orchestration_id, bot_id, before_created_at, before_assignment_id, demand_id,
             } = &command {
                 // Inspect native activity without opening a recovering store.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
                     .and_then(|dir| crate::superagent::list_headless_team_member_activity(
                         &dir.join("kingcode.sqlite3"), orchestration_id, bot_id,
-                        *before_created_at, before_assignment_id.as_deref(),
+                        *before_created_at, before_assignment_id.as_deref(), demand_id.as_deref(),
                     ));
                 match result {
                     Ok(activity) => { println!("{activity}"); std::process::exit(0) }
@@ -1607,24 +1608,44 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 let bot_id = args.get(index + 2)
                     .ok_or("--list-team-member-activity needs a Team ID and bot ID.")?;
                 validate_member_identity(bot_id)?;
-                let (before_created_at, before_assignment_id) =
-                    if args.get(index + 3).map(String::as_str) == Some("--before") {
-                        let at = args.get(index + 4)
-                            .ok_or("--before needs a positive creation timestamp and assignment ID.")?
-                            .parse::<i64>().ok().filter(|value| *value > 0)
-                            .ok_or("--before needs a positive creation timestamp and assignment ID.")?;
-                        let assignment_id = args.get(index + 5)
-                            .ok_or("--before needs a positive creation timestamp and assignment ID.")?;
-                        validate_member_identity(assignment_id)?;
-                        index += 3;
-                        (Some(at), Some(assignment_id.clone()))
-                    } else { (None, None) };
+                let mut before_created_at = None;
+                let mut before_assignment_id = None;
+                let mut demand_id = None;
+                index += 2;
+                loop {
+                    match args.get(index + 1).map(String::as_str) {
+                        Some("--before") => {
+                            if before_created_at.is_some() {
+                                return Err("Provide only one activity cursor.".into());
+                            }
+                            let at = args.get(index + 2)
+                                .ok_or("--before needs a positive creation timestamp and assignment ID.")?
+                                .parse::<i64>().ok().filter(|value| *value > 0)
+                                .ok_or("--before needs a positive creation timestamp and assignment ID.")?;
+                            let assignment_id = args.get(index + 3)
+                                .ok_or("--before needs a positive creation timestamp and assignment ID.")?;
+                            validate_member_identity(assignment_id)?;
+                            before_created_at = Some(at);
+                            before_assignment_id = Some(assignment_id.clone());
+                            index += 3;
+                        }
+                        Some("--demand") => {
+                            if demand_id.is_some() {
+                                return Err("Provide only one Demand filter.".into());
+                            }
+                            let id = args.get(index + 2).ok_or("--demand needs a Ticket ID.")?;
+                            validate_ticket_id(id)?;
+                            demand_id = Some(id.clone());
+                            index += 2;
+                        }
+                        _ => break,
+                    }
+                }
                 command = Command::ListTeamMemberActivity {
                     orchestration_id: team_id.clone(), bot_id: bot_id.clone(),
-                    before_created_at, before_assignment_id,
+                    before_created_at, before_assignment_id, demand_id,
                 };
                 ops += 1;
-                index += 2;
             }
             "--list-recovery-inbox" => {
                 let (before_priority,before_updated_at,before_id)=
@@ -2833,7 +2854,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2880,9 +2901,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-ticket-activity <id> [--before <audit-id>]
                           Page 100 redacted native Ticket audit events by immutable ID.
                           Event details remain private; never replay or recover; exit.
-  --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>]
+  --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>]
                           Page native Team-scoped assignments without recovery or provider
                           dispatch; use nextCursor to inspect additional history.
+                          Optional Demand must belong to the selected Team and bot.
   --list-review-inbox [--before <ms> <ticket-id>]
                          Page pending human/Council decisions across Teams using
                          nextCursor; redact objectives; never approve; exit.
@@ -3285,14 +3307,29 @@ mod tests {
         assert_eq!(parsed("--list-team-member-activity team_123 bot_1"),
             Ok(Command::ListTeamMemberActivity {
                 orchestration_id: "team_123".into(), bot_id: "bot_1".into(),
-                before_created_at: None, before_assignment_id: None,
+                before_created_at: None, before_assignment_id: None, demand_id: None,
             }));
         assert_eq!(parsed("--list-team-member-activity team_123 bot_1 --before 123 assignment_4"),
             Ok(Command::ListTeamMemberActivity {
                 orchestration_id: "team_123".into(), bot_id: "bot_1".into(),
                 before_created_at: Some(123), before_assignment_id: Some("assignment_4".into()),
+                demand_id: None,
             }));
+        for valid in [
+            "--list-team-member-activity team_123 bot_1 --demand ticket_1 --before 123 assignment_4",
+            "--list-team-member-activity team_123 bot_1 --before 123 assignment_4 --demand ticket_1",
+        ] {
+            assert_eq!(parsed(valid), Ok(Command::ListTeamMemberActivity {
+                orchestration_id: "team_123".into(), bot_id: "bot_1".into(),
+                before_created_at: Some(123), before_assignment_id: Some("assignment_4".into()),
+                demand_id: Some("ticket_1".into()),
+            }));
+        }
         for invalid in [
+            "--list-team-member-activity team_123 bot_1 --demand",
+            "--list-team-member-activity team_123 bot_1 --demand ../escape",
+            "--list-team-member-activity team_123 bot_1 --demand ticket_1 --demand ticket_2",
+            "--list-team-member-activity team_123 bot_1 --before 123 assignment_4 --before 123 assignment_4",
             "--list-team-member-activity", "--list-team-member-activity team_123",
             "--list-team-member-activity ../unsafe bot_1",
             "--list-team-member-activity team_123 ../private",

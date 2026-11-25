@@ -459,6 +459,46 @@ pub(crate) fn decode_plan(text: &str) -> Result<Vec<PlannedWorkItemInput>> {
         .map_err(|_| "WorkItem plan must be a JSON array of requestKey, summary and optional parentRequestKey and paired workerBotId/routingReason.".into())
 }
 
+/// Check the shape and admitted routing of an advisory Coordinator response.
+/// No inserts, reservations or authority changes are allowed on this read path.
+pub(super) fn validate_coordinator_proposal(
+    store: &Store, ticket: &super::Ticket, config: &super::Orchestration,
+    inputs: &[PlannedWorkItemInput],
+) -> Result<()> {
+    let budget = super::roster::ticket_worker_attempt_limit(store, &ticket.id)?;
+    if inputs.is_empty() || inputs.len() > 16 || inputs.len() as i64 > budget {
+        return Err("Coordinator proposal exceeds the admitted Worker attempt budget.".into());
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for input in inputs {
+        let key = input.request_key.as_str();
+        let summary = input.summary.trim();
+        if key.is_empty() || key.len() > 128
+            || !key.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+            || summary.is_empty() || summary.len() > 1000 || summary.chars().any(char::is_control)
+            || input.parent_request_key.as_deref().is_some_and(|parent| !keys.contains(parent))
+            || !keys.insert(key)
+        {
+            return Err("Invalid or unordered Coordinator WorkItem proposal.".into());
+        }
+        let (Some(worker), Some(reason)) = (
+            input.worker_bot_id.as_deref(), input.routing_reason.as_deref(),
+        ) else {
+            return Err("Coordinator proposals must identify an admitted Worker and rationale.".into());
+        };
+        let reason = reason.trim();
+        if worker.is_empty() || worker.len() > 128
+            || !worker.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            || reason.is_empty() || reason.len() > 512 || reason.chars().any(char::is_control)
+        {
+            return Err("Invalid Coordinator Worker route.".into());
+        }
+        super::direct_team_member(store, config, worker)?;
+        super::roster::require_current_profile(store, &ticket.id, "worker", worker)?;
+    }
+    Ok(())
+}
+
 /// Apply an ordered, bounded plan atomically through the same native policy,
 /// budget, revision and immutable request-key checks as individual planning.
 /// Existing identical keys are read-only receipts, including on stale replay.

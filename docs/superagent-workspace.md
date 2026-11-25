@@ -398,3 +398,7 @@ session; moved, deleted, stale or fabricated thread mappings are unavailable.
 Historical audit rows remain inspectable without recreating conversations.
 The read-only link lookup never grants tools, launches workers, changes approvals
 or changes ordinary bot chats.
+
+### Structured Coordinator proposals
+
+When the original native Coordinator finishes with a complete JSON dependency plan, the Demand inspector can prefill the reviewed-plan editor with that untrusted proposal. Native inspection checks the original assignment and thread, current read-only mandate, Team revision, admitted Worker profiles, ordered dependency keys, route rationale and attempt budget. Invalid, stale, paused or unstructured proposals do not prefill the editor; ordinary advisory evidence remains inspectable. The operator must still review and explicitly save the plan using the existing transactional planning command. This creates no new assignment, permission, external effect or Council verdict. It is not automatic execution or autonomous acceptance.

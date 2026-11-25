@@ -1016,6 +1016,10 @@ pub struct TaskSnapshot {
     /// Operator-authored plans only: these are not dispatched or completed tasks.
     pub work_items: Vec<work_items::WorkItem>,
     pub truncated_work_items: bool,
+    /// Untrusted structured advice from the original native Coordinator.
+    /// This is a preview, never a WorkItem, grant, or dispatch receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_plan_proposal: Option<CoordinatorPlanProposal>,
     /// Historical task-effective bot profiles, not permission or execution proof.
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1032,6 +1036,64 @@ pub struct TaskSnapshot {
     /// Advisory native Council status, never a SuperAgent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub council: Option<council_adapter::CouncilObservation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoordinatorPlanProposal {
+    pub assignment_id: String,
+    pub ticket_revision: i64,
+    pub plan_json: String,
+}
+
+fn coordinator_plan_proposal(
+    store: &Store, ticket: &Ticket, grant: &MandateSummary,
+) -> Result<Option<CoordinatorPlanProposal>> {
+    if ticket.state != "queued" || ticket.active_assignment_id.is_some()
+        || ticket.actor != "local-user" || grant.revoked
+        || grant.actor != ticket.actor || grant.expires_at <= storage::now()
+        || grant.allowed_side_effects || !grant.allowed_tools.is_empty()
+        || effects::unresolved_count(store, &ticket.id)? != 0
+    {
+        return Ok(None);
+    }
+    let config = configuration(store, &ticket.orchestration_id)?;
+    if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused)
+        || grant.policy_revision != config.policy_revision
+        || grant.project_id != config.project_id
+    {
+        return Ok(None);
+    }
+    let Some(profile) = roster::ticket_profile(store, &ticket.id)? else {
+        return Ok(None);
+    };
+    if profile.policy_revision != config.policy_revision {
+        return Ok(None);
+    }
+    let coordinator = bots::get(store, &config.coordinator_bot_id)?;
+    if coordinator.paused
+        || !coordinator_plan_current(store, &ticket.id, &coordinator.id, &coordinator.project_id)?
+    {
+        return Ok(None);
+    }
+    roster::require_current_profile(store, &ticket.id, "coordinator", &coordinator.id)?;
+    let Some(advice) = original_coordinator_advice(
+        store, &ticket.id, &coordinator.id, &coordinator.project_id,
+    )? else {
+        return Ok(None);
+    };
+    // Do not extract executable-looking fragments from prose, Markdown, or
+    // a later Worker result. Only the entire original JSON response qualifies.
+    let inputs = work_items::decode_plan(&advice)?;
+    work_items::validate_coordinator_proposal(store, ticket, &config, &inputs)?;
+    let assignment_id: String = store.db.query_row(
+        "SELECT id FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2
+           AND attempt=1 AND state='finished'",
+        params![&ticket.id, &coordinator.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(Some(CoordinatorPlanProposal {
+        assignment_id, ticket_revision: ticket.revision, plan_json: advice,
+    }))
 }
 
 fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSnapshot> {
@@ -1083,6 +1145,11 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
+        // Advisory parsing/profile failures must not hide canonical evidence
+        // or make the read-only inspector fail. Native save still rechecks.
+        coordinator_plan_proposal: if work_items.is_empty() && !truncated_work_items {
+            coordinator_plan_proposal(store, &ticket, &native_mandate).ok().flatten()
+        } else { None },
         ticket,
         mandate: native_mandate,
         assignments: native_assignments,
@@ -5486,7 +5553,7 @@ fn coordinator_capability_packet(store: &Store, ticket: &Ticket) -> Result<Strin
         "workers": candidates,
     });
     let packet = format!(
-        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a dependency-aware plan across admitted Workers. Only explicit operator review and native admission may select a WorkItem recipient; never change the original Ticket default. An optional operator-reviewed dependency plan is a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (an admitted same-project Worker) and routingReason (at most 512 bytes). Do not include grants or claim execution.",
+        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a dependency-aware plan across admitted Workers. Only explicit operator review and native admission may select a WorkItem recipient; never change the original Ticket default. When proposing a structured dependency plan, return ONLY a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (an admitted same-project Worker) and routingReason (at most 512 bytes). Every item must explicitly select a Worker and give a reason. Parent keys must precede their children. Stay within the immutable native Worker attempt budget. Do not include grants or claim execution. If no valid plan can be proposed, return an explanatory advisory response instead.",
         initial_manual_packet(ticket, true), context,
     );
     // The native gateway truncates messages at 32 Ki characters. Enforce a
@@ -15613,6 +15680,64 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn coordinator_proposal_is_original_current_and_requires_operator_save() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Inspect source", "structured-coordinator", false, true,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let raw = r#"[{"requestKey":"inspect","summary":"Inspect source","workerBotId":"worker","routingReason":"Admitted Worker"}]"#;
+        assert!(ticket_snapshot(&store, &ticket.id, 50).unwrap().coordinator_plan_proposal.is_none());
+        assert!(on_run_finished(&store, &session, true, raw).unwrap());
+        let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        let proposal = snapshot.coordinator_plan_proposal.unwrap();
+        assert_eq!(proposal.assignment_id, snapshot.assignments[0].id);
+        assert_eq!(proposal.ticket_revision, snapshot.ticket.revision);
+        assert_eq!(proposal.plan_json, raw);
+        assert!(snapshot.work_items.is_empty());
+        assert_eq!(snapshot.assignments.len(), 1);
+        assert!(!snapshot.mandate.allowed_side_effects);
+        assert!(snapshot.mandate.allowed_tools.is_empty());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(ticket_snapshot(&store, &ticket.id, 50).unwrap().coordinator_plan_proposal.is_none());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
+        let inputs = work_items::decode_plan(&proposal.plan_json).unwrap();
+        let saved = work_items::plan_batch(&store, &ticket.id, proposal.ticket_revision, &inputs).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].worker_bot_id.as_deref(), Some("worker"));
+        let after = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(after.coordinator_plan_proposal.is_none());
+        assert_eq!(after.assignments.len(), 1);
+        assert_eq!(after.ticket.revision, proposal.ticket_revision + 1);
+    }
+
+    #[test]
+    fn coordinator_proposal_rejects_untrusted_routes_and_unstructured_results() {
+        for (index, raw) in [
+            r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"router","routingReason":"Not a Worker"}]"#,
+            r#"[{"requestKey":"x","summary":"Inspect"}]"#,
+            r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"worker","routingReason":"Admitted","allowedTools":["shell"]}]"#,
+            r#"[{"requestKey":"x","summary":"Inspect","parentRequestKey":"missing","workerBotId":"worker","routingReason":"Admitted"}]"#,
+            r#"Advisory text, not a structured proposal."#,
+        ].iter().enumerate() {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, _) = admit_role(
+                &mut store, &config.id, "Inspect source", &format!("invalid-proposal-{index}"), false, true,
+            ).unwrap();
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, raw).unwrap());
+            let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+            assert!(snapshot.coordinator_plan_proposal.is_none());
+            assert!(snapshot.work_items.is_empty());
+            assert_eq!(snapshot.assignments.len(), 1);
+            assert_eq!(snapshot.ticket.state, "queued");
+        }
     }
 
     #[test]

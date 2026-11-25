@@ -105,6 +105,7 @@ interface TicketDetails {
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; timeline?: TaskTimelineEntry[];
   workItems?: PlannedWorkItem[]; truncatedWorkItems?: boolean;
+  coordinatorPlanProposal?: {assignmentId:string;ticketRevision:number;planJson:string};
   council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
@@ -714,8 +715,15 @@ let demandArchived = false;
             '<button type="submit">Save plan without dispatch</button></form>' +
             '<form data-sa-form="plan-work-items"><label>Reviewed dependency plan (JSON)' +
             '<textarea name="planJson" rows="5" maxlength="16384" required>' +
-            safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json : '') +
-            '</textarea></label><p>Up to 16 items. Each needs a stable requestKey and summary; ' +
+            safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json :
+              ticketDetails.coordinatorPlanProposal?.ticketRevision===ticketDetails.ticket.revision
+                ? ticketDetails.coordinatorPlanProposal.planJson : '') +
+            '</textarea></label>' +
+            (ticketDetails.coordinatorPlanProposal?.ticketRevision===ticketDetails.ticket.revision
+              ? '<p>Untrusted Coordinator proposal from native attempt ' +
+                safe(ticketDetails.coordinatorPlanProposal.assignmentId) +
+                '. Review or edit every item before saving; no plan has been accepted.</p>' : '') +
+            '<p>Up to 16 items. Each needs a stable requestKey and summary; ' +
             'optional parentRequestKey must refer to a preceding item in the same plan. ' +
             'Optional workerBotId and routingReason must be supplied together and match an admitted same-project Worker. ' +
             'Review the entire plan before saving. No Worker is dispatched or authorized.</p>' +

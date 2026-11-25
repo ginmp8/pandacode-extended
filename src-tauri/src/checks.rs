@@ -24,18 +24,43 @@ const MAX_SOURCE_FILES: usize = 8_192;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SOURCE_DEPTH: usize = 16;
 
+// File mode and directory presence can change the behavior of a declared
+// test without changing any regular file bytes (for example, an executable
+// fixture becoming non-executable or an expected empty directory vanishing).
+fn source_mode(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        u32::from(metadata.permissions().readonly())
+    }
+}
+
+struct SourceEntry {
+    path: PathBuf,
+    size: Option<u64>, // None is a directory, including an empty directory.
+    mode: u32,
+}
+
 pub(crate) fn source_snapshot_sha256(root: &Path) -> Option<String> {
     fn collect(
-        dir: &Path, files: &mut Vec<(PathBuf, u64)>, entries_seen: &mut usize,
-        bytes: &mut u64, depth: usize,
+        dir: &Path, snapshot: &mut Vec<SourceEntry>, entries_seen: &mut usize,
+        file_count: &mut usize, bytes: &mut u64, depth: usize,
     ) -> Option<()> {
         if depth > MAX_SOURCE_DEPTH { return None; }
-        let mut entries = std::fs::read_dir(dir).ok()?
-            .collect::<std::io::Result<Vec<_>>>().ok()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()? {
+            // Enforce the entry budget before collecting/sorting a directory,
+            // not after allocating for an arbitrarily large directory.
             *entries_seen = entries_seen.checked_add(1)?;
             if *entries_seen > MAX_SOURCE_ENTRIES { return None; }
+            entries.push(entry.ok()?);
+        }
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let name = entry.file_name();
             let name = name.to_str()?;
             // A linked worktree has a regular .git pointer instead of a directory.
@@ -50,13 +75,15 @@ pub(crate) fn source_snapshot_sha256(root: &Path) -> Option<String> {
                     "coverage" | "vendor" | ".venv" | ".next" | ".turbo" |
                     ".cache" | ".vite-cache" | "out"
                 ) { continue; }
-                collect(&path, files, entries_seen, bytes, depth + 1)?;
+                snapshot.push(SourceEntry { path: path.clone(), size: None, mode: source_mode(&metadata) });
+                collect(&path, snapshot, entries_seen, file_count, bytes, depth + 1)?;
             } else if metadata.is_file() {
                 *bytes = bytes.checked_add(metadata.len())?;
-                if *bytes > MAX_SOURCE_BYTES || files.len() >= MAX_SOURCE_FILES {
+                *file_count = file_count.checked_add(1)?;
+                if *bytes > MAX_SOURCE_BYTES || *file_count > MAX_SOURCE_FILES {
                     return None;
                 }
-                files.push((path, metadata.len()));
+                snapshot.push(SourceEntry { path, size: Some(metadata.len()), mode: source_mode(&metadata) });
             } else {
                 // Devices, sockets and other non-regular files cannot be evidence.
                 return None;
@@ -65,23 +92,38 @@ pub(crate) fn source_snapshot_sha256(root: &Path) -> Option<String> {
         Some(())
     }
 
-    let (mut files, mut count, mut bytes) = (Vec::new(), 0, 0);
-    collect(root, &mut files, &mut count, &mut bytes, 0)?;
-    if files.is_empty() { return None; }
+    let root_metadata = std::fs::symlink_metadata(root).ok()?;
+    if !root_metadata.is_dir() { return None; }
+    let (mut snapshot, mut count, mut file_count, mut bytes) = (Vec::new(), 0, 0, 0);
+    collect(root, &mut snapshot, &mut count, &mut file_count, &mut bytes, 0)?;
+    if file_count == 0 { return None; }
     let mut sha = Sha256::new();
-    sha.update(b"pandacode:bounded-source-snapshot:v2");
-    for (path, original_size) in files {
-        let relative = path.strip_prefix(root).ok()?.to_str()?;
-        // A file that grows after collection must not defeat the byte budget.
-        let metadata = std::fs::symlink_metadata(&path).ok()?;
-        if !metadata.is_file() || metadata.len() != original_size { return None; }
-        let file = std::fs::File::open(&path).ok()?;
-        if !file.metadata().ok()?.is_file() { return None; }
-        let mut data = Vec::new();
-        file.take(original_size.checked_add(1)?).read_to_end(&mut data).ok()?;
-        if data.len() as u64 != original_size { return None; }
+    sha.update(b"pandacode:bounded-source-snapshot:v3");
+    sha.update(source_mode(&root_metadata).to_le_bytes());
+    for entry in snapshot {
+        let relative = entry.path.strip_prefix(root).ok()?.to_str()?;
+        let metadata = std::fs::symlink_metadata(&entry.path).ok()?;
+        if source_mode(&metadata) != entry.mode { return None; }
         sha.update((relative.len() as u64).to_le_bytes());
         sha.update(relative.as_bytes());
+        sha.update(entry.mode.to_le_bytes());
+        let Some(original_size) = entry.size else {
+            if !metadata.is_dir() { return None; }
+            sha.update(b"D");
+            continue;
+        };
+        // A file that grows after collection must not defeat the byte budget.
+        if !metadata.is_file() || metadata.len() != original_size { return None; }
+        let file = std::fs::File::open(&entry.path).ok()?;
+        let opened = file.metadata().ok()?;
+        if !opened.is_file() || opened.len() != original_size
+            || source_mode(&opened) != entry.mode { return None; }
+        let mut data = Vec::new();
+        (&file).take(original_size.checked_add(1)?).read_to_end(&mut data).ok()?;
+        let after = file.metadata().ok()?;
+        if data.len() as u64 != original_size || after.len() != original_size
+            || source_mode(&after) != entry.mode { return None; }
+        sha.update(b"F");
         sha.update(original_size.to_le_bytes());
         sha.update(&data);
     }
@@ -560,6 +602,49 @@ mod tests {
         let oversized = fs::File::create(root.join("oversized.bin")).unwrap();
         oversized.set_len(MAX_SOURCE_BYTES + 1).unwrap();
         assert!(source_snapshot_sha256(root).is_none());
+    }
+
+    #[test]
+    fn native_task_check_covers_file_modes_and_empty_directories() {
+        let temp = Scratch::new("native-source-metadata");
+        let root = temp.path();
+        fs::write(root.join("package.json"), r#"{"scripts":{"test":"echo ok"}}"#).unwrap();
+        let fixture = root.join("fixture.sh");
+        fake(&fixture, "exit 0");
+        fs::create_dir(root.join("empty-fixture")).unwrap();
+        let runner = root.join("fake-npm");
+        fake(&runner, "echo checked\nexit 0");
+        let plan = Plan {
+            name: "npm test".into(), program: runner.to_str().unwrap().into(), args: vec![],
+        };
+        let original = report_for_plan_inner(root, &plan, true);
+        assert_eq!(original["hostObservation"]["passed"], true);
+        let digest = original["hostObservation"]["sourceSnapshotSha256"].as_str().unwrap();
+        let manifest = original["hostObservation"]["manifestSha256"].as_str().unwrap();
+
+        // A chmod alone must invalidate a delayed receipt, even with identical bytes.
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(validate_native_check_observation(root, "npm test", manifest, digest).is_err());
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+        validate_native_check_observation(root, "npm test", manifest, digest).unwrap();
+
+        fs::remove_dir(root.join("empty-fixture")).unwrap();
+        assert!(validate_native_check_observation(root, "npm test", manifest, digest).is_err());
+        fs::create_dir(root.join("empty-fixture")).unwrap();
+        validate_native_check_observation(root, "npm test", manifest, digest).unwrap();
+
+        // A successful process that changes only metadata is not a valid new observation.
+        fake(&runner, "chmod 600 fixture.sh\nexit 0");
+        let changed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(changed["checked"], true);
+        assert_eq!(changed["ok"], true);
+        assert!(changed.get("hostObservation").is_none());
+
+        fake(&runner, "rmdir empty-fixture\nexit 0");
+        let changed = report_for_plan_inner(root, &plan, true);
+        assert_eq!(changed["checked"], true);
+        assert_eq!(changed["ok"], true);
+        assert!(changed.get("hostObservation").is_none());
     }
 
     #[test]

@@ -130,6 +130,39 @@ pub(super) fn reject_stale_pending(
     Ok(())
 }
 
+/// Detect old pending intents even if a legacy writer already persisted Off.
+pub(super) fn team_has_pending(db: &rusqlite::Connection, team_id: &str) -> Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_headless_dispatch_requests r
+         JOIN sa_tickets t ON t.id=r.ticket_id
+         WHERE t.orchestration_id=?1 AND r.state='pending')",
+        [team_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+/// Team Off retires only its unconsumed requests, including legacy terminal
+/// Tickets, in the same transaction as the policy and Mandate revocation.
+pub(super) fn reject_team_pending(
+    tx: &Transaction<'_>, team_id: &str, now: i64,
+) -> Result<()> {
+    let predicate = "state='pending' AND ticket_id IN (
+        SELECT id FROM sa_tickets WHERE orchestration_id=?1)";
+    tx.execute(
+        &format!("INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         SELECT ticket_id,'headless_dispatch_rejected',
+         'Dispatch request ' || id || ' rejected: Team disabled',?2
+         FROM sa_headless_dispatch_requests WHERE {predicate}"),
+        params![team_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        &format!("UPDATE sa_headless_dispatch_requests
+         SET state='rejected',rejection='Team disabled',updated_at=?2
+         WHERE {predicate}"),
+        params![team_id,now],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub(super) fn enqueue(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {

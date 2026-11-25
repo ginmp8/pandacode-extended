@@ -4753,6 +4753,7 @@ fn stop_with_expected_revision(
         params![ticket_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before Stop.".into()); }
+    headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     // Stop every still-running task-owned attempt, including a detached
     // legacy/orphan assignment. The live host observes these stopped rows and
     // cancels the corresponding provider sessions; no callback may revive them.
@@ -5126,7 +5127,8 @@ fn change_enabled(
              )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if !unsettled && !pending_effects { return Ok(current); }
+        let pending_dispatches = headless_dispatch::team_has_pending(&store.db, orchestration_id)?;
+        if !unsettled && !pending_effects && !pending_dispatches { return Ok(current); }
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
@@ -5197,6 +5199,7 @@ fn change_enabled(
              WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&settle, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        headless_dispatch::reject_team_pending(&tx, orchestration_id, now)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,orchestration_id)
@@ -7635,6 +7638,74 @@ mod tests {
         assert_eq!(get_ticket(&store, id).unwrap().state, "stopped");
         assert!(assignment_session(&store, id).unwrap().is_none());
         assert!(headless_dispatch::enqueue(&store, id, revision, "third-confirmation").is_err());
+    }
+
+    #[test]
+    fn stop_and_team_off_retire_pending_dispatches_without_a_live_host() {
+        let store = fixture();
+        let cfg = enabled(&store);
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Other manual Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&other.id],
+        ).unwrap();
+        let make = |team: &str, key: &str| {
+            let raw = headless_queue_demand(&store.path, team, "Inspect scope", key).unwrap();
+            let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let id = view["ticketId"].as_str().unwrap().to_owned();
+            let revision = get_ticket(&store, &id).unwrap().revision;
+            headless_dispatch::enqueue(&store, &id, revision, key).unwrap();
+            (id, revision)
+        };
+        let (stopped, sr) = make(&cfg.id, "stop-pending");
+        let (disabled, dr) = make(&cfg.id, "off-pending");
+        let (unrelated, ur) = make(&other.id, "unrelated-pending");
+
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_dispatch_revocation BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected'
+             BEGIN SELECT RAISE(ABORT,'test audit failure'); END;",
+        ).unwrap();
+        assert!(stop_with_expected_revision(&store, &stopped, Some(sr)).is_err());
+        assert_eq!(get_ticket(&store, &stopped).unwrap().revision, sr);
+        assert!(!mandate(&store, &stopped).unwrap().revoked);
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, false).is_err());
+        assert!(configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(headless_dispatch::pending_batch(&store).unwrap().len(), 3);
+        store.db.execute_batch("DROP TRIGGER deny_dispatch_revocation;").unwrap();
+
+        stop_with_expected_revision(&store, &stopped, Some(sr)).unwrap();
+        assert_eq!(headless_dispatch::pending_batch(&store).unwrap().len(), 2);
+        let replay = serde_json::to_value(
+            headless_dispatch::enqueue(&store, &stopped, sr, "stop-pending").unwrap(),
+        ).unwrap();
+        assert_eq!(replay["state"], "rejected");
+        assert_eq!(replay["rejection"], "Ticket revision changed");
+        assert!(mandate(&store, &stopped).unwrap().revoked);
+
+        let off = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let replay = serde_json::to_value(
+            headless_dispatch::enqueue(&store, &disabled, dr, "off-pending").unwrap(),
+        ).unwrap();
+        assert_eq!(replay["state"], "rejected");
+        assert_eq!(replay["rejection"], "Team disabled");
+        let pending = headless_dispatch::pending_batch(&store).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].ticket_id, unrelated);
+        assert_eq!(get_ticket(&store, &unrelated).unwrap().revision, ur);
+        assert!(!mandate(&store, &unrelated).unwrap().revoked);
+        assert_eq!(change_enabled(&store, &cfg.id, off.policy_revision, false)
+            .unwrap().policy_revision, off.policy_revision);
+        for id in [&stopped, &disabled] {
+            assert!(assignment_session(&store, id).unwrap().is_none());
+            assert_eq!(history(&store, id, 100).unwrap().iter()
+                .filter(|event| event.kind == "headless_dispatch_rejected").count(), 1);
+        }
+        let reopened = Store::open_read_only(&store.path).unwrap();
+        assert_eq!(headless_dispatch::pending_batch(&reopened).unwrap().len(), 1);
     }
 
     #[test]

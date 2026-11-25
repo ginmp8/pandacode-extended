@@ -676,24 +676,24 @@ fn fetch_authenticated_issue_pull_resources(
         return Err("Verified Issue/PR association requires exact source and thread keys.".into());
     }
     let root = std::env::temp_dir();
-    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let user = crate::github::run_github_com_api_read(&root, "user", crate::github::TIMEOUT)?;
     let (login, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     let repo_endpoint = format!("repos/{repository}");
     let issue_endpoint = format!("repos/{repository}/issues/{}",
         issue_key.trim_start_matches("issue:"));
     let pull_endpoint = format!("repos/{repository}/pulls/{}",
         pull_key.trim_start_matches("pull:"));
-    let repo = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &repo_endpoint], crate::github::TIMEOUT,
+    let repo = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &repo_endpoint, crate::github::TIMEOUT,
     )?)?;
-    let issue = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &issue_endpoint], crate::github::TIMEOUT,
+    let issue = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &issue_endpoint, crate::github::TIMEOUT,
     )?)?;
-    let pull = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &pull_endpoint], crate::github::TIMEOUT,
+    let pull = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &pull_endpoint, crate::github::TIMEOUT,
     )?)?;
-    let current_repo = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &repo_endpoint], crate::github::TIMEOUT,
+    let current_repo = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &repo_endpoint, crate::github::TIMEOUT,
     )?)?;
     let id = authenticated_issue_pull_resources_stable(
         repository, issue_key, pull_key, &repo, &issue, &pull, &current_repo,
@@ -1429,7 +1429,7 @@ fn require_same_authenticated_operator(
 fn recheck_authenticated_operator(
     root: &std::path::Path, expected_login: &str, expected_id: u64,
 ) -> Result<()> {
-    let response = crate::github::run_gh(root, &["api", "user"], crate::github::TIMEOUT)?;
+    let response = crate::github::run_github_com_api_read(root, "user", crate::github::TIMEOUT)?;
     require_same_authenticated_operator(expected_login, expected_id, &crate::github::json(&response)?)
 }
 
@@ -1462,8 +1462,8 @@ fn recheck_authenticated_repository(
     root: &std::path::Path, requested: &str, expected_id: u64,
 ) -> Result<()> {
     let endpoint = format!("repos/{requested}");
-    let result = crate::github::run_gh(
-        root, &["api", &endpoint], crate::github::TIMEOUT,
+    let result = crate::github::run_github_com_api_read(
+        root, &endpoint, crate::github::TIMEOUT,
     )?;
     require_same_authenticated_repository(
         requested, expected_id, &crate::github::json(&result)?,
@@ -2187,23 +2187,23 @@ fn fetch_authenticated_github_window(
     repo: &str, since: i64, prior_cursor: i64,
 ) -> Result<(String, serde_json::Value, usize, u64, u64)> {
     let root = std::env::temp_dir();
-    let user = crate::github::run_gh(
-        &root, &["api", "user"], crate::github::TIMEOUT,
+    let user = crate::github::run_github_com_api_read(
+        &root, "user", crate::github::TIMEOUT,
     )?;
     let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     // Resolve ID on every explicit Observe request, including after a rename
     // or delete/recreate of the same repository display name.
     let repository_endpoint = format!("repos/{repo}");
-    let repository = crate::github::run_gh(
-        &root, &["api", &repository_endpoint], crate::github::TIMEOUT,
+    let repository = crate::github::run_github_com_api_read(
+        &root, &repository_endpoint, crate::github::TIMEOUT,
     )?;
     let repository_id = authenticated_repository_id(&crate::github::json(&repository)?, repo)?;
     let mut pages = Vec::new();
     let mut previous_id = None;
     for page in 1..=GITHUB_MAX_PAGES {
         let endpoint = format!("repos/{repo}/events?per_page={GITHUB_PAGE_SIZE}&page={page}");
-        let output = crate::github::run_gh(
-            &root, &["api", &endpoint], crate::github::TIMEOUT,
+        let output = crate::github::run_github_com_api_read(
+            &root, &endpoint, crate::github::TIMEOUT,
         )?;
         let value = crate::github::json(&output)?;
         let complete = github_page_complete(&value, since, prior_cursor, &mut previous_id)?;
@@ -2905,17 +2905,17 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
         return Err("Invalid authenticated PR Checks scope.".into());
     }
     let root = std::env::temp_dir();
-    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let user = crate::github::run_github_com_api_read(&root, "user", crate::github::TIMEOUT)?;
     let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     let endpoint = format!("repos/{repository}");
-    let repo = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    let repo = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &endpoint, crate::github::TIMEOUT,
     )?)?;
     let repository_id = authenticated_repository_id(&repo, repository)?;
     let number = pull_key.trim_start_matches("pull:");
     let endpoint = format!("repos/{repository}/pulls/{number}");
-    let pull = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    let pull = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &endpoint, crate::github::TIMEOUT,
     )?)?;
     // Validate the head and repository BEFORE using them in the Checks URL.
     let empty = serde_json::json!({"total_count":0,"check_runs":[]});
@@ -2929,14 +2929,14 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
     let endpoint = format!(
         "repos/{repository}/commits/{head_sha}/check-runs?filter=all&per_page={LINKED_PR_CHECK_LIMIT}"
     );
-    let listing = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    let listing = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &endpoint, crate::github::TIMEOUT,
     )?)?;
     // A PR head may move during the request. Do not attribute stale runs to
     // its newer revision; this is a read-only GET and safe to retry explicitly.
     let endpoint = format!("repos/{repository}/pulls/{number}");
-    let current = crate::github::json(&crate::github::run_gh(
-        &root, &["api", &endpoint], crate::github::TIMEOUT,
+    let current = crate::github::json(&crate::github::run_github_com_api_read(
+        &root, &endpoint, crate::github::TIMEOUT,
     )?)?;
     if current != pull {
         // GitHub may update unrelated PR counters; compare only identity and
@@ -3127,17 +3127,17 @@ fn fetch_authenticated_check_run(
     repository: &str, check_run_id: i64,
 ) -> Result<(String, serde_json::Value, u64)> {
     let root = std::env::temp_dir();
-    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let user = crate::github::run_github_com_api_read(&root, "user", crate::github::TIMEOUT)?;
     let (signed_in, operator_id) = authenticated_operator(&crate::github::json(&user)?)?;
     let metadata_endpoint = format!("repos/{repository}");
-    let metadata = crate::github::run_gh(
-        &root, &["api", &metadata_endpoint], crate::github::TIMEOUT,
+    let metadata = crate::github::run_github_com_api_read(
+        &root, &metadata_endpoint, crate::github::TIMEOUT,
     )?;
     let repository_id = authenticated_repository_id(
         &crate::github::json(&metadata)?, repository,
     )?;
     let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
-    let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
+    let output = crate::github::run_github_com_api_read(&root, &endpoint, crate::github::TIMEOUT)?;
     let verified = crate::github::json(&output)?;
     recheck_authenticated_repository(&root, repository, repository_id)?;
     recheck_authenticated_operator(&root, &signed_in, operator_id)?;

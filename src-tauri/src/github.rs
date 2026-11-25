@@ -118,6 +118,24 @@ fn gh_command(root: &Path, args: &[&str]) -> Command {
 pub(crate) fn run_gh(root: &Path, args: &[&str], timeout: Duration) -> Result<Capture, String> {
     checked(run_process(gh_command(root, args), "GitHub CLI", OUTPUT_LIMIT, timeout)?)
 }
+/// SuperAgent source identities and typed thread URLs are scoped to github.com.
+/// Do not let GH_HOST, GH_REPO or local checkout context select another
+/// identity namespace for a receipt. Keep the ordinary GitHub integration's
+/// configurable host behavior intact.
+fn github_com_read_command(root: &Path, endpoint: &str) -> Result<Command, String> {
+    if (endpoint != "user" && !endpoint.starts_with("repos/"))
+        || endpoint.contains(['{', '}'])
+        || endpoint.chars().any(char::is_control)
+    {
+        return Err("Invalid SuperAgent GitHub REST read endpoint.".into());
+    }
+    Ok(gh_command(root, &["api", "--hostname", "github.com", "--method", "GET", "--", endpoint]))
+}
+
+pub(crate) fn run_github_com_api_read(root: &Path, endpoint: &str, timeout: Duration) -> Result<Capture, String> {
+    checked(run_process(github_com_read_command(root, endpoint)?, "GitHub CLI", OUTPUT_LIMIT, timeout)?)
+}
+
 pub(crate) fn json(capture: &Capture) -> Result<serde_json::Value, String> {
     if capture.truncated {
         return Err("The GitHub response was too large to read.".into());
@@ -499,6 +517,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn superagent_github_api_reads_pin_public_host_and_method() {
+        let root = std::env::temp_dir();
+        for endpoint in ["user", "repos/owner/repo/events?per_page=100&page=1",
+            "repos/owner/repo/commits/abc/check-runs?filter=all"] {
+            let command = github_com_read_command(&root, endpoint).unwrap();
+            let args: Vec<_> = command.get_args().map(|arg| arg.to_str().unwrap()).collect();
+            assert_eq!(args, ["api", "--hostname", "github.com", "--method", "GET", "--", endpoint]);
+        }
+        for endpoint in ["https://enterprise.example/api/v3/user", "--hostname=enterprise.example",
+            "repos/{owner}/{repo}", "repos/owner/repo\n"] {
+            assert!(github_com_read_command(&root, endpoint).is_err());
+        }
+        let ordinary = gh_command(&root, &["api", "user"]);
+        let args: Vec<_> = ordinary.get_args().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["api", "user"], "ordinary GitHub integration is unchanged");
+    }
 
     #[test]
     fn excerpts_cut_on_character_boundaries_and_flag_truncation() {

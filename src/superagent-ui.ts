@@ -161,6 +161,7 @@ export function mountSuperagent(
   let pendingWorkItem: {ticketId:string;summary:string;parentId:string|null;key:string}|null=null;
   let batchPlanDraft: {ticketId:string;json:string}|null=null;
   let pendingCancelWorkItem: {ticketId:string;itemId:string;key:string}|null=null;
+  let pendingDesktopPlan: {ticketId:string;revision:number;key:string}|null=null;
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
 let demandArchived = false;
@@ -694,6 +695,10 @@ let demandArchived = false;
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
         '<h5>Planned WorkItems</h5><p>Manual dispatch selects one dependency-ready item. Accept its evidence before dispatching the next; ' +
         'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
+        (validWorkItems && ticketDetails.ticket.state==='queued' && !ticketDetails.truncatedWorkItems &&
+          plannedWorkItems.some(item=>item.state==='planned' && !item.assignmentId)
+          ? '<button type="button" data-sa-dispatch-reviewed-plan>Authorize sequential plan dispatch</button>' +
+            '<p>Read-only Workers only. Each result still requires human acceptance; the native host advances only the reviewed plan.</p>' : '') +
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
           safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.state==='cancelled' ? ' · Cancelled ' + safe(activityTime(item.cancelledAt ?? undefined)) : '') +
@@ -3296,6 +3301,36 @@ let demandArchived = false;
         feedback = result.created.length + ' presets imported; ' + result.unchanged.length +
           ' unchanged.' + (result.backupPath ? ' Recovery snapshot: ' + result.backupPath : '');
       }); return;
+    }
+    if (target.hasAttribute('data-sa-dispatch-reviewed-plan')) {
+      const detail=ticketDetails;
+      if (!detail || detail.ticket.id!==inspectedTicket ||
+          detail.ticket.orchestrationId!==selected || detail.ticket.state!=='queued' ||
+          detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && !item.assignmentId)) return;
+      const ticketId=detail.ticket.id, revision=detail.ticket.revision;
+      if (!pendingDesktopPlan || pendingDesktopPlan.ticketId!==ticketId || pendingDesktopPlan.revision!==revision) {
+        pendingDesktopPlan={ticketId,revision,key:crypto.randomUUID()};
+      }
+      const pending=pendingDesktopPlan;
+      ask('Authorize sequential read-only dispatch of the reviewed WorkItem plan at revision '+revision+
+        '? Each result still requires human acceptance. No write grant or Council verdict is issued.',async()=>{
+        if (pendingDesktopPlan!==pending || ticketDetails!==detail ||
+            inspectedTicket!==ticketId || selected!==detail.ticket.orchestrationId) {
+          throw new Error('Demand changed before plan dispatch confirmation.');
+        }
+        const receipt=await call<{id:string;ticketId:string;expectedRevision:number;requestKey:string;state:string}>(
+          'superagent_dispatch_reviewed_plan',{ticketId,expectedRevision:revision,requestKey:pending.key});
+        if (!receipt.id || receipt.ticketId!==ticketId || receipt.expectedRevision!==revision ||
+            receipt.requestKey!==pending.key || !['pending','admitted','rejected'].includes(receipt.state)) {
+          throw new Error('Native plan dispatch acknowledgement is inconsistent.');
+        }
+        await refreshTicketDetails();
+        pendingDesktopPlan=null;
+        feedback=receipt.state==='rejected'
+          ? 'Plan dispatch was rejected. Inspect native Ticket activity before authorizing again.'
+          : 'Reviewed read-only plan authorization recorded ('+receipt.state+'). Refresh for native execution activity; human acceptance is still required.';
+      });
+      return;
     }
     if (target.dataset.saCancelWorkItem) {
       const detail=ticketDetails;

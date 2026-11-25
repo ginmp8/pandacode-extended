@@ -6329,14 +6329,14 @@ async fn dispatch_worker_native(
 /// Poll only explicit local-operator intents. Pending requests expire; an
 /// admitted request never launches again, even after host restart. Ordinary
 /// queue drains, GitHub events and provider text cannot create these intents.
-pub(crate) async fn dispatch_pending_headless(app: &tauri::AppHandle) -> Result<()> {
+async fn dispatch_pending_local(app: &tauri::AppHandle, desktop_only: bool) -> Result<()> {
     let state = app.state::<AppState>();
     if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
         return Ok(());
     }
     let requests = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        headless_dispatch::pending_batch(&store)?
+        headless_dispatch::pending_for_host(&store, desktop_only)?
     };
     for request in requests {
         if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
@@ -6364,6 +6364,34 @@ pub(crate) async fn dispatch_pending_headless(app: &tauri::AppHandle) -> Result<
         }
     }
     Ok(())
+}
+
+/// Both host lifecycles use the same bounded durable queue consumer. Desktop
+/// only consumes explicit Desktop plan authorizations, not CLI-only requests.
+pub(crate) fn start_dispatch_poll(app: tauri::AppHandle, desktop_only: bool) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if app.state::<AppState>().shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                break;
+            }
+            if dispatch_pending_local(&app, desktop_only).await.is_err() {
+                eprintln!("SuperAgent dispatch intent processing failed; inspect native Ticket activity.");
+            }
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn superagent_dispatch_reviewed_plan(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: i64, request_key: String,
+) -> Result<serde_json::Value> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let request = headless_dispatch::enqueue_desktop_plan(
+        &store, &ticket_id, expected_revision, &request_key)?;
+    serde_json::to_value(request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -16115,7 +16143,7 @@ mod tests {
 
     #[test]
     fn authorized_plan_continuation_requires_human_acceptance_and_current_revision() {
-        for revoke in [false,true] {
+        for (desktop,revoke) in [(false,false),(false,true),(true,false),(true,true)] {
             let mut store=fixture();
             let cfg=enabled(&store);
             let (ticket,_)=admit_role(&mut store,&cfg.id,"Inspect project","reviewed-plan",false,true).unwrap();
@@ -16127,10 +16155,19 @@ mod tests {
             let child=work_items::plan(&store,id,get_ticket(&store,id).unwrap().revision,
                 "child","Inspect child",Some(&root.id)).unwrap();
             let revision=get_ticket(&store,id).unwrap().revision;
-            assert!(headless_dispatch::enqueue_plan(&store,id,revision-1,"stale").is_err());
-            let request=headless_dispatch::enqueue_plan(&store,id,revision,"plan-key").unwrap();
-            assert_eq!(headless_dispatch::enqueue_plan(&store,id,revision,"plan-key").unwrap().id,request.id);
+            let enqueue = |store: &Store, rev, key: &str| {
+                if desktop { headless_dispatch::enqueue_desktop_plan(store,id,rev,key) }
+                else { headless_dispatch::enqueue_plan(store,id,rev,key) }
+            };
+            assert!(enqueue(&store,revision-1,"stale").is_err());
+            let request=enqueue(&store,revision,"plan-key").unwrap();
+            assert_eq!(enqueue(&store,revision,"plan-key").unwrap().id,request.id);
             assert!(headless_dispatch::enqueue(&store,id,revision,"plan-key").is_err());
+            let cross_surface = if desktop { headless_dispatch::enqueue_plan(&store,id,revision,"plan-key") }
+                else { headless_dispatch::enqueue_desktop_plan(&store,id,revision,"plan-key") };
+            assert!(cross_surface.is_err());
+            assert_eq!(headless_dispatch::pending_for_host(&store,true).unwrap().len(),if desktop { 1 } else { 0 });
+            assert_eq!(headless_dispatch::pending_for_host(&store,false).unwrap().len(),1);
             let (_,_,_,packet)=prepare_coordinated_worker_with_request(
                 &mut store,id,revision,false,Some(&request)).unwrap();
             assert!(packet.contains(root.id.as_str()));
@@ -16158,6 +16195,9 @@ mod tests {
             assert_eq!(next.ticket_id.as_str(),id.as_str());
             assert_eq!(next.expected_revision,queued.revision);
             assert_ne!(next.id,request.id);
+            let desktop_pending=headless_dispatch::pending_for_host(&reopened,true).unwrap();
+            assert_eq!(desktop_pending.len(),if desktop { 1 } else { 0 });
+            if desktop { assert_eq!(desktop_pending[0].id,next.id); }
             drop(reopened);
             if revoke {
                 work_items::cancel(&store,id,queued.revision,&child.id,"cancel-child").unwrap();

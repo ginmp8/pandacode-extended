@@ -4232,6 +4232,7 @@ pub fn run() {
             agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             vm::watch_idle(app.handle().clone());
+            superagent::start_dispatch_poll(app.handle().clone(), true);
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("Menu bar item is unavailable: {error}");
             }
@@ -4513,6 +4514,7 @@ pub fn run() {
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_reviewed_plan,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,

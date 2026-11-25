@@ -4994,3 +4994,63 @@ test('guided Team setup uses native disabled-Team creation and prevents early su
   await expect(host.getByRole('button',{name:'Demands / Runs'}))
     .toHaveAttribute('aria-current','page');
 });
+
+
+// IPC/UI contract only; native queue admission and restart are covered by
+// authorized_plan_continuation_requires_human_acceptance_and_current_revision.
+test('Desktop reviewed plan dispatch requires explicit revision-bound confirmation', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-desktop-plan-test';document.body.appendChild(host);
+    const requests:Array<Record<string,unknown>>=[];
+    (window as unknown as {desktopPlanRequests:typeof requests}).desktopPlanRequests=requests;
+    const ticket={id:'ticket',orchestrationId:'team',objective:'Inspect project',state:'queued',revision:3,evidence:null};
+    mountSuperagent(host,async (command,args) => {
+      if(command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Operator Plan Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:true,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets') return [ticket] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket,mandate:{actor:'local-user',authorizationId:'native-user-issued',
+          policyRevision:1,projectId:'project',expiresAt:1900000000000,
+          revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],
+        workItems:[{id:'item-one',ticketId:'ticket',requestKey:'plan-one',parentId:null,
+          summary:'Inspect root',state:'planned',createdAt:1800000000100,cancelledAt:null}],
+        truncatedWorkItems:false,
+      } as never;
+      if(command==='superagent_dispatch_reviewed_plan') {
+        const request=args as Record<string,unknown>;
+        requests.push(request);
+        return {id:'native-intent',...request,state:'pending'} as never;
+      }
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-desktop-plan-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const action=host.getByRole('button',{name:'Authorize sequential plan dispatch'});
+  await action.click();
+  const confirmation=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(confirmation).toContainText('Each result still requires human acceptance');
+  const requests=()=>page.evaluate(()=>
+    (window as unknown as {desktopPlanRequests:Array<Record<string,unknown>>}).desktopPlanRequests);
+  expect(await requests()).toHaveLength(0);
+  await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(await requests()).toHaveLength(0);
+  await action.click();
+  await confirmation.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host).toContainText('Reviewed read-only plan authorization recorded (pending)');
+  const recorded=await requests();
+  expect(recorded).toHaveLength(1);
+  expect(recorded[0]).toMatchObject({ticketId:'ticket',expectedRevision:3});
+  expect(typeof recorded[0].requestKey).toBe('string');
+});

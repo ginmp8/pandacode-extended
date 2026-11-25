@@ -1297,18 +1297,7 @@ fn start_services(app: tauri::AppHandle) {
             }
         }
     });
-    let dispatch_host = app.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let state = dispatch_host.state::<AppState>();
-            if state.shutdown.load(Ordering::SeqCst) != 0 { break; }
-            if crate::superagent::dispatch_pending_headless(&dispatch_host).await.is_err() {
-                // Do not print private native evidence or provider errors to stdout.
-                eprintln!("serve: SuperAgent dispatch intent processing failed; inspect native Ticket activity.");
-            }
-        }
-    });
+    crate::superagent::start_dispatch_poll(app.clone(), false);
     let watchdog = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {

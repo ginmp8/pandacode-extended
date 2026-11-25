@@ -48,6 +48,20 @@ CREATE TRIGGER IF NOT EXISTS sa_headless_plan_dispatch_immutable_delete
  BEGIN SELECT RAISE(ABORT,'Plan dispatch authorization is immutable'); END;
 ";
 
+/// An explicit Desktop authorization is distinct from a CLI-only intent.
+/// A continuation inherits this immutable marker, never ambient host authority.
+pub(crate) const DESKTOP_PLAN_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS sa_desktop_plan_dispatch (
+ request_id TEXT PRIMARY KEY REFERENCES sa_headless_plan_dispatch(request_id) ON DELETE RESTRICT
+);
+CREATE TRIGGER IF NOT EXISTS sa_desktop_plan_dispatch_immutable_update
+ BEFORE UPDATE ON sa_desktop_plan_dispatch
+ BEGIN SELECT RAISE(ABORT,'Desktop plan authorization is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_desktop_plan_dispatch_immutable_delete
+ BEFORE DELETE ON sa_desktop_plan_dispatch
+ BEGIN SELECT RAISE(ABORT,'Desktop plan authorization is immutable'); END;
+";
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DispatchRequest {
@@ -166,13 +180,32 @@ pub(super) fn reject_team_pending(
 pub(super) fn enqueue(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {
-    enqueue_mode(store,ticket_id,revision,key,false)
+    enqueue_mode(store,ticket_id,revision,key,false,false)
 }
 
 pub(super) fn enqueue_plan(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {
-    enqueue_mode(store,ticket_id,revision,key,true)
+    enqueue_mode(store,ticket_id,revision,key,true,false)
+}
+
+pub(super) fn enqueue_desktop_plan(
+    store: &Store, ticket_id: &str, revision: i64, key: &str,
+) -> Result<DispatchRequest> {
+    enqueue_mode(store,ticket_id,revision,key,true,true)
+}
+
+fn desktop_authorized(db: &rusqlite::Connection, request_id: &str) -> Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_desktop_plan_dispatch WHERE request_id=?1)",
+        [request_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+fn mark_desktop(tx: &Transaction<'_>, request_id: &str) -> Result<()> {
+    tx.execute("INSERT INTO sa_desktop_plan_dispatch(request_id) VALUES(?1)",
+        [request_id]).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Bind content, dependencies, routing and cancellations, but exclude
@@ -219,7 +252,7 @@ fn bind_plan(tx: &Transaction<'_>, request: &DispatchRequest, digest: &str,
 }
 
 fn enqueue_mode(
-    store: &Store, ticket_id: &str, revision: i64, key: &str, plan: bool,
+    store: &Store, ticket_id: &str, revision: i64, key: &str, plan: bool, desktop: bool,
 ) -> Result<DispatchRequest> {
     if !valid_key(key) || revision < 0 || ticket_id.is_empty() || ticket_id.len() > 128
         || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'))
@@ -235,8 +268,8 @@ fn enqueue_mode(
     let existed=by_key(store,ticket_id,key)?.is_some();
     let request=enqueue_in_transaction(store,&tx,ticket_id,revision,key,now)?;
     if existed {
-        if binding(&tx,&request.id)?.is_some()!=plan {
-            return Err("Dispatch request key is bound to another progression mode.".into());
+        if binding(&tx,&request.id)?.is_some()!=plan || desktop_authorized(&tx,&request.id)?!=desktop {
+            return Err("Dispatch request key is bound to another progression mode or operator surface.".into());
         }
     } else if plan {
         if request.kind!="coordinated" || super::next_work_item(store,ticket_id)?
@@ -246,6 +279,7 @@ fn enqueue_mode(
         }
         let digest=plan_digest(&tx,ticket_id)?;
         bind_plan(&tx,&request,&digest,None,now)?;
+        if desktop { mark_desktop(&tx,&request.id)?; }
     }
     tx.commit().map_err(|e|e.to_string())?;
     Ok(request)
@@ -350,7 +384,9 @@ pub(super) fn advance_after_acceptance(
     }
     let key=format!("plan-next.{}",storage::id());
     let request=enqueue_in_transaction(store,tx,ticket_id,ticket.revision,&key,now)?;
-    bind_plan(tx,&request,&digest,Some(&previous),now)
+    bind_plan(tx,&request,&digest,Some(&previous),now)?;
+    if desktop_authorized(tx,&previous)? { mark_desktop(tx,&request.id)?; }
+    Ok(())
 }
 
 pub(crate) fn headless_enqueue(
@@ -447,6 +483,21 @@ pub(super) fn pending_batch(store: &Store) -> Result<Vec<DispatchRequest>> {
         &format!("{SELECT} WHERE state='pending' ORDER BY created_at,id LIMIT 200"),
     ).map_err(|e| e.to_string())?;
     let rows = statement.query_map([], row).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// Desktop consumes only plans explicitly authorized on Desktop. The CLI
+/// retains its existing serve-only semantics. A later serve host may continue
+/// an explicitly authorized Desktop plan through the same native CAS.
+pub(super) fn pending_for_host(store: &Store, desktop_only: bool) -> Result<Vec<DispatchRequest>> {
+    if !desktop_only { return pending_batch(store); }
+    let mut stmt = store.db.prepare(&format!(
+        "{SELECT} WHERE state='pending' AND EXISTS(
+            SELECT 1 FROM sa_desktop_plan_dispatch d
+            WHERE d.request_id=sa_headless_dispatch_requests.id)
+         ORDER BY created_at,id LIMIT 200"
+    )).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], row).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 

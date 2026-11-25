@@ -65,6 +65,28 @@ fn valid_key(key: &str) -> bool {
         && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.'))
 }
 
+/// Expired intents never reserved an Assignment. Settle their receipts and
+/// audit together before counting pending capacity, even without a live
+/// serve host. Never touch an admitted intent or refresh an old key's lifetime.
+fn expire_pending(tx: &Transaction<'_>, now: i64) -> Result<()> {
+    let cutoff = now.saturating_sub(MAX_REQUEST_AGE_MS);
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         SELECT ticket_id,'headless_dispatch_rejected',
+            'Dispatch request ' || id || ' rejected: expired or invalid creation time',?1
+         FROM sa_headless_dispatch_requests
+         WHERE state='pending' AND (created_at<=?2 OR created_at>?1 OR created_at<=0)",
+        params![now,cutoff],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE sa_headless_dispatch_requests
+         SET state='rejected',rejection='expired or invalid creation time',updated_at=?1
+         WHERE state='pending' AND (created_at<=?2 OR created_at>?1 OR created_at<=0)",
+        params![now,cutoff],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub(super) fn enqueue(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {
@@ -75,10 +97,13 @@ pub(super) fn enqueue(
     }
     let tx = Transaction::new_unchecked(&store.db, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    let now = storage::now();
+    expire_pending(&tx, now)?;
     if let Some(prior) = by_key(store, ticket_id, key)? {
         if prior.expected_revision != revision {
             return Err("Dispatch request key is already bound to another Ticket revision.".into());
         }
+        tx.commit().map_err(|e| e.to_string())?;
         return Ok(prior);
     }
     let ticket = get_ticket(store, ticket_id)?;
@@ -94,7 +119,6 @@ pub(super) fn enqueue(
     }
     let cfg = configuration(store, &ticket.orchestration_id)?;
     let grant = mandate(store, ticket_id)?;
-    let now = storage::now();
     if !cfg.enabled || grant.revoked || grant.expires_at <= now
         || grant.actor != ticket.actor || grant.policy_revision != cfg.policy_revision
         || grant.project_id != cfg.project_id || !grant.allowed_tools.is_empty()

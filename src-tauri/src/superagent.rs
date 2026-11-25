@@ -7449,6 +7449,52 @@ mod tests {
     }
 
     #[test]
+    fn headless_dispatch_expiry_recovers_capacity_without_replaying_old_intents() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id, "Read only", "dispatch-expiry").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let first = headless_dispatch::enqueue(&store, id, revision, "first").unwrap();
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
+            [&first.id]).unwrap();
+
+        // A failed audit cannot free capacity or create a replacement intent.
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_dispatch_expiry BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected' BEGIN SELECT RAISE(ABORT,'test audit failure'); END;",
+        ).unwrap();
+        assert!(headless_dispatch::enqueue(&store, id, revision, "second").is_err());
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, first.id);
+        store.db.execute_batch("DROP TRIGGER deny_dispatch_expiry;").unwrap();
+
+        // An explicit fresh request can recover expired capacity while the
+        // live serve host is absent. The old key remains a rejected receipt.
+        let second = headless_dispatch::enqueue(&store, id, revision, "second").unwrap();
+        let expired = serde_json::to_value(
+            headless_dispatch::enqueue(&store, id, revision, "first").unwrap()).unwrap();
+        assert_eq!(expired["state"], "rejected");
+        assert_eq!(expired["rejection"], "expired or invalid creation time");
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, second.id);
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&first)).is_err());
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        let (running, _, _, _) = retry_blocked_with_request(
+            &mut store, id, revision, false, Some(&second)).unwrap();
+        assert_eq!(running.state, "running");
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
+            [&second.id]).unwrap();
+        let admitted = serde_json::to_value(
+            headless_dispatch::enqueue(&store, id, revision, "second").unwrap()).unwrap();
+        assert_eq!(admitted["state"], "admitted");
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
     fn headless_staged_retry_without_original_audit_cannot_enter_gateway() {
         let mut store = fixture();
         let config = enabled(&store);

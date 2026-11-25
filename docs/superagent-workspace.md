@@ -79,6 +79,16 @@ engineering delivery. A v55 waiting-approval Demand with unresolved plans but
 only prompt-context evidence must reject that evidence and dispatch a current
 item rather than retroactively accepting every plan.
 
+### Headless dispatch intent expiry
+
+An explicit `pandacode serve --dispatch-ticket <ticket-id> <revision> <request-key>`
+request atomically settles expired pending intents with an audit record before
+checking queue capacity, even when the live serve host was offline. An expired
+key remains a rejected receipt; it cannot be used to launch a provider. Confirm
+a new request key against the current Ticket revision. Admitted Assignment
+receipts remain immutable and require the existing native Stop/recovery path;
+expiry never cancels an Assignment, refreshes a Mandate or replays an effect.
+
 ## Native-backed surfaces
 
 The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.

@@ -171,7 +171,7 @@ const state = {
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
   generation: 0, hasOlder: false,
   sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
-  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
+  sharedChannelDrafts: new Map<string, string>(), failedChannelCouncilDrafts: new Map<string, HTMLFormElement>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
 };
 let renderFrame = 0;
 /** Shows the open thread's scene behind the conversation (set once the sky mounts; `renderTranscript` calls it). */
@@ -2834,7 +2834,8 @@ function renderComposer(): void {
     // Channel events redraw the composer while Council settings may be open.
     // Capture its live keyboard/scroll state before removing the old popover.
     const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
-    const councilWasOpen = oldCouncilPanel?.matches(':popover-open') ?? false;
+    const councilWasOpen = oldChannelComposer?.dataset.channelId === state.sharedChannelId
+      && (oldCouncilPanel?.matches(':popover-open') ?? false);
     const councilControls = 'button, input, select, textarea, summary';
     const councilFocusedIndex = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
       ? [...oldCouncilPanel.querySelectorAll<HTMLElement>(councilControls)].indexOf(document.activeElement as HTMLElement)
@@ -2856,7 +2857,11 @@ function renderComposer(): void {
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     const posting = state.sharedChannelPosting.has(state.sharedChannelId);
-    if (!posting) restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
+    if (!posting && channelComposer) {
+      const failedDraft = state.failedChannelCouncilDrafts.get(state.sharedChannelId);
+      restoreSharedChannelCouncilInputs(failedDraft ?? oldChannelComposer, channelComposer);
+      state.failedChannelCouncilDrafts.delete(state.sharedChannelId);
+    }
     bindSharedChannelCouncil(channelComposer);
     if (!posting && councilWasOpen && channelComposer) {
       const nextTrigger = channelComposer.querySelector<HTMLElement>('.bc-council-trigger');
@@ -7418,8 +7423,16 @@ document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
     const channelId = state.sharedChannelId, data = new FormData(form), text = String(data.get('text') ?? '').trim();
-    if (!text) return;
+    if (!text || state.sharedChannelPosting.has(channelId)) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
+    const showCouncilError = (message: string): void => {
+      notify(message);
+      const panel = form.querySelector<HTMLElement>('.bc-council-panel');
+      const trigger = form.querySelector<HTMLElement>('.bc-council-trigger');
+      // Clicking Send light-dismisses the popover before submit validation.
+      // Reopen it so the rejected configuration can be corrected in place.
+      if (trigger && panel && !panel.matches(':popover-open')) toggleSharedChannelCouncil(trigger);
+    };
     const councilMode = data.get('councilMode');
     const isSelected = councilMode === 'selected';
     const channel = state.sharedChannelDetail;
@@ -7489,12 +7502,12 @@ document.addEventListener('submit', event => {
       || !['architect', 'user', 'hybrid'].includes(criteriaSource)
       || !criteriaValid || !validSelection
     )) {
-      notify('Check Council seats (2–8), child limits, strategy and required criteria before sending.');
+      showCouncilError('Check Council seats (2–8), child limits, strategy and required criteria before sending.');
       return;
     }
     const scopedRequested = data.get('councilScopedFile') === 'on' && isSelected;
     if (councilEnabled && scopedRequested && !directBotIds.length) {
-      notify('Scoped reviewer grants require at least one direct bot, not only child Councils.');
+      showCouncilError('Scoped reviewer grants require at least one direct bot, not only child Councils.');
       return;
     }
     const filePath = String(data.get('councilFilePath') ?? '').trim();
@@ -7502,7 +7515,7 @@ document.addEventListener('submit', event => {
       && !filePath.startsWith('\\') && !filePath.includes(':')
       && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
     if (councilEnabled && scopedRequested && !validFilePath) {
-      notify('Choose one valid relative file path for the scoped reviewer action.');
+      showCouncilError('Choose one valid relative file path for the scoped reviewer action.');
       return;
     }
     const issueEnabled = councilEnabled && data.get('councilGithubIssue') === 'on';
@@ -7510,7 +7523,7 @@ document.addEventListener('submit', event => {
     const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
       && !issueRepo.split('/').some(part => part === '.' || part === '..');
     if (issueEnabled && !validIssueRepo) {
-      notify('Specify the exact authorized GitHub repository as owner/name.');
+      showCouncilError('Specify the exact authorized GitHub repository as owner/name.');
       return;
     }
     const council = councilEnabled ? {
@@ -7533,15 +7546,23 @@ document.addEventListener('submit', event => {
     // Native routing assigns the channel lead when no bot is explicitly mentioned.
     const executorIds = recipients.length ? recipients : channel?.leadBotId ? [channel.leadBotId] : [];
     if (councilEnabled && selectedBotIds.some(id => executorIds.includes(id)) && isSelected) {
-      notify('A message executor cannot also be one of its Council reviewers.');
+      showCouncilError('A message executor cannot also be one of its Council reviewers.');
       return;
     }
     state.sharedChannelDrafts.delete(channelId);
+    state.failedChannelCouncilDrafts.delete(channelId);
     state.sharedChannelPosting.add(channelId); renderComposer();
     // A failed post goes back to its own channel's draft, unless something new was typed there.
     run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}), ...(council ? { council } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
       state.sharedChannelPosting.delete(channelId);
-      if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
+      const draft = state.sharedChannelDrafts.get(channelId);
+      if (!draft?.trim() || draft === text) {
+        state.sharedChannelDrafts.set(channelId, text);
+        // Restore the submitted Council settings together with the rejected text.
+        // A retry must not silently become an ordinary non-Council message.
+        // The detached form is scoped to this Channel and consumed on its next render.
+        state.failedChannelCouncilDrafts.set(channelId, form);
+      }
       notify(error instanceof Error ? error.message : String(error));
       if (channelId === state.sharedChannelId) renderComposer();
     }));

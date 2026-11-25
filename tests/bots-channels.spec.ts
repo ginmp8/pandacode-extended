@@ -412,6 +412,61 @@ test.describe('shared bot channels', () => {
     expect(posted.nestedBotReviewers).toBeUndefined();
   });
 
+  test('Channel restores the rejected Council request before an explicit retry', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        "if (command === 'bot_shared_channel_post') { const posts = (window.__channelCouncilPosts ??= []); posts.push(structuredClone(args)); if (posts.length === 1) throw new Error('Council admission rejected by test host'); }\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    await panel.getByRole('checkbox', { name: 'Writer', exact: true }).check();
+    await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
+    await panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' }).uncheck();
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
+    await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
+    await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+    await page.keyboard.press('Escape');
+    const prompt = composer.getByRole('textbox', { name: 'Message channel' });
+    await prompt.fill('@Ledger Review this artifact.');
+    await composer.locator('button[type=submit]').click();
+    await expect(page.getByText('Council admission rejected by test host', { exact: true })).toBeVisible();
+    await expect(prompt).toHaveValue('@Ledger Review this artifact.');
+    await expect(composer.getByRole('button', { name: 'Council: on' })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+
+    // A same-Channel refresh cannot discard the restored draft.
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    await expect(panel.getByRole('checkbox', { name: 'Writer', exact: true })).toBeChecked();
+    await expect(panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' })).not.toBeChecked();
+    await expect(panel.getByRole('textbox', { name: 'Criterion ID' })).toHaveValue('security');
+    await expect(panel.getByRole('checkbox', { name: 'Require independently verified native evidence' })).toBeChecked();
+    await page.keyboard.press('Escape');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(2);
+    const posts = await page.evaluate(() => (window as any).__channelCouncilPosts);
+    expect(posts[0].council).toMatchObject({ strategy: 'escalated', forceEscalation: false, criteriaSource: 'user' });
+    expect(posts[1]).toEqual(posts[0]);
+    await expect(composer.getByRole('button', { name: 'Council: off' })).toBeVisible();
+    await expect(prompt).toHaveValue('');
+  });
+
   test('shared Channel preserves and validates multiple user-required criteria across refresh', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {
@@ -443,6 +498,7 @@ test.describe('shared bot channels', () => {
     await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review both required gates');
     await composer.locator('button[type=submit]').click();
     expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+    await expect(panel).toBeVisible();
 
     await panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1).fill('data_integrity');
     await page.keyboard.press('Escape');

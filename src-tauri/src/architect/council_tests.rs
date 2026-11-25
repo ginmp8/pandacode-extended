@@ -10520,6 +10520,20 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     assert_eq!(groups.iter().map(|group| group.usage.unique_attempts).sum::<usize>(),
         composed.unique_attempts, "group totals must not double-count child composite seats");
     if strategy == council::CouncilExecutionStrategy::Escalated {
+        // A clean S2 completion must not hide an occupied or phantom
+        // second-wave receipt slot by falling back to first-wave evidence.
+        let owner = inspected.reserved_children[0].child_session_id.clone();
+        for bot in ["security-child", "foreign-child"] {
+            let key = format!("native-council-child-s2-receipt:{}:{bot}", saved.council_since);
+            record_request(&store, &sid, &key, "foreign_kind", "{}", &owner).unwrap();
+            assert!(child_council::verified_triggered_s2_parent_seats(&store, &saved).is_err());
+            assert!(!verified_council_pass(&store, &saved));
+            store.db.execute(
+                "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+                rusqlite::params![sid, key],
+            ).unwrap();
+            assert!(verified_council_pass(&store, &saved));
+        }
         let children = child_council::verified_parent_seats(&store, &saved)
             .unwrap().unwrap();
         let mut forced = saved.clone();
@@ -13019,6 +13033,34 @@ fn nested_m4_triggered_s2_requires_authenticated_evidence_before_terminal_pass()
     assert!(first_ids.is_disjoint(&second_ids));
     assert!(verified_council_pass(&store, &root),
         "root completion is backed by current child receipts and native leaf callbacks");
+
+    // Hold the first configured child's valid escalation receipt. Pending
+    // evidence must not hide a later sibling's conflicting composite.
+    let first_key = format!("native-council-child-s2-receipt:{}:security-child", root.council_since);
+    let held_key = format!("test-held-{first_key}");
+    let sibling_key = format!("native-council-parent-seat:{}:architecture-child", root.council_since);
+    assert_eq!(store.db.execute(
+        "UPDATE architect_requests SET key=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, first_key, held_key],
+    ).unwrap(), 1);
+    assert!(child_council::verified_triggered_s2_parent_seats(&store, &root).unwrap().is_none());
+    assert_eq!(store.db.execute(
+        "UPDATE architect_requests SET worker_id='foreign-native-owner'
+         WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, sibling_key],
+    ).unwrap(), 1);
+    assert!(child_council::verified_triggered_s2_parent_seats(&store, &root).unwrap_err()
+        .contains("receipt kind or native ownership changed"));
+    assert!(!verified_council_pass(&store, &root));
+    store.db.execute(
+        "UPDATE architect_requests SET worker_id=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, sibling_key, architecture.child_session_id],
+    ).unwrap();
+    store.db.execute(
+        "UPDATE architect_requests SET key=?3 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, held_key, first_key],
+    ).unwrap();
+    assert!(verified_council_pass(&store, &root));
 
     let mut altered = load(&store, &security_id).unwrap().unwrap();
     let leaf = altered.workers.iter_mut()

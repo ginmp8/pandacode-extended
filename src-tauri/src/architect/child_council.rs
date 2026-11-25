@@ -2048,6 +2048,7 @@ pub(super) fn verified_triggered_s2_parent_seats(
     let mut leaf_sessions = HashSet::new();
     let mut clean_count = 0usize;
     let mut escalated_count = 0usize;
+    let mut ready = true;
     let mut seats = Vec::with_capacity(config.nested_bot_reviewers.len());
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?
@@ -2057,9 +2058,15 @@ pub(super) fn verified_triggered_s2_parent_seats(
         let triggers = authenticated_first_wave_s2_triggers(
             store, root, &record, &child, choice,
         )?;
+        // Inspect both receipt slots even when the earlier sibling or wave
+        // is pending. An invalid slot must not fall through to the clean S2
+        // first-wave approval path in authenticated_hierarchical_status.
+        let first = parent_seat(store, root, &record, &child, false)?;
+        let second = read_escalation_receipt(store, root, &record, &child, choice)?;
         let (seat, expected_leaves) = if triggers.is_empty() {
-            let Some(seat) = parent_seat(store, root, &record, &child, false)? else {
-                return Ok(None);
+            let Some(seat) = first else {
+                ready = false;
+                continue;
             };
             clean_count += 1;
             (seat, choice.child_reviewers)
@@ -2067,21 +2074,26 @@ pub(super) fn verified_triggered_s2_parent_seats(
             // A new read-only review cannot correct a high-severity defect in
             // the unchanged artifact. Every other triggered case needs actual
             // independently authenticated second-wave callbacks.
-            if triggers.contains(&"high_severity_finding")
-                || parent_seat(store, root, &record, &child, false)?.is_some()
-            {
-                return Ok(None);
+            if first.is_some() {
+                return Err("child_council_stale: triggered S2 child has a conflicting first-wave composite.".into());
             }
-            let Some(second) = read_escalation_receipt(
-                store, root, &record, &child, choice,
-            )? else { return Ok(None) };
+            if triggers.contains(&"high_severity_finding") {
+                ready = false;
+                continue;
+            }
+            let Some(second) = second else {
+                ready = false;
+                continue;
+            };
             let (count, worker): (i64, Option<String>) = store.db.query_row(
                 "SELECT COUNT(*), MIN(worker_id) FROM architect_workers
                  WHERE parent_session_id=?1 AND session_id=?2",
                 params![root.session_id, record.child_session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             ).map_err(|err| err.to_string())?;
-            if count != 1 { return Ok(None); }
+            if count != 1 {
+                return Err("child_council_stale: triggered S2 composite has invalid native ownership.".into());
+            }
             escalated_count += 1;
             (AuthenticatedParentSeat {
                 root_session_id: root.session_id.clone(),
@@ -2103,35 +2115,39 @@ pub(super) fn verified_triggered_s2_parent_seats(
             || !child_ids.insert(seat.child_session_id.clone())
             || !parent_ids.insert(seat.parent_worker_id.clone())
             || seat.bot_id != choice.bot_id
+            || root.workers.iter().any(|worker|
+                worker.id == seat.parent_worker_id || worker.session_id == seat.child_session_id)
             || child.workers.iter().any(|leaf| {
                 leaf.id.is_empty() || leaf.session_id.is_empty()
                     || !leaf_ids.insert(leaf.id.clone())
                     || !leaf_sessions.insert(leaf.session_id.clone())
+                    || root.workers.iter().any(|worker|
+                        worker.id == leaf.id || worker.session_id == leaf.session_id)
                     || leaf.council.as_ref().is_none_or(|review|
                         review.round != 1 && review.round != 2)
             })
         {
-            return Ok(None);
+            return Err("child_council_stale: triggered S2 reused a reviewer identity or session.".into());
         }
         seats.push(seat);
     }
     // Extra persistent composite or escalation rows are never silent votes.
-    for (kind, prefix, expected) in [
-        ("council_parent_seat",
-         format!("native-council-parent-seat:{}:", root.council_since), clean_count),
-        ("council_child_s2_receipt",
-         format!("native-council-child-s2-receipt:{}:", root.council_since), escalated_count),
+    for (prefix, expected) in [
+        (format!("native-council-parent-seat:{}:", root.council_since), clean_count),
+        (format!("native-council-child-s2-receipt:{}:", root.council_since), escalated_count),
     ] {
         let count: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM architect_requests
-             WHERE parent_session_id=?1 AND kind=?2
-             AND substr(key,1,length(?3))=?3",
-            params![root.session_id, kind, prefix],
+             WHERE parent_session_id=?1
+             AND substr(key,1,length(?2))=?2",
+            params![root.session_id, prefix],
             |row| row.get(0),
         ).map_err(|err| err.to_string())?;
-        if count != expected as i64 { return Ok(None); }
+        if count != expected as i64 {
+            return Err("child_council_stale: unexpected triggered S2 receipt in root cycle.".into());
+        }
     }
-    Ok((escalated_count > 0
+    Ok((ready && escalated_count > 0
         && seats.len() == config.nested_bot_reviewers.len()).then_some(seats))
 }
 

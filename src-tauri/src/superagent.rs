@@ -42,6 +42,11 @@ const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 /// ticket mandate lifetime. A late provider result must never become newly
 /// approvable after its execution budget has elapsed.
 const MAX_ASSIGNMENT_RUN_MS: i64 = 30 * 60 * 1000;
+// These exact native admission outcomes occur before an Assignment is reserved.
+// Headless polling may defer only these outcomes, never provider failures.
+const RETRY_WORKER_OCCUPIED: &str =
+    "Worker is occupied; the original blocked ticket remains queued for manual retry.";
+const COORDINATED_WORKER_OCCUPIED: &str = "Worker is occupied; coordinated ticket stays queued.";
 
 fn assignment_within_budget(started_at: i64, now: i64) -> bool {
     started_at > 0 && now >= started_at
@@ -5963,7 +5968,7 @@ fn retry_blocked_with_request(
         store, &worker.id, &config.project_id, &worker.project_id,
     )?;
     if busy || occupied {
-        return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
+        return Err(RETRY_WORKER_OCCUPIED.into());
     }
     let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
     let advice = original_coordinator_advice(store, ticket_id, &coordinator.id, &coordinator.project_id)?;
@@ -6110,7 +6115,7 @@ fn prepare_coordinated_worker_with_request(
         store, &worker.id, &config.project_id, &worker.project_id,
     )?;
     if busy || occupied {
-        return Err("Worker is occupied; coordinated ticket stays queued.".into());
+        return Err(COORDINATED_WORKER_OCCUPIED.into());
     }
     let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
     let worker_context = fit_worker_context(
@@ -6256,22 +6261,34 @@ pub(crate) async fn dispatch_pending_headless(app: &tauri::AppHandle) -> Result<
     if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
         return Ok(());
     }
-    let request = {
+    let requests = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        headless_dispatch::next_pending(&store)?
+        headless_dispatch::pending_batch(&store)?
     };
-    let Some(request) = request else { return Ok(()) };
-    let result = if !headless_dispatch::is_current(&request, storage::now()) {
-        Err("Explicit headless dispatch request expired; inspect the Demand and confirm a new request.".into())
-    } else if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-        return Ok(());
-    } else {
-        dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
+    for request in requests {
+        if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            return Ok(());
+        }
+        if !headless_dispatch::is_current(&request, storage::now()) {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            headless_dispatch::reject_pending(&store, &request,
+                "Explicit headless dispatch request expired; inspect the Demand and confirm a new request.")?;
+            continue;
+        }
+        match dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
             request.kind == "coordinated", Some(&request)).await
-    };
-    if let Err(error) = result {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
-        headless_dispatch::reject_pending(&store, &request, &error)?;
+        {
+            Ok(_) => break,
+            Err(error) => {
+                let store = state.store.lock().map_err(|e| e.to_string())?;
+                // A busy Worker has not reserved an Assignment. Keep the
+                // original intent and try an independent ready Demand instead.
+                // All other failures retain the existing terminal settlement.
+                if !headless_dispatch::settle_poll_failure(&store, &request, &error)? {
+                    break;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -7590,6 +7607,100 @@ mod tests {
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
             [id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn headless_busy_intent_waits_without_blocking_an_independent_checkout() {
+        let mut store = fixture();
+        let first_team = enabled(&store);
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-project','Other','/tmp/disposable-superagent-other')", [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Other Builder','other-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let other_team = create_configuration(&store, NewOrchestration {
+            name: "Independent safe manual".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&other_team.id],
+        ).unwrap();
+        let first_raw = headless_queue_demand(&store.path, &first_team.id,
+            "Inspect first checkout", "busy-demand").unwrap();
+        let other_raw = headless_queue_demand(&store.path, &other_team.id,
+            "Inspect independent checkout", "ready-demand").unwrap();
+        let first_view: serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        let other_view: serde_json::Value = serde_json::from_str(&other_raw).unwrap();
+        let first_id = first_view["ticketId"].as_str().unwrap();
+        let other_id = other_view["ticketId"].as_str().unwrap();
+        let first_revision = get_ticket(&store, first_id).unwrap().revision;
+        let other_revision = get_ticket(&store, other_id).unwrap().revision;
+        let first = headless_dispatch::enqueue(&store, first_id, first_revision, "busy-intent").unwrap();
+        let other = headless_dispatch::enqueue(&store, other_id, other_revision, "ready-intent").unwrap();
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=?2 WHERE id=?1",
+            params![first.id, storage::now() - 1000]).unwrap();
+        let pending = headless_dispatch::pending_batch(&store).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, first.id);
+        assert_eq!(pending[1].id, other.id);
+
+        // The ordinary native chat occupies only the first checkout.
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let active = vec![ordinary.id];
+        let busy = active_manual_conflict(&store, &active, "worker", "project").unwrap();
+        assert!(busy);
+        let error = retry_blocked_with_request(
+            &mut store, first_id, first_revision, busy, Some(&pending[0])).unwrap_err();
+        assert_eq!(error, RETRY_WORKER_OCCUPIED);
+        assert!(headless_dispatch::settle_poll_failure(&store, &pending[0], &error).unwrap());
+        assert!(assignment_session(&store, first_id).unwrap().is_none());
+        assert_eq!(get_ticket(&store, first_id).unwrap().revision, first_revision);
+
+        let other_busy = active_manual_conflict(&store, &active, "other-worker", "other-project").unwrap();
+        assert!(!other_busy);
+        let (running, _, worker, _) = retry_blocked_with_request(
+            &mut store, other_id, other_revision, other_busy, Some(&pending[1])).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(worker, "other-worker");
+        assert_eq!(headless_dispatch::pending_batch(&store).unwrap()[0].id, first.id);
+
+        // Once the ordinary chat releases its slot, the same durable intent
+        // can reserve the first Worker without a new request key or grant.
+        let (first_running, _, first_worker, _) = retry_blocked_with_request(
+            &mut store, first_id, first_revision, false, Some(&pending[0])).unwrap();
+        assert_eq!(first_running.state, "running");
+        assert_eq!(first_worker, "worker");
+        assert!(headless_dispatch::pending_batch(&store).unwrap().is_empty());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [first_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_poll_does_not_defer_expired_or_non_occupancy_failures() {
+        let store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id, "Inspect", "poll-expiry").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let first = headless_dispatch::enqueue(&store, id, revision, "expired-busy").unwrap();
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
+            [&first.id]).unwrap();
+        let expired = headless_dispatch::next_pending(&store).unwrap().unwrap();
+        assert!(!headless_dispatch::settle_poll_failure(&store, &expired, RETRY_WORKER_OCCUPIED).unwrap());
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        let second = headless_dispatch::enqueue(&store, id, revision, "permanent-failure").unwrap();
+        assert!(!headless_dispatch::settle_poll_failure(&store, &second,
+            "Worker dispatch failed after native reservation").unwrap());
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
     }
 
     #[test]

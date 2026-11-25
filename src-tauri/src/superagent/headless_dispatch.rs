@@ -232,9 +232,19 @@ pub(crate) fn headless_cancel(
     })).map_err(|e| e.to_string())
 }
 
+/// Bounded FIFO snapshot: one occupied checkout must not prevent an
+/// independently authorized Demand from reaching native admission.
+pub(super) fn pending_batch(store: &Store) -> Result<Vec<DispatchRequest>> {
+    let mut statement = store.db.prepare(
+        &format!("{SELECT} WHERE state='pending' ORDER BY created_at,id LIMIT 200"),
+    ).map_err(|e| e.to_string())?;
+    let rows = statement.query_map([], row).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
 pub(super) fn next_pending(store: &Store) -> Result<Option<DispatchRequest>> {
-    store.db.query_row(&format!("{SELECT} WHERE state='pending' ORDER BY created_at,id LIMIT 1"),
-        [], row).optional().map_err(|e| e.to_string())
+    Ok(pending_batch(store)?.into_iter().next())
 }
 
 pub(super) fn is_current(request: &DispatchRequest, now: i64) -> bool {
@@ -274,6 +284,26 @@ pub(super) fn consume(
         params![ticket.id,format!("Dispatch request {} reserved native Assignment {assignment_id}",request.id),now],
     ).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Only known native pre-reservation occupancy outcomes may wait. All other
+/// errors (including provider launch failures) retain terminal settlement.
+/// Returning true lets the poller try the next independent pending request.
+pub(super) fn settle_poll_failure(
+    store: &Store, request: &DispatchRequest, reason: &str,
+) -> Result<bool> {
+    let busy = reason == super::RETRY_WORKER_OCCUPIED
+        || reason == super::COORDINATED_WORKER_OCCUPIED;
+    if busy && is_current(request, storage::now()) {
+        return Ok(true);
+    }
+    let rejection = if busy {
+        "Explicit headless dispatch request expired; inspect the Demand and confirm a new request."
+    } else {
+        reason
+    };
+    reject_pending(store, request, rejection)?;
+    Ok(false)
 }
 
 /// Rejection is terminal for this key. A provider launch failure occurs only

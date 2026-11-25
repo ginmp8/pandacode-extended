@@ -144,7 +144,17 @@ fn expire_pending(tx: &Transaction<'_>, now: i64) -> Result<()> {
 pub(super) fn reject_stale_pending(
     tx: &Transaction<'_>, ticket_id: &str, now: i64,
 ) -> Result<()> {
-    let predicate = "ticket_id=?1 AND state='pending' AND EXISTS(
+    retire_stale_pending(tx, Some(ticket_id), now)
+}
+
+/// The queue capacity is global. Retire obsolete intents across all Tickets
+/// before counting capacity, even if another writer left an old intent behind.
+/// This only rejects pending requests whose recorded revision no longer matches;
+/// it cannot admit, replay or modify a current or already admitted request.
+fn retire_stale_pending(
+    tx: &Transaction<'_>, ticket_id: Option<&str>, now: i64,
+) -> Result<()> {
+    let predicate = "(?1 IS NULL OR ticket_id=?1) AND state='pending' AND EXISTS(
         SELECT 1 FROM sa_tickets t WHERE t.id=sa_headless_dispatch_requests.ticket_id
         AND t.revision<>sa_headless_dispatch_requests.expected_revision)";
     tx.execute(
@@ -308,7 +318,7 @@ fn enqueue_in_transaction(
     store: &Store, tx: &Transaction<'_>, ticket_id: &str, revision: i64, key: &str, now: i64,
 ) -> Result<DispatchRequest> {
     expire_pending(tx,now)?;
-    reject_stale_pending(tx,ticket_id,now)?;
+    retire_stale_pending(tx,None,now)?;
     if let Some(prior) = by_key(store, ticket_id, key)? {
         if prior.expected_revision != revision {
             return Err("Dispatch request key is already bound to another Ticket revision.".into());
@@ -385,7 +395,7 @@ pub(super) fn advance_after_acceptance(
         return Ok(());
     }
     expire_pending(tx,now)?;
-    reject_stale_pending(tx,ticket_id,now)?;
+    retire_stale_pending(tx,None,now)?;
     let occupied:bool=tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_headless_dispatch_requests WHERE ticket_id=?1 AND state='pending')
          OR (SELECT COUNT(*) FROM sa_headless_dispatch_requests WHERE state='pending')>=200",
@@ -634,4 +644,73 @@ fn settle_pending(
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+
+#[cfg(test)]
+mod stale_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn new_dispatch_retires_unrelated_stale_intents_without_touching_current_requests() {
+        let path = std::env::temp_dir().join(format!("sa-stale-capacity-{}.sqlite3", storage::id()));
+        let store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/sa-stale-capacity')",
+            [],
+        ).unwrap();
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg = super::super::create_configuration(&store, super::super::NewOrchestration {
+            name: "Dispatch capacity".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&cfg.id],
+        ).unwrap();
+        let stage = |key: &str| {
+            let raw = super::super::headless_queue_demand(&path, &cfg.id, "Inspect source", key).unwrap();
+            let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            (view["ticketId"].as_str().unwrap().to_owned(), view["revision"].as_i64().unwrap())
+        };
+        let (stale, stale_rev) = stage("stale-demand");
+        let (current, current_rev) = stage("current-demand");
+        let (fresh, fresh_rev) = stage("fresh-demand");
+        let old = enqueue(&store, &stale, stale_rev, "old").unwrap();
+        let live = enqueue(&store, &current, current_rev, "live").unwrap();
+        // Simulate a legacy writer leaving an obsolete intent behind.
+        store.db.execute("UPDATE sa_tickets SET revision=revision+1 WHERE id=?1", [&stale]).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER fail_stale_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected'
+             BEGIN SELECT RAISE(ABORT,'test audit failure'); END;"
+        ).unwrap();
+        assert!(enqueue(&store, &fresh, fresh_rev, "new").is_err());
+        assert_eq!(by_key(&store, &stale, "old").unwrap().unwrap().state, "pending");
+        assert!(by_key(&store, &fresh, "new").unwrap().is_none());
+        store.db.execute_batch("DROP TRIGGER fail_stale_audit;").unwrap();
+
+        let next = enqueue(&store, &fresh, fresh_rev, "new").unwrap();
+        let retired = by_key(&store, &stale, "old").unwrap().unwrap();
+        assert_eq!(retired.id, old.id);
+        assert_eq!(retired.state, "rejected");
+        assert_eq!(retired.rejection.as_deref(), Some("Ticket revision changed"));
+        assert_eq!(by_key(&store, &current, "live").unwrap().unwrap().id, live.id);
+        assert_eq!(by_key(&store, &current, "live").unwrap().unwrap().state, "pending");
+        assert_eq!(enqueue(&store, &fresh, fresh_rev, "new").unwrap().id, next.id);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [&stale], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id IN (?1,?2,?3)",
+            params![stale,current,fresh], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
 }

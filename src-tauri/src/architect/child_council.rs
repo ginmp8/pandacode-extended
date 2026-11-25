@@ -2454,8 +2454,7 @@ fn issue_leaf_wave(
              S3 NATIVE CHILD CHALLENGE HANDOFF: {evidence}"
         ))
     } else { None };
-    for index in 0..choice.child_reviewers {
-        let lens = lenses[index].clone();
+    for (index, lens) in lenses.into_iter().take(choice.child_reviewers).enumerate() {
         let mut assignment = format!(
                 "Review the frozen task artifact independently for the {lens} criterion. \
                  You are a task-scoped Council leaf, never the coordinating bot. \

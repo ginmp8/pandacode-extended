@@ -304,7 +304,7 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     }
     const extra = selected ? Number(panel.querySelector<HTMLInputElement>('input[name="councilAutomaticReviewers"]')?.value ?? 0) : 0;
     const seats = selected ? selectedBots.length + extra : 0;
-    const criteriaNote = source !== 'architect' ? ` · ${rows.length} required criterion${rows.length === 1 ? '' : 's'} (not yet verified)` : '';
+    const criteriaNote = source !== 'architect' ? ` · ${rows.length} required ${rows.length === 1 ? 'criterion' : 'criteria'} (not yet verified)` : '';
     panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = (selected
       ? `Council preview: ${seats} root seats (${selectedBots.length} selected bots + ${extra} automatic). Each child Council counts once.`
       : 'Council preview: automatic native reviewers.') + criteriaNote;

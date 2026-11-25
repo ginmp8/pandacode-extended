@@ -9,6 +9,24 @@ async function showBots(page: Page): Promise<void> {
   await expect(sidebar(page)).toBeVisible();
 }
 
+// Seed the real preview Channel, not a detached DOM-only assignment: native
+// reads and Channel refresh notifications must use the same delivery identity.
+async function seedCouncilDelivery(page: Page, state: 'Passed' | 'Reviewing', lowest: number | null): Promise<void> {
+  const delivery = {
+    id: 'delivery-one', kind: 'assigned', authorBotId: null, text: '', status: 'Completed', createdAt: 1,
+    council: { cycleId: 'cycle-one', sessionId: 'channel-root', state,
+      round: 1, target: 9, lowest, artifactRevision: 'artifact', reviewers: [] },
+  };
+  await page.route('**/src/preview-bots.ts*', async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const body = source.replace(/sharedChannels\.set\(\s*['"]sample-launch['"]\s*,\s*\{[^}]*?messages:\s*\[\]/,
+      match => match.replace(/messages:\s*\[\]/, () => 'messages: [' + JSON.stringify(delivery) + ']'));
+    if (body === source) throw new Error('Sample Channel Council delivery seed was not installed.');
+    await route.fulfill({ response, body });
+  });
+}
+
 test.describe('shared bot channels', () => {
 
   test('bot collaboration: Council opens from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
@@ -491,6 +509,7 @@ test.describe('shared bot channels', () => {
     await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
     await panel.getByRole('textbox', { name: 'Review lens' }).fill('Authorization boundary');
     await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+    await expect(panel.getByRole('status')).toContainText('1 required criterion (not yet verified)');
     await panel.getByRole('button', { name: 'Add criterion' }).click();
     await expect(panel.locator('[data-council-criterion-row]')).toHaveCount(2);
     await panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1).fill('security');
@@ -597,12 +616,15 @@ test.describe('shared bot channels', () => {
         tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
       }],
     };
+    await seedCouncilDelivery(page, 'Passed', 9.7);
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
-        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") { ' +
+      const source = await response.text();
+      const body = source.replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "sample-launch" && args.deliveryId === "delivery-one") { ' +
         'if (window.__channelCouncilInspectionError) throw new Error(window.__channelCouncilInspectionError); return ' +
         '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); } if (command === "bots_list" || command.startsWith("bot_"))');
+      if (body === source) throw new Error('Channel Council inspector interceptor was not installed.');
       await route.fulfill({ response, body });
     });
     await showBots(page);
@@ -610,27 +632,6 @@ test.describe('shared bot channels', () => {
     // Channel rendering is async at narrow widths; fixture insertion must
     // target the real, visible thread rather than racing the navigation.
     await expect(page.locator('.conversation-pane.channel-thread .bc-history')).toBeVisible();
-    await page.evaluate(async () => {
-      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
-      const wrapper = document.createElement('div');
-      wrapper.innerHTML = sharedChannelThreadHtml({
-        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
-        archived: false, updatedAt: 1, activeBotIds: [],
-        messages: [{
-          id: 'delivery-one', kind: 'assigned', authorBotId: null,
-          text: '', status: 'Completed', createdAt: 1,
-          council: {
-            cycleId: 'cycle-one', sessionId: 'channel-root', state: 'Passed',
-            round: 1, target: 9, lowest: 9.7, artifactRevision: 'artifact',
-            reviewers: [],
-          },
-        }],
-      }, []);
-      const assignment = wrapper.querySelector('.bc-assigned');
-      const history = document.querySelector('.bc-history');
-      if (!assignment || !history) throw new Error('Channel fixture is missing');
-      history.append(assignment);
-    });
     await expect(page.getByRole('button', { name: 'View Council report' })).toBeVisible();
     await page.getByRole('button', { name: 'Inspect Council evidence' }).click();
     const dialog = page.getByRole('dialog', { name: 'Council inspection' });
@@ -687,7 +688,7 @@ test.describe('shared bot channels', () => {
     // without navigating away, even when its root completion still matches.
     await page.evaluate(snapshot => {
       (window as any).__channelCouncilInspectorOverride = snapshot;
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     }, { ...accepted, reservedChildren: [{
       ...accepted.reservedChildren[0],
       verifiedChildReceipt: { rootCycleId: 'channel-root:1000', childSessionId: 'channel-child-one',
@@ -705,7 +706,7 @@ test.describe('shared bot channels', () => {
     await page.evaluate(() => {
       (window as any).__channelCouncilInspectionError =
         'child_council_stale: unexpected triggered S2 receipt /private/channel-child';
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     });
     await expect(dialog.getByRole('alert')).toHaveText(
       'Council child evidence is stale or conflicting. Native approval is blocked; refresh after recovery.');
@@ -718,7 +719,7 @@ test.describe('shared bot channels', () => {
     // Missing required phase evidence is pending, not a conflicting receipt.
     await page.evaluate(snapshot => {
       (window as any).__channelCouncilInspectorOverride = snapshot;
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     }, { ...accepted, strategy: 'escalated', forceEscalation: true });
     await expect(dialog).toContainText('Required child phase receipts are pending');
     await expect(dialog).not.toContainText('Conflicting child receipts in this inspection');
@@ -731,7 +732,7 @@ test.describe('shared bot channels', () => {
     await refresh.focus();
     await page.evaluate(snapshot => {
       (window as any).__channelCouncilInspectorOverride = snapshot;
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     }, { ...inspection, teamRevision: 11, status: { ...inspection.status, state: 'reviewing', stale: true } });
     await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
     await expect(dialog.getByText('Stale revision', { exact: false })).toBeVisible();
@@ -742,7 +743,7 @@ test.describe('shared bot channels', () => {
     await expect(details.locator('.council-inspection-body')).toBeEmpty();
     await page.evaluate(snapshot => {
       (window as any).__channelCouncilInspectorOverride = snapshot;
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     }, { ...inspection, reportedFindings: [], reservedChildren: [{ botId: 'Foreign child bot',
       childSessionId: 'foreign-child', rootCycleId: 'other-channel:1000', requiredLeafReviewers: 2, status: 'reviewing' }] });
     await expect(details.locator('.council-inspection-body')).toBeEmpty();
@@ -774,7 +775,7 @@ test.describe('shared bot channels', () => {
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     await page.evaluate(next => {
       (window as any).__channelCouncilInspectorOverride = next;
-      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
     }, { ...inspection, teamRevision: 12, status: { ...inspection.status, state: 'reviewing', stale: true } });
     await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toHaveCount(0);
@@ -802,32 +803,19 @@ test.describe('shared bot channels', () => {
         explanation: 'Another delivery', artifactRevision: 'other-revision',
         verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false }],
     };
+    await seedCouncilDelivery(page, 'Reviewing', null);
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
-        'if (command === "bot_shared_channel_council_inspect") return ' +
+      const source = await response.text();
+      const body = source.replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "sample-launch" && args.deliveryId === "delivery-one") return ' +
         '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(own) + '); if (command === "bots_list" || command.startsWith("bot_"))');
+      if (body === source) throw new Error('Channel Council inspector interceptor was not installed.');
       await route.fulfill({ response, body });
     });
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     await expect(page.locator('.conversation-pane.channel-thread .bc-history')).toBeVisible();
-    await page.evaluate(async () => {
-      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
-      const wrapper = document.createElement('div');
-      wrapper.innerHTML = sharedChannelThreadHtml({
-        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
-        archived: false, updatedAt: 1, activeBotIds: [],
-        messages: [{ id: 'delivery-one', kind: 'assigned', authorBotId: null,
-          text: '', status: 'Completed', createdAt: 1,
-          council: { cycleId: 'cycle-one', sessionId: 'channel-root', state: 'Reviewing',
-            round: 1, target: 9, lowest: null, artifactRevision: 'artifact', reviewers: [] } }],
-      }, []);
-      const assignment = wrapper.querySelector('.bc-assigned');
-      const history = document.querySelector('.bc-history');
-      if (!assignment || !history) throw new Error('Channel fixture is missing');
-      history.append(assignment);
-    });
     // A foreign response on the FIRST native read must never become the bound
     // Channel task or display its private findings/approval.
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, foreign);

@@ -680,7 +680,14 @@ test.describe('shared bot channels', () => {
     // a read of this delivery or silently replace the inspected native scope.
     const accepted = { ...inspection, teamRevision: 10, verifiedPass: true,
       verifiedCompletion: { sessionId: 'channel-root', cycleId: 'channel-root:1000',
-        teamRevision: 10, round: 1, lowest: 9.7 } };
+        teamRevision: 10, round: 1, lowest: 9.7 },
+      reservedChildren: [{
+        ...inspection.reservedChildren[0], status: 'parent_composite_ready_root_pending',
+        verifiedChildReceipt: { rootCycleId: 'channel-root:1000',
+          childSessionId: 'channel-child-one', botId: 'security-child',
+          objectiveSha256: 'objective', policySha256: 'policy', childConfigSha256: 'config',
+          lowestScore: 9.7, leafWorkerIds: ['leaf-a', 'leaf-b'] },
+      }] };
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
     await refresh.click();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();

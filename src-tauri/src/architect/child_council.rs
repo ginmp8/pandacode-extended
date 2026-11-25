@@ -751,6 +751,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         if !matches!(old.status.as_str(), "interrupted" | "error")
             && !stale_paused_child && !physical_restart
         {
+            // A sibling that does not need replacement still belongs to the
+            // same frozen roster. Authenticate its ownership, policy and
+            // isolated native state before allowing any replacement to commit.
+            read(store, root, choice)
+                .map_err(|reason| format!("child_council_recovery_denied: {reason}"))?
+                .ok_or("child_council_recovery_denied: unchanged child reservation is missing.")?;
             continue;
         }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)

@@ -5938,6 +5938,46 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
             rusqlite::params![&sid, original_status],
         ).unwrap();
     }
+    // Even a pristine sibling that needs no replacement must authenticate.
+    // Corrupt its frozen reservation after the first child became recoverable;
+    // denial must roll back the entire transaction, not just the sibling.
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let original: String = store.db.query_row(
+            "SELECT content FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &sibling_child], |row| row.get(0),
+        ).unwrap();
+        let before_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE architect_requests SET content='{}'
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &sibling_child],
+        ).unwrap();
+        let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+        assert!(denied.contains("malformed frozen child reservation"), "{denied}");
+        let reserved: String = store.db.query_row(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &old_child], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reserved, old_child);
+        let after_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(after_count, before_count, "failed recovery must not issue new ownership");
+        assert_eq!(serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(), before_root);
+        store.db.execute(
+            "UPDATE architect_requests SET content=?3
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            rusqlite::params![&sid, &sibling_child, original],
+        ).unwrap();
+    }
     // An interrupted child and a still-live sibling must never be replaced
     // together. Native coordinator state wins over a paused TeamSnapshot;
     // the SQLite transaction must roll back the interrupted replacement.

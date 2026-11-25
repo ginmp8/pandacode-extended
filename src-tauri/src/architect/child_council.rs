@@ -688,7 +688,11 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         // Root Pause stops leaf providers, not the isolated coordinator.
         // A separately paused/stopped coordinator has revoked authority;
         // explicit crash recovery must not silently replace that seat.
-        if matches!(old.status.as_str(), "paused" | "stopped") {
+        let (coordinator_restart, coordinator_stop): (i64, i64) = store.db.query_row(
+            "SELECT restart_interrupted,stop_requested FROM sessions WHERE id=?1",
+            [&old_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        if coordinator_stop != 0 || matches!(old.status.as_str(), "paused" | "stopped") {
             return Err("child_council_recovery_denied: child coordinator was independently paused or stopped.".into());
         }
         let mut old_team = super::load(store, &old_id)?
@@ -707,6 +711,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 "SELECT restart_interrupted FROM sessions WHERE id=?1",
                 [&root.session_id], |row| row.get::<_, i64>(0),
             ).map_err(|e| e.to_string())? == 1;
+        // Store::open marks running sessions interrupted even when a user
+        // requested Stop; only restart_interrupted=1 proves a native crash.
+        // An idle coordinator is a reservation and needs no provider restart.
+        if physical_restart && old.status == "interrupted" && coordinator_restart != 1 {
+            return Err("child_council_recovery_denied: child coordinator has no confirmed physical restart.".into());
+        }
         if physical_restart {
             old_team.status = "running".into();
             old_team.generation -= 1;

@@ -7624,6 +7624,39 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![&sid, &sealed_key],
     ).unwrap();
+    // Store::open does not distinguish a user-stopped coordinator by status
+    // alone. Its native restart and stop markers must independently prove
+    // authority before replacing either sibling, even with valid leaf grants.
+    let coordinator = &sibling_launch.admission.parent;
+    assert_eq!(reopened.session(coordinator).unwrap().status, "interrupted");
+    assert_eq!(reopened.db.query_row(
+        "SELECT restart_interrupted FROM sessions WHERE id=?1",
+        [coordinator], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+    for (stop, expected) in [(1, "independently paused or stopped"),
+        (0, "coordinator has no confirmed physical restart")] {
+        reopened.db.execute(
+            "UPDATE sessions SET restart_interrupted=0,stop_requested=?2 WHERE id=?1",
+            rusqlite::params![coordinator, stop],
+        ).unwrap();
+        let denied = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+        assert!(denied.contains(expected), "{denied}");
+        assert_eq!(serde_json::to_value(load(&reopened, &sid).unwrap().unwrap()).unwrap(), before_root);
+        for id in old_children {
+            assert_eq!(reopened.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, id], |row| row.get::<_, i64>(0),
+            ).unwrap(), 1);
+        }
+        for id in &old_leaves {
+            assert!(parent_of(&reopened, id).unwrap().is_some(),
+                "denied sibling recovery must not detach any original grant");
+        }
+    }
+    reopened.db.execute(
+        "UPDATE sessions SET restart_interrupted=1,stop_requested=0 WHERE id=?1",
+        [coordinator],
+    ).unwrap();
     // A user-stopped native leaf is not proof of restart revocation.
     // The transaction must roll back all replacements.
     reopened.db.execute("UPDATE sessions SET restart_interrupted=0 WHERE id=?1",

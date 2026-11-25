@@ -337,8 +337,9 @@ test.describe('shared bot channels', () => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
-        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") return ' +
-        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); switch (command) {');
+        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") { ' +
+        'if (window.__channelCouncilInspectionError) throw new Error(window.__channelCouncilInspectionError); return ' +
+        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); } switch (command) {');
       await route.fulfill({ response, body });
     });
     await showBots(page);
@@ -434,6 +435,21 @@ test.describe('shared bot channels', () => {
     await expect(dialog).not.toContainText('Verified native pass');
     await expect(dialog.locator('.council-verified-completion')).toHaveCount(0);
     await page.evaluate(snapshot => { (window as any).__channelCouncilInspectorOverride = snapshot; }, accepted);
+    await refresh.click();
+    await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
+    // A native cycle-wide S2 conflict may reject the entire inspection rather
+    // than returning a child projection. The shared view must fail closed.
+    await page.evaluate(() => {
+      (window as any).__channelCouncilInspectionError =
+        'child_council_stale: unexpected triggered S2 receipt /private/channel-child';
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'channel-one' });
+    });
+    await expect(dialog.getByRole('alert')).toHaveText(
+      'Council child evidence is stale or conflicting. Native approval is blocked; refresh after recovery.');
+    await expect(dialog).not.toContainText('/private/channel-child');
+    await expect(dialog).not.toContainText('Verified native pass');
+    await expect(dialog.locator('.council-verified-completion')).toHaveCount(0);
+    await page.evaluate(() => { delete (window as any).__channelCouncilInspectionError; });
     await refresh.click();
     await expect(dialog.getByText('Verified native pass', { exact: false })).toBeVisible();
     // Missing required phase evidence is pending, not a conflicting receipt.

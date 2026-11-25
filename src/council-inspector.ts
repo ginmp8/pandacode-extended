@@ -619,7 +619,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
         }
       }
       shownScope = nextScope;
-    }).catch(() => {
+    }).catch((reason: unknown) => {
       if (serial !== current || !details.open || !details.isConnected) return;
       shownScope = null;
       body.replaceChildren();
@@ -627,7 +627,11 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       error.setAttribute('role', 'alert');
       // Native/provider errors can contain private paths or Channel data. Do not
       // render untrusted exception details in a shared read-only inspector.
-      error.textContent = 'Could not inspect this Council. Check task access and retry.';
+      const message = typeof reason === 'string' ? reason
+        : reason instanceof Error ? reason.message : '';
+      error.textContent = message.startsWith('child_council_stale:')
+        ? 'Council child evidence is stale or conflicting. Native approval is blocked; refresh after recovery.'
+        : 'Could not inspect this Council. Check task access and retry.';
       body.append(error);
     }).finally(() => {
       if (serial === current) {

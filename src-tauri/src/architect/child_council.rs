@@ -3131,6 +3131,9 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     // Read-only inspection must not mistake independently valid but jointly
     // conflicting child records for a trustworthy root roster.
     let _ = verified_parent_seats(store, root)?;
+    // Use the same native unforced-S2 cycle-wide receipt validation as the
+    // terminal gate. A phantom second-wave slot is not a pending child review.
+    let _ = verified_triggered_s2_parent_seats(store, root)?;
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;

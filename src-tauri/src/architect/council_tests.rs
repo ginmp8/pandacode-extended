@@ -10528,11 +10528,16 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
             record_request(&store, &sid, &key, "foreign_kind", "{}", &owner).unwrap();
             assert!(child_council::verified_triggered_s2_parent_seats(&store, &saved).is_err());
             assert!(!verified_council_pass(&store, &saved));
+            assert!(matches!(council_inspection_state(&store, &sid),
+                Err(err) if err.starts_with("child_council_stale:")),
+                "the shared native inspector must reject conflicting S2 receipt slots");
             store.db.execute(
                 "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
                 rusqlite::params![sid, key],
             ).unwrap();
             assert!(verified_council_pass(&store, &saved));
+            assert!(council_inspection_state(&store, &sid).unwrap().unwrap().verified_pass,
+                "restoring native evidence restores the verified inspection");
         }
         let children = child_council::verified_parent_seats(&store, &saved)
             .unwrap().unwrap();

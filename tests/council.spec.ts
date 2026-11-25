@@ -31,6 +31,7 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
         return team;
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
+      if (command === 'architect_council_inspect' && window.__councilInspectionError) throw new Error(window.__councilInspectionError);
       if (command === 'architect_council_inspect' && ${inspection !== undefined}) return (window.__councilInspectorOverride ?? ${JSON.stringify(inspection ?? null)});
       if (command === 'architect_get' && ${Boolean(criteriaPreset)}) {
         const team = architect.get(args.sessionId);
@@ -1712,6 +1713,58 @@ test('Council inspector never promotes an unverified terminal hint', async ({ pa
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
+
+for (const consumer of ['direct', 'embedded'] as const) {
+  test(`Council inspector clears a verified result on native child evidence conflict (${consumer})`, async ({ page }) => {
+    const snapshot = {
+      sessionId: 'session-1', mode: 'm5', strategy: 'escalated', forceEscalation: false,
+      cycleStartedAt: 1000, teamRevision: 17,
+      status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
+        teamRevision: 17, round: 1, lowest: 9.4 },
+      criteria: [], attempts: [],
+    };
+    await page.setViewportSize({ width: 360, height: 640 });
+    await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+    const view = consumer === 'direct' ? panel(page).locator('.council-inspection')
+      : page.locator('#embedded-s2-conflict .council-inspection');
+    if (consumer === 'direct') {
+      await button(page).click();
+      await view.locator('summary').click();
+    } else {
+      await page.evaluate(async inspection => {
+        const { createCouncilInspector } = await import('/src/council-inspector.ts');
+        const host = document.createElement('div');
+        host.id = 'embedded-s2-conflict';
+        document.body.append(host);
+        const detail = createCouncilInspector(async () => {
+          const failure = (window as any).__councilInspectionError;
+          if (failure) throw failure;
+          return inspection as any;
+        }, 'session-1');
+        host.append(detail);
+        detail.open = true;
+      }, snapshot);
+    }
+    await expect(view).toContainText('Verified native pass');
+    const refresh = view.getByRole('button', { name: 'Refresh native evidence' });
+    await page.evaluate(() => { (window as any).__councilInspectionError =
+      'child_council_stale: unexpected triggered S2 receipt /private/child-scope'; });
+    await refresh.click();
+    await expect(view.getByRole('alert')).toHaveText(
+      'Council child evidence is stale or conflicting. Native approval is blocked; refresh after recovery.');
+    await expect(view).not.toContainText('/private/child-scope');
+    await expect(view).not.toContainText('Verified native pass');
+    await expect(view).not.toContainText('Required child phase receipts are pending');
+    await expect(view.locator('.council-verified-completion')).toHaveCount(0);
+    await expect(refresh).toBeEnabled();
+    await page.evaluate(() => { delete (window as any).__councilInspectionError; });
+    await refresh.click();
+    await expect(view).toContainText('Verified native pass');
+    await expect(view.getByRole('alert')).toHaveCount(0);
+  });
+}
 
 test('Council inspector safely redacts private native denial details and remains accessible on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });

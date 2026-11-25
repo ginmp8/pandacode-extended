@@ -7530,7 +7530,9 @@ document.addEventListener('submit', event => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && selectedBotIds.some(id => recipients.includes(id)) && isSelected) {
+    // Native routing assigns the channel lead when no bot is explicitly mentioned.
+    const executorIds = recipients.length ? recipients : channel?.leadBotId ? [channel.leadBotId] : [];
+    if (councilEnabled && selectedBotIds.some(id => executorIds.includes(id)) && isSelected) {
       notify('A message executor cannot also be one of its Council reviewers.');
       return;
     }

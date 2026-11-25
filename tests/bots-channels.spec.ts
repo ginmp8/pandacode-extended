@@ -187,7 +187,7 @@ test.describe('shared bot channels', () => {
         const response = await route.fetch();
         const source = await response.text();
         const body = source.replace(
-          "if (command === 'bots_list' || command.startsWith('bot_'))",
+          /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
           "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
         );
         if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
@@ -301,13 +301,49 @@ test.describe('shared bot channels', () => {
     });
   }
 
+  test('Channel Council denies the implicit lead executor before dispatch but permits explicit other executors', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    await panel.getByRole('checkbox', { name: 'Scout', exact: true }).check();
+    await panel.getByRole('checkbox', { name: 'Writer', exact: true }).check();
+    const prompt = composer.getByRole('textbox', { name: 'Message channel' });
+    await prompt.fill('Review this task.');
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    await expect(page.getByText('A message executor cannot also be one of its Council reviewers.', { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+    await expect(prompt).toHaveValue('Review this task.');
+    await prompt.fill('@Ledger Review this task.');
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0]);
+    expect(posted.recipients).toHaveLength(1);
+    expect(posted.council.reviewerBotIds).toHaveLength(2);
+    expect(posted.council.reviewerBotIds).not.toContain(posted.recipients[0]);
+  });
+
   test('Channel Council opt-out sends an ordinary message despite an invalid inactive draft', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const source = await response.text();
       const body = source.replace(
-        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
       );
       if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
@@ -340,7 +376,7 @@ test.describe('shared bot channels', () => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const body = (await response.text()).replace(
-        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
       );
       await route.fulfill({ response, body });
@@ -381,7 +417,7 @@ test.describe('shared bot channels', () => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const body = (await response.text()).replace(
-        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
       );
       await route.fulfill({ response, body });
@@ -437,7 +473,7 @@ test.describe('shared bot channels', () => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const body = (await response.text()).replace(
-        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
       );
       await route.fulfill({ response, body });
@@ -507,10 +543,10 @@ test.describe('shared bot channels', () => {
     };
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
+      const body = (await response.text()).replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") { ' +
         'if (window.__channelCouncilInspectionError) throw new Error(window.__channelCouncilInspectionError); return ' +
-        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); } switch (command) {');
+        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(inspection) + '); } if (command === "bots_list" || command.startsWith("bot_"))');
       await route.fulfill({ response, body });
     });
     await showBots(page);
@@ -712,9 +748,9 @@ test.describe('shared bot channels', () => {
     };
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
-      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
+      const body = (await response.text()).replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
         'if (command === "bot_shared_channel_council_inspect") return ' +
-        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(own) + '); switch (command) {');
+        '(window.__channelCouncilInspectorOverride ?? ' + JSON.stringify(own) + '); if (command === "bots_list" || command.startsWith("bot_"))');
       await route.fulfill({ response, body });
     });
     await showBots(page);

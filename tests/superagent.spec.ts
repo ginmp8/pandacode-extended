@@ -4468,6 +4468,59 @@ test('native Team creation clears stale directory filters after creation is ackn
   expect(calls).not.toContain('superagent_submit');
 });
 
+test('creating a distinct Team after a delayed native ACK clears the previous Demand draft',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-create-scope';document.body.appendChild(host);
+    const teams=[{id:'old-team',name:'Existing Team',enabled:false,policyRevision:1,
+      coordinatorBotId:'coordinator',workerBotId:'worker'}];
+    let writes=0;
+    let release:()=>void=()=>{};
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    (window as unknown as {saCreateScope:{release:()=>void;writes:()=>number}}).saCreateScope=
+      {release,writes:()=>writes};
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [...teams] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        writes++;
+        await gate;
+        const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+        const created={...input,id:'new-team',enabled:false,policyRevision:1};
+        teams.push(created);
+        return created as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-create-scope');
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Existing Team');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Private draft for existing Team');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('New Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect.poll(()=>page.evaluate(()=>
+    (window as unknown as {saCreateScope:{writes:()=>number}}).saCreateScope.writes())).toBe(1);
+  await expect(host).toHaveAttribute('aria-busy','true');
+  await page.evaluate(()=>
+    (window as unknown as {saCreateScope:{release:()=>void}}).saCreateScope.release());
+  await expect(host.getByRole('region',{name:'Selected orchestration'})).toContainText('New Team');
+  await expect(host.getByRole('textbox',{name:'Task objective'})).toHaveValue('');
+  await expect(host.getByRole('combobox',{name:'Dispatch'})).toHaveValue('coordinated');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  expect(await page.evaluate(()=>
+    (window as unknown as {saCreateScope:{writes:()=>number}}).saCreateScope.writes())).toBe(1);
+});
+
 test('new Team ACK retries a stale directory read without duplicating creation',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{

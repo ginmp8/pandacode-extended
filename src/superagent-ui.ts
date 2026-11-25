@@ -1699,16 +1699,32 @@ let demandArchived = false;
         !/^[A-Za-z0-9_-]{1,128}$/.test(created.id) || created.enabled !== false) {
       throw new Error('Native Team creation returned an invalid or enabled identity.');
     }
+    // Creating a distinct Team is not a continuation of the previous Demand.
+    // Never carry its objective, idempotency key, inspector or source state into
+    // the new Team, even when a delayed directory refresh changes selection.
     selected = created.id;
+    demandObjective = ''; demandMode = 'coordinated';
+    taskKey = crypto.randomUUID();
+    selectedDemandWorkerId = ''; demandPreflight = null;
+    tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+    inspectedAssignmentId = ''; rejectingTicket = '';
+    olderActivity = []; olderActivityTicketId = ''; olderActivityHasMore = true;
+    effectReceipts = []; effectReceiptsLoaded = false;
+    runGraph = null; runGraphLoaded = false;
+    roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
+    sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+    sourceIntegrity = null;
+    linkedDecisions = []; linkedDecisionsLoaded = false; linkedDecisionsHasMore = false;
+    clearMemberActivity();
     teamSearch = ''; teamStatusFilter = 'all';
     await reload();
     let persisted = presets.find(item => item.id === created.id);
-    if (!persisted) {
+    if (!persisted || selected !== created.id || error) {
       selected = created.id;
       await reload();
       persisted = presets.find(item => item.id === created.id);
     }
-    if (!persisted || persisted.enabled ||
+    if (!persisted || selected !== created.id || error || persisted.enabled ||
         persisted.coordinatorBotId !== created.coordinatorBotId ||
         persisted.workerBotId !== created.workerBotId) {
       selected = '';

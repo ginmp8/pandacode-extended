@@ -6615,6 +6615,32 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
         assert_eq!(serde_json::to_value(&root).unwrap(), frozen_root,
             "denied recovery must not mutate the root Council cycle");
     }
+    // A root Pause may stop leaf providers, but it does not stop the
+    // isolated coordinator itself. An independently stopped coordinator
+    // is revoked, not an interrupted reservation eligible for replacement.
+    for revoked in ["paused", "stopped"] {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&old_child, revoked],
+        ).unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        let denied = child_council::recover_interrupted_children(&store, &root).unwrap_err();
+        assert!(denied.contains("child coordinator was independently paused or stopped"), "{denied}");
+        assert_eq!(store.session(&old_child).unwrap().status, revoked);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), before);
+        for leaf in &old_leaves {
+            assert_eq!(parent_of(&store, leaf).unwrap().as_deref(), Some(old_child.as_str()));
+        }
+        assert_eq!(serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(), frozen_root);
+    }
     {
         let store = state.store.lock().unwrap();
         store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
@@ -7478,7 +7504,7 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
     ));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("state.sqlite");
-    let (sid, launch, sibling_launch) = {
+    let (sid, launch, sibling_launch, request) = {
         let store = Store::open(&path).unwrap();
         let project = store.add_project(&directory).unwrap();
         let session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
@@ -7509,6 +7535,12 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
         let (started, _) = start_state(
             &state, &session.id, "Review the frozen artifact", None, None,
         ).unwrap();
+        let request = {
+            let store = state.store.lock().unwrap();
+            council_requests::admit_native_task(
+                &store, &session.id, &project.id, "restart-native-task", &"f".repeat(64),
+            ).unwrap()
+        };
         let (result, _) = dispatch_state(
             &state, &session.id, started.generation, "pandacode_finish_team",
             json!({"summary":"Begin real nested review"}),
@@ -7565,7 +7597,7 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
                 }
             }
         }
-        (session.id, launch, sibling_launch)
+        (session.id, launch, sibling_launch, request)
     };
     let reopened = Store::open(&path).unwrap();
     let root = load(&reopened, &sid).unwrap().unwrap();
@@ -7679,6 +7711,61 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
              AND kind IN ('council_child_receipt','council_parent_seat')",
             [&sid], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+    // The original task request survives the physical restart, but cannot
+    // settle until all four independently admitted replacement leaves finish.
+    let mut first = Some(fresh);
+    let mut new_leaves = std::collections::HashSet::new();
+    for index in 0..4 {
+        let current = first.take().unwrap_or_else(||
+            next_action_state(&state, &mut |_| {}).unwrap().unwrap());
+        assert!(!old_leaves.contains(&current.sid));
+        assert!(new_leaves.insert(current.sid.clone()));
+        {
+            let store = state.store.lock().unwrap();
+            assert!(council_requests::record_native_terminal(
+                &store, &sid, &request.project_id, &request.assignment_key,
+                &request.artifact_sha256, &request.request_id,
+            ).is_err(), "unfinished replacement wave cannot settle the original task");
+            child_council::authorize_leaf(&store, &current.sid, &current.admission).unwrap();
+            store.message(&current.sid, "assistant",
+                "Independent replacement review.\nCouncil score: 9.6/10").unwrap();
+            store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
+                [&current.sid]).unwrap();
+        }
+        completed_state(&state, &current.sid, Some(&current.admission), true, false, &mut |_| {});
+        if index < 3 {
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            assert!(!verified_council_pass(&store, &root));
+        }
+    }
+    let (settled, _) = dispatch_state(&state, &sid, resumed.generation,
+        "pandacode_finish_team", json!({"summary":"All replacement reviewers completed"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(settled["completed"], true);
+    let terminal = {
+        let store = state.store.lock().unwrap();
+        let terminal = council_requests::record_native_terminal(
+            &store, &sid, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        ).unwrap();
+        assert_eq!(terminal.outcome, "passed");
+        terminal
+    };
+    for old in [&launch, &sibling_launch] {
+        completed_state(&state, &old.sid, Some(&old.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(council_requests::record_native_terminal(
+            &store, &sid, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        ).unwrap(), terminal, "late retired callbacks cannot mint a second terminal receipt");
+        assert_eq!(council_requests::read_native_terminal(
+            &store, &sid, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        ).unwrap(), terminal);
     }
     drop(state);
     std::fs::remove_dir_all(directory).unwrap();

@@ -685,6 +685,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             "child_council_recovery_denied: required frozen child reservation is missing."
         )?;
         let old = store.session(&old_id)?;
+        // Root Pause stops leaf providers, not the isolated coordinator.
+        // A separately paused/stopped coordinator has revoked authority;
+        // explicit crash recovery must not silently replace that seat.
+        if matches!(old.status.as_str(), "paused" | "stopped") {
+            return Err("child_council_recovery_denied: child coordinator was independently paused or stopped.".into());
+        }
         let mut old_team = super::load(store, &old_id)?
             .ok_or("child_council_recovery_denied: child state is missing.")?;
         // Store::open advances both Architect generations and stops running

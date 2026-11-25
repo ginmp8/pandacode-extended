@@ -1848,10 +1848,11 @@ pub(super) fn verified_s3_receipts(
         }
         receipts.push(challenge);
     }
+    // Count all occupied phase receipt keys, including unexpected kinds.
     let prefix = format!("native-council-child-s3-receipt:{}:", root.council_since);
     let recorded: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
-         WHERE parent_session_id=?1 AND kind='council_child_s3_receipt'
+         WHERE parent_session_id=?1
          AND substr(key,1,length(?2))=?2",
         params![root.session_id, prefix], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
@@ -2015,12 +2016,12 @@ pub(super) fn verified_parent_seats(
         }
         seats.push(seat);
     }
-    // Bind the record count to this cycle only. Old cycles are harmless,
-    // but phantom seats in this cycle may not be silently ignored.
+    // Bind every occupied key in this cycle's reserved namespace, regardless
+    // of its stored kind. A foreign-kind row is a conflict, not an absent vote.
     let key_prefix = format!("native-council-parent-seat:{}:", root.council_since);
     let recorded: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
-         WHERE parent_session_id=?1 AND kind='council_parent_seat'
+         WHERE parent_session_id=?1
          AND substr(key,1,length(?2))=?2",
         params![root.session_id, key_prefix],
         |row| row.get(0),
@@ -2214,10 +2215,11 @@ pub(super) fn verified_s2_receipts(
         }
         receipts.push(second);
     }
+    // Count all occupied phase receipt keys, including unexpected kinds.
     let prefix = format!("native-council-child-s2-receipt:{}:", root.council_since);
     let recorded: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
-         WHERE parent_session_id=?1 AND kind='council_child_s2_receipt'
+         WHERE parent_session_id=?1
          AND substr(key,1,length(?2))=?2",
         params![root.session_id, prefix], |row| row.get(0),
     ).map_err(|e| e.to_string())?;

@@ -9559,6 +9559,17 @@ fn assert_pending_child_does_not_hide_conflicting_sibling(
         rusqlite::params![root.session_id, first, held],
     ).unwrap(), 1);
     assert!(!verify().unwrap(), "a missing phase receipt remains pending");
+    let unexpected = format!("{prefix}:{}:unselected-bot", root.council_since);
+    record_request(store, &root.session_id, &unexpected, "foreign_kind",
+        "{}", "foreign-native-owner").unwrap();
+    assert!(verify().unwrap_err().contains("unexpected"),
+        "a pending wave must not conceal an occupied unselected receipt key");
+    assert!(!verified_council_pass(store, root));
+    assert_eq!(store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![root.session_id, unexpected],
+    ).unwrap(), 1);
+    assert!(!verify().unwrap());
     let owner: String = store.db.query_row(
         "SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![root.session_id, second], |row| row.get(0),
@@ -9582,6 +9593,30 @@ fn assert_pending_child_does_not_hide_conflicting_sibling(
     ).unwrap();
     assert!(verify().unwrap());
     assert!(verified_council_pass(store, root));
+
+    // A completed wave must reject extra keys in either reserved namespace,
+    // even if their metadata claims an unrelated request kind.
+    for (reserved, phase_receipt) in [
+        (prefix, true),
+        ("native-council-parent-seat", false),
+    ] {
+        let unexpected = format!("{reserved}:{}:unselected-bot", root.council_since);
+        record_request(store, &root.session_id, &unexpected, "foreign_kind",
+            "{}", "foreign-native-owner").unwrap();
+        if phase_receipt {
+            assert!(verify().unwrap_err().contains("unexpected"));
+        } else {
+            assert!(child_council::verified_parent_seats(store, root)
+                .unwrap_err().contains("unexpected"));
+        }
+        assert!(!verified_council_pass(store, root));
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![root.session_id, unexpected],
+        ).unwrap(), 1);
+        assert!(verify().unwrap());
+        assert!(verified_council_pass(store, root));
+    }
 }
 
 #[test]

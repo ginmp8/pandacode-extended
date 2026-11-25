@@ -5,6 +5,7 @@
 use super::{configuration, effects, get_ticket, mandate, open_headless_transition_store, Ticket};
 use crate::{storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
+use sha2::{Digest,Sha256};
 
 const MAX_REQUEST_AGE_MS: i64 = 5 * 60 * 1000;
 
@@ -28,6 +29,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS sa_headless_dispatch_pending_ticket
     ON sa_headless_dispatch_requests(ticket_id) WHERE state='pending';
 CREATE INDEX IF NOT EXISTS sa_headless_dispatch_pending_order
     ON sa_headless_dispatch_requests(created_at,id) WHERE state='pending';
+";
+
+/// Explicit opt-in to continue the exact reviewed plan after each separate
+/// human acceptance. No historical request inherits this authority.
+pub(crate) const PLAN_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS sa_headless_plan_dispatch (
+ request_id TEXT PRIMARY KEY REFERENCES sa_headless_dispatch_requests(id) ON DELETE RESTRICT,
+ plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256)=64),
+ previous_request_id TEXT UNIQUE REFERENCES sa_headless_plan_dispatch(request_id) ON DELETE RESTRICT,
+ CHECK(previous_request_id IS NULL OR previous_request_id<>request_id)
+);
+CREATE TRIGGER IF NOT EXISTS sa_headless_plan_dispatch_immutable_update
+ BEFORE UPDATE ON sa_headless_plan_dispatch
+ BEGIN SELECT RAISE(ABORT,'Plan dispatch authorization is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_headless_plan_dispatch_immutable_delete
+ BEFORE DELETE ON sa_headless_plan_dispatch
+ BEGIN SELECT RAISE(ABORT,'Plan dispatch authorization is immutable'); END;
 ";
 
 #[derive(Debug, serde::Serialize)]
@@ -115,6 +133,61 @@ pub(super) fn reject_stale_pending(
 pub(super) fn enqueue(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {
+    enqueue_mode(store,ticket_id,revision,key,false)
+}
+
+pub(super) fn enqueue_plan(
+    store: &Store, ticket_id: &str, revision: i64, key: &str,
+) -> Result<DispatchRequest> {
+    enqueue_mode(store,ticket_id,revision,key,true)
+}
+
+/// Bind content, dependencies, routing and cancellations, but exclude
+/// runtime acceptance and assignment changes from the reviewed plan digest.
+fn plan_digest(db: &rusqlite::Connection, ticket_id: &str) -> Result<String> {
+    let mut stmt=db.prepare(
+        "SELECT w.id,w.parent_id,w.summary,r.worker_bot_id,r.routing_reason,c.item_id
+         FROM sa_work_items w LEFT JOIN sa_work_item_routes r ON r.item_id=w.id
+         LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
+         WHERE w.ticket_id=?1 ORDER BY w.id LIMIT 101",
+    ).map_err(|e|e.to_string())?;
+    let items=stmt.query_map([ticket_id],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,
+        r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,
+    ))).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    if items.is_empty() || items.len()>100 {
+        return Err("Plan progression requires a bounded reviewed WorkItem plan.".into());
+    }
+    let bytes=serde_json::to_vec(&items).map_err(|e|e.to_string())?;
+    Ok(format!("{:x}",Sha256::digest(bytes)))
+}
+
+fn binding(db: &rusqlite::Connection, request_id: &str) -> Result<Option<String>> {
+    db.query_row("SELECT plan_sha256 FROM sa_headless_plan_dispatch WHERE request_id=?1",
+        [request_id],|r|r.get(0)).optional().map_err(|e|e.to_string())
+}
+
+fn bind_plan(tx: &Transaction<'_>, request: &DispatchRequest, digest: &str,
+    previous: Option<&str>, now: i64) -> Result<()> {
+    tx.execute(
+        "INSERT INTO sa_headless_plan_dispatch(request_id,plan_sha256,previous_request_id)
+         VALUES(?1,?2,?3)",params![request.id,digest,previous],
+    ).map_err(|e|e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_plan_dispatch_requested',?2,?3)",
+        params![request.ticket_id,serde_json::json!({
+            "requestId":request.id,"requestKey":request.request_key,
+            "planSha256":digest,"previousRequestId":previous,"revision":request.expected_revision,
+        }).to_string(),now],
+    ).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+fn enqueue_mode(
+    store: &Store, ticket_id: &str, revision: i64, key: &str, plan: bool,
+) -> Result<DispatchRequest> {
     if !valid_key(key) || revision < 0 || ticket_id.is_empty() || ticket_id.len() > 128
         || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'))
     {
@@ -122,15 +195,38 @@ pub(super) fn enqueue(
     }
     let tx = Transaction::new_unchecked(&store.db, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let now = storage::now();
-    expire_pending(&tx, now)?;
-    // Also recover stale receipts written before plan-edit invalidation existed.
-    reject_stale_pending(&tx, ticket_id, now)?;
+    if key.starts_with("plan-next.") {
+        return Err("This request key namespace is reserved for native plan continuations.".into());
+    }
+    let now=storage::now();
+    let existed=by_key(store,ticket_id,key)?.is_some();
+    let request=enqueue_in_transaction(store,&tx,ticket_id,revision,key,now)?;
+    if existed {
+        if binding(&tx,&request.id)?.is_some()!=plan {
+            return Err("Dispatch request key is bound to another progression mode.".into());
+        }
+    } else if plan {
+        if request.kind!="coordinated" || super::next_work_item(store,ticket_id)?
+            .is_none_or(|item|item.assignment_id.is_some())
+        {
+            return Err("Plan progression requires a queued coordinated Demand and a new ready WorkItem.".into());
+        }
+        let digest=plan_digest(&tx,ticket_id)?;
+        bind_plan(&tx,&request,&digest,None,now)?;
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(request)
+}
+
+fn enqueue_in_transaction(
+    store: &Store, tx: &Transaction<'_>, ticket_id: &str, revision: i64, key: &str, now: i64,
+) -> Result<DispatchRequest> {
+    expire_pending(tx,now)?;
+    reject_stale_pending(tx,ticket_id,now)?;
     if let Some(prior) = by_key(store, ticket_id, key)? {
         if prior.expected_revision != revision {
             return Err("Dispatch request key is already bound to another Ticket revision.".into());
         }
-        tx.commit().map_err(|e| e.to_string())?;
         return Ok(prior);
     }
     let ticket = get_ticket(store, ticket_id)?;
@@ -179,9 +275,49 @@ pub(super) fn enqueue(
          VALUES(?1,'headless_dispatch_requested',?2,?3)",
         params![ticket_id,format!("Explicit local operator dispatch request {id} at revision {revision}"),now],
     ).map_err(|e| e.to_string())?;
-    let request = by_key(store, ticket_id, key)?.ok_or("Dispatch request was not persisted.")?;
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(request)
+    by_key(store,ticket_id,key)?.ok_or_else(||"Dispatch request was not persisted.".into())
+}
+
+/// A chain may advance only from the exact accepted native Assignment.
+/// Never infer authority from provider text, manual retry or a cancelled intent.
+pub(super) fn advance_after_acceptance(
+    store: &Store, tx: &Transaction<'_>, ticket_id: &str, accepted_revision: i64, now: i64,
+) -> Result<()> {
+    let prior:Option<(String,String)>=tx.query_row(
+        "SELECT r.id,p.plan_sha256 FROM sa_headless_plan_dispatch p
+         JOIN sa_headless_dispatch_requests r ON r.id=p.request_id
+         JOIN sa_work_item_attempts b ON b.assignment_id=r.assignment_id
+         JOIN sa_work_item_acceptances v ON v.assignment_id=b.assignment_id AND v.item_id=b.item_id
+         WHERE r.ticket_id=?1 AND b.ticket_id=r.ticket_id AND r.state='admitted'
+           AND r.kind='coordinated' AND v.accepted_revision=?2
+           AND NOT EXISTS(SELECT 1 FROM sa_headless_plan_dispatch n WHERE n.previous_request_id=r.id)",
+        params![ticket_id,accepted_revision],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((previous,digest))=prior else {return Ok(());};
+    let ticket=get_ticket(store,ticket_id)?;
+    if ticket.state!="queued" || ticket.revision!=accepted_revision.saturating_add(1) {
+        return Ok(());
+    }
+    expire_pending(tx,now)?;
+    reject_stale_pending(tx,ticket_id,now)?;
+    let occupied:bool=tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_headless_dispatch_requests WHERE ticket_id=?1 AND state='pending')
+         OR (SELECT COUNT(*) FROM sa_headless_dispatch_requests WHERE state='pending')>=200",
+        [ticket_id],|r|r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let ready=super::next_work_item(store,ticket_id)
+        .is_ok_and(|item|item.is_some_and(|w|w.assignment_id.is_none()));
+    if occupied || !ready || plan_digest(tx,ticket_id)?!=digest {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'headless_plan_progression_paused','Plan changed, queue occupied or next item not new; explicit dispatch required',?2)",
+            params![ticket_id,now],
+        ).map_err(|e|e.to_string())?;
+        return Ok(());
+    }
+    let key=format!("plan-next.{}",storage::id());
+    let request=enqueue_in_transaction(store,tx,ticket_id,ticket.revision,&key,now)?;
+    bind_plan(tx,&request,&digest,Some(&previous),now)
 }
 
 pub(crate) fn headless_enqueue(
@@ -195,6 +331,18 @@ pub(crate) fn headless_enqueue(
         "grantIssued": false,
         "externalEffectReplayed": false,
     })).map_err(|e| e.to_string())
+}
+
+pub(crate) fn headless_enqueue_plan(
+    database_path: &std::path::Path, ticket_id: &str, revision: i64, key: &str,
+) -> Result<String> {
+    let store=open_headless_transition_store(database_path)?;
+    let request=enqueue_plan(&store,ticket_id,revision,key)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "dispatchRequest":request,"planProgressionRequested":true,
+        "humanAcceptanceStillRequired":true,"providerDispatchedByCommand":false,
+        "grantIssued":false,"externalEffectReplayed":false,
+    })).map_err(|e|e.to_string())
 }
 
 /// Cancel only the exact local operator intent, not a reserved Assignment.
@@ -295,6 +443,11 @@ pub(super) fn consume(
         || request.kind != expected_kind || !is_current(request, now)
     {
         return Err("Headless dispatch request is stale, expired or bound to a different Demand.".into());
+    }
+    if let Some(digest)=binding(tx,&request.id)? {
+        if request.kind!="coordinated" || plan_digest(tx,&ticket.id)?!=digest {
+            return Err("Reviewed WorkItem plan changed; progression authorization is stale.".into());
+        }
     }
     let changed = tx.execute(
         "UPDATE sa_headless_dispatch_requests SET state='admitted',assignment_id=?2,updated_at=?3

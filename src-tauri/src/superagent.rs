@@ -4679,6 +4679,9 @@ fn accept_with_pause(
     if changed != 1 {
         return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
     }
+    if next_state=="queued" {
+        headless_dispatch::advance_after_acceptance(store,&tx,ticket_id,expected_revision,now)?;
+    }
     if !more_items {
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
@@ -7849,17 +7852,24 @@ mod tests {
         assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, first.id);
         store.db.execute_batch("DROP TRIGGER deny_dispatch_cancel;").unwrap();
 
-        // A changed plan invalidates the original confirmation. The operator
-        // can still cancel the exact old intent without revoking the Ticket.
+        let cancelled = serde_json::to_value(
+            headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap();
+        assert_eq!(cancelled["rejection"], "cancelled by local operator");
+        assert_eq!(serde_json::to_value(
+            headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap(), cancelled);
+        let first = headless_dispatch::enqueue(&store,id,revision,"stale-plan").unwrap();
+
+        // A changed plan retires pending confirmation atomically. A later
+        // cancel must return the original rejection, not relabel history.
         let item = work_items::plan(&store, id, revision, "new-plan", "Inspect checkout", None).unwrap();
         let current_revision = get_ticket(&store, id).unwrap().revision;
         assert_ne!(revision, current_revision);
-        let result = headless_dispatch::headless_cancel(&store.path, id, revision, "cancel-me").unwrap();
+        let result = headless_dispatch::headless_cancel(&store.path, id, revision, "stale-plan").unwrap();
         let result: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(result["dispatchRequest"]["state"], "rejected");
-        assert_eq!(result["dispatchRequest"]["rejection"], "cancelled by local operator");
+        assert_eq!(result["dispatchRequest"]["rejection"], "Ticket revision changed");
         assert_eq!(result["providerDispatchedByCommand"], false);
-        let replay = serde_json::to_value(headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap();
+        let replay = serde_json::to_value(headless_dispatch::cancel(&store, id, revision, "stale-plan").unwrap()).unwrap();
         assert_eq!(replay, result["dispatchRequest"]);
         assert_eq!(get_ticket(&store, id).unwrap().revision, current_revision);
         assert!(assignment_session(&store, id).unwrap().is_none());
@@ -7874,7 +7884,7 @@ mod tests {
         assert_eq!(get_ticket(&store, id).unwrap().active_assignment_id, running.active_assignment_id);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
-            [id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            [id], |row| row.get::<_, i64>(0)).unwrap(), 2);
     }
 
     #[test]
@@ -16030,6 +16040,73 @@ mod tests {
         let items = work_items::list(&reopened,&ticket.id,100).unwrap().0;
         assert!(items.iter().all(|item|item.state=="accepted" && item.assignment_id.is_some()));
         assert!(!mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+    }
+
+    #[test]
+    fn authorized_plan_continuation_requires_human_acceptance_and_current_revision() {
+        for revoke in [false,true] {
+            let mut store=fixture();
+            let cfg=enabled(&store);
+            let (ticket,_)=admit_role(&mut store,&cfg.id,"Inspect project","reviewed-plan",false,true).unwrap();
+            let id=&ticket.id;
+            let coordinator=assignment_session(&store,id).unwrap().unwrap();
+            assert!(on_run_finished(&store,&coordinator,true,"Coordinator evidence").unwrap());
+            let root=work_items::plan(&store,id,get_ticket(&store,id).unwrap().revision,
+                "root","Inspect root",None).unwrap();
+            let child=work_items::plan(&store,id,get_ticket(&store,id).unwrap().revision,
+                "child","Inspect child",Some(&root.id)).unwrap();
+            let revision=get_ticket(&store,id).unwrap().revision;
+            assert!(headless_dispatch::enqueue_plan(&store,id,revision-1,"stale").is_err());
+            let request=headless_dispatch::enqueue_plan(&store,id,revision,"plan-key").unwrap();
+            assert_eq!(headless_dispatch::enqueue_plan(&store,id,revision,"plan-key").unwrap().id,request.id);
+            assert!(headless_dispatch::enqueue(&store,id,revision,"plan-key").is_err());
+            let (_,_,_,packet)=prepare_coordinated_worker_with_request(
+                &mut store,id,revision,false,Some(&request)).unwrap();
+            assert!(packet.contains(root.id.as_str()));
+            let session=assignment_session(&store,id).unwrap().unwrap();
+            assert!(on_run_finished(&store,&session,true,"Root evidence").unwrap());
+            let waiting=get_ticket(&store,id).unwrap();
+            assert_eq!(waiting.state,"waiting_approval");
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            assert!(accept(&store,id,waiting.revision-1).is_err());
+            store.db.execute_batch(
+                "CREATE TRIGGER deny_plan_continuation BEFORE INSERT ON sa_headless_plan_dispatch
+                 WHEN NEW.previous_request_id IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT,'test continuation failure'); END;",
+            ).unwrap();
+            assert!(accept(&store,id,waiting.revision).is_err());
+            assert_eq!(get_ticket(&store,id).unwrap().revision,waiting.revision);
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            assert!(work_items::list(&store,id,100).unwrap().0.iter().all(|w|w.state=="planned"));
+            store.db.execute_batch("DROP TRIGGER deny_plan_continuation;").unwrap();
+            let queued=accept(&store,id,waiting.revision).unwrap();
+            assert_eq!(queued.state,"queued");
+            assert!(accept(&store,id,waiting.revision).is_err());
+            let reopened=Store::open_read_only(&store.path).unwrap();
+            let next=headless_dispatch::next_pending(&reopened).unwrap().unwrap();
+            assert_eq!(next.ticket_id.as_str(),id.as_str());
+            assert_eq!(next.expected_revision,queued.revision);
+            assert_ne!(next.id,request.id);
+            drop(reopened);
+            if revoke {
+                work_items::cancel(&store,id,queued.revision,&child.id,"cancel-child").unwrap();
+                assert!(prepare_coordinated_worker_with_request(
+                    &mut store,id,queued.revision,false,Some(&next)).is_err());
+                assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            } else {
+                let (_,_,_,packet)=prepare_coordinated_worker_with_request(
+                    &mut store,id,queued.revision,false,Some(&next)).unwrap();
+                assert!(packet.contains(child.id.as_str()));
+                assert!(packet.contains("Root evidence"));
+                let session=assignment_session(&store,id).unwrap().unwrap();
+                assert!(on_run_finished(&store,&session,true,"Child evidence").unwrap());
+                let waiting=get_ticket(&store,id).unwrap();
+                assert_eq!(waiting.state,"waiting_approval");
+                assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+                assert_eq!(accept(&store,id,waiting.revision).unwrap().state,"completed");
+            }
+            assert!(!mandate(&store,id).unwrap().allowed_side_effects);
+        }
     }
 
     #[test]

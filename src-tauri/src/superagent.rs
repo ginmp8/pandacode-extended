@@ -6365,8 +6365,10 @@ async fn dispatch_pending_local(app: &tauri::AppHandle, desktop_only: bool) -> R
         }
         if !headless_dispatch::is_current(&request, storage::now()) {
             let store = state.store.lock().map_err(|e| e.to_string())?;
-            headless_dispatch::reject_pending(&store, &request,
-                "Explicit headless dispatch request expired; inspect the Demand and confirm a new request.")?;
+            if !headless_dispatch::reject_pending(&store, &request,
+                "Explicit headless dispatch request expired; inspect the Demand and confirm a new request.")? {
+                break;
+            }
             continue;
         }
         match dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
@@ -6375,9 +6377,9 @@ async fn dispatch_pending_local(app: &tauri::AppHandle, desktop_only: bool) -> R
             Ok(_) => break,
             Err(error) => {
                 let store = state.store.lock().map_err(|e| e.to_string())?;
-                // A busy Worker has not reserved an Assignment. Keep the
-                // original intent and try an independent ready Demand instead.
-                // All other failures retain the existing terminal settlement.
+                // Busy or terminally rejected pre-admission intents do not
+                // consume the poll's native reservation budget. Only an
+                // admitted receipt stops the scan, even after delivery failure.
                 if !headless_dispatch::settle_poll_failure(&store, &request, &error)? {
                     break;
                 }
@@ -7941,8 +7943,8 @@ mod tests {
     }
 
     #[test]
-    fn headless_poll_does_not_defer_expired_or_non_occupancy_failures() {
-        let store = fixture();
+    fn headless_poll_rejects_failed_intents_without_starving_later_demands() {
+        let mut store = fixture();
         let cfg = enabled(&store);
         let raw = headless_queue_demand(&store.path, &cfg.id, "Inspect", "poll-expiry").unwrap();
         let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -7952,14 +7954,47 @@ mod tests {
         store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
             [&first.id]).unwrap();
         let expired = headless_dispatch::next_pending(&store).unwrap().unwrap();
-        assert!(!headless_dispatch::settle_poll_failure(&store, &expired, RETRY_WORKER_OCCUPIED).unwrap());
+        assert!(headless_dispatch::settle_poll_failure(&store, &expired, RETRY_WORKER_OCCUPIED).unwrap());
         assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
         let second = headless_dispatch::enqueue(&store, id, revision, "permanent-failure").unwrap();
-        assert!(!headless_dispatch::settle_poll_failure(&store, &second,
-            "Worker dispatch failed after native reservation").unwrap());
-        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        let other_raw = headless_queue_demand(&store.path, &cfg.id, "Independent scope", "poll-next").unwrap();
+        let other_view: serde_json::Value = serde_json::from_str(&other_raw).unwrap();
+        let other_id = other_view["ticketId"].as_str().unwrap();
+        let other_revision = get_ticket(&store, other_id).unwrap().revision;
+        let other = headless_dispatch::enqueue(&store, other_id, other_revision, "ready-after-denial").unwrap();
+
+        // A failed pre-admission request must not consume this poll's admission
+        // budget. Replaying its rejection is safe and must not add audit rows.
+        assert!(headless_dispatch::settle_poll_failure(&store, &second,
+            "Worker profile no longer matches").unwrap());
+        assert!(headless_dispatch::settle_poll_failure(&store, &second,
+            RETRY_WORKER_OCCUPIED).unwrap());
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, other.id);
         assert!(assignment_session(&store, id).unwrap().is_none());
         assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        assert_eq!(history(&store, id, 100).unwrap().iter()
+            .filter(|event| event.kind == "headless_dispatch_rejected").count(), 2);
+
+        // Exercise the actual native reservation path: the same failure
+        // handler must stop after an admitted request, even when the error
+        // happens to look like an occupancy error or an expired snapshot.
+        let (running, _, _, _) = retry_blocked_with_request(
+            &mut store, other_id, other_revision, false, Some(&other)).unwrap();
+        assert_eq!(running.state, "running");
+        assert!(!headless_dispatch::settle_poll_failure(&store, &other,
+            "Worker dispatch failed after native reservation").unwrap());
+        assert!(!headless_dispatch::settle_poll_failure(&store, &other,
+            RETRY_WORKER_OCCUPIED).unwrap());
+        assert!(!headless_dispatch::reject_pending(&store, &other,
+            "Expired snapshot from another poll").unwrap());
+        let receipt = serde_json::to_value(headless_dispatch::enqueue(
+            &store, other_id, other_revision, "ready-after-denial").unwrap()).unwrap();
+        assert_eq!(receipt["state"], "admitted");
+        assert!(receipt["assignmentId"].is_string());
+        assert_eq!(assignments(&store, other_id, 100).unwrap().len(), 1);
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert!(!history(&store, other_id, 100).unwrap().iter()
+            .any(|event| event.kind == "headless_dispatch_rejected"));
     }
 
     #[test]

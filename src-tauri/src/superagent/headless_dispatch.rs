@@ -569,45 +569,69 @@ pub(super) fn consume(
     Ok(())
 }
 
-/// Only known native pre-reservation occupancy outcomes may wait. All other
-/// errors (including provider launch failures) retain terminal settlement.
-/// Returning true lets the poller try the next independent pending request.
+/// An occupied, still-current request can wait. A terminal pre-admission
+/// rejection also lets the bounded poll scan continue: it did not reserve
+/// an Assignment. An admitted receipt always consumes the poll's admission
+/// budget, even if delivery subsequently failed or another host admitted it.
 pub(super) fn settle_poll_failure(
     store: &Store, request: &DispatchRequest, reason: &str,
 ) -> Result<bool> {
     let busy = reason == super::RETRY_WORKER_OCCUPIED
         || reason == super::COORDINATED_WORKER_OCCUPIED;
-    if busy && is_current(request, storage::now()) {
-        return Ok(true);
-    }
     let rejection = if busy {
         "Explicit headless dispatch request expired; inspect the Demand and confirm a new request."
     } else {
         reason
     };
-    reject_pending(store, request, rejection)?;
-    Ok(false)
+    settle_pending(store, request, rejection, busy)
 }
 
-/// Rejection is terminal for this key. A provider launch failure occurs only
-/// after consumption, so it is settled by the existing Assignment recovery
-/// and can never be relabeled a pre-admission rejection.
-pub(super) fn reject_pending(store: &Store, request: &DispatchRequest, reason: &str) -> Result<()> {
+/// Rejection is terminal for this key. Return whether the poll may continue
+/// without exceeding its one-native-reservation budget.
+pub(super) fn reject_pending(store: &Store, request: &DispatchRequest, reason: &str) -> Result<bool> {
+    settle_pending(store, request, reason, false)
+}
+
+fn settle_pending(
+    store: &Store, request: &DispatchRequest, reason: &str, defer_if_busy: bool,
+) -> Result<bool> {
     let tx = Transaction::new_unchecked(&store.db, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let now = storage::now();
+    // The durable receipt, not a stale in-memory snapshot or a provider
+    // error string, decides whether this poll has already reserved work.
+    let state: String = tx.query_row(
+        "SELECT state FROM sa_headless_dispatch_requests
+         WHERE id=?1 AND ticket_id=?2 AND expected_revision=?3",
+        params![request.id, request.ticket_id, request.expected_revision],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    match state.as_str() {
+        "admitted" | "rejected" => {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(state == "rejected");
+        }
+        "pending" => {}
+        _ => return Err("Invalid native dispatch receipt state.".into()),
+    }
+    if defer_if_busy && is_current(request, now) {
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
     let detail: String = reason.chars().take(500).collect();
     let changed = tx.execute(
         "UPDATE sa_headless_dispatch_requests SET state='rejected',rejection=?2,updated_at=?3
          WHERE id=?1 AND ticket_id=?4 AND expected_revision=?5 AND state='pending'",
         params![request.id,detail,now,request.ticket_id,request.expected_revision],
     ).map_err(|e| e.to_string())?;
-    if changed == 1 {
-        tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'headless_dispatch_rejected',?2,?3)",
-            params![request.ticket_id,format!("Dispatch request {} rejected: {detail}",request.id),now],
-        ).map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("Dispatch request was already settled or changed.".into());
     }
-    tx.commit().map_err(|e| e.to_string())
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_dispatch_rejected',?2,?3)",
+        params![request.ticket_id,format!("Dispatch request {} rejected: {detail}",request.id),now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(true)
 }

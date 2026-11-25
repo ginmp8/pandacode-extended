@@ -164,6 +164,117 @@ test.describe('shared bot channels', () => {
 
 
 
+
+  // Rotate the three criteria origins across the strategies for each mode.
+  // These tests exercise the actual composer submit path with an intercepted
+  // preview command; native callback and permission tests remain separate.
+  const channelModes = [
+    { mode: 'M1', roles: [], automatic: 0 },
+    { mode: 'M2', roles: ['direct', 'direct'], automatic: 0 },
+    { mode: 'M3', roles: ['direct'], automatic: 1 },
+    { mode: 'M4', roles: ['nested', 'nested'], automatic: 0 },
+    { mode: 'M5', roles: ['nested'], automatic: 1 },
+    { mode: 'M6', roles: ['direct', 'nested'], automatic: 0 },
+    { mode: 'M7', roles: ['direct', 'nested'], automatic: 1 },
+  ] as const;
+  const origins = ['architect', 'user', 'hybrid'] as const;
+  const strategies = ['parallel', 'escalated', 'two_phase'] as const;
+  for (const [modeIndex, mode] of channelModes.entries()) for (const [strategyIndex, strategy] of strategies.entries()) {
+    const origin = origins[(modeIndex + strategyIndex) % origins.length];
+    test(`shared Channel Council matrix ${mode.mode}/${strategy}/${origin} submits explicit sources`, async ({ page }) => {
+      test.setTimeout(60_000);
+      await page.route('**/src/preview.ts*', async route => {
+        const response = await route.fetch();
+        const source = await response.text();
+        const body = source.replace(
+          "if (command === 'bots_list' || command.startsWith('bot_'))",
+          "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+        );
+        if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+        await route.fulfill({ response, body });
+      });
+      await showBots(page);
+      await sidebar(page).getByRole('button', { name: '#launch' }).click();
+      let composer = page.locator('#shared-channel-composer');
+      await composer.getByRole('button', { name: 'Council: off' }).click();
+      let panel = composer.getByRole('dialog', { name: 'Council' });
+      await panel.getByRole('switch', { name: 'Council' }).check();
+      const selectedIds: string[] = [];
+      if (mode.roles.length) {
+        await panel.getByRole('radio', { name: 'Bots' }).check();
+        const bots = panel.locator('input[name="councilReviewer"]');
+        for (const [index, role] of mode.roles.entries()) {
+          // The first fixture channel member is its lead/executor.
+          const bot = bots.nth(index + 1);
+          await bot.check();
+          selectedIds.push(await bot.inputValue());
+          if (role === 'nested') await panel.locator('select[name="councilReviewerRole"]').nth(index + 1).selectOption('nested');
+        }
+        if (mode.automatic) await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill(String(mode.automatic));
+      }
+      await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption(strategy);
+      const immediate = panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+      if (strategy === 'escalated') {
+        await expect(immediate).toBeChecked();
+        await immediate.focus();
+        await page.keyboard.press('Space');
+        await expect(immediate).not.toBeChecked();
+      } else await expect(immediate).toBeHidden();
+      await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption(origin);
+      if (origin !== 'architect') {
+        await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
+        await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
+        await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+      }
+      await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review this task.');
+      if (mode.mode === 'M7' && strategy === 'escalated') {
+        // A native trigger may need a second round even with immediate escalation off.
+        const rounds = panel.getByRole('spinbutton', { name: 'Custom max rounds' });
+        await rounds.fill('1');
+        await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+        expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+        await rounds.fill('10');
+        const childRounds = panel.locator('input[name="councilChildMaxRounds"]').nth(2);
+        await childRounds.fill('1');
+        await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+        expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+        await childRounds.fill('10');
+        // Three required criteria fit the three root seats, but not the two child leaves.
+        for (const id of ['integrity', 'reliability']) {
+          await panel.getByRole('button', { name: 'Add criterion' }).click();
+          await panel.getByRole('textbox', { name: 'Criterion ID' }).last().fill(id);
+          await panel.getByRole('textbox', { name: 'Review lens' }).last().fill(id);
+        }
+        await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+        expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+        await panel.getByRole('button', { name: 'Remove criterion' }).last().click();
+        await panel.getByRole('button', { name: 'Remove criterion' }).last().click();
+        await page.keyboard.press('Escape');
+        const previous = await composer.elementHandle();
+        await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+        await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+        composer = page.locator('#shared-channel-composer');
+        await composer.getByRole('button', { name: 'Council: on' }).click();
+        panel = composer.getByRole('dialog', { name: 'Council' });
+        await expect(panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' })).not.toBeChecked();
+      }
+      await composer.locator('button[type=submit]').click();
+      await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+      const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+      expect(posted.strategy ?? 'parallel').toBe(strategy);
+      expect(posted.forceEscalation ?? false).toBe(false);
+      expect(posted.automaticReviewers ?? 0).toBe(mode.automatic);
+      expect(posted.reviewers).toBe(0);
+      expect(posted.reviewerBotIds ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'direct' ? [selectedIds[index]] : []));
+      expect(posted.nestedBotReviewers ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'nested'
+        ? [{ botId: selectedIds[index], childReviewers: 2, childTarget: 9, childMaxRounds: 10 }] : []));
+      expect(posted.criteriaSource ?? 'architect').toBe(origin);
+      expect(posted.criteria ?? []).toEqual(origin === 'architect' ? [] : [
+        { id: 'security', lens: 'Permission boundary', target: 9, required: true, evidenceRequired: true },
+      ]);
+    });
+  }
+
   test('shared Channel submits M3 hybrid seats, S2 and frozen user criteria through the existing native request', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {

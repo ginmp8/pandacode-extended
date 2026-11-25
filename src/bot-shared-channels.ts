@@ -227,7 +227,9 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
           ${options}
         </div>
         <div class="bc-council-advanced">
-          <label>Review strategy<select name="councilStrategy" aria-label="Review strategy"><option value="parallel">Parallel</option><option value="escalated">Escalated (fresh review)</option><option value="two_phase">Two-phase adversarial</option></select></label>
+          <label>Review strategy<select name="councilStrategy" aria-label="Review strategy"><option value="parallel">Parallel</option><option value="escalated">Escalated (on demand / fresh review)</option><option value="two_phase">Two-phase adversarial</option></select></label>
+          <label class="bc-council-s2-trigger" hidden><input type="checkbox" name="councilForceEscalation" checked disabled> Require immediate S2 escalation</label>
+          <small class="bc-council-s2-trigger" hidden>Unchecked: escalate only on native score, critical finding, missing evidence or conflict triggers. No extra reviewer sources are enabled.</small>
           <label>Criteria source<select name="councilCriteriaSource" aria-label="Criteria source"><option value="architect">Architect-defined</option><option value="user">User-defined</option><option value="hybrid">Hybrid</option></select></label>
           <div class="bc-council-criterion-fields" hidden>
             <div class="bc-council-criterion-rows">
@@ -275,6 +277,9 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
       row.querySelector<HTMLElement>('.bc-council-role')!.hidden = !selected || !checked;
       row.querySelector<HTMLElement>('.bc-council-child-settings')!.hidden = !selected || !checked || role !== 'nested';
     }
+    const escalated = panel.querySelector<HTMLSelectElement>('select[name="councilStrategy"]')?.value === 'escalated';
+    for (const control of panel.querySelectorAll<HTMLElement>('.bc-council-s2-trigger')) control.hidden = !escalated;
+    panel.querySelector<HTMLInputElement>('input[name="councilForceEscalation"]')!.disabled = !escalated;
     const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;
     panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!.hidden = source === 'architect';
     const rows = panel.querySelectorAll<HTMLElement>('[data-council-criterion-row]');

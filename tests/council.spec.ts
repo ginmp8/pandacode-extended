@@ -1844,6 +1844,51 @@ test('native child recovery errors never disclose private backend context to the
   ]);
 });
 
+
+// Each independently mounted scenario records the real Council settings command.
+// Preview transport proves UI serialization, not native reviewer execution.
+const sourceModes = [
+  { mode: 'M1', roles: [], automatic: 0 },
+  { mode: 'M2', roles: ['direct', 'direct'], automatic: 0 },
+  { mode: 'M3', roles: ['direct'], automatic: 1 },
+  { mode: 'M4', roles: ['nested', 'nested'], automatic: 0 },
+  { mode: 'M5', roles: ['nested'], automatic: 1 },
+  { mode: 'M6', roles: ['direct', 'nested'], automatic: 0 },
+  { mode: 'M7', roles: ['direct', 'nested'], automatic: 1 },
+] as const;
+for (const mode of sourceModes) for (const strategy of ['parallel', 'escalated', 'two_phase'] as const) {
+  test(`direct Council matrix ${mode.mode}/${strategy} serializes only selected sources`, async ({ page }) => {
+    const bots = [
+      { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'model-a', paused: false },
+      { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'model-b', paused: false },
+    ];
+    await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+    await button(page).click();
+    if (mode.roles.length) {
+      await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+      await expect(eligibleReviewers(page)).toHaveCount(2);
+      for (const [index, role] of mode.roles.entries()) {
+        await eligibleReviewers(page).nth(index).check();
+        if (role === 'nested') await panel(page).getByLabel('Review role for ' + bots[index].name).selectOption('nested');
+      }
+      if (mode.automatic) await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption(String(mode.automatic));
+    }
+    await panel(page).getByLabel('Review strategy').selectOption(strategy);
+    if (strategy === 'escalated') await panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' }).uncheck();
+    expect(await calls(page)).toEqual([]);
+    await toggle(page).click();
+    await expect.poll(async () => (await calls(page)).length).toBe(1);
+    const saved = (await calls(page))[0];
+    expect(saved.strategy ?? 'parallel').toBe(strategy);
+    expect(saved.forceEscalation ?? false).toBe(false);
+    expect(saved.automaticReviewers ?? 0).toBe(mode.automatic);
+    expect(saved.reviewers).toBe(0);
+    expect(saved.reviewerBotIds ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'direct' ? [bots[index].id] : []));
+    expect(saved.nestedBotReviewers ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'nested'
+      ? [{ botId: bots[index].id, childReviewers: 2, childTarget: 9, childMaxRounds: 10 }] : []));
+  });
+}
+
 test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {
   // Start without a Council: strategy selection remains staged until the explicit enable.
   await open(page, '/');

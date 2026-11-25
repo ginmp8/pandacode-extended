@@ -7445,6 +7445,7 @@ document.addEventListener('submit', event => {
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
     const strategy = String(data.get('councilStrategy') ?? 'parallel');
+    const forceEscalation = strategy === 'escalated' && data.get('councilForceEscalation') === 'on';
     const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
     const criteria = [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => ({
       id: row.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.value.trim() ?? '',
@@ -7461,6 +7462,7 @@ document.addEventListener('submit', event => {
       && new Set(criteria.map(c => c.id)).size === criteria.length
       && new Set(criteria.map(c => c.lens.toLowerCase())).size === criteria.length
       && (!isSelected || criteria.length <= selectedBotIds.length + automaticReviewers)
+      && nestedBotReviewers.every(child => child.childReviewers >= criteria.length)
     );
     const childAttempts = nestedBotReviewers.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
     const totalSeats = selectedBotIds.length + automaticReviewers;
@@ -7483,6 +7485,7 @@ document.addEventListener('submit', event => {
       || !Number.isFinite(target) || target < 1 || target > 10
       || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
       || !['parallel', 'escalated', 'two_phase'].includes(strategy)
+      || (strategy !== 'parallel' && (maxRounds < 2 || nestedBotReviewers.some(child => child.childMaxRounds < 2)))
       || !['architect', 'user', 'hybrid'].includes(criteriaSource)
       || !criteriaValid || !validSelection
     )) {
@@ -7515,7 +7518,7 @@ document.addEventListener('submit', event => {
       ...(directBotIds.length ? { reviewerBotIds: directBotIds } : {}),
       ...(nestedBotReviewers.length ? { nestedBotReviewers } : {}),
       ...(automaticReviewers ? { automaticReviewers } : {}),
-      ...(strategy !== 'parallel' ? { strategy, forceEscalation: strategy === 'escalated' } : {}),
+      ...(strategy !== 'parallel' ? { strategy, forceEscalation } : {}),
       ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
       ...(scopedRequested ? { reviewPermissions: {

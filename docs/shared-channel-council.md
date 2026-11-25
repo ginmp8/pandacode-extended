@@ -41,6 +41,12 @@ When using **Bots**, select 2–8 distinct channel members. A bot assigned to ex
 
 *Figure 3 — Explicit reviewer selection for an individual message (component preview).*
 
+## Review strategy and criteria
+
+Parallel is the original default. Escalated (S2) supports either immediate escalation (checked by default) or on-demand escalation (uncheck **Require immediate S2 escalation**). On-demand review still requires a fresh native escalation when a score, critical finding, missing evidence or conflict triggers it; it cannot add a reviewer source that was not selected. Two-phase (S3) requires independent challenge reviewers. Both S2 and S3 require at least two root rounds and, when a child Council is selected, at least two child rounds. These are pre-dispatch bounds, not evidence of completed reviews.
+
+Architect-defined, User-defined and Hybrid criteria are independent of the reviewer sources and strategy. User criteria remain required, and each selected child must have enough reviewers to cover them. The immediate escalation checkbox and criteria are scoped to the unsent message; changing channels does not grant or inherit review authority.
+
 ## Optional permissions and follow-up
 
 These are independent, opt-in choices. Neither is enabled simply by opening the panel.

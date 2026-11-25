@@ -152,7 +152,8 @@
 .bc-council-panel :is(.bc-council-advanced,.bc-council-reviewer-options) :is(input:not([type=checkbox]),select){box-sizing:border-box;max-width:100%;width:100%;min-width:0;min-height:32px;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit}
 .bc-council-panel .bc-council-automatic input{width:64px!important}
 .bc-council-plan{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4}
-.bc-council-panel :is(.bc-council-role,.bc-council-child-settings,.bc-council-criterion-fields)[hidden]{display:none!important}
+.bc-council-panel .bc-council-advanced>label.bc-council-s2-trigger{display:flex;align-items:center;gap:6px}
+.bc-council-panel :is(.bc-council-role,.bc-council-child-settings,.bc-council-criterion-fields,.bc-council-s2-trigger)[hidden]{display:none!important}
 .bc-council-panel :is(select,input):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 @media(max-width:420px){.bc-council-reviewer-options .bc-council-child-settings{grid-template-columns:1fr}}
 

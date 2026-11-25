@@ -44,10 +44,12 @@ array of up to 16 items atomically, using the same native transition as
 `--plan-work-items`. Supply stable `requestKey` and `summary` fields and an
 optional `parentRequestKey` referring to a preceding item in the same plan.
 Optional paired `workerBotId` and `routingReason` record the reviewed routing
-rationale (maximum 512 UTF-8 bytes) for the Demand's already selected native
-Worker. A different, paused or drifted Worker is rejected; changing a route
-under an existing request key is rejected. These are operator-reviewed plan
-annotations, not verified capability claims, autonomous reassignment or grants.
+rationale (maximum 512 UTF-8 bytes) for an admitted same-project native Worker.
+An outsider, Coordinator, Reviewer, paused or drifted Worker is rejected;
+changing a route under an existing request key is rejected. Explicitly reviewed
+routes select the actual native recipient for that WorkItem, not verified
+capability claims, automatic reassignment or write grants. The original Ticket's
+default Worker remains unchanged; unrouted items keep that default.
 The native WorkItem receipt, Desktop inspector and headless batch response
 preserve the rationale; legacy plans remain valid without it.
 The 16 KiB payload limit, strict schema, original Ticket revision, remaining
@@ -61,7 +63,13 @@ Ticket revision and selects exactly one ready item, prioritizing an attempted
 but unaccepted item before new items. A child becomes ready only after its
 parent's explicit acceptance. SQLite schema v56 binds the selected item to its
 actual native Assignment in the same admission transaction; historical v55
-prompt-only context is not backfilled into execution receipts.
+prompt-only context is not backfilled into execution receipts. Schema v59 uses
+the exact attempt and reviewed route to resolve Worker identity at provider
+admission, callback, watchdog, human acceptance and Council observation.
+All Worker attempts share one frozen Demand budget, irrespective of recipient.
+This enables serial work across distinct configured Workers within one Demand
+through Desktop or headless dispatch, with explicit review and read-only scope;
+it does not provide autonomous progression, parallel execution or scoped writes.
 
 A finished Worker turn is still only evidence awaiting operator acceptance.
 **Accept evidence** records the matching WorkItem receipt after the original

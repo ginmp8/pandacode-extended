@@ -2996,7 +2996,7 @@ fn headless_cancelled_assignments_with_pause(
                        OR coordinator.id IS NULL OR coordinator.paused!=0
                        OR b.id IS NULL OR b.paused!=0
                        OR (a.bot_id!=o.coordinator_bot_id AND
-                           (a.bot_id!=t.worker_bot_id OR b.project_id!=t.project_id))
+                           (a.bot_id!=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id) OR b.project_id!=t.project_id))
                        OR s.id IS NULL OR s.project_id!=b.project_id
                        OR a.created_at<=0 OR a.created_at>?2
                        OR (?2-a.created_at)>=?3
@@ -3062,7 +3062,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                                     AND admission.detail='manual readonly coordinator reserved'
                                )))
                            OR (a.bot_id!=o.coordinator_bot_id AND
-                               (a.bot_id!=t.worker_bot_id OR worker.project_id!=t.project_id))
+                               (a.bot_id!=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id) OR worker.project_id!=t.project_id))
                         THEN 'Assigned bot unavailable or out of scope; no replay'
                       WHEN active_session.id IS NULL
                            OR active_session.project_id!=worker.project_id
@@ -3902,13 +3902,33 @@ fn assignment_role_authorized(
         "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted' ORDER BY id LIMIT 1",
         [ticket_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
-    Ok(match admission.as_deref() {
-        Some("manual readonly coordinator reserved") if attempt == 1 => bot_id == coordinator_id,
+    if admission.as_deref() == Some("manual readonly coordinator reserved") && attempt == 1 {
+        return Ok(bot_id == coordinator_id);
+    }
+    if attempt <= 0 || bot_id == coordinator_id || !matches!(admission.as_deref(),
         Some("manual readonly coordinator reserved" | "manual readonly worker reserved"
-            | "blocked: worker occupied" | "blocked: explicit headless staging")
-            if attempt > 0 => bot_id == worker_id,
-        _ => false,
-    })
+            | "blocked: worker occupied" | "blocked: explicit headless staging"))
+    {
+        return Ok(false);
+    }
+    // Only the immutable receipt for this exact native attempt can override
+    // the Ticket's original default Worker. Never infer authority from the
+    // latest plan, the current roster or a provider's text.
+    let expected: Option<String> = store.db.query_row(
+        "SELECT v.worker_bot_id FROM sa_assignment_worker_authority v
+         JOIN sa_assignments a ON a.id=v.assignment_id
+         JOIN sa_tickets t ON t.id=a.ticket_id
+         WHERE a.ticket_id=?1 AND a.attempt=?2 AND t.worker_bot_id=?3",
+        params![ticket_id,attempt,worker_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?.flatten();
+    if expected.as_deref() != Some(bot_id) {
+        return Ok(false);
+    }
+    if bot_id != worker_id {
+        return Ok(roster::ticket_profile(store, ticket_id)?.is_some_and(|profile|
+            profile.members.iter().any(|member| member.role == "worker" && member.bot_id == bot_id)));
+    }
+    Ok(true)
 }
 
 /// Fence the actual provider session to its admission-time native Team
@@ -4055,8 +4075,8 @@ pub(crate) fn read_only_policy(
             return Err("policy_unsupported: native SuperAgent session profile differs from admitted Demand.".into());
         }
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
-            || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
-            || (scope.bot_id == scope.worker_id && !coordinator_plan_current(
+            || (assigned_role == "worker" && active_bot.project_id != scope.project_id)
+            || (assigned_role == "worker" && !coordinator_plan_current(
                 store, &scope.ticket_id, &scope.coordinator_id, &coordinator.project_id,
             )?)
         {
@@ -4380,7 +4400,7 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
            WHERE active.id=t.active_assignment_id AND current_bot.paused=0
              AND current_bot.project_id=active_session.project_id
              AND (active.bot_id=o.coordinator_bot_id OR
-               (active.bot_id=t.worker_bot_id AND current_bot.project_id=t.project_id))
+               (active.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=active.id) AND current_bot.project_id=t.project_id))
          )
          FROM sa_mandates m JOIN sa_tickets t ON t.id=m.ticket_id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
@@ -4503,14 +4523,15 @@ fn accept_with_pause(
     let worker_evidence_session: Option<String> = tx.query_row(
         "SELECT assignment.session_id FROM sa_assignments assignment
          JOIN sessions original ON original.id=assignment.session_id
-         WHERE assignment.ticket_id=?1 AND assignment.bot_id=?2
+         WHERE assignment.ticket_id=?1
+           AND assignment.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=assignment.id)
            AND assignment.state='finished'
            AND assignment.attempt=(
                SELECT MAX(newest.attempt) FROM sa_assignments newest
                WHERE newest.ticket_id=?1
            )
-           AND original.project_id=?3 AND assignment.result=?4",
-        params![ticket_id,ticket_worker(store, ticket_id)?,mandate(store, ticket_id)?.project_id,
+           AND original.project_id=?2 AND assignment.result=?3",
+        params![ticket_id,mandate(store, ticket_id)?.project_id,
             ticket.evidence.as_deref().unwrap_or_default()],
         |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
@@ -4545,8 +4566,8 @@ fn accept_with_pause(
             [ticket_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         let attempts: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2",
-            params![ticket_id,ticket_worker(store,ticket_id)?], |row| row.get(0),
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND bot_id<>?2",
+            params![ticket_id,coordinator.id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
             tx.execute(
@@ -4568,15 +4589,20 @@ fn accept_with_pause(
               AND m.project_id=sa_tickets.project_id AND m.actor=sa_tickets.actor
               AND trim(m.authorization_id)<>''
               AND m.policy_revision=o.policy_revision AND o.enabled=1
+              AND sa_tickets.policy_revision=o.policy_revision
+              AND sa_tickets.project_id=o.project_id
               AND EXISTS (
                 SELECT 1 FROM bots worker JOIN bots coordinator
                   ON coordinator.id=o.coordinator_bot_id
-                WHERE worker.id=sa_tickets.worker_bot_id
+                WHERE worker.id=(SELECT a.bot_id FROM sa_assignments a
+                    WHERE a.ticket_id=sa_tickets.id AND a.session_id=?5
+                    AND a.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id))
                   AND worker.paused=0 AND coordinator.paused=0
                   AND worker.project_id=sa_tickets.project_id
               )
          )",
-        params![ticket_id,expected_revision,now,next_state],
+        params![ticket_id,expected_revision,now,next_state,
+            worker_evidence_session.as_deref().unwrap_or_default()],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
         return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
@@ -5446,7 +5472,7 @@ fn coordinator_capability_packet(store: &Store, ticket: &Ticket) -> Result<Strin
             "provider": &member.provider,
             "model": &member.model,
             "assignedSkillIds": &member.assigned_skill_ids,
-            "executionAuthority": "read-only; operator-selected Worker only",
+            "executionAuthority": "read-only; explicit reviewed WorkItem route or original default",
         }));
     }
     let context = serde_json::json!({
@@ -5455,7 +5481,7 @@ fn coordinator_capability_packet(store: &Store, ticket: &Ticket) -> Result<Strin
         "workers": candidates,
     });
     let packet = format!(
-        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a plan for the operator-selected Worker. Recommendations about other Workers are advisory only; never change the native assignment. An optional operator-reviewed dependency plan is a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (the selected Worker only) and routingReason (at most 512 bytes). Do not include grants or claim execution.",
+        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a dependency-aware plan across admitted Workers. Only explicit operator review and native admission may select a WorkItem recipient; never change the original Ticket default. An optional operator-reviewed dependency plan is a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (an admitted same-project Worker) and routingReason (at most 512 bytes). Do not include grants or claim execution.",
         initial_manual_packet(ticket, true), context,
     );
     // The native gateway truncates messages at 32 Ki characters. Enforce a
@@ -5712,14 +5738,14 @@ fn accepted_work_item_dependency(
 /// Select one dependency-ready WorkItem inside the native admission transaction.
 /// This is serial, operator-confirmed read-only execution, not autonomous routing
 /// or permission to treat a provider turn as engineering delivery.
-fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, Vec<String>)> {
+fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::WorkItem>> {
     let (items, truncated) = work_items::list(store, ticket_id, 100)?;
     if truncated {
         return Err("Demand WorkItem plan exceeds the native admission limit.".into());
     }
     let planned: Vec<_> = items.iter().filter(|item| item.state == "planned").collect();
     if planned.is_empty() {
-        return Ok((String::new(), Vec::new()));
+        return Ok(None);
     }
     let ready = |item: &&work_items::WorkItem| item.parent_id.as_ref().is_none_or(|parent_id|
         items.iter().any(|parent| &parent.id == parent_id && parent.state == "accepted"));
@@ -5727,9 +5753,25 @@ fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, V
         .find(|item| item.assignment_id.is_some())
         .or_else(|| planned.iter().copied().find(ready))
         .ok_or("No WorkItem is dependency-ready; accept its parent or resolve the plan.")?;
+    Ok(Some(selected.clone()))
+}
+
+/// Pick the exact ready item's reviewed route, otherwise the legacy default.
+/// Both dispatch callers repeat this under their admission transaction.
+fn next_dispatch_worker(store: &Store, ticket_id: &str) -> Result<String> {
+    if let Some(worker) = next_work_item(store, ticket_id)?.and_then(|item| item.worker_bot_id) {
+        return Ok(worker);
+    }
+    ticket_worker(store, ticket_id)
+}
+
+fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, Vec<String>)> {
+    let Some(selected) = next_work_item(store, ticket_id)? else {
+        return Ok((String::new(), Vec::new()));
+    };
     if let Some(worker) = selected.worker_bot_id.as_deref() {
-        if ticket_worker(store, ticket_id)? != worker {
-            return Err("Stored WorkItem route no longer matches the selected native Worker.".into());
+        if roster::ticket_profile(store, ticket_id)?.is_none() {
+            return Err("Reviewed WorkItem route has no admitted Team profile.".into());
         }
         roster::require_current_profile(store, ticket_id, "worker", worker)?;
     }
@@ -5860,7 +5902,7 @@ fn retry_blocked_with_request(
     if !members.reviewer_bot_ids.is_empty() {
         return Err("Configured Council reviewers require a native task-bound review.".into());
     }
-    let selected_worker_id = ticket_worker(store, ticket_id)?;
+    let selected_worker_id = next_dispatch_worker(store, ticket_id)?;
     if members.worker_bot_ids.len() > 1 {
         // A legacy blocked Ticket must not acquire a new multi-member roster
         // merely because the Team changed while it was waiting. Compare the
@@ -5898,9 +5940,9 @@ fn retry_blocked_with_request(
     }
     roster::require_current_profile(store,ticket_id,"worker",&worker.id)?;
     let (attempts, worker_attempts): (i64,i64) = store.db.query_row(
-        "SELECT COALESCE(MAX(attempt),0),COUNT(*) FILTER (WHERE bot_id=?2)
+        "SELECT COALESCE(MAX(attempt),0),COUNT(*) FILTER (WHERE bot_id<>?2)
          FROM sa_assignments WHERE ticket_id=?1",
-        params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
+        params![ticket_id,coordinator.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
     // This is an immutable, admission-time ceiling, not the Team's editable
     // current preference. Missing snapshots deny retries rather than widening.
@@ -6026,7 +6068,7 @@ fn prepare_coordinated_worker_with_request(
         None => {}
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = direct_team_member(store, &config, &ticket_worker(store, ticket_id)?)?;
+    let worker = direct_team_member(store, &config, &next_dispatch_worker(store, ticket_id)?)?;
     if coordinator.paused || worker.paused || worker.project_id != config.project_id
     {
         return Err("A selected bot is unavailable or outside the immutable project scope.".into());
@@ -6068,9 +6110,9 @@ fn prepare_coordinated_worker_with_request(
         &plan, "", &work_context, coordinated_worker_message(&ticket, "").chars().count(),
     )?;
     let (next_attempt, worker_attempts): (i64,i64) = store.db.query_row(
-        "SELECT COALESCE(MAX(attempt),0)+1,COUNT(*) FILTER (WHERE bot_id=?2)
+        "SELECT COALESCE(MAX(attempt),0)+1,COUNT(*) FILTER (WHERE bot_id<>?2)
          FROM sa_assignments WHERE ticket_id=?1",
-        params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
+        params![ticket_id,coordinator.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
     if worker_attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
         return Err("Manual worker attempt limit reached; no further WorkItem may be dispatched.".into());
@@ -6165,7 +6207,7 @@ async fn dispatch_worker_native(
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let worker = ticket_worker(&store, ticket_id)?;
+        let worker = next_dispatch_worker(&store, ticket_id)?;
         let ticket = get_ticket(&store, ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
         let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
@@ -13933,7 +13975,7 @@ mod tests {
         assert_eq!(workers[0]["selectedForThisDemand"], false);
         assert_eq!(workers[1]["declaredRolePreview"], "Frontend specialist");
         assert_eq!(workers[1]["selectedForThisDemand"], true);
-        assert_eq!(workers[1]["executionAuthority"], "read-only; operator-selected Worker only");
+        assert_eq!(workers[1]["executionAuthority"], "read-only; explicit reviewed WorkItem route or original default");
         for secret in ["outsider", "Other Team private role", "private-instruction-marker", "private-goal-marker", "private-soul-marker"] {
             assert!(!packet.contains(secret));
         }
@@ -15404,6 +15446,77 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn reviewed_work_items_dispatch_two_distinct_workers_on_one_native_demand() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('peer','Peer Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'peer')",
+            [&cfg.id],
+        ).unwrap();
+        let (ticket, launched) = admit_role_with_staging_member(
+            &mut store, &cfg.id, "Inspect two components", "peer-work-items", false,
+            ManualAdmissionOptions { coordinate: false, headless_staging: true,
+                selected_worker_id: Some("worker") },
+        ).unwrap();
+        assert!(!launched);
+        let plan = work_items::decode_plan(r#"[{"requestKey":"root","summary":"Inspect backend","workerBotId":"worker","routingReason":"Backend specialist"},{"requestKey":"child","summary":"Inspect frontend","parentRequestKey":"root","workerBotId":"peer","routingReason":"Frontend specialist"}]"#).unwrap();
+        let items = work_items::plan_batch(&store, &ticket.id, ticket.revision, &plan).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let (running, _, worker, _) = retry_blocked_at_revision(
+            &mut store, &ticket.id, revision, false,
+        ).unwrap();
+        assert_eq!(worker, "worker");
+        let first = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &first).unwrap().is_some());
+        assert!(on_run_finished(&store, &first, true, "Backend evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert!(accept(&store, &ticket.id, running.revision).is_err());
+        let blocked = accept(&store, &ticket.id, waiting.revision).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(work_items::list(&store, &ticket.id, 100).unwrap().0.iter()
+            .find(|item| item.id == items[0].id).unwrap().state, "accepted");
+        let path = store.path.clone();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(ticket_worker(&store, &ticket.id).unwrap(), "worker");
+        assert_eq!(next_dispatch_worker(&store, &ticket.id).unwrap(), "peer");
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='peer'", []).unwrap();
+        assert!(retry_blocked_at_revision(&mut store, &ticket.id, blocked.revision, false).is_err());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='peer'", []).unwrap();
+        let (running, _, worker, context) = retry_blocked_at_revision(
+            &mut store, &ticket.id, blocked.revision, false,
+        ).unwrap();
+        assert_eq!(worker, "peer");
+        assert!(context.contains("Backend evidence"));
+        let second = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert_ne!(first, second);
+        assert!(assignment_role_authorized(&store, &ticket.id, "peer", 2, "router", "worker").unwrap());
+        assert!(!assignment_role_authorized(&store, &ticket.id, "worker", 2, "router", "worker").unwrap());
+        assert!(!assignment_role_authorized(&store, &ticket.id, "router", 2, "router", "worker").unwrap());
+        assert!(read_only_policy(&store, &second).unwrap().is_some());
+        assert!(headless_cancelled_assignments_with_pause(&store, std::slice::from_ref(&second), false).unwrap().is_empty());
+        assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+        assert!(!on_run_finished(&store, &first, true, "Late root result").unwrap());
+        assert!(on_run_finished(&store, &second, true, "Frontend evidence").unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert!(accept(&store, &ticket.id, running.revision).is_err());
+        assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
+        let finished = work_items::list(&store, &ticket.id, 100).unwrap().0;
+        assert!(finished.iter().all(|item| item.state == "accepted"));
+        assert_eq!(finished.iter().map(|item| &item.id).collect::<std::collections::HashSet<_>>(),
+            items.iter().map(|item| &item.id).collect::<std::collections::HashSet<_>>());
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 2);
+        assert!(!mandate(&store, &ticket.id).unwrap().allowed_side_effects);
+        assert!(!on_run_finished(&store, &second, true, "Late peer result").unwrap());
     }
 
     #[test]

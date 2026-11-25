@@ -153,6 +153,74 @@ CREATE TRIGGER IF NOT EXISTS sa_work_item_route_immutable_delete
  BEGIN SELECT RAISE(ABORT,'WorkItem route is immutable'); END;
 "#;
 
+
+/// Version 59 keeps the original Ticket's default Worker immutable. An
+/// operator-reviewed WorkItem route may authorize another frozen same-project
+/// Worker for that item only. The attempt receipt, not live bot configuration
+/// or provider output, resolves the exact recipient at every later boundary.
+pub(crate) const MULTI_WORKER_SCHEMA: &str = r#"
+DROP TRIGGER IF EXISTS sa_work_item_route_guard;
+DROP TRIGGER IF EXISTS sa_work_item_attempt_guard;
+DROP TRIGGER IF EXISTS sa_work_item_acceptance_guard;
+CREATE VIEW IF NOT EXISTS sa_assignment_worker_authority AS
+ SELECT a.id AS assignment_id,
+   CASE WHEN b.assignment_id IS NULL THEN t.worker_bot_id
+        WHEN w.id IS NULL THEN NULL
+        ELSE COALESCE(r.worker_bot_id,t.worker_bot_id) END AS worker_bot_id
+ FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
+ LEFT JOIN sa_work_item_attempts b ON b.assignment_id=a.id
+ LEFT JOIN sa_work_items w ON w.id=b.item_id AND w.ticket_id=t.id AND b.ticket_id=t.id
+ LEFT JOIN sa_work_item_routes r ON r.item_id=w.id;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_route_guard
+ BEFORE INSERT ON sa_work_item_routes
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_items w JOIN sa_tickets t ON t.id=w.ticket_id
+   JOIN sa_ticket_profiles p ON p.ticket_id=t.id AND p.policy_revision=t.policy_revision
+   JOIN json_each(p.profiles_json) member
+   WHERE w.id=NEW.item_id
+     AND json_extract(member.value,'$.botId')=NEW.worker_bot_id
+     AND json_extract(member.value,'$.role')='worker'
+     AND json_extract(member.value,'$.projectId')=t.project_id
+     AND t.state IN ('queued','blocked') AND t.active_assignment_id IS NULL
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_attempts b WHERE b.item_id=w.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem route must match its selected native Worker and unexecuted plan'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_attempt_guard
+ BEFORE INSERT ON sa_work_item_attempts
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_items w
+   JOIN sa_assignments a ON a.id=NEW.assignment_id AND a.ticket_id=w.ticket_id
+   JOIN sa_tickets t ON t.id=w.ticket_id
+   WHERE w.id=NEW.item_id AND w.ticket_id=NEW.ticket_id
+     AND t.active_assignment_id=a.id AND t.state='running'
+     AND t.revision=NEW.confirmed_revision+1 AND a.state='running'
+     AND a.bot_id=COALESCE((SELECT r.worker_bot_id FROM sa_work_item_routes r
+                             WHERE r.item_id=w.id),t.worker_bot_id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances c WHERE c.item_id=w.id)
+     AND (w.parent_id IS NULL OR EXISTS(
+         SELECT 1 FROM sa_work_item_acceptances p WHERE p.item_id=w.parent_id))
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem attempt must match its active native Worker and ready plan'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_acceptance_guard
+ BEFORE INSERT ON sa_work_item_acceptances
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_item_attempts b
+   JOIN sa_assignments a ON a.id=b.assignment_id AND a.ticket_id=b.ticket_id
+   JOIN sa_tickets t ON t.id=b.ticket_id
+   WHERE b.item_id=NEW.item_id AND b.assignment_id=NEW.assignment_id
+     AND t.state='waiting_approval' AND t.revision=NEW.accepted_revision
+     AND a.state='finished' AND a.bot_id=COALESCE(
+         (SELECT r.worker_bot_id FROM sa_work_item_routes r WHERE r.item_id=b.item_id),
+         t.worker_bot_id)
+     AND a.result=t.evidence AND length(trim(a.result))>0
+     AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=t.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=b.item_id)
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem acceptance requires current native Worker evidence'); END;
+"#;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct WorkItem {
@@ -282,16 +350,12 @@ fn plan_in_transaction(
         return Err("Demand revision changed; planning denied.".into());
     }
     if let Some((worker, _)) = route {
-        if super::ticket_worker(store, ticket_id)? != worker {
-            return Err("WorkItem route differs from the selected native Worker; create a separately authorized Demand for another Worker.".into());
-        }
         if super::roster::ticket_profile(store, ticket_id)?.is_none() {
             return Err("WorkItem routing requires an admitted Team profile.".into());
         }
+        let config = super::configuration(store, &ticket.orchestration_id)?;
+        super::direct_team_member(store, &config, worker)?;
         super::roster::require_current_profile(store, ticket_id, "worker", worker)?;
-        if super::bots::get(store, worker)?.paused {
-            return Err("Selected Worker is paused; WorkItem routing denied.".into());
-        }
     }
     // Each remaining non-cancelled, unaccepted item needs at least one
     // more native Worker attempt. Failed attempts count too. Reserve this
@@ -301,7 +365,8 @@ fn plan_in_transaction(
     let (used, pending): (i64, i64) = tx.query_row(
         "SELECT
            (SELECT COUNT(*) FROM sa_assignments a JOIN sa_tickets t
-            ON t.id=a.ticket_id AND t.worker_bot_id=a.bot_id WHERE t.id=?1),
+            ON t.id=a.ticket_id JOIN sa_orchestrations o ON o.id=t.orchestration_id
+            WHERE t.id=?1 AND a.bot_id<>o.coordinator_bot_id),
            (SELECT COUNT(*) FROM sa_work_items w WHERE w.ticket_id=?1
             AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
             AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id))",

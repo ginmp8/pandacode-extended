@@ -87,7 +87,7 @@ pub(super) fn bind_finished(
         "SELECT EXISTS(SELECT 1 FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          WHERE a.id=?1 AND a.ticket_id=?2 AND a.session_id=?3
-           AND a.bot_id=t.worker_bot_id AND a.state='finished'
+           AND a.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id) AND a.state='finished'
            AND a.result=t.evidence
            AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=?2))",
         params![assignment_id, ticket_id, session_id], |r| r.get(0),
@@ -148,7 +148,7 @@ pub(super) fn inspect(store: &Store, ticket: &Ticket) -> Result<Option<CouncilOb
     let assignment: Option<(String, String)> = store.db.query_row(
         "SELECT a.id,a.session_id FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
-         WHERE t.id=?1 AND a.bot_id=t.worker_bot_id
+         WHERE t.id=?1 AND a.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id)
            AND a.state='finished' AND a.result=t.evidence
            AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments
                           WHERE ticket_id=?1)",

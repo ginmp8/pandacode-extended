@@ -717,7 +717,7 @@ let demandArchived = false;
             safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json : '') +
             '</textarea></label><p>Up to 16 items. Each needs a stable requestKey and summary; ' +
             'optional parentRequestKey must refer to a preceding item in the same plan. ' +
-            'Optional workerBotId and routingReason must be supplied together and match the selected Worker. ' +
+            'Optional workerBotId and routingReason must be supplied together and match an admitted same-project Worker. ' +
             'Review the entire plan before saving. No Worker is dispatched or authorized.</p>' +
             '<button type="submit">Save dependency plan without dispatch</button></form>' : '') +
         '</section>' +

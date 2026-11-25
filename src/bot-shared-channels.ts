@@ -267,6 +267,9 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
   if (!panel || !trigger) return;
   const sync = () => {
     const enabled = form.querySelector<HTMLInputElement>('input[name="councilEnabled"]')?.checked ?? false;
+    // An opt-out message has no Council configuration to validate. Keep its
+    // editable draft, but do not let inactive numeric constraints block sending.
+    form.noValidate = !enabled;
     trigger.dataset.on = enabled ? 'true' : 'false';
     trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
     const selected = panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected';
@@ -274,14 +277,27 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     for (const row of panel.querySelectorAll<HTMLElement>('.bc-council-reviewer')) {
       const checked = row.querySelector<HTMLInputElement>('input[name="councilReviewer"]')?.checked ?? false;
       const role = row.querySelector<HTMLSelectElement>('select[name="councilReviewerRole"]')?.value;
-      row.querySelector<HTMLElement>('.bc-council-role')!.hidden = !selected || !checked;
-      row.querySelector<HTMLElement>('.bc-council-child-settings')!.hidden = !selected || !checked || role !== 'nested';
+      const roleVisible = selected && checked;
+      row.querySelector<HTMLElement>('.bc-council-role')!.hidden = !roleVisible;
+      row.querySelector<HTMLSelectElement>('select[name="councilReviewerRole"]')!.disabled = !roleVisible;
+      const childSettings = row.querySelector<HTMLElement>('.bc-council-child-settings')!;
+      childSettings.hidden = !roleVisible || role !== 'nested';
+      // Hidden controls still participate in HTML constraint validation unless
+      // disabled. Preserve drafts without validating or submitting inactive seats.
+      for (const input of childSettings.querySelectorAll<HTMLInputElement>('input')) {
+        input.disabled = childSettings.hidden;
+      }
     }
     const escalated = panel.querySelector<HTMLSelectElement>('select[name="councilStrategy"]')?.value === 'escalated';
     for (const control of panel.querySelectorAll<HTMLElement>('.bc-council-s2-trigger')) control.hidden = !escalated;
     panel.querySelector<HTMLInputElement>('input[name="councilForceEscalation"]')!.disabled = !escalated;
     const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;
-    panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!.hidden = source === 'architect';
+    const criterionFields = panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!;
+    criterionFields.hidden = source === 'architect';
+    for (const input of criterionFields.querySelectorAll<HTMLInputElement>('input')) {
+      input.disabled = criterionFields.hidden;
+    }
+    panel.querySelector<HTMLInputElement>('input[name="councilAutomaticReviewers"]')!.disabled = !selected;
     const rows = panel.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
     for (const remove of panel.querySelectorAll<HTMLButtonElement>('[data-council-criterion-remove]')) {
       remove.disabled = rows.length <= 1;

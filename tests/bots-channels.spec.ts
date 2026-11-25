@@ -212,6 +212,21 @@ test.describe('shared bot channels', () => {
         }
         if (mode.automatic) await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill(String(mode.automatic));
       }
+      if (mode.mode === 'M3' && strategy === 'parallel') {
+        const role = panel.locator('select[name="councilReviewerRole"]').nth(1);
+        const leaves = panel.locator('input[name="councilChildReviewers"]').nth(1);
+        await role.selectOption('nested');
+        await leaves.fill('1');
+        expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(false);
+        await role.selectOption('direct');
+        await expect(leaves).toBeDisabled();
+        await expect(leaves).toHaveValue('1');
+        expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(true);
+        await role.selectOption('nested');
+        await expect(leaves).toBeEnabled();
+        expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(false);
+        await role.selectOption('direct');
+      }
       await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption(strategy);
       const immediate = panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' });
       if (strategy === 'escalated') {
@@ -220,7 +235,18 @@ test.describe('shared bot channels', () => {
         await page.keyboard.press('Space');
         await expect(immediate).not.toBeChecked();
       } else await expect(immediate).toBeHidden();
-      await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption(origin);
+      const source = panel.getByRole('combobox', { name: 'Criteria source' });
+      if (mode.mode === 'M1' && strategy === 'parallel') {
+        await source.selectOption('user');
+        const target = panel.locator('input[name="councilCriterionTarget"]').first();
+        await target.fill('0');
+        expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(false);
+        await source.selectOption('architect');
+        await expect(target).toBeDisabled();
+        await expect(target).toHaveValue('0');
+        expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(true);
+      }
+      await source.selectOption(origin);
       if (origin !== 'architect') {
         await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
         await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
@@ -274,6 +300,40 @@ test.describe('shared bot channels', () => {
       ]);
     });
   }
+
+  test('Channel Council opt-out sends an ordinary message despite an invalid inactive draft', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Send without Council.');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    const enabled = panel.getByRole('switch', { name: 'Council' });
+    await enabled.check();
+    const target = panel.getByRole('spinbutton', { name: 'Custom target score' });
+    await target.fill('0');
+    expect(await composer.evaluate(form => (form as HTMLFormElement).checkValidity())).toBe(false);
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+    await enabled.uncheck();
+    await expect(target).toHaveValue('0');
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0]);
+    expect(posted.text).toBe('Send without Council.');
+    expect(posted.council).toBeUndefined();
+  });
 
   test('shared Channel submits M3 hybrid seats, S2 and frozen user criteria through the existing native request', async ({ page }) => {
     test.setTimeout(60_000);

@@ -132,7 +132,8 @@ jobs:
   council-bot-selected-browser:
     name: Council configured reviewer selection (focused Playwright)
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    # The expanded matrix exceeded the job envelope, not individual test limits.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -168,6 +169,29 @@ jobs:
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/council.spec.ts --workers=1 --shard=${{ matrix.shard }}/3
+
+  council-channel-browser:
+    # The bot workflow grep does not cover the complete Channel Council matrix.
+    # Run all Channel tests in isolated shards, retaining the existing gates.
+    name: Shared Channel Council (Playwright, shard ${{ matrix.shard }}/2)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise every Shared Channel UI and Council configuration
+        run: |
+          PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
+            npx playwright test tests/bots-channels.spec.ts --workers=1 --shard=${{ matrix.shard }}/2
 
   customize-skills-browser:
     # Run the Skills regressions independently, even when an unrelated Bots test fails.

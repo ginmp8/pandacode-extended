@@ -1016,6 +1016,8 @@ pub struct TaskSnapshot {
     /// Operator-authored plans only: these are not dispatched or completed tasks.
     pub work_items: Vec<work_items::WorkItem>,
     pub truncated_work_items: bool,
+    /// Durable intent only; not an admitted Assignment or a provider launch.
+    pending_dispatch: Option<headless_dispatch::DispatchRequest>,
     /// Untrusted structured advice from the original native Coordinator.
     /// This is a preview, never a WorkItem, grant, or dispatch receipt.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1144,6 +1146,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         team_policy_changed_since_admission,
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
+        pending_dispatch: headless_dispatch::pending_for_ticket(store, ticket_id)?,
         council: council_adapter::inspect(store, &ticket)?,
         // Advisory parsing/profile failures must not hide canonical evidence
         // or make the read-only inspector fail. Native save still rechecks.
@@ -5976,6 +5979,9 @@ fn retry_blocked_with_request(
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
     }
+    if dispatch_request.is_none() {
+        headless_dispatch::require_no_live_pending(store, &ticket)?;
+    }
     if effects::unresolved_count(store, ticket_id)? != 0 {
         return Err("SuperAgent has unresolved external effects; reconcile before retry.".into());
     }
@@ -6077,6 +6083,8 @@ fn retry_blocked_with_request(
     record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
     if let Some(request) = dispatch_request {
         headless_dispatch::consume(&tx, request, &ticket, &assignment_id, now)?;
+    } else {
+        headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,thread,worker.id,work_context))
@@ -6120,6 +6128,9 @@ fn prepare_coordinated_worker_with_request(
     }
     if ticket.state != "queued" || ticket.active_assignment_id.is_some() {
         return Err("Coordinator has not produced a current, dispatchable plan.".into());
+    }
+    if dispatch_request.is_none() {
+        headless_dispatch::require_no_live_pending(store, &ticket)?;
     }
     if effects::unresolved_count(store, ticket_id)? != 0 {
         return Err("SuperAgent has unresolved external effects; reconcile before coordinated dispatch.".into());
@@ -6226,6 +6237,8 @@ fn prepare_coordinated_worker_with_request(
     record_work_item_admission(store, &ticket, &assignment_id, &work_item_ids, now)?;
     if let Some(request) = dispatch_request {
         headless_dispatch::consume(&tx, request, &ticket, &assignment_id, now)?;
+    } else {
+        headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store,ticket_id)?,thread,worker.id,worker_context))
@@ -6391,6 +6404,17 @@ pub async fn superagent_dispatch_reviewed_plan(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let request = headless_dispatch::enqueue_desktop_plan(
         &store, &ticket_id, expected_revision, &request_key)?;
+    serde_json::to_value(request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn superagent_cancel_dispatch_request(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, expected_revision: i64, request_key: String,
+) -> Result<serde_json::Value> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let request = headless_dispatch::cancel(&store, &ticket_id, expected_revision, &request_key)?;
     serde_json::to_value(request).map_err(|e| e.to_string())
 }
 
@@ -7942,6 +7966,13 @@ mod tests {
         assert!(headless_dispatch::cancel(&store, id, revision + 1, "cancel-me").is_err());
         assert!(headless_dispatch::cancel(&store, id, revision, "other-key").is_err());
         assert!(headless_dispatch::cancel(&store, "foreign-ticket", revision, "cancel-me").is_err());
+        let snapshot = serde_json::to_value(ticket_snapshot(&store, id, 50).unwrap()).unwrap();
+        assert_eq!(snapshot["pendingDispatch"]["id"], first.id);
+        assert_eq!(snapshot["pendingDispatch"]["requestKey"], "cancel-me");
+        assert_eq!(snapshot["pendingDispatch"]["expectedRevision"], revision);
+        assert!(retry_blocked_at_revision(&mut store, id, revision, false).is_err(),
+            "manual admission must not silently replace an outstanding operator intent");
+        assert!(assignment_session(&store, id).unwrap().is_none());
 
         store.db.execute_batch(
             "CREATE TRIGGER deny_dispatch_cancel BEFORE INSERT ON sa_audit
@@ -7954,6 +7985,9 @@ mod tests {
         let cancelled = serde_json::to_value(
             headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap();
         assert_eq!(cancelled["rejection"], "cancelled by local operator");
+        let snapshot = serde_json::to_value(ticket_snapshot(&store, id, 50).unwrap()).unwrap();
+        assert!(snapshot["pendingDispatch"].is_null());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
         assert_eq!(serde_json::to_value(
             headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap(), cancelled);
         let first = headless_dispatch::enqueue(&store,id,revision,"stale-plan").unwrap();
@@ -7984,6 +8018,38 @@ mod tests {
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
             [id], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn expired_pending_dispatch_is_retired_only_with_successful_manual_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id, "Read only", "expired-manual").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let request = headless_dispatch::enqueue(&store,id,revision,"expired-intent").unwrap();
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
+            [&request.id]).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_expired_manual_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected'
+             BEGIN SELECT RAISE(ABORT,'test audit failure'); END;",
+        ).unwrap();
+        assert!(retry_blocked_at_revision(&mut store,id,revision,false).is_err());
+        assert_eq!(get_ticket(&store,id).unwrap().revision,revision);
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        assert_eq!(headless_dispatch::pending_for_ticket(&store,id).unwrap().unwrap().id,request.id);
+        store.db.execute_batch("DROP TRIGGER deny_expired_manual_audit;").unwrap();
+        let (running,_,_,_)=retry_blocked_at_revision(&mut store,id,revision,false).unwrap();
+        assert_eq!(running.state,"running");
+        assert!(headless_dispatch::pending_for_ticket(&store,id).unwrap().is_none());
+        let receipt=serde_json::to_value(headless_dispatch::cancel(
+            &store,id,revision,"expired-intent").unwrap()).unwrap();
+        assert_eq!(receipt["state"],"rejected");
+        assert_eq!(receipt["rejection"],"Ticket revision changed");
+        assert!(running.active_assignment_id.is_some());
+        assert_eq!(get_ticket(&store,id).unwrap().active_assignment_id,running.active_assignment_id);
     }
 
     #[test]
@@ -16168,6 +16234,9 @@ mod tests {
             assert!(cross_surface.is_err());
             assert_eq!(headless_dispatch::pending_for_host(&store,true).unwrap().len(),if desktop { 1 } else { 0 });
             assert_eq!(headless_dispatch::pending_for_host(&store,false).unwrap().len(),1);
+            assert!(prepare_coordinated_worker_at_revision(&mut store,id,revision,false).is_err(),
+                "manual coordinated admission must not replace the reviewed plan intent");
+            assert_eq!(get_ticket(&store,id).unwrap().revision,revision);
             let (_,_,_,packet)=prepare_coordinated_worker_with_request(
                 &mut store,id,revision,false,Some(&request)).unwrap();
             assert!(packet.contains(root.id.as_str()));

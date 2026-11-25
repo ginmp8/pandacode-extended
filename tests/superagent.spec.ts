@@ -5005,6 +5005,7 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
     const host=document.createElement('div');
     host.id='sa-desktop-plan-test';document.body.appendChild(host);
     const requests:Array<Record<string,unknown>>=[];
+    let pendingDispatch:Record<string,unknown>|null=null;
     (window as unknown as {desktopPlanRequests:typeof requests}).desktopPlanRequests=requests;
     const ticket={id:'ticket',orchestrationId:'team',objective:'Inspect project',state:'queued',revision:3,evidence:null};
     mountSuperagent(host,async (command,args) => {
@@ -5024,12 +5025,20 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
         assignments:[],activity:[],
         workItems:[{id:'item-one',ticketId:'ticket',requestKey:'plan-one',parentId:null,
           summary:'Inspect root',state:'planned',createdAt:1800000000100,cancelledAt:null}],
-        truncatedWorkItems:false,
+        truncatedWorkItems:false,pendingDispatch,
       } as never;
       if(command==='superagent_dispatch_reviewed_plan') {
         const request=args as Record<string,unknown>;
         requests.push(request);
-        return {id:'native-intent',...request,state:'pending'} as never;
+        pendingDispatch={id:'native-intent',...request,state:'pending',kind:'coordinated'};
+        return pendingDispatch as never;
+      }
+      if(command==='superagent_cancel_dispatch_request') {
+        const request=args as Record<string,unknown>;
+        requests.push(request);
+        const cancelled={...pendingDispatch,state:'rejected',rejection:'cancelled by local operator'};
+        pendingDispatch=null;
+        return cancelled as never;
       }
       throw Error('Unexpected command: '+command);
     });
@@ -5053,4 +5062,14 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
   expect(recorded).toHaveLength(1);
   expect(recorded[0]).toMatchObject({ticketId:'ticket',expectedRevision:3});
   expect(typeof recorded[0].requestKey).toBe('string');
+  await expect(action).toHaveCount(0);
+  await expect(host.getByRole('region',{name:'Pending dispatch request'})).toContainText('Not admitted');
+  await host.getByRole('button',{name:'Cancel pending dispatch'}).click();
+  await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(await requests()).toHaveLength(1);
+  await host.getByRole('button',{name:'Cancel pending dispatch'}).click();
+  await confirmation.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host).toContainText('Pending dispatch cancelled');
+  expect(await requests()).toEqual([recorded[0],recorded[0]]);
+  await expect(action).toBeVisible();
 });

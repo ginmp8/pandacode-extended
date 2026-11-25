@@ -4515,6 +4515,7 @@ pub fn run() {
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
                 superagent::superagent_dispatch_reviewed_plan,
+                superagent::superagent_cancel_dispatch_request,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,

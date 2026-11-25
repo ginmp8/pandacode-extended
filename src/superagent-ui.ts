@@ -96,8 +96,13 @@ interface PlannedWorkItem {
   assignmentId?:string|null;
   workerBotId?:string|null; routingReason?:string|null;
 }
+interface PendingDispatch {
+  id:string; ticketId:string; requestKey:string; expectedRevision:number;
+  kind:string; state:string;
+}
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  pendingDispatch?: PendingDispatch | null;
   admittedProfile?: AdmittedTeamProfile | null;
   admittedStrategy?: {policyRevision:number;purpose:string;strategy:string;capturedAt:number} | null;
   currentTeamPolicyRevision?: number;
@@ -695,7 +700,13 @@ let demandArchived = false;
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
         '<h5>Planned WorkItems</h5><p>Manual dispatch selects one dependency-ready item. Accept its evidence before dispatching the next; ' +
         'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
-        (validWorkItems && ticketDetails.ticket.state==='queued' && !ticketDetails.truncatedWorkItems &&
+        (ticketDetails.pendingDispatch?.ticketId===inspected.id && ticketDetails.pendingDispatch.state==='pending'
+          ? '<section role="region" aria-label="Pending dispatch request">' +
+            '<p><strong>Pending dispatch · Not admitted</strong> · ' +
+            safe(ticketDetails.pendingDispatch.kind) + ' · Authorized revision ' +
+            safe(ticketDetails.pendingDispatch.expectedRevision) + '</p>' +
+            '<button type="button" data-sa-cancel-dispatch>Cancel pending dispatch</button></section>' : '') +
+        (validWorkItems && !ticketDetails.pendingDispatch && ticketDetails.ticket.state==='queued' && !ticketDetails.truncatedWorkItems &&
           plannedWorkItems.some(item=>item.state==='planned' && !item.assignmentId)
           ? '<button type="button" data-sa-dispatch-reviewed-plan>Authorize sequential plan dispatch</button>' +
             '<p>Read-only Workers only. Each result still requires human acceptance; the native host advances only the reviewed plan.</p>' : '') +
@@ -3302,11 +3313,33 @@ let demandArchived = false;
           ' unchanged.' + (result.backupPath ? ' Recovery snapshot: ' + result.backupPath : '');
       }); return;
     }
+    if (target.hasAttribute('data-sa-cancel-dispatch')) {
+      const detail=ticketDetails, request=detail?.pendingDispatch;
+      if (!detail || !request || request.state!=='pending' || request.ticketId!==detail.ticket.id ||
+          inspectedTicket!==detail.ticket.id || selected!==detail.ticket.orchestrationId) return;
+      ask('Cancel this pending dispatch authorization? No admitted Assignment will be stopped.',async()=>{
+        if (ticketDetails!==detail || inspectedTicket!==request.ticketId ||
+            selected!==detail.ticket.orchestrationId) {
+          throw new Error('Demand changed before dispatch cancellation. Refresh before acting.');
+        }
+        const receipt=await call<PendingDispatch>('superagent_cancel_dispatch_request',{
+          ticketId:request.ticketId,expectedRevision:request.expectedRevision,requestKey:request.requestKey,
+        });
+        if (receipt.id!==request.id || receipt.ticketId!==request.ticketId ||
+            receipt.expectedRevision!==request.expectedRevision || receipt.requestKey!==request.requestKey ||
+            receipt.state!=='rejected') {
+          throw new Error('Native dispatch cancellation acknowledgement is inconsistent.');
+        }
+        await refreshTicketDetails();
+        feedback='Pending dispatch cancelled or already rejected. Native Demand history is preserved.';
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-dispatch-reviewed-plan')) {
       const detail=ticketDetails;
       if (!detail || detail.ticket.id!==inspectedTicket ||
           detail.ticket.orchestrationId!==selected || detail.ticket.state!=='queued' ||
-          detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && !item.assignmentId)) return;
+          detail.pendingDispatch || detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && !item.assignmentId)) return;
       const ticketId=detail.ticket.id, revision=detail.ticket.revision;
       if (!pendingDesktopPlan || pendingDesktopPlan.ticketId!==ticketId || pendingDesktopPlan.revision!==revision) {
         pendingDesktopPlan={ticketId,revision,key:crypto.randomUUID()};

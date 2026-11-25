@@ -62,7 +62,7 @@ CREATE TRIGGER IF NOT EXISTS sa_desktop_plan_dispatch_immutable_delete
  BEGIN SELECT RAISE(ABORT,'Desktop plan authorization is immutable'); END;
 ";
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DispatchRequest {
     pub(super) id: String,
@@ -90,6 +90,25 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<DispatchRequest> {
 fn by_key(store: &Store, ticket_id: &str, key: &str) -> Result<Option<DispatchRequest>> {
     store.db.query_row(&format!("{SELECT} WHERE ticket_id=?1 AND request_key=?2"),
         params![ticket_id,key], row).optional().map_err(|e| e.to_string())
+}
+
+/// Read the single pending intent inside the Ticket snapshot transaction.
+pub(super) fn pending_for_ticket(store: &Store, ticket_id: &str) -> Result<Option<DispatchRequest>> {
+    store.db.query_row(&format!("{SELECT} WHERE ticket_id=?1 AND state='pending'"),
+        [ticket_id], row).optional().map_err(|e| e.to_string())
+}
+
+/// Manual admission must not silently replace a live queued authorization.
+/// The same immediate transaction serializes this check with consumption
+/// and operator cancellation. Expired or stale intents cannot block a new
+/// explicit admission; successful manual admission retires them atomically.
+pub(super) fn require_no_live_pending(store: &Store, ticket: &Ticket) -> Result<()> {
+    if pending_for_ticket(store, &ticket.id)?.is_some_and(|request|
+        request.expected_revision == ticket.revision && is_current(&request, storage::now()))
+    {
+        return Err("Demand already has a pending dispatch; cancel it or wait for native admission.".into());
+    }
+    Ok(())
 }
 
 fn valid_key(key: &str) -> bool {

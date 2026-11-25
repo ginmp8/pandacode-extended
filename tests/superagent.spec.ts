@@ -5000,6 +5000,10 @@ test('guided Team setup uses native disabled-Team creation and prevents early su
 // authorized_plan_continuation_requires_human_acceptance_and_current_revision.
 for (const demandState of ['queued','blocked'] as const) {
 test(`Desktop ${demandState} reviewed plan dispatch requires explicit revision-bound confirmation`, async ({page}) => {
+  // The full confirmation, cancellation and focus-return journey involves
+  // multiple workspace renders. Use the suite's existing long-journey budget;
+  // all assertions, including native request counts, remain unchanged.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async (demandState) => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');

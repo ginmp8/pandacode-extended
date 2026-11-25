@@ -4212,6 +4212,25 @@ pub(crate) fn guard_prepared_provider_launch(
     {
         return Err("policy_unsupported: prepared SuperAgent provider or checkout changed.".into());
     }
+    // Provider resume IDs select actual harness conversations. Match the
+    // prepared value to the live session, then require exclusive native
+    // attribution before letting an existing thread enter this task. Usage
+    // links are deliberately checked across all sessions because they do not
+    // carry a provider namespace. Ambiguous ownership must fail closed.
+    if config.resume_id != session.resume_id {
+        return Err("policy_unsupported: prepared SuperAgent provider history changed.".into());
+    }
+    if let Some(resume_id) = config.resume_id.as_deref() {
+        let exclusively_owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_usage_links WHERE session_id=?1 AND harness_id=?2)
+               AND NOT EXISTS(SELECT 1 FROM sessions WHERE id<>?1 AND resume_id=?2)
+               AND NOT EXISTS(SELECT 1 FROM task_usage_links WHERE session_id<>?1 AND harness_id=?2)",
+            params![&config.session_id, resume_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if resume_id.trim().is_empty() || !exclusively_owned {
+            return Err("policy_unsupported: SuperAgent provider history has no exclusive task attribution.".into());
+        }
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -13252,6 +13271,36 @@ mod tests {
         let model = std::mem::replace(&mut config.model, "different-model".into());
         assert!(guard_prepared_provider_launch(&store, &config).is_err());
         config.model = model;
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+
+        // A native launch must not borrow another chat's provider history,
+        // even when the provider, model, project and local session all match.
+        config.resume_id = Some("foreign-harness-id".into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        config.resume_id = None;
+        store.resume(&sid, "task-owned-harness-id").unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        config.resume_id = Some("task-owned-harness-id".into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+
+        let other = store.create_session("project", "codex", "default", "ask").unwrap();
+        store.resume(&other.id, "foreign-harness-id").unwrap();
+        assert!(read_only_policy(&store, &other.id).unwrap().is_none());
+        // Matching the live session alone does not prove provider ownership.
+        store.resume(&sid, "foreign-harness-id").unwrap();
+        config.resume_id = Some("foreign-harness-id".into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        // The other session can switch threads; its historic link still
+        // prevents the task from reading the prior private conversation.
+        store.resume(&other.id, "replacement-harness-id").unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+
+        store.db.execute("UPDATE sessions SET resume_id='unattributed-harness-id' WHERE id=?1",
+            [&sid]).unwrap();
+        config.resume_id = Some("unattributed-harness-id".into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        store.resume(&sid, "task-owned-harness-id").unwrap();
+        config.resume_id = Some("task-owned-harness-id".into());
         assert!(guard_prepared_provider_launch(&store, &config).is_ok());
         stop(&store, &ticket.id).unwrap();
         assert!(guard_prepared_provider_launch(&store, &config).is_err(),

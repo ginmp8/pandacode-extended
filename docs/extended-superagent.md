@@ -122,6 +122,13 @@ immutable admission profile. Reassigning that path under the same project ID
 denies provider admission and prevents late callbacks from becoming approvable
 evidence. Existing read-only task profiles without this field remain readable.
 
+Immediately before native SuperAgent provider launch, a prepared resume ID must
+match the current task session. A nonempty ID must have a native usage link for
+that exact session and no current or historical link belonging to any other
+session. Ambiguous or unattributed history is denied without exposing the
+provider identifier. Ordinary chats retain their existing resume behavior.
+This is a read-only task isolation fence, not a scoped-write grant.
+
 This protection compares stored checkout path strings. It does **not** claim
 equivalence for symlink targets, relative aliases or case-folded paths.
 Writable tools and remote effects still require separate task-scoped native

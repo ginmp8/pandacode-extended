@@ -11330,24 +11330,50 @@ fn hierarchical_s2_root_worker_and_session_identities_are_unique_across_waves() 
 /// root scores alone must never substitute for a new child Council receipt.
 #[test]
 fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
+    assert_nested_forced_s2_root_callbacks("m5");
+}
+
+#[test]
+fn nested_m6_forced_s2_requires_fresh_direct_and_child_callbacks() {
+    assert_nested_forced_s2_root_callbacks("m6");
+}
+
+#[test]
+fn nested_m7_forced_s2_requires_all_three_fresh_native_sources() {
+    assert_nested_forced_s2_root_callbacks("m7");
+}
+
+fn assert_nested_forced_s2_root_callbacks(mode: &str) {
+    crate::providers::with_test_executable_override("codex", || {
+        run_nested_forced_s2_root_callbacks(mode);
+    });
+}
+
+fn run_nested_forced_s2_root_callbacks(mode: &str) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
         let project = store.session(&sid).unwrap().project_id;
-        store.db.execute(
-            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
-            rusqlite::params![project, storage::now()],
-        ).unwrap();
+        for bot in ["security-child", "quality-direct"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
         let mut root = load(&store, &sid).unwrap().unwrap();
         let mut config = on(9.0, 3, 0);
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.force_escalation = true;
-        config.automatic_reviewers = 1;
+        config.automatic_reviewers = usize::from(matches!(mode, "m5" | "m7"));
+        if matches!(mode, "m6" | "m7") {
+            config.reviewer_bot_ids = vec!["quality-direct".into()];
+        }
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
+        assert_eq!(config.mode(), mode);
         config.validate().unwrap();
         root.config.council = Some(config);
         root.status = "ready".into();
@@ -11355,15 +11381,44 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         save(&store, &mut root).unwrap();
     }
     let (started, _) = start_state(&state, &sid, "Force a second independent Council wave", None, None).unwrap();
-    call(&state, &sid, "pandacode_dispatch_workers", json!({
-        "assignments":[reviewer_assignment("s2-root-first", "correctness")]
-    })).unwrap();
-    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-    let (first_run, _) = claim(&state, action);
-    finish(&state, &first_run, "Independent root review.\nCouncil score: 9.7/10", true);
-    let second_request = json!({
-        "assignments":[reviewer_assignment("s2-root-second", "correctness")]
-    });
+    let assignment = format!("{mode}-forced-s2-native");
+    let (project, artifact, task) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "f".repeat(64);
+        let task = council_requests::admit_native_task(
+            &store, &sid, &project, &assignment, &artifact,
+        ).unwrap();
+        (project, artifact, task)
+    };
+    let assignments = |round: usize| {
+        let mut selected = Vec::new();
+        if matches!(mode, "m6" | "m7") {
+            let mut direct = reviewer_assignment(
+                &format!("s2-direct-{round}"), "Quality");
+            direct["councilReviewerSource"] = json!("direct_bot");
+            selected.push(direct);
+        }
+        if matches!(mode, "m5" | "m7") {
+            let mut automatic = reviewer_assignment(
+                &format!("s2-automatic-{round}"), "correctness");
+            automatic["councilReviewerSource"] = json!("automatic");
+            selected.push(automatic);
+        }
+        selected
+    };
+    let root_count = assignments(1).len();
+    call(&state, &sid, "pandacode_dispatch_workers",
+        json!({"assignments": assignments(1)})).unwrap();
+    let mut root_sessions = std::collections::HashSet::new();
+    for _ in 0..root_count {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, action);
+        assert!(run.config.reviewer_boundary);
+        assert!(root_sessions.insert(run.config.session_id.clone()));
+        finish(&state, &run, "Independent root review.\nCouncil score: 9.7/10", true);
+    }
+    let second_request = json!({"assignments": assignments(2)});
     let early = call(&state, &sid, "pandacode_dispatch_workers", second_request.clone()).unwrap_err();
     assert!(early.contains("first-wave root and child receipts"), "{early}");
     assert_eq!(saved(&state, &sid).workers.iter()
@@ -11416,14 +11471,37 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     }
     let assigned = call(&state, &sid, "pandacode_dispatch_workers", second_request).unwrap();
     assert_eq!(assigned["queued"], true);
-    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-    let (second_run, _) = claim(&state, action);
-    assert_ne!(first_run.config.session_id, second_run.config.session_id);
-    assert!(second_run.config.reviewer_boundary);
-    finish(&state, &second_run, "Independent follow-up root review.\nCouncil score: 9.8/10", true);
+    for _ in 0..root_count {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, action);
+        assert!(run.config.reviewer_boundary);
+        assert!(root_sessions.insert(run.config.session_id.clone()),
+            "the forced S2 root wave must use fresh native sessions");
+        finish(&state, &run, "Independent follow-up root review.\nCouncil score: 9.8/10", true);
+    }
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
-    assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), 1);
+    assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), root_count);
+    let config = root.config.council.as_ref().unwrap();
+    assert!(child_council::fresh_s2_root_reviewers(&store, &root, config));
+    // A previous cycle's second-wave report is historical, not an extra
+    // current reviewer. The same row in the live cycle must block admission.
+    let mut history = root.clone();
+    let mut previous = root.workers.iter()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().clone();
+    previous.created_at = root.council_since - 1;
+    previous.id = "historical-root-worker".into();
+    previous.session_id = "historical-root-session".into();
+    history.workers.push(previous);
+    assert!(child_council::fresh_s2_root_reviewers(&store, &history, config),
+        "retained historical second-wave reviewers cannot block a fresh cycle");
+    history.workers.last_mut().unwrap().created_at = root.council_since;
+    assert!(!child_council::fresh_s2_root_reviewers(&store, &history, config),
+        "an extra current-cycle reviewer must still block the native quorum");
+    assert!(council_requests::record_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).is_err(), "a fresh root wave without fresh child receipts is not terminal");
     assert!(!verified_council_pass(&store, &root),
         "fresh root callbacks cannot replace missing phase-two child evidence");
     drop(store);
@@ -11453,8 +11531,8 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     }
     for _ in 0..2 {
         let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-        assert_ne!(action.sid, first_run.config.session_id);
-        assert_ne!(action.sid, second_run.config.session_id);
+        assert!(!root_sessions.contains(&action.sid),
+            "child escalation cannot reuse a root reviewer session");
         {
             let store = state.store.lock().unwrap();
             store.message(&action.sid, "assistant",
@@ -11494,6 +11572,17 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved),
         "the separate root and child waves must both pass the native S2 terminal gate");
+    let terminal = council_requests::record_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.reviewed_round, Some(2));
+    assert_eq!(council_requests::record_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).unwrap(), terminal, "forced S2 terminal settlement must be idempotent");
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).unwrap(), terminal);
     let parent_seats = child_council::verified_parent_seats(&store, &saved).unwrap().unwrap();
     let child_receipts = child_council::verified_s2_receipts(&store, &saved).unwrap().unwrap();
     assert!(council::status_for_authenticated_children_s2(
@@ -11612,6 +11701,9 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert!(child_council::inspect(&store, &saved).is_err(),
         "a revoked native second-wave reviewer grant invalidates the recorded receipt");
     assert!(!verified_council_pass(&store, &saved));
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, &assignment, &artifact, &task.request_id,
+    ).is_err(), "revoked child authority invalidates the native forced S2 terminal");
 }
 
 

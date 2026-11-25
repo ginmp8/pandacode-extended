@@ -2504,11 +2504,16 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
     if !super::council::independent_s2_root_identities(root) { return false; }
     let expected = config.reviewer_bot_ids.len() + config.automatic_reviewers;
     if expected == 0 { return true; }
+    // Root snapshots retain historical reviewers when a new objective starts.
+    // Only the current cycle's second wave participates in its quorum. Keep
+    // historical reviewer sessions excluded from reuse as fresh evidence.
     let first_sessions: HashSet<&str> = root.workers.iter()
-        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat|
+            worker.created_at < root.council_since || seat.round == 1))
         .map(|worker| worker.session_id.as_str()).collect();
     let second = root.workers.iter().filter(|worker|
-        worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+        worker.created_at >= root.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == 2)
     ).collect::<Vec<_>>();
     if second.len() != expected { return false; }
     let mut sessions = HashSet::new();

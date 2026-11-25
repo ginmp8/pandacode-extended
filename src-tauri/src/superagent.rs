@@ -4642,7 +4642,7 @@ fn accept_with_pause(
         store, ticket_id, worker_evidence_session.as_deref().unwrap_or_default(),
         expected_revision, now,
     )?;
-    let next_state = if more_items {
+    let (next_state, can_continue_plan) = if more_items {
         let coordinated: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1
              AND kind='admitted' AND detail='manual readonly coordinator reserved')",
@@ -4658,9 +4658,9 @@ fn accept_with_pause(
                  VALUES(?1,'work_item_budget_exhausted','Pending WorkItems remain; immutable Worker attempt budget exhausted',?2)",
                 params![ticket_id,now],
             ).map_err(|e| e.to_string())?;
-            "blocked"
-        } else if coordinated { "queued" } else { "blocked" }
-    } else { "completed" };
+            ("blocked", false)
+        } else if coordinated { ("queued", true) } else { ("blocked", true) }
+    } else { ("completed", false) };
     let changed = tx.execute(
         "UPDATE sa_tickets SET state=?4,revision=revision+1,updated_at=?3
          WHERE id=?1 AND revision=?2 AND state='waiting_approval'
@@ -4690,7 +4690,7 @@ fn accept_with_pause(
     if changed != 1 {
         return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
     }
-    if next_state=="queued" {
+    if can_continue_plan {
         headless_dispatch::advance_after_acceptance(store,&tx,ticket_id,expected_revision,now)?;
     }
     if !more_items {
@@ -16327,6 +16327,71 @@ mod tests {
                 assert_eq!(waiting.state,"waiting_approval");
                 assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
                 assert_eq!(accept(&store,id,waiting.revision).unwrap().state,"completed");
+            }
+            assert!(!mandate(&store,id).unwrap().allowed_side_effects);
+        }
+    }
+
+    #[test]
+    fn direct_reviewed_plan_continues_only_after_native_human_acceptance() {
+        for (desktop, cancel) in [(false,false),(true,false),(true,true)] {
+            let mut store=fixture();
+            let cfg=enabled(&store);
+            let (ticket,launched)=admit_role_with_staging(
+                &mut store,&cfg.id,"Inspect two components","direct-reviewed-plan",false,false,true,
+            ).unwrap();
+            assert!(!launched);
+            let id=&ticket.id;
+            let root=work_items::plan(&store,id,ticket.revision,"root","Inspect root",None).unwrap();
+            let child=work_items::plan(&store,id,get_ticket(&store,id).unwrap().revision,
+                "child","Inspect child",Some(&root.id)).unwrap();
+            let revision=get_ticket(&store,id).unwrap().revision;
+            let request=if desktop {
+                headless_dispatch::enqueue_desktop_plan(&store,id,revision,"direct-plan")
+            } else {
+                headless_dispatch::enqueue_plan(&store,id,revision,"direct-plan")
+            }.unwrap();
+            assert_eq!(request.kind,"retry");
+            assert_eq!(headless_dispatch::pending_for_host(&store,true).unwrap().len(),
+                if desktop {1} else {0});
+            assert!(retry_blocked_at_revision(&mut store,id,revision,false).is_err());
+            let (_,_,_,packet)=retry_blocked_with_request(
+                &mut store,id,revision,false,Some(&request)).unwrap();
+            assert!(packet.contains(root.id.as_str()));
+            let session=assignment_session(&store,id).unwrap().unwrap();
+            assert!(on_run_finished(&store,&session,true,"Root evidence").unwrap());
+            let waiting=get_ticket(&store,id).unwrap();
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            assert!(accept(&store,id,waiting.revision-1).is_err());
+            let blocked=accept(&store,id,waiting.revision).unwrap();
+            assert_eq!(blocked.state,"blocked");
+            assert!(accept(&store,id,waiting.revision).is_err());
+            let reopened=Store::open_read_only(&store.path).unwrap();
+            let next=headless_dispatch::next_pending(&reopened).unwrap().unwrap();
+            assert_eq!(next.kind,"retry");
+            assert_eq!(next.expected_revision,blocked.revision);
+            assert_ne!(request.id,next.id);
+            assert_eq!(headless_dispatch::pending_for_host(&reopened,true).unwrap().len(),
+                if desktop {1} else {0});
+            drop(reopened);
+            if cancel {
+                work_items::cancel(&store,id,blocked.revision,&child.id,"cancel-child").unwrap();
+                assert!(retry_blocked_with_request(
+                    &mut store,id,blocked.revision,false,Some(&next)).is_err());
+                assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            } else {
+                let (_,_,_,packet)=retry_blocked_with_request(
+                    &mut store,id,blocked.revision,false,Some(&next)).unwrap();
+                assert!(packet.contains(child.id.as_str()));
+                assert!(packet.contains("Root evidence"));
+                let child_session=assignment_session(&store,id).unwrap().unwrap();
+                assert_ne!(session,child_session);
+                assert!(!on_run_finished(&store,&session,true,"Late result").unwrap());
+                assert!(on_run_finished(&store,&child_session,true,"Child evidence").unwrap());
+                let waiting=get_ticket(&store,id).unwrap();
+                assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+                assert_eq!(accept(&store,id,waiting.revision).unwrap().state,"completed");
+                assert_eq!(assignments(&store,id,10).unwrap().len(),2);
             }
             assert!(!mandate(&store,id).unwrap().allowed_side_effects);
         }

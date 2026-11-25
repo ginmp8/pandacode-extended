@@ -301,10 +301,10 @@ fn enqueue_mode(
             return Err("Dispatch request key is bound to another progression mode or operator surface.".into());
         }
     } else if plan {
-        if request.kind!="coordinated" || super::next_work_item(store,ticket_id)?
+        if super::next_work_item(store,ticket_id)?
             .is_none_or(|item|item.assignment_id.is_some())
         {
-            return Err("Plan progression requires a queued coordinated Demand and a new ready WorkItem.".into());
+            return Err("Plan progression requires a blocked or queued Demand and a new ready WorkItem.".into());
         }
         let digest=plan_digest(&tx,ticket_id)?;
         bind_plan(&tx,&request,&digest,None,now)?;
@@ -385,13 +385,14 @@ pub(super) fn advance_after_acceptance(
          JOIN sa_work_item_attempts b ON b.assignment_id=r.assignment_id
          JOIN sa_work_item_acceptances v ON v.assignment_id=b.assignment_id AND v.item_id=b.item_id
          WHERE r.ticket_id=?1 AND b.ticket_id=r.ticket_id AND r.state='admitted'
-           AND r.kind='coordinated' AND v.accepted_revision=?2
+           AND v.accepted_revision=?2
            AND NOT EXISTS(SELECT 1 FROM sa_headless_plan_dispatch n WHERE n.previous_request_id=r.id)",
         params![ticket_id,accepted_revision],|r|Ok((r.get(0)?,r.get(1)?)),
     ).optional().map_err(|e|e.to_string())?;
     let Some((previous,digest))=prior else {return Ok(());};
     let ticket=get_ticket(store,ticket_id)?;
-    if ticket.state!="queued" || ticket.revision!=accepted_revision.saturating_add(1) {
+    if !matches!(ticket.state.as_str(),"queued"|"blocked")
+        || ticket.revision!=accepted_revision.saturating_add(1) {
         return Ok(());
     }
     expire_pending(tx,now)?;
@@ -558,8 +559,15 @@ pub(super) fn consume(
         return Err("Headless dispatch request is stale, expired or bound to a different Demand.".into());
     }
     if let Some(digest)=binding(tx,&request.id)? {
-        if request.kind!="coordinated" || plan_digest(tx,&ticket.id)?!=digest {
-            return Err("Reviewed WorkItem plan changed; progression authorization is stale.".into());
+        let first_attempt: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_item_attempts b
+             WHERE b.assignment_id=?1 AND b.ticket_id=?2
+             AND NOT EXISTS(SELECT 1 FROM sa_work_item_attempts prior
+                 WHERE prior.item_id=b.item_id AND prior.assignment_id<>b.assignment_id))",
+            params![assignment_id,ticket.id],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if !first_attempt || plan_digest(tx,&ticket.id)?!=digest {
+            return Err("Reviewed WorkItem plan changed or item already attempted; progression authorization is stale.".into());
         }
     }
     let changed = tx.execute(

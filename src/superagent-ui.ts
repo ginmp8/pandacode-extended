@@ -706,7 +706,7 @@ let demandArchived = false;
             safe(ticketDetails.pendingDispatch.kind) + ' · Authorized revision ' +
             safe(ticketDetails.pendingDispatch.expectedRevision) + '</p>' +
             '<button type="button" data-sa-cancel-dispatch>Cancel pending dispatch</button></section>' : '') +
-        (validWorkItems && !ticketDetails.pendingDispatch && ticketDetails.ticket.state==='queued' && !ticketDetails.truncatedWorkItems &&
+        (validWorkItems && !ticketDetails.pendingDispatch && ['queued','blocked'].includes(ticketDetails.ticket.state) && !ticketDetails.truncatedWorkItems &&
           plannedWorkItems.some(item=>item.state==='planned' && !item.assignmentId)
           ? '<button type="button" data-sa-dispatch-reviewed-plan>Authorize sequential plan dispatch</button>' +
             '<p>Read-only Workers only. Each result still requires human acceptance; the native host advances only the reviewed plan.</p>' : '') +
@@ -3344,7 +3344,7 @@ let demandArchived = false;
     if (target.hasAttribute('data-sa-dispatch-reviewed-plan')) {
       const detail=ticketDetails;
       if (!detail || detail.ticket.id!==inspectedTicket ||
-          detail.ticket.orchestrationId!==selected || detail.ticket.state!=='queued' ||
+          detail.ticket.orchestrationId!==selected || !['queued','blocked'].includes(detail.ticket.state) ||
           detail.pendingDispatch || detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && !item.assignmentId)) return;
       const ticketId=detail.ticket.id, revision=detail.ticket.revision;
       if (!pendingDesktopPlan || pendingDesktopPlan.ticketId!==ticketId || pendingDesktopPlan.revision!==revision) {

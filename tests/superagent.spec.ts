@@ -4998,16 +4998,17 @@ test('guided Team setup uses native disabled-Team creation and prevents early su
 
 // IPC/UI contract only; native queue admission and restart are covered by
 // authorized_plan_continuation_requires_human_acceptance_and_current_revision.
-test('Desktop reviewed plan dispatch requires explicit revision-bound confirmation', async ({page}) => {
+for (const demandState of ['queued','blocked'] as const) {
+test(`Desktop ${demandState} reviewed plan dispatch requires explicit revision-bound confirmation`, async ({page}) => {
   await page.goto('/?bots=sample');
-  await page.evaluate(async () => {
+  await page.evaluate(async (demandState) => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
     host.id='sa-desktop-plan-test';document.body.appendChild(host);
     const requests:Array<Record<string,unknown>>=[];
     let pendingDispatch:Record<string,unknown>|null=null;
     (window as unknown as {desktopPlanRequests:typeof requests}).desktopPlanRequests=requests;
-    const ticket={id:'ticket',orchestrationId:'team',objective:'Inspect project',state:'queued',revision:3,evidence:null};
+    const ticket={id:'ticket',orchestrationId:'team',objective:'Inspect project',state:demandState,revision:3,evidence:null};
     mountSuperagent(host,async (command,args) => {
       if(command==='bots_list') return [
         {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
@@ -5030,7 +5031,7 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
       if(command==='superagent_dispatch_reviewed_plan') {
         const request=args as Record<string,unknown>;
         requests.push(request);
-        pendingDispatch={id:'native-intent',...request,state:'pending',kind:'coordinated'};
+        pendingDispatch={id:'native-intent',...request,state:'pending',kind:demandState==='queued'?'coordinated':'retry'};
         return pendingDispatch as never;
       }
       if(command==='superagent_cancel_dispatch_request') {
@@ -5042,7 +5043,7 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
       }
       throw Error('Unexpected command: '+command);
     });
-  });
+  }, demandState);
   const host=page.locator('#sa-desktop-plan-test');
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'View evidence'}).click();
@@ -5076,3 +5077,4 @@ test('Desktop reviewed plan dispatch requires explicit revision-bound confirmati
   expect(await requests()).toEqual([recorded[0],recorded[0]]);
   await expect(action).toBeVisible();
 });
+}

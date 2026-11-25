@@ -155,15 +155,19 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   // Missing required phases are pending, not conflicting receipts. Check
   // every child independently; a completed sibling cannot cover a missing wave.
   const pendingChildPhase = childEvidence.some(evidence => {
-    if (inspection.strategy === 'two_phase') return evidence.challengeReceipt == null;
-    if (inspection.strategy !== 'escalated') return false;
+    if (inspection.strategy === 'two_phase') return evidence.receipt == null || evidence.challengeReceipt == null;
+    if (inspection.strategy !== 'escalated') return evidence.receipt == null;
     const child = evidence.child;
     const needsSecondWave = inspection.forceEscalation === true
       || (child.automaticEscalationTriggers ?? []).length > 0
       || child.status === 'child_escalation_required'
       || child.status === 'child_escalation_reviewing'
       || child.status === 'child_escalation_evidence_ready_root_pending';
-    return needsSecondWave && evidence.escalationReceipt == null;
+    // Forced escalation requires both passing waves. An unforced trigger
+    // may legitimately have a failing first wave and only a passing second.
+    return needsSecondWave
+      ? evidence.escalationReceipt == null || (inspection.forceEscalation === true && evidence.receipt == null)
+      : evidence.receipt == null;
   });
   const proof = inspection.verifiedCompletion;
   const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale

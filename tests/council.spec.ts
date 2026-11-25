@@ -1283,6 +1283,48 @@ test('child S2 inspector distinguishes a native second-wave receipt from termina
 });
 
 
+for (const strategy of ['parallel', 'escalated'] as const) {
+  test(`Council inspector denies root pass with an incomplete child receipt (${strategy})`, async ({ page }) => {
+    const receipt = {
+      rootCycleId: 'session-1:1000', childSessionId: 'child-task', botId: 'security-child',
+      objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+      childConfigSha256: 'frozen-child', lowestScore: 9.6, leafWorkerIds: ['leaf-a', 'leaf-b'],
+    };
+    const child = {
+      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'reviewing', automaticEscalationTriggers: [],
+      leafAttempts: [],
+    };
+    const snapshot = {
+      sessionId: 'session-1', mode: 'm5', strategy, forceEscalation: false,
+      cycleStartedAt: 1000, teamRevision: 22,
+      status: { state: 'passed', round: 1, lowest: 9.6, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
+        teamRevision: 22, round: 1, lowest: 9.6 },
+      criteria: [], attempts: [], reservedChildren: [child],
+    };
+    await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+    await button(page).click();
+    const inspector = panel(page).locator('.council-inspection');
+    await inspector.getByText('Review evidence and usage').click();
+    await expect(inspector).toContainText('Required child phase receipts are pending');
+    await expect(inspector).not.toContainText('Verified native pass');
+    await expect(inspector.locator('.council-verified-completion')).toHaveCount(0);
+    // A genuinely correlated child receipt makes the same native terminal
+    // projection displayable. This is display consistency, not native approval.
+    await open(page, '/?council', {}, 0, '', {}, undefined, {
+      ...snapshot, reservedChildren: [{ ...child, status: 'child_evidence_ready_root_pending',
+        verifiedChildReceipt: receipt }],
+    });
+    await button(page).click();
+    await inspector.getByText('Review evidence and usage').click();
+    await expect(inspector).toContainText('Verified native pass');
+    await expect(inspector).not.toContainText('Required child phase receipts are pending');
+    await expect(inspector.locator('.council-verified-completion')).toHaveCount(1);
+  });
+}
+
 test('verified M4 S2 inspector distinguishes authenticated root completion from pending child evidence', async ({ page }) => {
   const nativeReceipt = {
     rootCycleId: 'session-1:1000', childSessionId: 'child-task', botId: 'security-child',

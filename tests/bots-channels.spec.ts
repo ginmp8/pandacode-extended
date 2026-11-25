@@ -980,8 +980,8 @@ test.describe('shared bot channels', () => {
 
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {
     await showBots(page);
-    await page.getByRole('button', { name: 'Add bot or channel' }).click();
-    await page.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New channel' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions', exact: true }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions', exact: true }).getByRole('menuitem', { name: 'New channel' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'New channel' });
     await dialog.getByRole('textbox', { name: 'Channel name' }).fill('release-test');
@@ -999,8 +999,8 @@ test.describe('shared bot channels', () => {
 
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
     await showBots(page);
-    await page.getByRole('button', { name: 'Add bot or channel' }).click();
-    await page.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New channel' }).click();
+    await sidebar(page).getByRole('button', { name: 'Bot actions', exact: true }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions', exact: true }).getByRole('menuitem', { name: 'New channel' }).click();
     const create = page.getByRole('dialog', { name: 'New channel' });
     await create.getByRole('textbox', { name: 'Channel name' }).fill('notes');
     await create.getByRole('button', { name: 'Create channel' }).click();
@@ -1049,7 +1049,8 @@ test.describe('shared bot channels', () => {
     await actions.getByRole('button', { name: /Reassign/ }).click();
     const menu = page.locator('#composer-area .bc-reassign-menu');
     await expect(menu).toBeVisible();
-    const before = await page.evaluate(() => document.querySelector('#composer-area .bc-reassign-menu'));
+    const before = await menu.elementHandle();
+    expect(before).not.toBeNull();
     await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
     // The refresh rewrote the actions (a new menu element), and the menu is still open.
     await expect.poll(() => page.evaluate(old => document.querySelector('#composer-area .bc-reassign-menu') !== old, before)).toBe(true);

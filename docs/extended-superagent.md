@@ -38,6 +38,8 @@ intentionally distinguishes **source inspection** from **executed acceptance**.
 | S1 — Manual native MVP | Implement durable Task, Mandate and Assignment identity, manual admission, correlated existing-bot execution, bounded authorization, stop and terminal settlement. Council remains Off by default. |
 | S2 — Presets and UI | Add Bots → Orchestrations, preset CRUD, backups/import/export, status/progress and attention controls with regression coverage. |
 | S3 — Council | Reuse the actual native Council cycle/revision/approval contract without making Shared Channels compulsory. Deny stale, unavailable, failed or unauthorized review. |
+
+An admitted Ticket with reviewer roles in its immutable Team profile remains review-required even when the native Council team or reviewer bot is unavailable. A malformed admitted profile also denies legacy manual acceptance. This is a finalization guard, not native reviewer launch or a verified verdict; Council-required execution remains unsupported until the task-bound native contract is connected.
 | S4 — Sources and policies | Add policy-driven GitHub/event/schedule subscriptions with Off/Observe/Auto, filtering, cursor deduplication and bounded authorizations. |
 | S5 — Recovery/headless | Prove restart, idempotent external effects, concurrency, cancellation, budget/watchdog and desktop/serve consistency. |
 | S6 — Verification and docs | Trace AC-01–AC-31 to implementation, executable tests, commit SHA, CI evidence, and honest gaps. Preserve optional manual cases as deferred. |

@@ -84,6 +84,8 @@ export async function invokeSuperagent<T>(
     // Ticket orchestration ownership and rejects conflicting thread reuse.
     case 'superagent_source_link_thread':
       throw Error('Source linking requires a native trusted event source.');
+    case 'superagent_source_observe_linked_pr_checks':
+      throw Error('Linked PR Checks require a signed-in native GitHub adapter.');
     case 'superagent_create':{
       const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
       if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');

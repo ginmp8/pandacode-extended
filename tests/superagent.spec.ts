@@ -1590,6 +1590,80 @@ test('Team Observe batches only enabled authenticated GitHub Events sources with
   expect(called).toEqual(['superagent_source_poll_team_authenticated']);
 });
 
+test('Desktop observes only explicitly linked PR Checks through the native bounded adapter', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-linked-pr-checks'; document.body.appendChild(host);
+    const ticket = {id:'ticket',orchestrationId:'team',objective:'Inspect CI context',
+      state:'queued',revision:1,evidence:null};
+    const sources = [
+      {id:'checks',orchestrationId:'team',repository:'owner/repo',actorFilter:'trusted',
+        eventKind:'check_run.completed',mode:'observe',policyRevision:1,lastSequence:0},
+      {id:'off-checks',orchestrationId:'team',repository:'owner/repo',actorFilter:'other',
+        eventKind:'check_run.completed',mode:'off',policyRevision:1,lastSequence:0},
+      {id:'issues',orchestrationId:'team',repository:'owner/repo',actorFilter:'trusted',
+        eventKind:'issues.opened',mode:'observe',policyRevision:1,lastSequence:0},
+    ];
+    const links = [
+      {sourceId:'checks',subjectKey:'pull:42'},
+      {sourceId:'off-checks',subjectKey:'pull:43'},
+      {sourceId:'issues',subjectKey:'issue:44'},
+    ].map(link => ({...link,ticketId:'ticket',repository:'owner/repo',createdAt:1}));
+    const calls:unknown[] = [];
+    (window as unknown as {linkedCheckCalls:unknown[]}).linkedCheckCalls = calls;
+    mountSuperagent(host, async (command,args) => {
+      if (command === 'bots_list') return [
+        {id:'a',name:'A',paused:false},{id:'b',name:'B',paused:false}] as never;
+      if (command === 'superagent_list') return [{id:'team',name:'Checks Team',
+        coordinatorBotId:'a',workerBotId:'b',enabled:true,policyRevision:1}] as never;
+      if (command === 'superagent_tickets') return [ticket] as never;
+      if (command === 'superagent_snapshot') return {ticket,
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]} as never;
+      if (command === 'superagent_source_thread_links') return links as never;
+      if (command === 'superagent_source_list') return sources as never;
+      if (command === 'superagent_source_observe_linked_pr_checks') {
+        calls.push(args);
+        if (args?.sourceId !== 'checks' || args.ticketId !== 'ticket' || args.pullKey !== 'pull:42')
+          throw Error('Wrong native observation scope');
+        return {sourceId:'checks',ticketId:'ticket',pullKey:'pull:42',
+          headSha:'0123456789012345678901234567890123456789',observed:1,duplicates:0,
+          pendingSkipped:2,bounded:true,observationalOnly:true,
+          authorizationIssued:false,councilApproved:false} as never;
+      }
+      if (command === 'superagent_source_thread_activity') return [{
+        sourceId:'checks',deliveryId:'checkrun_77',eventKind:'check_run.completed',
+        subjectKey:'pull:42',decision:'observed_permitted',sequence:1,policyRevision:1,
+        at:Date.now(),checkConclusion:'failure',
+        checkHeadSha:'0123456789012345678901234567890123456789',checkCompletedAt:Date.now(),
+      }] as never;
+      calls.push(command);
+      throw Error('Unexpected command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-linked-pr-checks');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(host.locator('[data-sa-linked-check-source]')).toHaveCount(0);
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(host.locator('[data-sa-linked-check-source]')).toHaveCount(1);
+  await host.getByRole('button',{name:'Observe linked PR Checks for owner/repo / pull:42'}).click();
+  await expect(host.locator('.sa-feedback')).toContainText('1 new, 0 duplicates, 2 pending');
+  await host.getByRole('button',{name:'Load linked source decisions'}).click();
+  await expect(host.getByRole('region',{name:'Observed linked GitHub activity'}))
+    .toContainText('Observed Check: failure');
+  expect(await page.evaluate(() =>
+    (window as unknown as {linkedCheckCalls:unknown[]}).linkedCheckCalls)).toEqual([
+      {sourceId:'checks',ticketId:'ticket',pullKey:'pull:42'},
+  ]);
+});
+
 test('Check Run observation stays Off until enabled and never launches a Demand', async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

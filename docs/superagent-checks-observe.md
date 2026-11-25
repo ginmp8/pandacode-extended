@@ -77,3 +77,20 @@ whose completion predates the current Observe activation is still denied,
 even if the API returns it after reactivation. Off still makes no authenticated
 requests. This behavior is verified by a native SQLite restart regression,
 not by a real GitHub provider run.
+
+## Observe a linked PR from Desktop or headless
+
+From the Demand Inspector, load the Team's Sources and explicitly link the
+exact PR thread to an enabled Check Run Observe source. **Observe linked PR
+Checks** appears only on that source/thread association. It uses the same
+native authenticated adapter as the existing headless linked-PR Checks
+operation. The native command freezes the Ticket revision, source revision
+and link generation before network IO, verifies a bounded PR-head window,
+and rechecks context in the receipt transaction. No API payload comes from
+the Webview. A replacement App with the same slug cannot contribute a
+pending-only count after a numeric App identity is pinned; an empty or
+pending-only window never creates a new pin. A replaced or moved PR head
+aborts the observation. The UI reports the head, new receipts, duplicates
+and pending count, then reloads native state. Load linked source decisions
+to inspect individual recorded outcomes. These are observations, not task
+acceptance, Council approval, GitHub writes or Auto execution.

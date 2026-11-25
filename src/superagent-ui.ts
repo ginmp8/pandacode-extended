@@ -219,6 +219,13 @@ let demandArchived = false;
   let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   let linkedDecisionsHasMore = false;
+  const linkedCheckSource = (link: ThreadLink): EventSource | undefined =>
+    sourcesLoaded && link.ticketId === inspectedTicket && /^pull:[1-9][0-9]{0,11}$/.test(link.subjectKey)
+      ? sources.find(source => source.id === link.sourceId &&
+          source.orchestrationId === selected && source.mode === 'observe' &&
+          source.eventKind === 'check_run.completed' &&
+          source.repository.toLowerCase() === link.repository.toLowerCase())
+      : undefined;
   const safe = (value: unknown) => escape(String(value ?? ''));
   // SQLite lower() folds ASCII only. Match the native literal-substring filter
   // without locale-sensitive case conversion that would reject valid UTF-8.
@@ -798,7 +805,13 @@ let demandArchived = false;
           safe(link.subjectKey) + ' <button type="button" data-sa-unlink-source="' +
           safe(link.sourceId) + '" data-sa-unlink-thread="' + safe(link.subjectKey) +
           '" aria-label="Unlink ' + safe(link.repository) + ' / ' +
-          safe(link.subjectKey) + '">Unlink</button></li>').join('') ||
+          safe(link.subjectKey) + '">Unlink</button>' +
+          (linkedCheckSource(link)
+            ? ' <button type="button" data-sa-linked-check-source="' + safe(link.sourceId) +
+              '" data-sa-linked-check-pull="' + safe(link.subjectKey) +
+              '" aria-label="Observe linked PR Checks for ' + safe(link.repository) + ' / ' +
+              safe(link.subjectKey) + '">Observe linked PR Checks</button>'
+            : '') + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
         '<section class="sa-linked-activity" role="region" aria-label="Observed linked GitHub activity">' +
         '<h5>Observed linked GitHub activity</h5><p>Read-only, bounded native Observe receipts for explicitly linked threads. ' +
@@ -878,7 +891,7 @@ let demandArchived = false;
         '<label>Issue Demand objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
         '<button type="submit">Review issue Demand</button></form>' : '';
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID or an explicitly linked PR and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -2154,6 +2167,37 @@ let demandArchived = false;
         roleRoster = null; workerOrder = []; reviewerDraft = []; sourcesLoaded = false; sources = [];
         await reloadCreatedTeam(created);
         feedback = 'Disabled Team duplicated. No prior Tickets, source grants or approvals were copied.';
+      });
+      return;
+    }
+    if (target.dataset.saLinkedCheckSource && target.dataset.saLinkedCheckPull) {
+      const sourceId = target.dataset.saLinkedCheckSource;
+      const pullKey = target.dataset.saLinkedCheckPull;
+      const ticketId = inspectedTicket;
+      const link = threadLinks.find(item => item.ticketId === ticketId &&
+        item.sourceId === sourceId && item.subjectKey === pullKey);
+      if (!ticketId || ticketDetails?.ticket.id !== ticketId ||
+          ticketDetails.ticket.orchestrationId !== selected || !link || !linkedCheckSource(link)) return;
+      void work(async () => {
+        const result = await call<{
+          sourceId:string; ticketId:string; pullKey:string; headSha:string;
+          observed:number; duplicates:number; pendingSkipped:number; bounded:boolean;
+          observationalOnly:boolean; authorizationIssued:boolean; councilApproved:boolean;
+        }>('superagent_source_observe_linked_pr_checks', {sourceId,ticketId,pullKey});
+        if (result.sourceId !== sourceId || result.ticketId !== ticketId ||
+            result.pullKey !== pullKey || !/^[0-9a-f]{40}$/i.test(result.headSha) ||
+            result.bounded !== true || result.observationalOnly !== true ||
+            result.authorizationIssued !== false || result.councilApproved !== false ||
+            ![result.observed,result.duplicates,result.pendingSkipped].every(count =>
+              Number.isSafeInteger(count) && count >= 0 && count <= 100) ||
+            result.observed + result.duplicates + result.pendingSkipped > 100) {
+          throw new Error('Invalid native linked PR Checks result; reload before interpreting receipts.');
+        }
+        if (inspectedTicket !== ticketId) return;
+        await reload();
+        feedback = 'Observed linked PR Checks at ' + result.headSha.slice(0,12) + ': ' +
+          result.observed + ' new, ' + result.duplicates + ' duplicates, ' +
+          result.pendingSkipped + ' pending. Context only; no task approval or external write.';
       });
       return;
     }

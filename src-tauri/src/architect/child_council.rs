@@ -3146,6 +3146,11 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     // Use the same native unforced-S2 cycle-wide receipt validation as the
     // terminal gate. A phantom second-wave slot is not a pending child review.
     let _ = verified_triggered_s2_parent_seats(store, root)?;
+    // The forced escalation and adversarial gates also authenticate the
+    // complete occupied receipt namespace, even while a sibling is pending.
+    // Never project a clean roster when the corresponding native gate rejects it.
+    let _ = verified_s2_receipts(store, root)?;
+    let _ = verified_s3_receipts(store, root)?;
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;

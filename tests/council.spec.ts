@@ -3212,30 +3212,25 @@ for (const used of [25, 30]) test(`at ${used} used rounds there is no empty Rais
   await expect(panel(page)).toHaveCount(0);
 });
 
-test('the tray button is settings only: no score badge, a cue dot when asking or settled', async ({ page }) => {
-  await open(page, '/?council');
+for (const { state, name, value } of [
+  { state: '', name: 'Council: Round 2 of 10 · reviewing', value: '' },
+  { state: '=asking', name: 'Council needs you', value: 'asking' },
+  { state: '=passed', name: /^Council: Passed/, value: 'settled' },
+  { state: '=accepted', name: /^Council: Accepted/, value: '' },
+] as const) test(`the tray button is settings only: no score badge and correct cue (${state || 'reviewing'})`, async ({ page }) => {
+  // Each case used a full navigation already. Use independent fixtures so a
+  // slow initial paint in one state cannot consume the next state's budget.
+  await open(page, `/?council${state}`);
   await expect(button(page).locator('b')).toHaveCount(0);
-  await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
+  await expect(button(page)).toHaveAccessibleName(name);
   // Test native-derived UI state and a rendered 6px cue, without relying on
   // engine-specific serialization of the ::after empty-string content value.
   const cue = () => button(page).locator('.council-glyph');
-  const expectCue = async (value: '' | 'asking' | 'settled') => {
-    await expect(cue()).toHaveAttribute('data-cue', value);
-    await expect.poll(() => cue().evaluate(node => {
-      const after = getComputedStyle(node, '::after');
-      return after.width === '6px' && after.height === '6px' && after.content !== 'none';
-    })).toBe(value !== '');
-  };
-  await expectCue('');
-  await open(page, '/?council=asking');
-  await expect(button(page)).toHaveAccessibleName('Council needs you');
-  await expectCue('asking');
-  await open(page, '/?council=passed');
-  await expect(button(page)).toHaveAccessibleName(/^Council: Passed/);
-  await expectCue('settled');
-  await open(page, '/?council=accepted');
-  await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
-  await expectCue('');
+  await expect(cue()).toHaveAttribute('data-cue', value);
+  await expect.poll(() => cue().evaluate(node => {
+    const after = getComputedStyle(node, '::after');
+    return after.width === '6px' && after.height === '6px' && after.content !== 'none';
+  })).toBe(value !== '');
 });
 
 test('in the thread, reviewers are ordinary worker rows with their verdict as status', async ({ page }) => {

@@ -11637,9 +11637,28 @@ fn hierarchical_s2_root_worker_and_session_identities_are_unique_across_waves() 
     let mut old_cycle = root.clone();
     let mut historical = old_cycle.workers[0].clone();
     historical.created_at = SINCE - 1;
+    historical.id = "retired-root-worker".into();
+    historical.session_id = "retired-root-session".into();
     old_cycle.workers.push(historical);
     assert!(council::independent_s2_root_identities(&old_cycle),
-        "earlier Council cycles cannot contaminate the current wave's identity set");
+        "distinct earlier Council reviewers must not count toward the current quorum");
+    for index in 0..2 {
+        let mut reused_worker = old_cycle.clone();
+        reused_worker.workers[index].id = "retired-root-worker".into();
+        assert!(!council::independent_s2_root_identities(&reused_worker),
+            "neither current wave can reuse a retired Council worker");
+        let mut reused_session = old_cycle.clone();
+        reused_session.workers[index].session_id = "retired-root-session".into();
+        assert!(!council::independent_s2_root_identities(&reused_session),
+            "neither current wave can reuse a retired native reviewer session");
+        let mut invalid_score = root.clone();
+        invalid_score.workers[index].council.as_mut().unwrap().score = Some(10.1);
+        assert!(!council::independent_s2_root_identities(&invalid_score));
+        let mut invalid_round = root.clone();
+        invalid_round.workers[index].council.as_mut().unwrap().round = 3;
+        assert!(!council::independent_s2_root_identities(&invalid_round),
+            "a current third wave must not be ignored by the bounded S2 authority gate");
+    }
 }
 
 /// Forced hierarchical S2 can issue genuinely new root callbacks only after
@@ -11778,6 +11797,15 @@ fn run_nested_forced_s2_root_callbacks(mode: &str) {
             "the frozen first-wave root reviewer grant must still be valid");
         assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
             "the unchanged frozen policy and authenticated first wave must permit a new root session");
+        let mut replay = root.clone();
+        let mut retired = root.workers.iter()
+            .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .unwrap().clone();
+        retired.created_at = root.council_since - 1;
+        retired.id = "retired-first-wave-worker".into();
+        replay.workers.push(retired);
+        assert!(!eligible_hierarchical_s2_root_escalation(&store, &replay),
+            "a real first-wave callback cannot authorize escalation using a retired native session");
         let mut forged = root.clone();
         let first = forged.workers.iter_mut()
             .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))

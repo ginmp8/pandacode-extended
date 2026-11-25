@@ -2589,14 +2589,15 @@ pub(super) fn status_for_authenticated_children(
         // An abandoned/replaced low-scoring reviewer still triggers S2.
         // A clean later snapshot must not conceal that first-wave history.
         || (config.strategy == CouncilExecutionStrategy::Escalated
-            && team.workers.iter().any(|worker| {
-                worker.created_at >= team.council_since
-                    && worker.council.as_ref().is_some_and(|seat| {
-                        worker.abandoned || seat.round != 1
-                            || seat.score.is_none_or(|score| score < config.target)
-                            || seat.reported_severe_finding || seat.reported_conflict
-                    })
-            }))
+            && (!independent_s2_root_identities(team)
+                || team.workers.iter().any(|worker| {
+                    worker.created_at >= team.council_since
+                        && worker.council.as_ref().is_some_and(|seat| {
+                            worker.abandoned || seat.round != 1
+                                || seat.score.is_none_or(|score| score < config.target)
+                                || seat.reported_severe_finding || seat.reported_conflict
+                        })
+                })))
         || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
         || (root_needed > 0 && stale(team, 1))
     {
@@ -2697,11 +2698,21 @@ pub(super) fn status_for_authenticated_children(
 pub(super) fn independent_s2_root_identities(team: &TeamSnapshot) -> bool {
     let mut worker_ids = std::collections::HashSet::new();
     let mut session_ids = std::collections::HashSet::new();
-    team.workers.iter().filter(|worker| {
-        worker.created_at >= team.council_since
-            && worker.council.as_ref().is_some_and(|seat| seat.round == 1 || seat.round == 2)
-    }).all(|worker| {
+    // Historical reviewers do not count toward the current quorum, but their
+    // native identities cannot be reused by either current S2 wave.
+    for worker in team.workers.iter().filter(|worker|
+        worker.created_at < team.council_since && worker.council.is_some())
+    {
+        worker_ids.insert(worker.id.as_str());
+        session_ids.insert(worker.session_id.as_str());
+    }
+    team.workers.iter().filter(|worker|
+        worker.created_at >= team.council_since && worker.council.is_some()
+    ).all(|worker| {
         !worker.id.is_empty() && !worker.session_id.is_empty()
+            && worker.council.as_ref().is_some_and(|seat|
+                (seat.round == 1 || seat.round == 2)
+                    && seat.score.is_none_or(valid_composed_score))
             && worker_ids.insert(worker.id.as_str())
             && session_ids.insert(worker.session_id.as_str())
     })

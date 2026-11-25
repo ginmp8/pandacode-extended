@@ -952,6 +952,7 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
     let Some(config) = team.config.council.as_ref() else { return false };
     if config.strategy != council::CouncilExecutionStrategy::Escalated
         || config.nested_bot_reviewers.is_empty()
+        || !council::independent_s2_root_identities(team)
     {
         return false;
     }
@@ -974,7 +975,6 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
                 && worker.council.as_ref().is_some_and(|seat| seat.round == 1))
             .collect::<Vec<_>>();
         return required > 0 && active(&team.status)
-            && council::independent_s2_root_identities(team)
             && children.len() == config.nested_bot_reviewers.len()
             && first_roots.len() == required
             && council::root_s2_unforced_trigger(&first, config, 1)

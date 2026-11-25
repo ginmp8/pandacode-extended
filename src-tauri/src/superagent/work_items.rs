@@ -128,6 +128,31 @@ CREATE TRIGGER IF NOT EXISTS sa_work_item_completion_guard
  BEGIN SELECT RAISE(ABORT,'Demand has unresolved WorkItems'); END;
 "#;
 
+/// Operator-reviewed routing rationale; never a grant or an autonomous reassignment.
+pub(crate) const ROUTING_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_work_item_routes (
+ item_id TEXT PRIMARY KEY REFERENCES sa_work_items(id) ON DELETE RESTRICT,
+ worker_bot_id TEXT NOT NULL CHECK(length(worker_bot_id) BETWEEN 1 AND 128),
+ routing_reason TEXT NOT NULL CHECK(length(trim(routing_reason)) BETWEEN 1 AND 512)
+);
+CREATE TRIGGER IF NOT EXISTS sa_work_item_route_guard
+ BEFORE INSERT ON sa_work_item_routes
+ WHEN NOT EXISTS(
+   SELECT 1 FROM sa_work_items w JOIN sa_tickets t ON t.id=w.ticket_id
+   WHERE w.id=NEW.item_id AND t.worker_bot_id=NEW.worker_bot_id
+     AND t.state IN ('queued','blocked') AND t.active_assignment_id IS NULL
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_attempts b WHERE b.item_id=w.id)
+     AND NOT EXISTS(SELECT 1 FROM sa_work_item_cancellations c WHERE c.item_id=w.id)
+ )
+ BEGIN SELECT RAISE(ABORT,'WorkItem route must match its selected native Worker and unexecuted plan'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_route_immutable_update
+ BEFORE UPDATE ON sa_work_item_routes
+ BEGIN SELECT RAISE(ABORT,'WorkItem route is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_work_item_route_immutable_delete
+ BEFORE DELETE ON sa_work_item_routes
+ BEGIN SELECT RAISE(ABORT,'WorkItem route is immutable'); END;
+"#;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct WorkItem {
@@ -142,6 +167,8 @@ pub struct WorkItem {
     pub cancelled_at: Option<i64>,
     /// Latest real native attempt; an attempt is not accepted delivery.
     pub assignment_id: Option<String>,
+    pub worker_bot_id: Option<String>,
+    pub routing_reason: Option<String>,
 }
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
@@ -149,6 +176,7 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
         id:row.get(0)?,ticket_id:row.get(1)?,request_key:row.get(2)?,
         parent_id:row.get(3)?,summary:row.get(4)?,state:row.get(5)?,
         created_at:row.get(6)?,cancelled_at:row.get(7)?,assignment_id:row.get(8)?,
+        worker_bot_id:row.get(9)?,routing_reason:row.get(10)?,
     })
 }
 
@@ -163,8 +191,10 @@ pub(super) fn list(store:&Store,ticket_id:&str,limit:i64)->Result<(Vec<WorkItem>
                      THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
                 (SELECT b.assignment_id FROM sa_work_item_attempts b
                  JOIN sa_assignments a ON a.id=b.assignment_id
-                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1),
+                r.worker_bot_id,r.routing_reason
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
+         LEFT JOIN sa_work_item_routes r ON r.item_id=w.id
          WHERE w.ticket_id=?1 ORDER BY w.created_at,w.id LIMIT ?2",
     ).map_err(|e|e.to_string())?;
     let mut items=statement.query_map(params![ticket_id,limit+1],from_row)
@@ -186,15 +216,21 @@ pub(super) fn plan(
         &store.db, rusqlite::TransactionBehavior::Immediate,
     ).map_err(|e|e.to_string())?;
     let item = plan_in_transaction(store, &tx, ticket_id, expected_revision,
-        request_key, summary, parent_id)?;
+        request_key, summary, PlanMetadata { parent_id, route: None })?;
     tx.commit().map_err(|e|e.to_string())?;
     Ok(item)
 }
 
+struct PlanMetadata<'a> {
+    parent_id: Option<&'a str>,
+    route: Option<(&'a str, &'a str)>,
+}
+
 fn plan_in_transaction(
     store: &Store, tx: &rusqlite::Transaction<'_>, ticket_id: &str,
-    expected_revision: i64, request_key: &str, summary: &str, parent_id: Option<&str>,
+    expected_revision: i64, request_key: &str, summary: &str, metadata: PlanMetadata<'_>,
 ) -> Result<WorkItem> {
+    let PlanMetadata { parent_id, route } = metadata;
     let summary=summary.trim();
     if request_key.is_empty() || request_key.len()>128
         || !request_key.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'|b'.'))
@@ -208,6 +244,12 @@ fn plan_in_transaction(
         || !id.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'))) {
         return Err("Invalid parent WorkItem identity.".into());
     }
+    let route = route.map(|(worker, reason)| (worker, reason.trim()));
+    if route.is_some_and(|(worker, reason)| worker.is_empty() || worker.len() > 128
+        || !worker.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        || reason.is_empty() || reason.len() > 512 || reason.chars().any(char::is_control)) {
+        return Err("WorkItem routing requires a bounded Worker ID and rationale.".into());
+    }
     let previous=tx.query_row(
         "SELECT w.id,w.ticket_id,w.request_key,w.parent_id,w.summary,
                 CASE WHEN c.item_id IS NOT NULL THEN 'cancelled'
@@ -215,13 +257,17 @@ fn plan_in_transaction(
                      THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
                 (SELECT b.assignment_id FROM sa_work_item_attempts b
                  JOIN sa_assignments a ON a.id=b.assignment_id
-                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1),
+                r.worker_bot_id,r.routing_reason
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
+         LEFT JOIN sa_work_item_routes r ON r.item_id=w.id
          WHERE w.ticket_id=?1 AND w.request_key=?2",
         params![ticket_id,request_key],from_row,
     ).optional().map_err(|e|e.to_string())?;
     if let Some(item)=previous {
-        if item.summary!=summary || item.parent_id.as_deref()!=parent_id {
+        if item.summary!=summary || item.parent_id.as_deref()!=parent_id
+            || item.worker_bot_id.as_deref()!=route.map(|(worker, _)| worker)
+            || item.routing_reason.as_deref()!=route.map(|(_, reason)| reason) {
             return Err("WorkItem request key is already bound to another plan.".into());
         }
         return Ok(item);
@@ -234,6 +280,18 @@ fn plan_in_transaction(
     }
     if ticket.revision != expected_revision {
         return Err("Demand revision changed; planning denied.".into());
+    }
+    if let Some((worker, _)) = route {
+        if super::ticket_worker(store, ticket_id)? != worker {
+            return Err("WorkItem route differs from the selected native Worker; create a separately authorized Demand for another Worker.".into());
+        }
+        if super::roster::ticket_profile(store, ticket_id)?.is_none() {
+            return Err("WorkItem routing requires an admitted Team profile.".into());
+        }
+        super::roster::require_current_profile(store, ticket_id, "worker", worker)?;
+        if super::bots::get(store, worker)?.paused {
+            return Err("Selected Worker is paused; WorkItem routing denied.".into());
+        }
     }
     // Each remaining non-cancelled, unaccepted item needs at least one
     // more native Worker attempt. Failed attempts count too. Reserve this
@@ -288,6 +346,12 @@ fn plan_in_transaction(
          VALUES(?1,?2,?3,?4,?5,'planned','local-user',?6)",
         params![id,ticket_id,request_key,parent_id,summary,now],
     ).map_err(|e|e.to_string())?;
+    if let Some((worker, reason)) = route {
+        tx.execute(
+            "INSERT INTO sa_work_item_routes(item_id,worker_bot_id,routing_reason) VALUES(?1,?2,?3)",
+            params![id,worker,reason],
+        ).map_err(|e|e.to_string())?;
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'work_item_planned',?2,?3)",
@@ -300,8 +364,10 @@ fn plan_in_transaction(
                      THEN 'accepted' ELSE w.state END,w.created_at,c.cancelled_at,
                 (SELECT b.assignment_id FROM sa_work_item_attempts b
                  JOIN sa_assignments a ON a.id=b.assignment_id
-                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1)
+                 WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1),
+                r.worker_bot_id,r.routing_reason
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
+         LEFT JOIN sa_work_item_routes r ON r.item_id=w.id
          WHERE w.id=?1",
         [&id],from_row,
     ).map_err(|e|e.to_string())
@@ -316,6 +382,8 @@ pub(crate) struct PlannedWorkItemInput {
     request_key: String,
     summary: String,
     parent_request_key: Option<String>,
+    worker_bot_id: Option<String>,
+    routing_reason: Option<String>,
 }
 
 pub(crate) fn decode_plan(text: &str) -> Result<Vec<PlannedWorkItemInput>> {
@@ -323,7 +391,7 @@ pub(crate) fn decode_plan(text: &str) -> Result<Vec<PlannedWorkItemInput>> {
         return Err("WorkItem plan exceeds the native 16 KiB limit.".into());
     }
     serde_json::from_str(text)
-        .map_err(|_| "WorkItem plan must be a JSON array of requestKey, summary and optional parentRequestKey.".into())
+        .map_err(|_| "WorkItem plan must be a JSON array of requestKey, summary and optional parentRequestKey and paired workerBotId/routingReason.".into())
 }
 
 /// Apply an ordered, bounded plan atomically through the same native policy,
@@ -350,9 +418,14 @@ pub(super) fn plan_batch(
             keys.get(key).map(String::as_str)
                 .ok_or("WorkItem parent key must precede its child in the same plan.")
         }).transpose()?;
+        let route = match (input.worker_bot_id.as_deref(), input.routing_reason.as_deref()) {
+            (None, None) => None,
+            (Some(worker), Some(reason)) => Some((worker, reason)),
+            _ => return Err("WorkItem route requires both workerBotId and routingReason.".into()),
+        };
         let before = super::get_ticket(store, ticket_id)?.revision;
         let item = plan_in_transaction(store, &tx, ticket_id, revision,
-            &input.request_key, &input.summary, parent)?;
+            &input.request_key, &input.summary, PlanMetadata { parent_id: parent, route })?;
         let after = super::get_ticket(store, ticket_id)?.revision;
         // An idempotent receipt cannot refresh a stale caller's authority
         // for the next, genuinely new item.
@@ -378,6 +451,7 @@ pub(crate) fn headless_plan_batch(
         "items": items.iter().map(|item| serde_json::json!({
             "workItemId": item.id, "requestKey": item.request_key,
             "parentId": item.parent_id, "state": item.state,
+            "workerBotId": item.worker_bot_id, "routingReason": item.routing_reason,
         })).collect::<Vec<_>>(),
         "providerDispatched": false, "grantIssued": false, "externalEffectReplayed": false,
     })).map_err(|e|e.to_string())
@@ -406,11 +480,12 @@ pub(super) fn cancel(
                 (SELECT b.assignment_id FROM sa_work_item_attempts b
                  JOIN sa_assignments a ON a.id=b.assignment_id
                  WHERE b.item_id=w.id ORDER BY a.attempt DESC LIMIT 1),
-                c.request_key
+                r.worker_bot_id,r.routing_reason,c.request_key
          FROM sa_work_items w LEFT JOIN sa_work_item_cancellations c ON c.item_id=w.id
+         LEFT JOIN sa_work_item_routes r ON r.item_id=w.id
          WHERE w.id=?1 AND w.ticket_id=?2",
         params![item_id,ticket_id],
-        |row|Ok((from_row(row)?,row.get(9)?)),
+        |row|Ok((from_row(row)?,row.get(11)?)),
     ).optional().map_err(|e|e.to_string())?;
     let (item,prior_key)=previous.ok_or("WorkItem does not belong to this Demand.")?;
     if item.state=="cancelled" {
@@ -668,6 +743,7 @@ mod headless_tests {
         let input = |key: &str, parent: Option<&str>| PlannedWorkItemInput {
             request_key: key.into(), summary: format!("Inspect {key}"),
             parent_request_key: parent.map(str::to_owned),
+            worker_bot_id: None, routing_reason: None,
         };
         let invalid = [input("root", None), input("child", Some("foreign"))];
         assert!(headless_plan_batch(&path, &ticket.id, ticket.revision, &invalid).is_err());

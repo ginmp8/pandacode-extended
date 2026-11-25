@@ -3020,12 +3020,13 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
         calls.push(request);
         if(request.ticketId!=='ticket' || request.expectedRevision!==revision)
           throw Error('Stale native plan revision');
-        const input=JSON.parse(String(request.planJson)) as Array<{requestKey:string;summary:string;parentRequestKey?:string}>;
+        const input=JSON.parse(String(request.planJson)) as Array<{requestKey:string;summary:string;parentRequestKey?:string;workerBotId?:string;routingReason?:string}>;
         if(input.some((item,index)=>item.parentRequestKey &&
           !input.slice(0,index).some(parent=>parent.requestKey===item.parentRequestKey)))
           throw Error('WorkItem parent key must precede its child in the same plan.');
         items=input.map(item=>({id:'item-'+item.requestKey,ticketId:'ticket',
           requestKey:item.requestKey,summary:item.summary,parentId:item.parentRequestKey?'item-'+item.parentRequestKey:null,
+          workerBotId:item.workerBotId ?? null,routingReason:item.routingReason ?? null,
           state:'planned',createdAt:1800000000100,cancelledAt:null,assignmentId:null}));
         revision+=items.length;
         return items as never;
@@ -3044,12 +3045,14 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
   await expect(host).toContainText('WorkItem parent key must precede its child');
   await expect(input).toHaveValue(invalid);
-  const valid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout'},
+  const valid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout',
+    workerBotId:'worker',routingReason:'Backend specialist'},
     {requestKey:'child',summary:'Verify results',parentRequestKey:'root'}]);
   await input.fill(valid);
   await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
   await expect(plans).toContainText('Inspect checkout');
   await expect(plans).toContainText('Verify results');
+  await expect(plans).toContainText('Reviewed route worker: Backend specialist');
   const result=await page.evaluate(()=>(window as unknown as {batchPlanEvidence:()=> {
     calls:Array<Record<string,unknown>>;revision:number;items:Array<Record<string,unknown>>;
   }}).batchPlanEvidence());
@@ -3057,6 +3060,8 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   expect(result.calls.map(call=>call.expectedRevision)).toEqual([3,3]);
   expect(result.calls[1].planJson).toBe(valid);
   expect(result.items[1].parentId).toBe(result.items[0].id);
+  expect(result.items[0].workerBotId).toBe('worker');
+  expect(result.items[0].routingReason).toBe('Backend specialist');
   expect(result.revision).toBe(5);
 });
 

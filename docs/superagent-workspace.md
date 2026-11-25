@@ -43,6 +43,13 @@ The **Reviewed dependency plan (JSON)** form also applies an operator-reviewed
 array of up to 16 items atomically, using the same native transition as
 `--plan-work-items`. Supply stable `requestKey` and `summary` fields and an
 optional `parentRequestKey` referring to a preceding item in the same plan.
+Optional paired `workerBotId` and `routingReason` record the reviewed routing
+rationale (maximum 512 UTF-8 bytes) for the Demand's already selected native
+Worker. A different, paused or drifted Worker is rejected; changing a route
+under an existing request key is rejected. These are operator-reviewed plan
+annotations, not verified capability claims, autonomous reassignment or grants.
+The native WorkItem receipt, Desktop inspector and headless batch response
+preserve the rationale; legacy plans remain valid without it.
 The 16 KiB payload limit, strict schema, original Ticket revision, remaining
 attempt budget, dependency ownership and idempotency are enforced natively;
 a rejected item rolls back the whole batch. Keep request keys unchanged when

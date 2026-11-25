@@ -94,6 +94,7 @@ interface PlannedWorkItem {
   id:string; ticketId:string; requestKey:string; parentId:string|null;
   summary:string; state:'planned'|'cancelled'|'accepted'; createdAt:number; cancelledAt:number|null;
   assignmentId?:string|null;
+  workerBotId?:string|null; routingReason?:string|null;
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
@@ -530,6 +531,9 @@ let demandArchived = false;
         item.ticketId === ticketDetails?.ticket.id &&
         typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id) &&
         typeof item.summary === 'string' && item.summary.length > 0 && item.summary.length <= 1000 &&
+        ((item.workerBotId == null && item.routingReason == null) ||
+          (typeof item.workerBotId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.workerBotId) &&
+            typeof item.routingReason === 'string' && item.routingReason.length > 0 && item.routingReason.length <= 512)) &&
         (item.state === 'planned' || item.state === 'cancelled' || item.state === 'accepted') &&
         (item.assignmentId == null || (typeof item.assignmentId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.assignmentId))) &&
         (item.state === 'cancelled' ? item.assignmentId == null : item.state !== 'accepted' || !!item.assignmentId) &&
@@ -686,6 +690,7 @@ let demandArchived = false;
           safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.state==='cancelled' ? ' · Cancelled ' + safe(activityTime(item.cancelledAt ?? undefined)) : '') +
           (item.parentId ? ' · Parent ' + safe(item.parentId) : ' · Demand root') +
+          (item.workerBotId ? ' · Reviewed route ' + safe(item.workerBotId) + ': ' + safe(item.routingReason ?? '') : '') +
           (item.assignmentId ? ' · Native attempt ' + safe(item.assignmentId) : '') +
           (item.state==='planned' && !item.assignmentId && ['blocked','queued'].includes(ticketDetails?.ticket.state ?? '')
             && !ticketDetails?.truncatedWorkItems &&
@@ -712,6 +717,7 @@ let demandArchived = false;
             safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json : '') +
             '</textarea></label><p>Up to 16 items. Each needs a stable requestKey and summary; ' +
             'optional parentRequestKey must refer to a preceding item in the same plan. ' +
+            'Optional workerBotId and routingReason must be supplied together and match the selected Worker. ' +
             'Review the entire plan before saving. No Worker is dispatched or authorized.</p>' +
             '<button type="submit">Save dependency plan without dispatch</button></form>' : '') +
         '</section>' +
@@ -3559,7 +3565,9 @@ let demandArchived = false;
         if (!Array.isArray(parsed) || parsed.length<1 || parsed.length>16 ||
             parsed.some(item=>!item || typeof item.requestKey!=='string' ||
               typeof item.summary!=='string' || (item.parentRequestKey!=null &&
-                typeof item.parentRequestKey!=='string'))) {
+                typeof item.parentRequestKey!=='string') ||
+              ((item.workerBotId!=null || item.routingReason!=null) &&
+                (typeof item.workerBotId!=='string' || typeof item.routingReason!=='string')))) {
           throw Error('Provide 1 to 16 WorkItems with stable requestKey and summary.');
         }
         const items=await call<PlannedWorkItem[]>('superagent_plan_work_items',{
@@ -3572,6 +3580,8 @@ let demandArchived = false;
               const parent=input.parentRequestKey==null ? null : ids.get(input.parentRequestKey);
               if (!item || item.ticketId!==ticketId || item.requestKey!==input.requestKey ||
                   item.summary!==input.summary.trim() || item.parentId!==parent ||
+                  (item.workerBotId ?? null)!==(input.workerBotId ?? null) ||
+                  (item.routingReason ?? null)!==(input.routingReason?.trim() ?? null) ||
                   typeof item.id!=='string' || !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
                   !['planned','cancelled','accepted'].includes(item.state) ||
                   ids.has(item.requestKey)) return true;

@@ -184,3 +184,7 @@ a receipt never issues a grant, infers a GitHub task or starts Auto.
 ### Explicit desktop issue intake
 
 From an enabled, supported Council-Off Team, open Sources, load an `issues.opened` or `issues.reopened` Observe source, and view its decisions. Select a currently permitted issue, an eligible configured Worker and an operator-written objective. Review and confirm the exact Team/source revisions. The desktop command uses the same atomic staging operation as `--queue-observed-issue`; it creates a blocked manual Ticket and source link, not a provider session or write grant. Use the existing Demand retry control for a later explicit read-only launch. A duplicate issue, stale source, identity mismatch or unsupported roster is rejected by native admission. Observe polling itself never admits work.
+
+### Overlapping authenticated Observe requests
+
+Desktop, background subscriptions and headless polling share the native receipt transaction. If another request advances the source cursor while a GitHub Events window is in flight, the older window cannot advance beyond that new cursor unless it contains the exact newly committed event identity. A window that cannot establish continuity is rejected without recording receipts or advancing the watermark; fetch a fresh window using the current source cursor. Duplicate or older already-observed deliveries remain idempotent. This is an Observe-only safeguard, not Auto admission or permission to write to GitHub.

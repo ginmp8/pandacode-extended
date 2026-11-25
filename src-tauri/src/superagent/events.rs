@@ -1995,8 +1995,11 @@ fn poll_authenticated_events_with_repository_id_scoped(
     // a complete but foreign GitHub feed to a valid source identity. Preserve
     // the existing legacy identity-free test fixtures; production GitHub
     // fetches require the independently attested numeric repository ID.
-    if events.iter().any(|event| event.pointer("/repo/id").is_some()) {
+    if operator_id.is_some() || events.iter().any(|event| event.pointer("/repo/id").is_some()) {
         require_authenticated_feed_repository(raw, repository_id)?;
+    }
+    if operator_id.is_some() {
+        require_authenticated_feed_actor_ids(raw)?;
     }
     // Verify the complete repository-scoped feed, including unsupported
     // kinds and actors, before any receipt or high-watermark is persisted.
@@ -2037,6 +2040,23 @@ fn poll_authenticated_events_with_repository_id_scoped(
         }
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
+    // The HTTP window was anchored to the cursor captured before the request.
+    // A second authenticated poll can advance that cursor before this
+    // transaction starts. Never advance beyond the new durable boundary
+    // unless this same verified window contains its exact event identity.
+    // Old/identical windows remain safe to deduplicate without advancing.
+    if operator_id.is_some() {
+        let current_cursor = current_policy.last_sequence;
+        if current_cursor < expected.last_sequence
+            || (current_cursor > expected.last_sequence
+                && feed_watermark.is_some_and(|newest| newest > current_cursor)
+                && !events.iter().any(|event| event.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| id.parse::<i64>().ok()) == Some(current_cursor)))
+        {
+            return Err("GitHub Observe cursor changed during request; fetch a fresh anchored window before advancing.".into());
+        }
+    }
     pin_authenticated_repository_identity(&tx, &current_policy.id, repository_id)?;
     if let Some(actor_id) = actor_id {
         pin_authenticated_actor_identity(&tx, &current_policy.id, actor_id)?;
@@ -4692,6 +4712,60 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(tickets, 0, "Source inspection cannot create inferred Tickets");
+    }
+
+    #[test]
+    fn overlapping_authenticated_observe_windows_cannot_skip_a_new_durable_cursor() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str| serde_json::json!({
+            "id":id, "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot","id":202},
+            "repo":{"name":"owner/repo","id":101},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        let identity = ObserveFeedContext {
+            repository_id:101, operator_id:Some(303), background_team_revision:None,
+        };
+        // Both requests captured the initial cursor; the first wins the commit.
+        let first = serde_json::json!([event("5000000301")]);
+        let stale = serde_json::json!([event("5000000303")]);
+        let admitted = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &first, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!(admitted.last_sequence, 5_000_000_301);
+        let error = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &stale, "operator", 1, identity,
+        ).unwrap_err();
+        assert!(error.contains("cursor changed during request"), "{error}");
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, admitted.last_sequence);
+        assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
+
+        // A response that includes the newer exact boundary can advance,
+        // even if its original snapshot was captured before the first commit.
+        let anchored = serde_json::json!([
+            event("5000000303"), event("5000000302"), event("5000000301")
+        ]);
+        let next = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &anchored, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((next.recorded, next.duplicates), (2, 1));
+        assert_eq!(next.last_sequence, 5_000_000_303);
+        let replay = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &first, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((replay.recorded, replay.duplicates), (0, 1));
+        assert_eq!(replay.last_sequence, next.last_sequence);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, next.last_sequence);
+        assert_eq!(list_decisions(&reopened, &active.id, 10).unwrap().len(), 3);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
     }
 
     #[test]

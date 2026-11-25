@@ -1482,6 +1482,26 @@ fn pin_authenticated_repository_identity(
     if id <= 0 {
         return Err("Authenticated GitHub repository identity is invalid.".into());
     }
+    // Legacy links may be created before either source has a numeric ID.
+    // Recheck the whole Ticket's same-name repository at attestation time:
+    // otherwise two individually valid first observations can bind one
+    // Ticket to distinct repository incarnations after linking.
+    let conflicting_link: bool = tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_source_thread_links current_link
+           JOIN sa_event_sources current_source ON current_source.id=current_link.source_id
+           JOIN sa_source_thread_links peer_link ON peer_link.ticket_id=current_link.ticket_id
+           JOIN sa_event_sources peer_source ON peer_source.id=peer_link.source_id
+           JOIN sa_source_repository_identity peer_identity ON peer_identity.source_id=peer_link.source_id
+           WHERE current_link.source_id=?1 AND peer_link.source_id<>?1
+             AND peer_source.repository=current_source.repository COLLATE NOCASE
+             AND peer_identity.repository_id<>?2
+         )",
+        params![source_id,id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if conflicting_link {
+        return Err("GitHub repository identity conflicts with another source linked to this Ticket; reconcile links before observing.".into());
+    }
     let existing: Option<i64> = tx.query_row(
         "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
         [source_id], |row| row.get(0),
@@ -8567,6 +8587,73 @@ mod tests {
         assert_eq!(tasks, 1, "Observation and correlation never admit work");
     }
 
+
+    #[test]
+    fn first_repository_attestation_cannot_split_preexisting_ticket_links() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "legacy-ticket", "orch");
+        insert_manual_ticket(&store, "independent-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let comment = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issue_comment.created").unwrap();
+        let independent = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.edited").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let comment = set_mode(&store, &comment.id, comment.policy_revision, "observe").unwrap();
+        let independent = set_mode(&store, &independent.id,
+            independent.policy_revision, "observe").unwrap();
+        // Both links were legitimate while their repository IDs were unknown.
+        link_thread(&store, &issue.id, "legacy-ticket", "issue:42").unwrap();
+        link_thread(&store, &comment.id, "legacy-ticket", "issue:99").unwrap();
+        link_thread(&store, &independent.id, "independent-ticket", "issue:77").unwrap();
+        let raw = |id: &str, repo_id: u64, kind: &str, action: &str, number: u64|
+            serde_json::json!([{
+                "id":id, "created_at":"2026-11-12T09:00:00Z",
+                "type":kind, "repo":{"name":"test/fixture","id":repo_id},
+                "actor":{"login":"trusted-bot"},
+                "payload":{"action":action,"issue":{"number":number}}
+            }]);
+        let opened = raw("5000099101", 101, "IssuesEvent", "opened", 42);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &issue, 0, &opened, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        let foreign = raw("5000099102", 202, "IssueCommentEvent", "created", 99);
+        let rejected = poll_authenticated_events_with_repository_id(
+            &store, &comment, 0, &foreign, "operator", 1, 202,
+        ).unwrap_err();
+        assert!(rejected.contains("conflicts with another source linked to this Ticket"));
+        assert_eq!(inspect_source_integrity(&store, &comment.id).unwrap().repository_id, None);
+        assert_eq!(source(&store, &comment.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &comment.id, 10).unwrap().is_empty());
+        assert_eq!(linked_decisions(&store, "legacy-ticket", 10).unwrap().len(), 1);
+        // The same owner/name on an independent Ticket is not globally blocked.
+        let edited = raw("5000099103", 202, "IssuesEvent", "edited", 77);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &independent, 0, &edited, "operator", 1, 202,
+        ).unwrap().recorded, 1);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert!(poll_authenticated_events_with_repository_id(
+            &reopened, &comment, 0, &foreign, "operator", 1, 202,
+        ).is_err());
+        let matching = raw("5000099104", 101, "IssueCommentEvent", "created", 99);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &reopened, &comment, 0, &matching, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        assert_eq!(inspect_source_integrity(&reopened, &comment.id).unwrap().repository_id, Some(101));
+        assert_eq!(linked_decisions(&reopened, "legacy-ticket", 10).unwrap().len(), 2);
+        assert_eq!(linked_decisions(&reopened, "independent-ticket", 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='legacy-ticket'
+             AND kind='source_context_observed'", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 2);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
 
     #[test]
     fn same_ticket_cannot_mix_recreated_or_unattested_github_repository_threads() {

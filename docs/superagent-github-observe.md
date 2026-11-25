@@ -165,6 +165,8 @@ Sources created before v48 preserve their historic receipts, but those historic 
 
 ## Cross-source thread correlation and numeric repository identity
 
+Existing links made before repository attestation do not permit a later source to bind the same Ticket to a different numeric repository ID. Every authenticated identity pin rechecks same-name repository links on that Ticket inside the receipt transaction. A conflict denies the pin, receipts and cursor advancement; explicitly reconcile the affected links before retrying. Independent Tickets and different repository names remain unaffected. No execution authority is granted.
+
 An explicit Ticket issue/PR association and its source-linked activity compare
 the independently pinned numeric GitHub repository IDs when available. Two
 source classes with the same owner/name but different IDs never share receipts,

@@ -8807,6 +8807,43 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert!(!saved.native.verified_pass,
         "a stable bounded source snapshot does not replace independent Council reviewers");
 
+    // A foreign-owned or invalid sibling can be restored/imported after
+    // admission. Neither a new observation nor replay may use an ambiguous
+    // root cycle, even if the authentic request itself is untouched.
+    for content in [
+        json!({"request":{"cycleId":request.cycle_id.clone()}}).to_string(),
+        json!({"request":{"cycleId":null}}).to_string(),
+        json!({"request":{"cycleId":7}}).to_string(),
+        "{".to_owned(),
+    ] {
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,'native-council-task:conflicting-host-task','council_native_task',?2,'foreign-owner')",
+            rusqlite::params![&sid, content],
+        ).unwrap();
+        assert!(council_requests::inspect_native_task(
+            &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
+        ).unwrap_err().contains("multiple or invalid task assignments"));
+        assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none());
+        assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err());
+        let mut fresh = bounded.clone();
+        fresh["hostObservation"]["observationId"] = json!(storage::id());
+        assert!(council_requests::record_native_host_check(&store, &request, &fresh).is_err());
+        assert!(council_requests::admit_native_task(
+            &store, &sid, &project, "host-check-task", &artifact,
+        ).is_err());
+        assert!(council_requests::resolve_native_admission_collision(
+            &store, &sid, &project, "host-check-task", &artifact,
+        ).is_err());
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1
+             AND key='native-council-task:conflicting-host-task'",
+            [&sid],
+        ).unwrap(), 1);
+        assert_eq!(council_requests::active_native_task_for_checks(&store, &sid).unwrap(), Some(request.clone()));
+        assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+    }
+
     // Physical storage replay must not turn one real host execution into
     // several independent observations, including after the Council task
     // was already admitted. This is inspection-only; no fake command runs.
@@ -9094,6 +9131,10 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
          VALUES(?1,'native-council-task:legacy-sibling-task','council_native_task',?2,?1)",
         rusqlite::params![sid, sibling.to_string()],
     ).unwrap();
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap_err().contains("multiple or invalid task assignments"),
+        "the read-only consumer must not see a verified pass for an ambiguous cycle");
     let denied = council_requests::record_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap_err();

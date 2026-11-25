@@ -518,6 +518,27 @@ fn native_task_record(
     Ok((raw, record))
 }
 
+/// A root cycle has exactly one native task owner. Apply this at every
+/// reusable read/replay boundary, not only at terminal settlement: an old
+/// conflicting row must not expose a verified pass or append host evidence.
+/// Rows with missing or malformed cycle pins cannot safely be classified as history.
+fn validate_unique_native_task_cycle(store: &Store, request: &NativeTaskCouncilRequest) -> Result<()> {
+    let related_requests: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'
+           AND CASE WHEN json_valid(content) THEN (
+                    json_type(content,'$.request.cycleId') IS NOT 'text'
+                    OR json_extract(content,'$.request.cycleId')=''
+                    OR json_extract(content,'$.request.cycleId')=?2
+                ) ELSE 1 END",
+        params![&request.session_id, &request.cycle_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if related_requests != 1 {
+        return Err("council_task_conflict: root Council cycle has multiple or invalid task assignments.".into());
+    }
+    Ok(())
+}
+
 /// After an atomic admission loses to another writer, return the winning
 /// request only when every immutable task pin still matches. The winning
 /// request ID is persisted by the other writer and must never be regenerated.
@@ -534,6 +555,7 @@ pub(super) fn resolve_native_admission_collision(
     if existing.request != current {
         return Err("council_task_conflict: native task admission winner has different task, cycle, policy or artifact.".into());
     }
+    validate_unique_native_task_cycle(store, &existing.request)?;
     Ok(existing.request)
 }
 
@@ -558,8 +580,11 @@ pub(crate) fn admit_native_task(
         let matching = NativeTaskCouncilRequest {
             request_id: saved.request.request_id.clone(), ..candidate
         };
-        return if saved.request == matching { Ok(saved.request) }
-            else { Err("council_task_conflict: an assignment cannot be rebound to another Council cycle, objective, policy or artifact.".into()) };
+        if saved.request != matching {
+            return Err("council_task_conflict: an assignment cannot be rebound to another Council cycle, objective, policy or artifact.".into());
+        }
+        validate_unique_native_task_cycle(store, &saved.request)?;
+        return Ok(saved.request);
     }
     let team = super::load(store, session_id)?
         .ok_or("council_task_denied: root team disappeared.")?;
@@ -633,6 +658,7 @@ pub(crate) fn inspect_native_task(
     if record.request != current {
         return Err("council_task_stale: native task, cycle, objective, policy or artifact changed.".into());
     }
+    validate_unique_native_task_cycle(store, &current)?;
     let native = super::council_inspection_state(store, session_id)?
         .ok_or("council_task_denied: native Council inspection is unavailable.")?;
     if format!("{}:{}", session_id, native.cycle_started_at) != current.cycle_id {
@@ -833,19 +859,6 @@ fn native_terminal_expected(
     let inspected = inspect_native_task(
         store, session_id, project_id, assignment_key, artifact_sha256, request_id,
     )?;
-    // Legacy/conflicting durable records must also fail closed at terminal
-    // settlement. An old multi-request cycle cannot reuse one root pass for
-    // another assignment merely because both requests predate admission guards.
-    let related_requests: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM architect_requests
-         WHERE parent_session_id=?1 AND kind='council_native_task'
-           AND (json_extract(content,'$.request.cycleId')=?2
-                OR json_type(content,'$.request.cycleId') IS NULL)",
-        params![session_id, &inspected.request.cycle_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if related_requests != 1 {
-        return Err("council_task_conflict: root Council cycle has multiple or invalid task assignments.".into());
-    }
     let native = &inspected.native;
     // A user exception is never relabeled "passed"; it needs its own
     // attributed, reasoned consumer contract before it can be emitted here.

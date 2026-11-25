@@ -405,6 +405,7 @@ fn plan_in_transaction(
     if updated!=1 {
         return Err("Demand revision, state, archive or effect policy changed; planning denied.".into());
     }
+    super::headless_dispatch::reject_stale_pending(tx, ticket_id, now)?;
     tx.execute(
         "INSERT INTO sa_work_items
          (id,ticket_id,request_key,parent_id,summary,state,actor,created_at)
@@ -626,6 +627,7 @@ pub(super) fn cancel(
     if changed!=1 {
         return Err("Demand revision, state, active child or effect policy changed; cancellation denied.".into());
     }
+    super::headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     tx.execute(
         "INSERT INTO sa_work_item_cancellations(item_id,ticket_id,request_key,cancelled_at)
          VALUES(?1,?2,?3,?4)",

@@ -87,6 +87,31 @@ fn expire_pending(tx: &Transaction<'_>, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Retire only unconsumed requests whose exact Ticket revision has changed.
+/// The caller owns the transaction: plan edits and their revocation audit
+/// must commit together. Admitted requests are immutable native receipts.
+pub(super) fn reject_stale_pending(
+    tx: &Transaction<'_>, ticket_id: &str, now: i64,
+) -> Result<()> {
+    let predicate = "ticket_id=?1 AND state='pending' AND EXISTS(
+        SELECT 1 FROM sa_tickets t WHERE t.id=sa_headless_dispatch_requests.ticket_id
+        AND t.revision<>sa_headless_dispatch_requests.expected_revision)";
+    tx.execute(
+        &format!("INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         SELECT ticket_id,'headless_dispatch_rejected',
+         'Dispatch request ' || id || ' rejected: Ticket revision changed',?2
+         FROM sa_headless_dispatch_requests WHERE {predicate}"),
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        &format!("UPDATE sa_headless_dispatch_requests
+         SET state='rejected',rejection='Ticket revision changed',updated_at=?2
+         WHERE {predicate}"),
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub(super) fn enqueue(
     store: &Store, ticket_id: &str, revision: i64, key: &str,
 ) -> Result<DispatchRequest> {
@@ -99,6 +124,8 @@ pub(super) fn enqueue(
         .map_err(|e| e.to_string())?;
     let now = storage::now();
     expire_pending(&tx, now)?;
+    // Also recover stale receipts written before plan-edit invalidation existed.
+    reject_stale_pending(&tx, ticket_id, now)?;
     if let Some(prior) = by_key(store, ticket_id, key)? {
         if prior.expected_revision != revision {
             return Err("Dispatch request key is already bound to another Ticket revision.".into());

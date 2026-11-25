@@ -97,6 +97,14 @@ a new request key against the current Ticket revision. Admitted Assignment
 receipts remain immutable and require the existing native Stop/recovery path;
 expiry never cancels an Assignment, refreshes a Mandate or replays an effect.
 
+Creating or cancelling a WorkItem changes the Ticket revision and atomically
+rejects any unconsumed dispatch intent bound to an older revision. The
+rejection and audit commit with the plan change; an audit failure rolls back
+the plan edit. No automatic replacement request is created: an explicit new
+confirmation and key must reference the revised plan. Replaying the old key
+returns its historical rejected receipt. A plan replay does not invalidate a
+current confirmation, and already admitted Assignment receipts remain intact.
+
 ## Native-backed surfaces
 
 The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.

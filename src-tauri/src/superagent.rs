@@ -6697,9 +6697,13 @@ mod tests {
             "new-confirmation").unwrap_err().contains("No remaining planned WorkItem"));
         assert!(assignments(&store, &ticket.id, 100).unwrap().is_empty());
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, cancelled.revision);
-        assert!(headless_dispatch::enqueue(&store, &ticket.id, revision,
-            "old-confirmation").is_ok(), "old confirmation remains an inspection receipt");
-        headless_dispatch::cancel(&store, &ticket.id, revision, "old-confirmation").unwrap();
+        let retired = serde_json::to_value(headless_dispatch::enqueue(
+            &store, &ticket.id, revision, "old-confirmation",
+        ).unwrap()).unwrap();
+        assert_eq!(retired["state"], "rejected");
+        assert_eq!(retired["rejection"], "Ticket revision changed");
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none(),
+            "cancelling a plan frees pending capacity without a separate cancellation");
         let replacement = work_items::plan(&store, &ticket.id, cancelled.revision,
             "replacement-scope", "New explicitly reviewed scope", None).unwrap();
         let revision = get_ticket(&store, &ticket.id).unwrap().revision;
@@ -7628,6 +7632,60 @@ mod tests {
         assert_eq!(get_ticket(&store, id).unwrap().state, "stopped");
         assert!(assignment_session(&store, id).unwrap().is_none());
         assert!(headless_dispatch::enqueue(&store, id, revision, "third-confirmation").is_err());
+    }
+
+    #[test]
+    fn headless_plan_revision_revokes_pending_intent_atomically_and_requires_new_confirmation() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id,
+            "Inspect original scope", "plan-revision-dispatch").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let original = headless_dispatch::enqueue(&store, id, revision, "original").unwrap();
+
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_plan_revocation BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected'
+             BEGIN SELECT RAISE(ABORT,'test audit failure'); END;",
+        ).unwrap();
+        assert!(work_items::plan(&store, id, revision, "item", "Inspect revised scope", None).is_err());
+        assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, original.id);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_items WHERE ticket_id=?1",
+            [id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        store.db.execute_batch("DROP TRIGGER deny_plan_revocation;").unwrap();
+
+        let item = work_items::plan(&store, id, revision, "item", "Inspect revised scope", None).unwrap();
+        let next_revision = get_ticket(&store, id).unwrap().revision;
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert!(retry_blocked_with_request(&mut store, id, revision, false, Some(&original)).is_err());
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        let replay = serde_json::to_value(
+            headless_dispatch::enqueue(&store, id, revision, "original").unwrap()).unwrap();
+        assert_eq!(replay["state"], "rejected");
+        assert_eq!(replay["rejection"], "Ticket revision changed");
+
+        let fresh = headless_dispatch::enqueue(&store, id, next_revision, "fresh").unwrap();
+        // A replay of the plan cannot revoke a current explicit confirmation.
+        work_items::plan(&store, id, revision, "item", "Inspect revised scope", None).unwrap();
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, fresh.id);
+        let (running, _, _, context) = retry_blocked_with_request(
+            &mut store, id, next_revision, false, Some(&fresh)).unwrap();
+        assert_eq!(running.state, "running");
+        assert!(context.contains(&item.id));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let receipt = serde_json::to_value(
+            headless_dispatch::enqueue(&reopened, id, next_revision, "fresh").unwrap()).unwrap();
+        assert_eq!(receipt["state"], "admitted");
+        assert!(headless_dispatch::next_pending(&reopened).unwrap().is_none());
     }
 
     #[test]

@@ -7701,6 +7701,46 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![&sid, &sealed_key],
     ).unwrap();
+    // Unexpected reservations must be rejected before any fresh grants are
+    // issued, even when the occupied key has a different request kind.
+    let unexpected_key = format!("native-council-child:{}:not-selected", root.council_since);
+    for kind in ["council_child", "dispatch"] {
+        reopened.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,?2,?3,'{}',?4)",
+            rusqlite::params![&sid, &unexpected_key, kind, &launch.admission.parent],
+        ).unwrap();
+        let denied = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+        assert!(denied.contains("native child reservation roster changed"), "{denied}");
+        reopened.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![&sid, &unexpected_key],
+        ).unwrap();
+    }
+    // A coordinator that is active independently of the interrupted snapshot
+    // must not be skipped while its sibling receives replacement grants.
+    for status in ["running", "waiting"] {
+        reopened.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&sibling_launch.admission.parent, status],
+        ).unwrap();
+        let denied = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+        assert!(denied.contains("child coordinator native session remains active"), "{denied}");
+        assert_eq!(serde_json::to_value(load(&reopened, &sid).unwrap().unwrap()).unwrap(), before_root);
+        for id in old_children {
+            assert_eq!(reopened.db.query_row(
+                "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+                rusqlite::params![&sid, id], |row| row.get::<_, i64>(0),
+            ).unwrap(), 1);
+        }
+        for id in &old_leaves {
+            assert!(parent_of(&reopened, id).unwrap().is_some());
+        }
+    }
+    reopened.db.execute(
+        "UPDATE sessions SET status='interrupted' WHERE id=?1",
+        [&sibling_launch.admission.parent],
+    ).unwrap();
     // Store::open does not distinguish a user-stopped coordinator by status
     // alone. Its native restart and stop markers must independently prove
     // authority before replacing either sibling, even with valid leaf grants.
@@ -7883,6 +7923,15 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
 
 #[test]
 fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
+    assert_physical_sqlite_restart_fresh_cycle(false);
+}
+
+#[test]
+fn physical_sqlite_restart_during_forced_s2_requires_fresh_cycle_and_terminal_receipt() {
+    assert_physical_sqlite_restart_fresh_cycle(true);
+}
+
+fn assert_physical_sqlite_restart_fresh_cycle(force_s2: bool) {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.
     let directory = std::env::temp_dir().join(format!(
@@ -7890,7 +7939,7 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     ));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("state.sqlite");
-    let (sid, launch, sibling_launch) = {
+    let (sid, launch, sibling_launch, old_request) = {
         let store = Store::open(&path).unwrap();
         let project = store.add_project(&directory).unwrap();
         let session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
@@ -7907,6 +7956,10 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
+        if force_s2 {
+            council.strategy = council::CouncilExecutionStrategy::Escalated;
+            council.force_escalation = true;
+        }
         council.validate().unwrap();
         let mut team_config = config();
         team_config.council = Some(council);
@@ -7921,12 +7974,42 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
         let (started, _) = start_state(
             &state, &session.id, "Review the frozen artifact", None, None,
         ).unwrap();
+        let old_request = if force_s2 {
+            let store = state.store.lock().unwrap();
+            Some(council_requests::admit_native_task(
+                &store, &session.id, &project.id, "interrupted-s2-task", &"f".repeat(64),
+            ).unwrap())
+        } else { None };
         let (result, _) = dispatch_state(
             &state, &session.id, started.generation, "pandacode_finish_team",
             json!({"summary":"Begin real nested review"}),
             &std::sync::atomic::AtomicBool::new(false),
         ).unwrap();
         assert_eq!(result["completed"], false);
+        if force_s2 {
+            for _ in 0..4 {
+                let first = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+                {
+                    let store = state.store.lock().unwrap();
+                    child_council::authorize_leaf(&store, &first.sid, &first.admission).unwrap();
+                    store.message(&first.sid, "assistant",
+                        "Independent first-wave evidence.\nCouncil score: 9.6/10").unwrap();
+                    store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&first.sid]).unwrap();
+                }
+                completed_state(&state, &first.sid, Some(&first.admission), true, false, &mut |_| {});
+            }
+            let (pending, _) = dispatch_state(&state, &session.id, started.generation,
+                "pandacode_finish_team", json!({"summary":"Begin second wave"}),
+                &std::sync::atomic::AtomicBool::new(false)).unwrap();
+            assert_eq!(pending["completed"], false);
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &session.id).unwrap().unwrap();
+            let children = child_council::inspect(&store, &root).unwrap();
+            assert_eq!(children.len(), 2);
+            assert!(children.iter().all(|child| child.verified_child_receipt.is_some()
+                && child.verified_escalation_receipt.is_none()));
+            assert!(!verified_council_pass(&store, &root));
+        }
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         // Start a reviewer in the second child as well, so reopening SQLite
         // must revoke both independently owned child sessions and callbacks.
@@ -7952,7 +8035,7 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
                 ).unwrap();
             }
         }
-        (session.id, launch, sibling_launch)
+        (session.id, launch, sibling_launch, old_request)
     };
     let reopened = Store::open(&path).unwrap();
     let root = load(&reopened, &sid).unwrap().unwrap();
@@ -7961,6 +8044,14 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     assert_eq!(root.status, "interrupted");
     assert_eq!(child.status, "interrupted");
     assert_eq!(sibling_child.status, "interrupted");
+    if force_s2 {
+        let denied = child_council::recover_interrupted_children(&reopened, &root).unwrap_err();
+        assert!(denied.contains("sealed child evidence"), "{denied}");
+        for (team, old_launch) in [(&child, &launch), (&sibling_child, &sibling_launch)] {
+            assert_eq!(team.workers.iter().find(|leaf| leaf.session_id == old_launch.sid)
+                .unwrap().council.as_ref().unwrap().round, 2);
+        }
+    }
     for id in [&sid, &launch.admission.parent, &launch.sid,
         &sibling_launch.admission.parent, &sibling_launch.sid] {
         assert_eq!(reopened.session(id).unwrap().status, "interrupted");
@@ -8160,6 +8251,20 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             "UPDATE sessions SET status='running' WHERE id=?1", [&sid],
         ).unwrap();
     }
+    let fresh_request = if force_s2 {
+        let store = state.store.lock().unwrap();
+        let old = old_request.as_ref().unwrap();
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &old.project_id, &old.assignment_key,
+            &old.artifact_sha256, &old.request_id,
+        ).is_err());
+        assert!(council_requests::admit_native_task(
+            &store, &sid, &old.project_id, &old.assignment_key, &old.artifact_sha256,
+        ).is_err(), "a fresh cycle must not adopt an interrupted assignment key");
+        Some(council_requests::admit_native_task(
+            &store, &sid, &old.project_id, "fresh-s2-task", &old.artifact_sha256,
+        ).unwrap())
+    } else { None };
     let (pending, _) = dispatch_state(
         &state, &sid, fresh.generation, "pandacode_finish_team",
         json!({"summary":"Start the fresh native Council after restart"}),
@@ -8198,6 +8303,69 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     assert!(start_state(
         &state, &sid, "Concurrent objective", None, None,
     ).is_err(), "a fresh task cannot be started twice while active");
+    if let Some(request) = fresh_request {
+        let mut first = Some(fresh_launch);
+        let mut fresh_ids = std::collections::HashSet::new();
+        for index in 0..8 {
+            if index == 4 {
+                let (pending, _) = dispatch_state(&state, &sid, fresh.generation,
+                    "pandacode_finish_team", json!({"summary":"Admit fresh second wave"}),
+                    &std::sync::atomic::AtomicBool::new(false)).unwrap();
+                assert_eq!(pending["completed"], false);
+            }
+            let current = first.take().unwrap_or_else(||
+                next_action_state(&state, &mut |_| {}).unwrap().unwrap());
+            assert_ne!(current.admission.parent, launch.admission.parent);
+            assert_ne!(current.admission.parent, sibling_launch.admission.parent);
+            assert!(fresh_ids.insert(current.sid.clone()));
+            {
+                let store = state.store.lock().unwrap();
+                assert!(council_requests::record_native_terminal(
+                    &store, &sid, &request.project_id, &request.assignment_key,
+                    &request.artifact_sha256, &request.request_id,
+                ).is_err(), "the fresh S2 request cannot settle before both waves");
+                child_council::authorize_leaf(&store, &current.sid, &current.admission).unwrap();
+                store.message(&current.sid, "assistant",
+                    "Independent replacement evidence.\nCouncil score: 9.7/10").unwrap();
+                store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&current.sid]).unwrap();
+            }
+            completed_state(&state, &current.sid, Some(&current.admission), true, false, &mut |_| {});
+        }
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sid]).unwrap();
+        }
+        let (complete, _) = dispatch_state(&state, &sid, fresh.generation,
+            "pandacode_finish_team", json!({"summary":"Both fresh S2 waves completed"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(complete["completed"], true);
+        let terminal = {
+            let store = state.store.lock().unwrap();
+            let receipt = council_requests::record_native_terminal(
+                &store, &sid, &request.project_id, &request.assignment_key,
+                &request.artifact_sha256, &request.request_id,
+            ).unwrap();
+            assert_eq!(receipt.outcome, "passed");
+            receipt
+        };
+        for old_launch in [&launch, &sibling_launch] {
+            completed_state(&state, &old_launch.sid, Some(&old_launch.admission), true, false, &mut |_| {});
+        }
+        let store = state.store.lock().unwrap();
+        assert_eq!(council_requests::record_native_terminal(
+            &store, &sid, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        ).unwrap(), terminal);
+        assert_eq!(council_requests::read_native_terminal(
+            &store, &sid, &request.project_id, &request.assignment_key,
+            &request.artifact_sha256, &request.request_id,
+        ).unwrap(), terminal);
+        let old = old_request.as_ref().unwrap();
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &old.project_id, &old.assignment_key,
+            &old.artifact_sha256, &old.request_id,
+        ).is_err(), "an interrupted task must never inherit the replacement receipt");
+    }
     drop(state);
     std::fs::remove_dir_all(directory).unwrap();
 }

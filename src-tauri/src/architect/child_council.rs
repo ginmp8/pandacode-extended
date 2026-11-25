@@ -674,6 +674,11 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         .map_err(|reason| format!("child_council_recovery_denied: {reason}"))?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    // Recovery issues fresh grants, so authenticate the complete frozen roster
+    // before replacing even one reservation. Unexpected keys are conflicts
+    // regardless of request kind, just as in Resume and the terminal gate.
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())
+        .map_err(|reason| format!("child_council_recovery_denied: {reason}"))?;
     let mut recovered = 0;
     for choice in &config.nested_bot_reviewers {
         let key = key(root, &choice.bot_id);
@@ -687,6 +692,12 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             "child_council_recovery_denied: required frozen child reservation is missing."
         )?;
         let old = store.session(&old_id)?;
+        // Even a sibling that would otherwise be skipped is part of the
+        // recovery transaction. Its active native coordinator must prevent
+        // replacement of any other child, not only of that coordinator.
+        if matches!(old.status.as_str(), "running" | "waiting") {
+            return Err("child_council_recovery_denied: child coordinator native session remains active.".into());
+        }
         // Root Pause stops leaf providers, not the isolated coordinator.
         // A separately paused/stopped coordinator has revoked authority;
         // explicit crash recovery must not silently replace that seat.
@@ -741,12 +752,6 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             && !stale_paused_child && !physical_restart
         {
             continue;
-        }
-        // A paused root snapshot is not proof that its child coordinator's
-        // native provider has stopped. Never replace an active coordinator,
-        // even when every leaf appears stopped after root Pause.
-        if matches!(old.status.as_str(), "running" | "waiting") {
-            return Err("child_council_recovery_denied: child coordinator native session remains active.".into());
         }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)
             .map_err(|_| "child_council_recovery_denied: malformed reservation.")?;

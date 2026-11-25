@@ -289,9 +289,11 @@ fn require_current_child_reservation_roster(
     store: &Store, root: &TeamSnapshot, expected: usize,
 ) -> Result<()> {
     let prefix = format!("native-council-child:{}:", root.council_since);
+    // Every occupied reservation key belongs to the immutable roster, even
+    // when a conflicting row is stored under another request kind.
     let reserved: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM architect_requests
-         WHERE parent_session_id=?1 AND kind='council_child'
+         WHERE parent_session_id=?1
          AND substr(key,1,length(?2))=?2",
         params![&root.session_id, prefix],
         |row| row.get(0),
@@ -1823,6 +1825,7 @@ pub(super) fn verified_s3_receipts(
     {
         return Ok(None);
     }
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     let mut worker_ids = HashSet::new();
     let mut sessions = HashSet::new();
     let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
@@ -1930,6 +1933,7 @@ pub(super) fn verified_parent_seats(
     {
         return Ok(None);
     }
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     crate::bots::shared_channels::validate_delivery_council(
         store, &root.session_id, config,
     )?;
@@ -2050,6 +2054,7 @@ pub(super) fn verified_triggered_s2_parent_seats(
     {
         return Ok(None);
     }
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     crate::bots::shared_channels::validate_delivery_council(
         store, &root.session_id, config,
     )?;
@@ -2176,6 +2181,7 @@ pub(super) fn verified_s2_receipts(
     {
         return Ok(None);
     }
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     let mut worker_ids = HashSet::new();
     let mut sessions = HashSet::new();
     let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
@@ -2570,6 +2576,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
         return Err("child_council_denied: root work must be settled before native child review.".into());
     }
     require_live_root_session(store, &root.session_id)?;
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     root_artifact_revision(store, root, true)?;
     let mut created = false;
@@ -2759,6 +2766,7 @@ fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool>
     {
         return Ok(false);
     }
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     let mut admitted = false;
     for choice in &config.nested_bot_reviewers {
@@ -2870,6 +2878,7 @@ pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) ->
     }
     require_live_root_session(store, &root_sid)?;
     let config = root.config.council.as_ref().ok_or("Council is off.")?;
+    require_current_child_reservation_roster(store, &root, config.nested_bot_reviewers.len())?;
     let mut authorized = false;
     for choice in &config.nested_bot_reviewers {
         let Some(record) = read(store, &root, choice)? else {
@@ -2920,6 +2929,7 @@ pub(super) fn next_leaf_launch(
     }
     // A fully authenticated first wave may require a fresh on-demand child
     // review. Only the native scheduler can issue the second wave.
+    require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     let _ = admit_triggered_s2_leaves(store, root)?;
     let mut global_running = root.workers.iter().filter(|w|
         super::active(&w.status) || agents.contains_key(&w.session_id)).count();

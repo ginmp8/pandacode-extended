@@ -11138,12 +11138,53 @@ fn run_nested_mixed_root_callbacks(
     ).unwrap();
     assert_eq!(pending["completed"], false,
         "root-only reports must not approve a composed Council");
-    for _ in 0..2 {
+    // An unselected reservation must block native launch and callbacks even
+    // when every selected child still has its authentic reservation and grants.
+    let extra_key = format!("native-council-child:{}:unselected", started.council_since);
+    let genuine_key = format!("native-council-child:{}:security-child", started.council_since);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        for kind in ["council_child", "foreign_request_kind"] {
+            assert_eq!(store.db.execute(
+                "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+                 SELECT parent_session_id,?2,?3,content,'foreign-child-session'
+                 FROM architect_requests WHERE parent_session_id=?1 AND key=?4",
+                rusqlite::params![&sid, &extra_key, kind, &genuine_key],
+            ).unwrap(), 1);
+            assert!(child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root).is_err(),
+                "an ambiguous child roster must not start a reviewer");
+            assert!(child_council::verified_parent_seats(&store, &root).is_err());
+            store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+                rusqlite::params![&sid, &extra_key]).unwrap();
+        }
+    }
+    for index in 0..2 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
             let store = state.store.lock().unwrap();
             store.message(&launch.sid, "assistant",
                 "Independent native child report.\nCouncil score: 9.5/10").unwrap();
+            if index == 0 {
+                store.db.execute(
+                    "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+                     SELECT parent_session_id,?2,'foreign_request_kind',content,'foreign-child-session'
+                     FROM architect_requests WHERE parent_session_id=?1 AND key=?3",
+                    rusqlite::params![&sid, &extra_key, &genuine_key],
+                ).unwrap();
+            }
+        }
+        if index == 0 {
+            let before = {
+                let store = state.store.lock().unwrap();
+                serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap()
+            };
+            completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+            let store = state.store.lock().unwrap();
+            assert_eq!(serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(), before,
+                "a delayed callback cannot settle a child in an ambiguous roster");
+            store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+                rusqlite::params![&sid, &extra_key]).unwrap();
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
     }
@@ -11202,6 +11243,20 @@ fn run_nested_mixed_root_callbacks(
             "no trigger means no native S2 second-wave evidence");
     }
 
+    store.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+         SELECT parent_session_id,?2,'foreign_request_kind',content,'foreign-child-session'
+         FROM architect_requests WHERE parent_session_id=?1 AND key=?3",
+        rusqlite::params![&sid, &extra_key, &genuine_key],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "an unexpected reservation must revoke a previously passing root gate");
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, assignment, &artifact, &task.request_id,
+    ).is_err());
+    store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![&sid, &extra_key]).unwrap();
+    assert!(verified_council_pass(&store, &saved));
     let children = child_council::verified_parent_seats(&store, &saved)
         .unwrap().unwrap();
     assert_eq!(children.len(), 1);

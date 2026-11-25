@@ -5507,6 +5507,83 @@ fn initial_nested_council_has_a_cycle_identity_without_restarting_blocked_review
 }
 
 #[test]
+fn failed_hierarchical_start_preserves_previous_objective_and_request_keys() {
+    let (state, sid) = state_fixture();
+    let (before, session_count) = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('atomic-first','atomic-first',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["atomic-first", "atomic-missing"]
+            .into_iter().map(|id| council::CouncilNestedReviewer {
+                bot_id: id.into(), child_reviewers: 2, child_target: 9.0,
+                child_max_rounds: 2,
+            }).collect();
+        policy.strategy = council::CouncilExecutionStrategy::Escalated;
+        policy.force_escalation = true;
+        policy.validate().unwrap();
+        team.config.council = Some(policy);
+        team.status = "ready".into();
+        team.round = 0;
+        team.council_since = 0;
+        team.objective = "Previous objective".into();
+        save(&store, &mut team).unwrap();
+        coordination::notes::ensure(&store).unwrap();
+        coordination::notes::set_reserved(&store, &sid, OBJECTIVE_NOTE,
+            Some("Previous objective")).unwrap();
+        record_request(&store, &sid, "previous-dispatch", "dispatch", "{}", &sid).unwrap();
+        record_request(&store, &sid, "previous-followup", "followup", "{}", &sid).unwrap();
+        let sessions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE project_id=?1",
+            [&project], |row| row.get(0),
+        ).unwrap();
+        (serde_json::to_value(&team).unwrap(), sessions)
+    };
+    let denied = start_state(&state, &sid, "New forced S2 objective", None, None).unwrap_err();
+    assert!(denied.contains("child_council_unavailable"), "{denied}");
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(), before);
+        let project = store.session(&sid).unwrap().project_id;
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE project_id=?1",
+            [&project], |row| row.get::<_, i64>(0),
+        ).unwrap(), session_count, "failed second child must not leave the first child orphaned");
+        assert_eq!(store.db.query_row(
+            "SELECT value FROM architect_notes WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![&sid, OBJECTIVE_NOTE], |row| row.get::<_, String>(0),
+        ).unwrap(), "Previous objective");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1
+             AND key IN ('previous-dispatch','previous-followup')",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), 2, "failed admission must preserve deduplication keys");
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('atomic-missing','atomic-missing',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "New forced S2 objective", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    assert_eq!(store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1
+         AND key IN ('previous-dispatch','previous-followup')",
+        [&sid], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0);
+    assert_eq!(store.db.query_row(
+        "SELECT COUNT(*) FROM architect_notes WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![&sid, OBJECTIVE_NOTE], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0);
+}
+
+#[test]
 fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let (state, sid) = state_fixture();
     let mut children = Vec::new();

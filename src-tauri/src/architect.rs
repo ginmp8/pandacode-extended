@@ -1937,11 +1937,18 @@ pub(crate) fn start_state(
         && team.config.council.as_ref()
             .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
         && verified_council_pass(&store, &team);
+    // Commit all persisted admission changes together. A failed child
+    // reservation must retain the previous objective, deduplication keys
+    // and deferred setup, not just roll back the new child sessions.
+    let transaction = store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     // A stopped team's parked workers belong to the old objective.
     for worker in team.workers.iter_mut().filter(|w| w.status == "parked") {
         worker.status = "stopped".into();
     }
-    apply_pending_setup(&store, &mut team)?;
+    if let Some(setup) = team.pending_setup.clone() {
+        apply_setup(&store, &mut team, &setup)?;
+        save(&store, &mut team)?;
+    }
     team.status = "running".into();
     team.round = 1;
     team.generation += 1;
@@ -1980,9 +1987,7 @@ pub(crate) fn start_state(
         reserved_at: storage::now(),
         kind: None,
     });
-    // Commit the initial Council cycle identity and Team reservation together.
-    // Failure cannot leave an unbound or re-bound cycle after a launch.
-    let transaction = store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    // Bind the initial Council cycle identity in the same admission transaction.
     crate::bots::shared_channels::bind_delivery_cycle(&store, session_id, team.council_since)?;
     // Reserve child Architects atomically with the parent cycle. Reservations do
     // not dispatch reviewers and cannot satisfy the root's blocked Council gate.

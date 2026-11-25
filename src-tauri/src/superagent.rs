@@ -7488,7 +7488,56 @@ mod tests {
         let admitted = serde_json::to_value(
             headless_dispatch::enqueue(&store, id, revision, "second").unwrap()).unwrap();
         assert_eq!(admitted["state"], "admitted");
-        assert_eq!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn headless_dispatch_cancel_is_request_scoped_atomic_and_never_cancels_admitted_work() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_demand(&store.path, &cfg.id, "Read only", "dispatch-cancel").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = get_ticket(&store, id).unwrap().revision;
+        let first = headless_dispatch::enqueue(&store, id, revision, "cancel-me").unwrap();
+        assert!(headless_dispatch::cancel(&store, id, revision + 1, "cancel-me").is_err());
+        assert!(headless_dispatch::cancel(&store, id, revision, "other-key").is_err());
+        assert!(headless_dispatch::cancel(&store, "foreign-ticket", revision, "cancel-me").is_err());
+
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_dispatch_cancel BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected' BEGIN SELECT RAISE(ABORT,'test audit failure'); END;",
+        ).unwrap();
+        assert!(headless_dispatch::cancel(&store, id, revision, "cancel-me").is_err());
+        assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, first.id);
+        store.db.execute_batch("DROP TRIGGER deny_dispatch_cancel;").unwrap();
+
+        // A changed plan invalidates the original confirmation. The operator
+        // can still cancel the exact old intent without revoking the Ticket.
+        let item = work_items::plan(&store, id, revision, "new-plan", "Inspect checkout", None).unwrap();
+        let current_revision = get_ticket(&store, id).unwrap().revision;
+        assert_ne!(revision, current_revision);
+        let result = headless_dispatch::headless_cancel(&store.path, id, revision, "cancel-me").unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["dispatchRequest"]["state"], "rejected");
+        assert_eq!(result["dispatchRequest"]["rejection"], "cancelled by local operator");
+        assert_eq!(result["providerDispatchedByCommand"], false);
+        let replay = serde_json::to_value(headless_dispatch::cancel(&store, id, revision, "cancel-me").unwrap()).unwrap();
+        assert_eq!(replay, result["dispatchRequest"]);
+        assert_eq!(get_ticket(&store, id).unwrap().revision, current_revision);
+        assert!(assignment_session(&store, id).unwrap().is_none());
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+
+        let second = headless_dispatch::enqueue(&store, id, current_revision, "fresh").unwrap();
+        assert!(retry_blocked_with_request(&mut store, id, current_revision, false, Some(&first)).is_err());
+        let (running, _, _, context) = retry_blocked_with_request(
+            &mut store, id, current_revision, false, Some(&second)).unwrap();
+        assert!(context.contains(&item.id));
+        assert!(headless_dispatch::cancel(&store, id, current_revision, "fresh").is_err());
+        assert_eq!(get_ticket(&store, id).unwrap().active_assignment_id, running.active_assignment_id);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
             [id], |row| row.get::<_, i64>(0)).unwrap(), 1);

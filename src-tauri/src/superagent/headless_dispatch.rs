@@ -166,6 +166,68 @@ pub(crate) fn headless_enqueue(
     })).map_err(|e| e.to_string())
 }
 
+/// Cancel only the exact local operator intent, not a reserved Assignment.
+/// The expected revision belongs to the request, so a stale confirmation
+/// remains cancellable after a WorkItem plan changes the Ticket revision.
+pub(super) fn cancel(
+    store: &Store, ticket_id: &str, revision: i64, key: &str,
+) -> Result<DispatchRequest> {
+    if !valid_key(key) || revision < 0 || ticket_id.is_empty() || ticket_id.len() > 128
+        || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'))
+    {
+        return Err("Cancellation requires a bounded Ticket ID, request revision and stable request key.".into());
+    }
+    let tx = Transaction::new_unchecked(&store.db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let ticket = get_ticket(store, ticket_id)?;
+    if ticket.actor != "local-user" {
+        return Err("Only a local operator Demand dispatch can be cancelled.".into());
+    }
+    let prior = by_key(store, ticket_id, key)?.ok_or("Dispatch request not found.")?;
+    if prior.expected_revision != revision {
+        return Err("Dispatch request key is bound to another Ticket revision.".into());
+    }
+    match prior.state.as_str() {
+        "rejected" => {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(prior);
+        }
+        "pending" => {}
+        _ => return Err("Dispatch already admitted; use native Ticket Stop or recovery.".into()),
+    }
+    let now = storage::now();
+    let changed = tx.execute(
+        "UPDATE sa_headless_dispatch_requests
+         SET state='rejected',rejection='cancelled by local operator',updated_at=?2
+         WHERE id=?1 AND ticket_id=?3 AND expected_revision=?4 AND state='pending'",
+        params![prior.id,now,ticket_id,revision],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("Dispatch request was already settled or changed.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_dispatch_rejected',?2,?3)",
+        params![ticket_id,format!("Dispatch request {} rejected: cancelled by local operator",prior.id),now],
+    ).map_err(|e| e.to_string())?;
+    let request = by_key(store, ticket_id, key)?.ok_or("Dispatch request was not persisted.")?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(request)
+}
+
+pub(crate) fn headless_cancel(
+    database_path: &std::path::Path, ticket_id: &str, revision: i64, key: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let request = cancel(&store, ticket_id, revision, key)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "dispatchRequest": request,
+        "providerDispatchedByCommand": false,
+        "grantIssued": false,
+        "externalEffectReplayed": false,
+    })).map_err(|e| e.to_string())
+}
+
 pub(super) fn next_pending(store: &Store) -> Result<Option<DispatchRequest>> {
     store.db.query_row(&format!("{SELECT} WHERE state='pending' ORDER BY created_at,id LIMIT 1"),
         [], row).optional().map_err(|e| e.to_string())

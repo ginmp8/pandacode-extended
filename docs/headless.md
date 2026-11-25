@@ -1255,3 +1255,11 @@ pandacode serve --dispatch-ticket <ticket-id> <revision> <stable-request-key>
 ```
 
 The detached command records only a local operator intent and exits without launching a provider, opening a live runtime, granting tools, or replaying an effect. The live host polls explicit intents and uses the same native retry/coordinated Worker admission and gateway as Desktop. It rechecks the exact Ticket revision, mandate, role, bot profile, work-item dependencies, occupancy, checkout lease and attempt budget. The intent expires after five minutes, including time spent offline. An admitted receipt means an Assignment reservation was committed, not that a provider completed work; inspect the native Ticket for actual execution and human acceptance. Repeat the identical command to inspect its durable receipt without starting another attempt. A rejected or expired intent requires fresh operator confirmation with a new key and current revision. The reservation and intent consumption commit atomically; a crash after admission cannot automatically replay the intent. Existing watchdog and recovery govern the reserved Assignment. This is manual read-only dispatch, not GitHub Auto, unrestricted write authorization, or Council acceptance. Upgrade the database with the native host before detached v57 operations.
+
+To withdraw an unconsumed confirmation without stopping the whole Demand, use:
+
+```sh
+pandacode serve --cancel-dispatch-ticket <ticket-id> <original-request-revision> <stable-request-key>
+```
+
+The command rejects only that exact pending request and atomically records the local operator cancellation. The original request revision is required even if the Ticket has since changed. Repeating cancellation of an already rejected request returns its existing receipt without changing the rejection reason. An admitted request cannot be cancelled this way; use native Ticket Stop or recovery instead. A new dispatch still needs a new key and confirmation of the current Ticket revision.

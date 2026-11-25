@@ -2197,23 +2197,24 @@ let demandArchived = false;
       void work(async () => {
         const result = await call<{
           sourceId:string; ticketId:string; pullKey:string; headSha:string;
-          observed:number; duplicates:number; pendingSkipped:number; bounded:boolean;
+          observed:number; duplicates:number; pendingSkipped:number; historicalSkipped:number; bounded:boolean;
           observationalOnly:boolean; authorizationIssued:boolean; councilApproved:boolean;
         }>('superagent_source_observe_linked_pr_checks', {sourceId,ticketId,pullKey});
         if (result.sourceId !== sourceId || result.ticketId !== ticketId ||
             result.pullKey !== pullKey || !/^[0-9a-f]{40}$/i.test(result.headSha) ||
             result.bounded !== true || result.observationalOnly !== true ||
             result.authorizationIssued !== false || result.councilApproved !== false ||
-            ![result.observed,result.duplicates,result.pendingSkipped].every(count =>
+            ![result.observed,result.duplicates,result.pendingSkipped,result.historicalSkipped].every(count =>
               Number.isSafeInteger(count) && count >= 0 && count <= 100) ||
-            result.observed + result.duplicates + result.pendingSkipped > 100) {
+            result.observed + result.duplicates + result.pendingSkipped + result.historicalSkipped > 100) {
           throw new Error('Invalid native linked PR Checks result; reload before interpreting receipts.');
         }
         if (inspectedTicket !== ticketId) return;
         await reload();
         feedback = 'Observed linked PR Checks at ' + result.headSha.slice(0,12) + ': ' +
           result.observed + ' new, ' + result.duplicates + ' duplicates, ' +
-          result.pendingSkipped + ' pending. Context only; no task approval or external write.';
+          result.pendingSkipped + ' pending, ' + result.historicalSkipped +
+          ' before Observe activation (not recorded). Context only; no task approval or external write.';
       });
       return;
     }

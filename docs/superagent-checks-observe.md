@@ -91,6 +91,16 @@ the Webview. A replacement App with the same slug cannot contribute a
 pending-only count after a numeric App identity is pinned; an empty or
 pending-only window never creates a new pin. A replaced or moved PR head
 aborts the observation. The UI reports the head, new receipts, duplicates
-and pending count, then reloads native state. Load linked source decisions
+pending count and previously unseen pre-activation count, then reloads native state. Load linked source decisions
 to inspect individual recorded outcomes. These are observations, not task
 acceptance, Council approval, GitHub writes or Auto execution.
+
+The linked PR lookup requests `filter=all` rather than GitHub's default latest-only
+filter so rerun identities are not silently omitted from the bounded response.
+The entire returned window must fit the existing 100-run limit; this is not a
+gap-free subscription or a claim about runs outside GitHub's API window. Valid
+unseen completed runs predating the current Observe activation are counted
+separately, not recorded, and cannot pin a source or advance its cursor. Already
+recorded IDs still use immutable replay validation. The individual Check Run
+command still rejects unseen pre-activation results. A malformed or conflicting
+identity remains a batch failure, including for historical-only windows.

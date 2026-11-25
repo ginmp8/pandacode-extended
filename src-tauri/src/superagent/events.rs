@@ -2907,7 +2907,7 @@ fn fetch_authenticated_linked_pr_checks(repository: &str, pull_key: &str)
         repository_id, pull_key, &pull, &empty,
     )?;
     let endpoint = format!(
-        "repos/{repository}/commits/{head_sha}/check-runs?per_page={LINKED_PR_CHECK_LIMIT}"
+        "repos/{repository}/commits/{head_sha}/check-runs?filter=all&per_page={LINKED_PR_CHECK_LIMIT}"
     );
     let listing = crate::github::json(&crate::github::run_gh(
         &root, &["api", &endpoint], crate::github::TIMEOUT,
@@ -2945,7 +2945,10 @@ fn observe_linked_pr_check_batch(
     store: &Store, context: &LinkedPrCheckContext,
     runs: &[(i64, serde_json::Value)], signed_in: &str, repository_id: u64,
     observed_app_id: Option<i64>,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize)> {
+    if !token_ok(signed_in, 80) {
+        return Err("Checks observation requires a verified operator.".into());
+    }
     if runs.len() > LINKED_PR_CHECK_LIMIT {
         return Err("Linked PR Check batch exceeds the native limit.".into());
     }
@@ -2984,13 +2987,45 @@ fn observe_linked_pr_check_batch(
             return Err("GitHub actor identity changed since source attestation; cursor unchanged.".into());
         }
     }
+    let activated_at: i64 = tx.query_row(
+        "SELECT updated_at FROM sa_event_sources WHERE id=?1",
+        [&current.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
     let mut observed = 0;
     let mut duplicates = 0;
+    let mut historical_skipped = 0;
     for (id, raw) in runs {
-        if authenticated_check_run(&current, raw, *id, 1, repository_id)?.subject_key
-            != context.pull_key
-        {
+        let envelope = authenticated_check_run(&current, raw, *id, 1, repository_id)?;
+        if envelope.subject_key != context.pull_key {
             return Err("Authenticated Check Run belongs to a different linked PR.".into());
+        }
+        // An all-attempts response can contain runs predating the current
+        // activation. They are neither new observations nor evidence of success.
+        // Validate identity first, but do not pin a source or advance its
+        // cursor for historical-only results. Previously recorded IDs must
+        // still pass the original immutable replay validation.
+        let app_id = authenticated_check_run_app_id(raw)?;
+        let existing_app: Option<i64> = tx.query_row(
+            "SELECT actor_id FROM sa_source_actor_identity WHERE source_id=?1",
+            [&current.id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if existing_app.is_some_and(|pinned| pinned != app_id) {
+            return Err("GitHub actor identity changed since source attestation; cursor unchanged.".into());
+        }
+        let completed_at = raw.get("completed_at").and_then(serde_json::Value::as_str)
+            .ok_or("Check Run has no completion timestamp.")?;
+        let at = chrono::DateTime::parse_from_rfc3339(completed_at)
+            .map_err(|_| "Check Run completion timestamp is invalid.")?.timestamp_millis();
+        if at <= 0 || at > storage::now().saturating_add(5 * 60 * 1000) {
+            return Err("Check Run completion timestamp is outside the supported range.".into());
+        }
+        let recorded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2)",
+            params![&current.id,&envelope.delivery_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if at < activated_at && !recorded {
+            historical_skipped += 1;
+            continue;
         }
         let receipt = observe_authenticated_check_run_in_tx(
             store, &tx, selected, *id, raw, signed_in, repository_id,
@@ -2999,7 +3034,7 @@ fn observe_linked_pr_check_batch(
         else if receipt.decision == "observed_permitted" { observed += 1; }
     }
     tx.commit().map_err(|e| e.to_string())?;
-    Ok((observed, duplicates))
+    Ok((observed, duplicates, historical_skipped))
 }
 
 /// A local headless read of authenticated Checks with durable, deduplicated,
@@ -3029,13 +3064,14 @@ fn commit_authenticated_linked_pr_checks(
     let (head_sha, runs, pending, app_id) = authenticated_linked_pr_checks(
         &context.source, repository_id, &context.pull_key, pull, listing,
     )?;
-    let (observed, duplicates) = observe_linked_pr_check_batch(
+    let (observed, duplicates, historical_skipped) = observe_linked_pr_check_batch(
         store, context, &runs, signed_in, repository_id, app_id,
     )?;
     Ok(serde_json::json!({
         "sourceId":context.source.id, "ticketId":context.ticket_id, "pullKey":context.pull_key,
         "headSha":head_sha, "observed":observed, "duplicates":duplicates,
-        "pendingSkipped":pending, "bounded":true, "observationalOnly":true,
+        "pendingSkipped":pending, "historicalSkipped":historical_skipped,
+        "bounded":true, "observationalOnly":true,
         "authorizationIssued":false, "councilApproved":false,
     }))
 }
@@ -6351,6 +6387,86 @@ mod tests {
         ).is_err());
     }
 
+
+    #[test]
+    fn linked_checks_skip_unseen_pre_activation_runs_without_losing_eligible_results() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "mixed-check-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        link_thread(&store, &off.id, "mixed-check-ticket", "pull:42").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let context = linked_pr_check_context(
+            &store, &active.id, "mixed-check-ticket", "pull:42",
+        ).unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let pull = serde_json::json!({
+            "id":99,"number":42,
+            "html_url":"https://github.com/owner/repo/pull/42",
+            "base":{"repo":{"id":900,"full_name":"owner/repo"}},"head":{"sha":sha}
+        });
+        let current = serde_json::json!({
+            "id":77,"status":"completed","conclusion":"failure","head_sha":sha,
+            "completed_at":(chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        let mut historical = current.clone();
+        historical["id"] = serde_json::json!(76);
+        historical["completed_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        let history_only = serde_json::json!({"total_count":1,"check_runs":[historical.clone()]});
+        let mixed = serde_json::json!({"total_count":2,"check_runs":[current.clone(),historical.clone()]});
+        let result = commit_authenticated_linked_pr_checks(
+            &store, &context, &pull, &history_only, "local-operator", 900,
+        ).unwrap();
+        assert_eq!(result["historicalSkipped"], 1);
+        assert_eq!(result["observed"], 0);
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&active.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_actor_identity WHERE source_id=?1",
+            [&active.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let result = commit_authenticated_linked_pr_checks(
+            &store, &context, &pull, &mixed, "local-operator", 900,
+        ).unwrap();
+        assert_eq!(result["historicalSkipped"], 1);
+        assert_eq!(result["observed"], 1);
+        assert_eq!(result["authorizationIssued"], false);
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(list_decisions(&store, &active.id, 10).unwrap().len(), 1);
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store, &active, 76, &historical, "local-operator", 900,
+        ).is_err(), "direct observation still denies unseen pre-activation runs");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let context = linked_pr_check_context(
+            &reopened, &active.id, "mixed-check-ticket", "pull:42",
+        ).unwrap();
+        let replay = commit_authenticated_linked_pr_checks(
+            &reopened, &context, &pull, &mixed, "local-operator", 900,
+        ).unwrap();
+        assert_eq!(replay["duplicates"], 1);
+        assert_eq!(replay["historicalSkipped"], 1);
+        assert_eq!(replay["observed"], 0);
+        assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(linked_decisions(&reopened, "mixed-check-ticket", 10).unwrap().len(), 1);
+        historical["app"]["id"] = serde_json::json!(45);
+        let conflicting = serde_json::json!({"total_count":1,"check_runs":[historical]});
+        assert!(commit_authenticated_linked_pr_checks(
+            &reopened, &context, &pull, &conflicting, "local-operator", 900,
+        ).is_err(), "historical-only batches cannot evade the pinned App identity");
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
     #[test]
     fn linked_pr_check_batch_rolls_back_earlier_results_on_later_conflicting_replay() {
         let (store, path) = fixture();
@@ -6400,7 +6516,7 @@ mod tests {
         let valid = vec![(90, first), (91, previous)];
         assert_eq!(observe_linked_pr_check_batch(
             &store, &context, &valid, "local-operator", 900, None,
-        ).unwrap(), (1, 1));
+        ).unwrap(), (1, 1, 0));
         assert_eq!(source(&store, &active.id).unwrap().last_sequence, 2);
         assert_eq!(linked_decisions(&store, "batch-ticket", 10).unwrap().len(), 2);
         drop(store);
@@ -6425,7 +6541,7 @@ mod tests {
         // Empty observations must not claim a new source attestation.
         assert_eq!(observe_linked_pr_check_batch(
             &store, &context, &[], "local-operator", 900, None,
-        ).unwrap(), (0, 0));
+        ).unwrap(), (0, 0, 0));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
             [&active.id], |row| row.get::<_, i64>(0),
@@ -6442,7 +6558,7 @@ mod tests {
         });
         assert_eq!(observe_linked_pr_check_batch(
             &store, &context, &[(7711, raw)], "local-operator", 900, None,
-        ).unwrap(), (1, 0));
+        ).unwrap(), (1, 0, 0));
         drop(store);
         let reopened = Store::open(&path).unwrap();
         let context = linked_pr_check_context(
@@ -6456,7 +6572,7 @@ mod tests {
         ).is_err());
         assert_eq!(observe_linked_pr_check_batch(
             &reopened, &context, &[], "local-operator", 900, None,
-        ).unwrap(), (0, 0));
+        ).unwrap(), (0, 0, 0));
         assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, 1);
         assert_eq!(linked_decisions(&reopened, "empty-check-ticket", 10).unwrap().len(), 1);
         assert_eq!(reopened.db.query_row(
@@ -6520,10 +6636,10 @@ mod tests {
         assert!(list_decisions(&store, &active.id, 10).unwrap().is_empty());
         assert_eq!(observe_linked_pr_check_batch(
             &store, &context, &runs, "local-operator", 900, None,
-        ).unwrap(), (1, 0));
+        ).unwrap(), (1, 0, 0));
         assert_eq!(observe_linked_pr_check_batch(
             &store, &context, &runs, "local-operator", 900, None,
-        ).unwrap(), (0, 1));
+        ).unwrap(), (0, 1, 0));
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(linked_decisions(&reopened, "check-ticket", 10).unwrap().len(), 1);

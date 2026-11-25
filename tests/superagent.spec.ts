@@ -1632,7 +1632,7 @@ test('Desktop observes only explicitly linked PR Checks through the native bound
           throw Error('Wrong native observation scope');
         return {sourceId:'checks',ticketId:'ticket',pullKey:'pull:42',
           headSha:'0123456789012345678901234567890123456789',observed:1,duplicates:0,
-          pendingSkipped:2,bounded:true,observationalOnly:true,
+          pendingSkipped:2,historicalSkipped:3,bounded:true,observationalOnly:true,
           authorizationIssued:false,councilApproved:false} as never;
       }
       if (command === 'superagent_source_thread_activity') return [{
@@ -1654,7 +1654,7 @@ test('Desktop observes only explicitly linked PR Checks through the native bound
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.locator('[data-sa-linked-check-source]')).toHaveCount(1);
   await host.getByRole('button',{name:'Observe linked PR Checks for owner/repo / pull:42'}).click();
-  await expect(host.locator('.sa-feedback')).toContainText('1 new, 0 duplicates, 2 pending');
+  await expect(host.locator('.sa-feedback')).toContainText('1 new, 0 duplicates, 2 pending, 3 before Observe activation (not recorded)');
   await host.getByRole('button',{name:'Load linked source decisions'}).click();
   await expect(host.getByRole('region',{name:'Observed linked GitHub activity'}))
     .toContainText('Observed Check: failure');

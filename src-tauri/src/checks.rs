@@ -245,17 +245,35 @@ pub(crate) fn turn_report(root: &Path) -> Value {
     report_for_plan(root, &plan)
 }
 
+/// In-process evidence from the host runner. The private fields prevent other
+/// production modules from manufacturing this authority out of client JSON.
+/// The exact checkout is carried with the execution, not supplied at receipt time.
+pub(crate) struct NativeTaskCheckReport {
+    workspace: PathBuf,
+    report: Value,
+}
+
+impl NativeTaskCheckReport {
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    pub(crate) fn as_json(&self) -> &Value {
+        &self.report
+    }
+}
+
 /// Only admitted native Council tasks pay for a bounded source snapshot.
 /// Ordinary turn checks retain their existing manifest-only behavior.
-pub(crate) fn turn_report_for_native_task(root: &Path, request_id: &str) -> Value {
-    let Some(plan) = plan(root) else {
-        return json!({"checked": false, "reason": NO_PLAN});
+pub(crate) fn turn_report_for_native_task(root: &Path, request_id: &str) -> NativeTaskCheckReport {
+    let mut report = match plan(root) {
+        Some(plan) => report_for_plan_inner(root, &plan, true),
+        None => json!({"checked": false, "reason": NO_PLAN}),
     };
-    let mut report = report_for_plan_inner(root, &plan, true);
     if let Some(observation) = report.get_mut("hostObservation") {
         observation["nativeRequestId"] = json!(request_id);
     }
-    report
+    NativeTaskCheckReport { workspace: root.to_path_buf(), report }
 }
 
 /// Only the existing, explicitly enabled host path invokes this runner.

@@ -747,6 +747,24 @@ pub(crate) fn active_native_task_for_checks(
 /// CAS and live request revalidation prevent post-run policy/cycle drift,
 /// competing receipt writes or arbitrary reviewer-script execution.
 pub(crate) fn record_native_host_check(
+    store: &Store, request: &NativeTaskCouncilRequest, report: &crate::checks::NativeTaskCheckReport,
+) -> Result<NativeTaskHostCheckReceipt> {
+    crate::checks::validate_native_check_workspace(
+        store, &request.session_id, &request.project_id, report.workspace(),
+    )?;
+    record_native_host_check_report(store, request, report.as_json())
+}
+
+/// Deliberately separate fixture-only entry point for adversarial ledger tests.
+/// Production callers must supply an actual host-run report.
+#[cfg(test)]
+pub(crate) fn record_native_host_check_fixture(
+    store: &Store, request: &NativeTaskCouncilRequest, report: &serde_json::Value,
+) -> Result<NativeTaskHostCheckReceipt> {
+    record_native_host_check_report(store, request, report)
+}
+
+fn record_native_host_check_report(
     store: &Store, request: &NativeTaskCouncilRequest, report: &serde_json::Value,
 ) -> Result<NativeTaskHostCheckReceipt> {
     let project = crate::checks::eligible_turn_check_project(store, &request.session_id)?;

@@ -3805,30 +3805,31 @@ async fn get_run_script(
 /// clean turn. Bounded; no plan is a result, not an error.
 #[tauri::command]
 async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value> {
-    let (project_id, task_request, root) = {
+    let (task_request, root) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let project_id = checks::eligible_turn_check_project(&store, &session_id)?;
         let task_request = architect::council_requests::active_native_task_for_checks(&store, &session_id)?;
         let root = store.workspace_root(&project_id, Some(&session_id))?;
-        (project_id, task_request, root)
+        (task_request, root)
     };
-    let checked_root = root.clone();
     let native_request_id = task_request.as_ref().map(|request| request.request_id.clone());
-    let mut report = blocking(move || Ok(if let Some(request_id) = native_request_id.as_deref() {
-        checks::turn_report_for_native_task(&root, request_id)
+    let (mut report, native_report) = blocking(move || Ok(if let Some(request_id) = native_request_id.as_deref() {
+        let observed = checks::turn_report_for_native_task(&root, request_id);
+        (observed.as_json().clone(), Some(observed))
     } else {
-        checks::turn_report(&root)
+        (checks::turn_report(&root), None)
     })).await?;
     // A check is not native task proof unless its original Council request
     // still has identical live authority after the process has finished.
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         checks::eligible_turn_check_project(&store, &session_id)?;
-        if let (Some(request), Some(_)) = (task_request.as_ref(), report.get("hostObservation")) {
-            checks::validate_native_check_workspace(&store, &session_id, &project_id, &checked_root)?;
-            let receipt = architect::council_requests::record_native_host_check(&store, request, &report)?;
-            report["hostObservation"]["nativeTaskReceipt"] =
-                serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+        if let (Some(request), Some(observed)) = (task_request.as_ref(), native_report.as_ref()) {
+            if observed.as_json().get("hostObservation").is_some() {
+                let receipt = architect::council_requests::record_native_host_check(&store, request, observed)?;
+                report["hostObservation"]["nativeTaskReceipt"] =
+                    serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+            }
         }
     }
     // The existing user-enabled check belongs to the resolved native session.

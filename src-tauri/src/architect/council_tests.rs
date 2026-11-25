@@ -8973,7 +8973,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             "sourceSnapshotSha256": original_snapshot.clone()
         }
     });
-    let receipt = council_requests::record_native_host_check(&store, &request, &observed).unwrap();
+    let receipt = council_requests::record_native_host_check_fixture(&store, &request, &observed).unwrap();
     assert_eq!(receipt.request_id, request.request_id);
     assert_eq!(receipt.cycle_id, request.cycle_id);
     assert_eq!(receipt.artifact_correlation_sha256, artifact);
@@ -8991,23 +8991,23 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     ).is_err());
     let mut forged = observed.clone();
     forged["hostObservation"]["provenance"] = json!("client");
-    assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err(),
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &forged).is_err(),
         "client-asserted success may not enter the native check ledger");
     forged = observed.clone();
     forged["hostObservation"]["manifestSha256"] = json!("invalid-digest");
-    assert!(council_requests::record_native_host_check(&store, &request, &forged).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &forged).is_err());
     // Retrying persistence must not mint another execution or consume capacity.
-    assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+    assert_eq!(council_requests::record_native_host_check_fixture(&store, &request, &observed).unwrap(), receipt);
     let mut conflicting_replay = observed.clone();
     conflicting_replay["hostObservation"]["sourceSnapshotSha256"] = json!("d".repeat(64));
-    assert!(council_requests::record_native_host_check(&store, &request, &conflicting_replay)
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &conflicting_replay)
         .unwrap_err().contains("observation identity"));
     let mut foreign = observed.clone();
     foreign["hostObservation"]["nativeRequestId"] = json!(storage::id());
-    assert!(council_requests::record_native_host_check(&store, &request, &foreign).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &foreign).is_err());
     let mut missing_id = observed.clone();
     missing_id["hostObservation"].as_object_mut().unwrap().remove("observationId");
-    assert!(council_requests::record_native_host_check(&store, &request, &missing_id).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &missing_id).is_err());
     assert_eq!(council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap().host_checks, vec![receipt.clone()]);
@@ -9018,17 +9018,17 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     // A process completed against the old bytes, but publication is delayed.
     // A new observation identity must not make that stale snapshot current.
     std::fs::write(checkout.join("proof.txt"), "changed bytes").unwrap();
-    assert!(council_requests::record_native_host_check(&store, &request, &bounded)
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &bounded)
         .unwrap_err().contains("host check source or manifest changed"));
     assert_eq!(council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).unwrap().host_checks, vec![receipt.clone()]);
     // Replaying the already persisted observation is historical/idempotent.
-    assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+    assert_eq!(council_requests::record_native_host_check_fixture(&store, &request, &observed).unwrap(), receipt);
     let changed_snapshot = crate::checks::source_snapshot_sha256(&checkout).unwrap();
     assert_ne!(changed_snapshot, original_snapshot);
     bounded["hostObservation"]["sourceSnapshotSha256"] = json!(changed_snapshot.clone());
-    let bounded_receipt = council_requests::record_native_host_check(
+    let bounded_receipt = council_requests::record_native_host_check_fixture(
         &store, &request, &bounded,
     ).unwrap();
     assert_eq!(bounded_receipt.source_snapshot_sha256.as_deref(), Some(changed_snapshot.as_str()));
@@ -9039,14 +9039,14 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     assert_eq!(saved.host_checks[1], bounded_receipt);
     let mut missing_hash = bounded.clone();
     missing_hash["hostObservation"].as_object_mut().unwrap().remove("sourceSnapshotSha256");
-    assert!(council_requests::record_native_host_check(&store, &request, &missing_hash).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &missing_hash).is_err());
     let mut invalid_hash = bounded.clone();
     invalid_hash["hostObservation"]["sourceSnapshotSha256"] = json!("not-a-hash");
-    assert!(council_requests::record_native_host_check(&store, &request, &invalid_hash).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &invalid_hash).is_err());
     let mut scope_downgrade = bounded.clone();
     scope_downgrade["hostObservation"]["scope"] = json!("manifest_only_not_artifact_verification");
     scope_downgrade["hostObservation"].as_object_mut().unwrap().remove("sourceSnapshotSha256");
-    assert!(council_requests::record_native_host_check(&store, &request, &scope_downgrade)
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &scope_downgrade)
         .unwrap_err().contains("native check scope is inconsistent"),
         "new task-bound host receipts must never downgrade to manifest-only proof");
     assert!(!saved.native.verified_pass,
@@ -9070,10 +9070,10 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
         ).unwrap_err().contains("multiple or invalid task assignments"));
         assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none());
-        assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err());
+        assert!(council_requests::record_native_host_check_fixture(&store, &request, &observed).is_err());
         let mut fresh = bounded.clone();
         fresh["hostObservation"]["observationId"] = json!(storage::id());
-        assert!(council_requests::record_native_host_check(&store, &request, &fresh).is_err());
+        assert!(council_requests::record_native_host_check_fixture(&store, &request, &fresh).is_err());
         assert!(council_requests::admit_native_task(
             &store, &sid, &project, "host-check-task", &artifact,
         ).is_err());
@@ -9086,7 +9086,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
             [&sid],
         ).unwrap(), 1);
         assert_eq!(council_requests::active_native_task_for_checks(&store, &sid).unwrap(), Some(request.clone()));
-        assert_eq!(council_requests::record_native_host_check(&store, &request, &observed).unwrap(), receipt);
+        assert_eq!(council_requests::record_native_host_check_fixture(&store, &request, &observed).unwrap(), receipt);
     }
 
     // Physical storage replay must not turn one real host execution into
@@ -9159,7 +9159,7 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     std::fs::create_dir(&other_root).unwrap();
     store.relink_project(&project, &other_root).unwrap();
     assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none());
-    assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err());
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &observed).is_err());
     assert!(council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).is_err());
@@ -9172,12 +9172,84 @@ fn native_host_checks_remain_durable_task_bound_observations_not_approval() {
     save(&store, &mut team).unwrap();
     assert!(council_requests::active_native_task_for_checks(&store, &sid).unwrap().is_none(),
         "stale native evidence must not break the user's ordinary project checks");
-    assert!(council_requests::record_native_host_check(&store, &request, &observed).is_err(),
+    assert!(council_requests::record_native_host_check_fixture(&store, &request, &observed).is_err(),
         "a host check cannot be appended after task policy/objective drift");
     assert!(council_requests::inspect_native_task(
         &store, &sid, &project, "host-check-task", &artifact, &request.request_id,
     ).is_err(), "old task observations must fail closed after a stale Council cycle");
     std::fs::remove_dir_all(&checkout).unwrap();
+}
+
+
+#[cfg(unix)]
+#[test]
+fn native_host_check_executes_real_manifest_and_binds_exact_checkout() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review host check evidence", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let scratch = std::env::temp_dir().join(format!("council-real-check-{}", storage::id()));
+    let checkout = scratch.join("original");
+    let foreign = scratch.join("foreign");
+    let manifest = "[package]\nname = \"council-host-proof\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    let lockfile = "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"council-host-proof\"\nversion = \"0.1.0\"\n";
+    for root in [&checkout, &foreign] {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(root.join("Cargo.lock"), lockfile).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn checked() -> u32 { 42 }\n").unwrap();
+    }
+    store.relink_project(&project, &checkout).unwrap();
+    let root = store.workspace_root(&project, Some(&sid)).unwrap();
+    let artifact = "b".repeat(64);
+    let request = council_requests::admit_native_task(
+        &store, &sid, &project, "real-host-check-task", &artifact,
+    ).unwrap();
+    assert_eq!(council_requests::active_native_task_for_checks(&store, &sid).unwrap(), Some(request.clone()));
+    // Both checkouts have identical contents. Evidence from the other one
+    // must not be accepted merely because its manifest and source hashes match.
+    let foreign_root = foreign.canonicalize().unwrap();
+    let foreign_report = crate::checks::turn_report_for_native_task(&foreign_root, &request.request_id);
+    assert_eq!(foreign_report.as_json()["checked"], true);
+    assert_eq!(foreign_report.as_json()["ok"], true);
+    assert!(foreign_report.as_json().get("hostObservation").is_some());
+    assert!(council_requests::record_native_host_check(&store, &request, &foreign_report)
+        .unwrap_err().contains("workspace changed"));
+
+    let passed = crate::checks::turn_report_for_native_task(&root, &request.request_id);
+    assert_eq!(passed.as_json()["checked"], true);
+    assert_eq!(passed.as_json()["ok"], true);
+    let receipt = council_requests::record_native_host_check(&store, &request, &passed).unwrap();
+    assert!(receipt.check_passed);
+    assert_eq!(receipt.check_name, "cargo check");
+    assert_eq!(council_requests::record_native_host_check(&store, &request, &passed).unwrap(), receipt);
+
+    // A real compilation error is an observed failure, never a passed check.
+    std::fs::write(root.join("src/lib.rs"), "pub fn checked() -> u32 { \"wrong type\" }\n").unwrap();
+    let failed = crate::checks::turn_report_for_native_task(&root, &request.request_id);
+    assert_eq!(failed.as_json()["checked"], true);
+    assert_eq!(failed.as_json()["ok"], false);
+    let failure = council_requests::record_native_host_check(&store, &request, &failed).unwrap();
+    assert!(!failure.check_passed);
+    assert_ne!(receipt.observation_id, failure.observation_id);
+    assert_ne!(receipt.source_snapshot_sha256, failure.source_snapshot_sha256);
+    let view = council_requests::inspect_native_task(
+        &store, &sid, &project, "real-host-check-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(view.host_checks, vec![receipt, failure]);
+    assert!(!view.native.verified_pass);
+    assert!(council_requests::record_native_terminal(
+        &store, &sid, &project, "real-host-check-task", &artifact, &request.request_id,
+    ).is_err());
+    std::fs::remove_dir_all(&scratch).unwrap();
 }
 
 #[test]

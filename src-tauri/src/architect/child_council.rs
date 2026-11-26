@@ -1469,6 +1469,22 @@ fn record_verified_receipt(
         if read_verified_receipt(store, root, record, child)?.is_some() {
             return Err("child_council_stale: completed child evidence was revoked.".into());
         }
+        // A fully scored S3 first wave with invalid reports is not pending
+        // work. Preserve the explicit handoff refusal before the stricter
+        // receipt gate can hide it as ordinary child_council_reviewing.
+        if root.config.council.as_ref().is_some_and(|config|
+            config.strategy == super::council::CouncilExecutionStrategy::TwoPhase)
+        {
+            let settled = child.workers.iter().filter(|leaf|
+                leaf.status == "completed" && leaf.council.as_ref()
+                    .is_some_and(|seat| seat.round == 1 && seat.score.is_some())
+            ).count();
+            if child.config.council.as_ref().is_some_and(|config|
+                config.needed() > 0 && settled == config.needed())
+            {
+                require_s3_child_phase_one_reports(store, child)?;
+            }
+        }
         return Ok(false);
     };
     if let Some(previous) = read_verified_receipt(store, root, record, child)? {

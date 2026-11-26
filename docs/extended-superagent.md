@@ -133,3 +133,5 @@ This protection compares stored checkout path strings. It does **not** claim
 equivalence for symlink targets, relative aliases or case-folded paths.
 Writable tools and remote effects still require separate task-scoped native
 tool/provider grants; this change does not enable them.
+
+Linked PR Check Run observations, including empty and pending-only windows, must match the numeric repository identity of every previously attested same-name source linked to the Ticket. A conflicting repository incarnation is rejected without creating a receipt, pinning the Check Run source, advancing its cursor, or issuing authority. A compatible empty/pending-only window remains observational only; it is not completed CI evidence.

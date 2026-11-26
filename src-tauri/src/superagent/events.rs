@@ -1474,9 +1474,9 @@ fn recheck_authenticated_repository(
 /// source lifetime. Re-enabling Observe never rebinds a source to a deleted,
 /// renamed or recreated repository. The insert is in the same transaction as
 /// receipt and cursor updates; a failed observation cannot leave a false pin.
-fn pin_authenticated_repository_identity(
+fn compatible_authenticated_repository_identity(
     tx: &rusqlite::Transaction<'_>, source_id: &str, repository_id: u64,
-) -> Result<()> {
+) -> Result<(i64, bool)> {
     let id = i64::try_from(repository_id)
         .map_err(|_| "Authenticated GitHub repository identity is out of range.")?;
     if id <= 0 {
@@ -1510,7 +1510,17 @@ fn pin_authenticated_repository_identity(
         if previous != id {
             return Err("GitHub repository identity changed since source attestation; cursor unchanged.".into());
         }
-    } else {
+    }
+    Ok((id, existing.is_some()))
+}
+
+fn pin_authenticated_repository_identity(
+    tx: &rusqlite::Transaction<'_>, source_id: &str, repository_id: u64,
+) -> Result<()> {
+    let (id, already_pinned) = compatible_authenticated_repository_identity(
+        tx, source_id, repository_id,
+    )?;
+    if !already_pinned {
         tx.execute(
             "INSERT INTO sa_source_repository_identity(source_id,repository_id,attested_at)
              VALUES(?1,?2,?3)",
@@ -2986,16 +2996,11 @@ fn observe_linked_pr_check_batch(
     // A pending-only or empty batch never enters the per-run receipt path.
     // Validate repository identity here as well, without creating a receipt
     // or pinning a previously unattested source merely for an empty window.
-    let repository_id_i64 = i64::try_from(repository_id)
-        .ok().filter(|id| *id > 0)
-        .ok_or("Authenticated GitHub repository identity is invalid.")?;
-    let pinned: Option<i64> = tx.query_row(
-        "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
-        [&current.id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if pinned.is_some_and(|id| id != repository_id_i64) {
-        return Err("GitHub repository identity changed since source attestation; cursor unchanged.".into());
-    }
+    // Reuse the complete compatibility check, including repository pins
+    // on sibling sources linked to any of this source's Tickets. An empty
+    // or pending-only result is still reported as a snapshot of this PR:
+    // it must not describe a replacement repository through a legacy link.
+    compatible_authenticated_repository_identity(&tx, &current.id, repository_id)?;
     // Pending-only counts must also respect an established numeric App pin.
     // A pending-only or empty observation never establishes a new pin.
     if let Some(app_id) = observed_app_id {
@@ -6600,6 +6605,76 @@ mod tests {
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn pending_and_empty_linked_checks_respect_peer_repository_pins_without_attestation() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "legacy-check-ticket", "orch");
+        let issue = create_source(&store, "orch", "owner/repo",
+            "trusted-bot", "issues.opened").unwrap();
+        let checks = create_source(&store, "orch", "owner/repo",
+            "trusted-bot", "check_run.completed").unwrap();
+        // Both source links existed before either numeric repository pin.
+        link_thread(&store, &issue.id, "legacy-check-ticket", "issue:42").unwrap();
+        link_thread(&store, &checks.id, "legacy-check-ticket", "pull:43").unwrap();
+        let checks = set_mode(&store, &checks.id, checks.policy_revision, "observe").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let raw = serde_json::json!([{
+            "id":"5000099201", "created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":900},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &issue, 0, &raw, "local-operator", 1, 900,
+        ).unwrap().recorded, 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let context = linked_pr_check_context(
+            &reopened, &checks.id, "legacy-check-ticket", "pull:43",
+        ).unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        for repository_id in [901_u64, 900] {
+            let pull = serde_json::json!({
+                "id":99, "number":43,
+                "html_url":"https://github.com/owner/repo/pull/43",
+                "base":{"repo":{"id":repository_id,"full_name":"owner/repo"}},
+                "head":{"sha":sha}
+            });
+            let pending = serde_json::json!({
+                "id":77, "status":"in_progress", "conclusion":null,
+                "head_sha":sha, "app":{"slug":"trusted-bot","id":44},
+                "pull_requests":[{"number":43,"head":{"sha":sha},
+                    "base":{"repo":{"id":repository_id,
+                        "url":"https://api.github.com/repos/owner/repo"}}}]
+            });
+            for (listing, expected_pending) in [
+                (serde_json::json!({"total_count":0,"check_runs":[]}), 0),
+                (serde_json::json!({"total_count":1,"check_runs":[pending]}), 1),
+            ] {
+                let result = commit_authenticated_linked_pr_checks(
+                    &reopened, &context, &pull, &listing, "local-operator", repository_id,
+                );
+                if repository_id == 901 {
+                    assert!(result.unwrap_err().contains(
+                        "conflicts with another source linked to this Ticket"));
+                } else {
+                    let observed = result.unwrap();
+                    assert_eq!(observed["pendingSkipped"], expected_pending);
+                    assert_eq!(observed["observed"], 0);
+                    assert_eq!(observed["authorizationIssued"], false);
+                    assert_eq!(observed["councilApproved"], false);
+                }
+            }
+        }
+        assert_eq!(inspect_source_integrity(&reopened, &checks.id).unwrap().repository_id, None);
+        assert_eq!(source(&reopened, &checks.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&reopened, &checks.id, 10).unwrap().is_empty());
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
     }
 
     #[test]

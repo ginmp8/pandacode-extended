@@ -2977,6 +2977,20 @@ pub(crate) fn headless_quarantine_expired_ticket(
 pub(crate) fn headless_quarantine_terminal_orphan(
     database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
 ) -> Result<String> {
+    quarantine_nonrunning_orphan(database_path, ticket_id, expected_revision, true)
+}
+
+/// Interrupt an inconsistent nonterminal Ticket without accepting its result.
+pub(crate) fn headless_quarantine_inactive_orphan(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    quarantine_nonrunning_orphan(database_path, ticket_id, expected_revision, false)
+}
+
+fn quarantine_nonrunning_orphan(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+    terminal_only: bool,
+) -> Result<String> {
     let store = open_headless_transition_store(database_path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
@@ -2987,11 +3001,17 @@ pub(crate) fn headless_quarantine_terminal_orphan(
     if revision != expected_revision {
         return Err("SuperAgent Ticket revision changed before quarantine.".into());
     }
-    if !matches!(state.as_str(), "completed" | "failed" | "stopped"
-        | "interrupted" | "inconclusive")
-    {
+    let terminal = matches!(state.as_str(), "completed" | "failed" | "stopped"
+        | "interrupted" | "inconclusive");
+    if terminal_only && !terminal {
         return Err("Only a terminal Ticket with an orphaned attempt can be quarantined.".into());
     }
+    if !terminal_only && !matches!(state.as_str(),
+        "queued" | "blocked" | "waiting_approval" | "waiting_review")
+    {
+        return Err("Only a nonterminal, non-running Ticket with an orphaned attempt can be quarantined.".into());
+    }
+    let next_state = if terminal { state.as_str() } else { "interrupted" };
     let running: i64 = tx.query_row(
         "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
         [ticket_id], |r| r.get(0),
@@ -3001,10 +3021,12 @@ pub(crate) fn headless_quarantine_terminal_orphan(
     }
     let now = storage::now();
     if tx.execute(
-        "UPDATE sa_tickets SET active_assignment_id=NULL,revision=revision+1,updated_at=?3
-         WHERE id=?1 AND revision=?2
-         AND state IN ('completed','failed','stopped','interrupted','inconclusive')",
-        params![ticket_id,expected_revision,now],
+        "UPDATE sa_tickets SET state=?4,active_assignment_id=NULL,revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state=?5
+           AND (active_assignment_id IS NOT NULL OR EXISTS(
+                SELECT 1 FROM sa_assignments a
+                WHERE a.ticket_id=sa_tickets.id AND a.state='running'))",
+        params![ticket_id,expected_revision,now,next_state,&state],
     ).map_err(|e| e.to_string())? != 1 {
         return Err("SuperAgent Ticket changed before quarantine.".into());
     }
@@ -3020,15 +3042,20 @@ pub(crate) fn headless_quarantine_terminal_orphan(
          WHERE ticket_id=?1 AND state='pending'",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    let (kind, detail) = if terminal {
+        ("headless_orphan_quarantined",
+         "Terminal native assignment quarantined; no provider or effect replay")
+    } else {
+        ("headless_inactive_orphan_quarantined",
+         "Non-running Ticket interrupted and revoked; no approval, provider or effect replay")
+    };
     tx.execute(
-        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-         VALUES(?1,'headless_orphan_quarantined',
-           'Terminal native assignment quarantined; no provider or effect replay',?2)",
-        params![ticket_id,now],
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+        params![ticket_id,kind,detail,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
-        "ticketId": ticket_id, "state": state, "revision": revision + 1,
+        "ticketId": ticket_id, "state": next_state, "revision": revision + 1,
         "quarantinedAssignments": quarantined, "pendingEffectsMarkedUncertain": uncertain,
         "providerStoppedByCommand": false, "liveProviderState": "unknown",
         "externalEffectReplayAllowed": false,
@@ -12164,6 +12191,55 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn headless_inactive_orphan_quarantine_matches_watchdog_without_provider_replay() {
+        for state in ["queued", "blocked", "waiting_approval", "waiting_review"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(&mut store, &config.id,
+                "Inactive orphan recovery", "headless-inactive-orphan", false).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let path = store.path.clone();
+            assert!(headless_quarantine_inactive_orphan(&path, &ticket.id, ticket.revision).is_err());
+            store.db.execute(
+                "UPDATE sa_tickets SET state=?2,revision=revision+1 WHERE id=?1",
+                params![&ticket.id,state],
+            ).unwrap();
+            let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'unverified-effect',?2,'pending',?3,?3)",
+                params![&ticket.id,"d".repeat(64),storage::now()],
+            ).unwrap();
+            assert!(headless_quarantine_terminal_orphan(&path, &ticket.id, revision).is_err());
+            assert!(headless_quarantine_inactive_orphan(&path, &ticket.id, revision-1).is_err());
+            assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, state);
+            let result: serde_json::Value = serde_json::from_str(
+                &headless_quarantine_inactive_orphan(&path, &ticket.id, revision).unwrap(),
+            ).unwrap();
+            assert_eq!(result["state"], "interrupted");
+            assert_eq!(result["providerStoppedByCommand"], false);
+            assert_eq!(result["externalEffectReplayAllowed"], false);
+            let after = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(after.revision, revision+1);
+            assert!(after.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert_eq!(effects::receipt_history(&store, &ticket.id, 10).unwrap()[0].state, "uncertain");
+            assert!(headless_quarantine_inactive_orphan(&path, &ticket.id, after.revision).is_err());
+            assert!(!on_run_finished(&store, &session, true, "Late success").unwrap());
+            assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+                .filter(|entry| entry.kind == "headless_inactive_orphan_quarantined").count(), 1);
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+            assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 1);
+        }
+    }
 
     #[test]
     fn watchdog_quarantines_nonrunning_orphans_without_approval_or_replay() {

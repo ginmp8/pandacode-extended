@@ -105,6 +105,7 @@ enum Command {
     QuarantinePendingEffect { ticket_id: String, expected_revision: i64, effect_key: String, payload_sha256: String },
     QuarantineOrphanRunning { ticket_id: String, expected_revision: i64 },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
+    QuarantineInactiveOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
@@ -996,7 +997,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::QuarantineExpiredTicket { .. }
                 | Command::QuarantinePendingEffect { .. }
                 | Command::QuarantineOrphanRunning { .. }
-                | Command::QuarantineTerminalOrphan { .. }
+                | Command::QuarantineTerminalOrphan { .. } | Command::QuarantineInactiveOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
                 | Command::RenameOrchestration { .. }
@@ -1069,6 +1070,9 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                             Command::QuarantineOrphanRunning { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_orphan_running_ticket(
                                     &database,ticket_id,*expected_revision),
+                            Command::QuarantineInactiveOrphan { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_inactive_orphan(
+                                    &database, ticket_id, *expected_revision),
                             Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_terminal_orphan(
                                     &database, ticket_id, *expected_revision),
@@ -1169,7 +1173,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::QuarantineExpiredTicket { .. }
         | Command::QuarantinePendingEffect { .. }
         | Command::QuarantineOrphanRunning { .. }
-        | Command::QuarantineTerminalOrphan { .. }
+        | Command::QuarantineTerminalOrphan { .. } | Command::QuarantineInactiveOrphan { .. }
         | Command::DisableOrchestration { .. }
                 | Command::EnableOrchestration { .. }
         | Command::RenameOrchestration { .. }
@@ -2688,6 +2692,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops+=1;
                 index+=2;
             }
+            "--quarantine-inactive-orphan" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-inactive-orphan needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-inactive-orphan needs a Ticket revision.")?;
+                command = Command::QuarantineInactiveOrphan {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--quarantine-terminal-orphan" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
@@ -2861,7 +2878,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --quarantine-inactive-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -3040,6 +3057,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --quarantine-orphan-ticket <id> <revision>
                           Quarantine a structurally orphaned running Ticket;
                           no provider or external-effect replay.
+  --quarantine-inactive-orphan <id> <revision>
+                         Interrupt a queued, blocked or review/approval-waiting Ticket
+                         with an orphaned native attempt; revoke without replay.
   --quarantine-terminal-orphan <id> <revision>
                          Quarantine orphaned native attempts on terminal Tickets;
                          do not launch providers or replay external effects.
@@ -4045,6 +4065,20 @@ mod tests {
             "--quarantine-orphan-ticket ticket_123 8 --stop-ticket ticket_123",
         ] {
             assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+        assert_eq!(parsed("--quarantine-inactive-orphan ticket_123 8"),
+            Ok(Command::QuarantineInactiveOrphan {
+                ticket_id: "ticket_123".into(), expected_revision: 8,
+            }));
+        for invalid in [
+            "--quarantine-inactive-orphan",
+            "--quarantine-inactive-orphan ticket_123",
+            "--quarantine-inactive-orphan ../unsafe 8",
+            "--quarantine-inactive-orphan ticket_123 nope",
+            "--quarantine-inactive-orphan ticket_123 -1",
+            "--quarantine-inactive-orphan ticket_123 8 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--quarantine-terminal-orphan ticket_123 8"),
             Ok(Command::QuarantineTerminalOrphan {

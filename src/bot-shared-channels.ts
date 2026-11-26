@@ -60,6 +60,13 @@ export interface SharedChannelUiOptions {
   notify(text: string): void;
 }
 
+/** Bind native detail responses to the requested Channel before rendering or editing. */
+export async function readSharedChannelDetail(call: SharedChannelUiOptions['call'], channelId: string, limit?: number): Promise<SharedChannelDetail> {
+  const detail = await call<SharedChannelDetail>('bot_shared_channel_detail', { channelId, ...(limit === undefined ? {} : { limit }) });
+  if (detail?.id !== channelId) throw new Error('Channel details do not match the requested channel.');
+  return detail;
+}
+
 const channelName = (name: string) => `#${name.replace(/^#+/, '')}`;
 
 function faces(ids: string[], bots: Bot[], cls = ''): string {
@@ -459,7 +466,7 @@ export async function openSharedChannel(channelId: string, options: SharedChanne
 }
 
 export async function openSharedChannelSettings(channelId: string, options: SharedChannelUiOptions): Promise<void> {
-  try { await editChannel(options, await options.call<SharedChannelDetail>('bot_shared_channel_detail', { channelId })); }
+  try { await editChannel(options, await readSharedChannelDetail(options.call, channelId)); }
   catch (error) { options.notify(error instanceof Error ? error.message : String(error)); }
 }
 

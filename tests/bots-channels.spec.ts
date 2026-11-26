@@ -914,6 +914,62 @@ test.describe('shared bot channels', () => {
   });
 
 
+  test('Channel detail and settings reject a response bound to another Channel', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        match => "if (command === 'bot_shared_channel_detail' && window.__foreignChannelDetail) return structuredClone(window.__foreignChannelDetail);\n" + match,
+      );
+      if (body === source) throw new Error('Channel detail response interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = composer.getByRole('textbox', { name: 'Message channel' });
+    await prompt.fill('Keep this Channel draft.');
+    const channel = page.locator('.bc-channel');
+    await expect(channel).toHaveAttribute('data-channel-id', 'sample-launch');
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__foreignChannelDetail = {
+        id: 'foreign-channel', name: 'Foreign private channel', memberIds: [],
+        leadBotId: null, archived: false, updatedAt: 1, activeBotIds: [], hasMore: false,
+        messages: [{ id: 'foreign-message', kind: 'user', text: 'Foreign private message',
+          authorBotId: null, status: 'Completed', createdAt: 1 }],
+      };
+      w.__channelDetailDenials = 0;
+      const toast = document.querySelector('#toast')!;
+      new MutationObserver(() => {
+        if (toast.textContent === 'Channel details do not match the requested channel.')
+          w.__channelDetailDenials++;
+      }).observe(toast, { childList: true });
+    });
+
+    const settings = page.getByRole('dialog', { name: 'Channel settings' });
+    await channel.getByRole('button', { name: 'Channel settings' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelDetailDenials)).toBe(1);
+    await expect(settings).not.toBeVisible();
+    await expect(page.locator('#dialog')).not.toContainText('Foreign private channel');
+
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' }));
+    await expect.poll(() => page.evaluate(() => (window as any).__channelDetailDenials)).toBe(2);
+    await expect(channel).toHaveAttribute('data-channel-id', 'sample-launch');
+    await expect(channel).not.toContainText('Foreign private message');
+    await expect(page.locator('#breadcrumb')).toContainText('#launch');
+    await expect(prompt).toHaveValue('Keep this Channel draft.');
+
+    await page.evaluate(() => { delete (window as any).__foreignChannelDetail; });
+    await refreshUnchangedChannel(page, 'sample-launch');
+    await channel.getByRole('button', { name: 'Channel settings' }).click();
+    await expect(settings.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('launch');
+    await settings.getByRole('button', { name: 'Cancel' }).click();
+    await expect(prompt).toHaveValue('Keep this Channel draft.');
+  });
+
   test('Channel native inspection never replaces its bound delivery with a foreign root result', async ({ page }) => {
     const own = {
       sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 7,

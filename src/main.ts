@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -6945,12 +6945,12 @@ async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<
   const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
   if (prompt && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
   try {
-    const detail = await call<SharedChannelDetail>('bot_shared_channel_detail', { channelId, limit: state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE });
+    const detail = await readSharedChannelDetail(call, channelId, state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE);
     if (request !== state.sharedChannelRequest || channelId !== state.sharedChannelId) return;
     state.sharedChannelDetail = detail;
     renderHeader(); renderTranscript(true); renderComposer(); renderBots();
     syncChannelWorkingLabel();
-  } catch (error) { if (channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
+  } catch (error) { if (request === state.sharedChannelRequest && channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
 }
 function activateSharedChannel(channelId: string): void {
   voiceDictation.detach();

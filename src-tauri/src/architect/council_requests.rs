@@ -613,6 +613,19 @@ pub(crate) fn admit_native_task(
     {
         return Err("council_task_denied: admission after reviewer dispatch is not allowed.".into());
     }
+    // Child-only M4 can dispatch and score leaves without any root worker.
+    // The native child artifact pin is written at admission, not reservation.
+    // Deny a new binding once it exists, regardless of the row's claimed kind.
+    let child_artifact_key = super::child_council::root_artifact_revision_key(&team);
+    let child_started: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests WHERE parent_session_id=?1 AND key=?2)",
+        params![session_id, &child_artifact_key], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if child_started {
+        return Err("council_task_denied: admission after reviewer dispatch is not allowed.".into());
+    }
+    // A missing pin must not let an already-started child inherit a new task.
+    super::child_council::require_unstarted_child_review(store, &team)?;
     let body = serde_json::to_string(&NativeTaskRecord {
         request: candidate.clone(), receipt: None, host_checks: Vec::new(),
     }).map_err(|e| e.to_string())?;
@@ -631,8 +644,11 @@ pub(crate) fn admit_native_task(
                     OR json_extract(content,'$.request.cycleId')=''
                     OR json_extract(content,'$.request.cycleId')=?4
                 ) ELSE 1 END
+         )
+         AND NOT EXISTS (
+             SELECT 1 FROM architect_requests WHERE parent_session_id=?1 AND key=?5
          )",
-        params![session_id, key, body, &candidate.cycle_id],
+        params![session_id, key, body, &candidate.cycle_id, &child_artifact_key],
     ).map_err(|e| format!("council_task_conflict: {e}"))?;
     if inserted != 1 {
         // SELECT and INSERT are not one transaction across independently

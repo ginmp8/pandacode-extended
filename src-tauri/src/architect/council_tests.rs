@@ -10114,6 +10114,40 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         json!({"summary":"Begin native child reviews."}),
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
+    // Native M4 child leaves are already admitted, although the root owns
+    // no ordinary Council workers. A late task cannot claim their results.
+    {
+        let store = state.store.lock().unwrap();
+        let current = load(&store, &sid).unwrap().unwrap();
+        assert_eq!(current.status, "running");
+        assert!(current.workers.iter().all(|worker| worker.council.is_none()));
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "a".repeat(64);
+        let pin_key = child_council::root_artifact_revision_key(&current);
+        let pin: (String, String, String) = store.db.query_row(
+            "SELECT kind,content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, pin_key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        let late = council_requests::admit_native_task(
+            &store, &sid, &project, "late-child-task", &artifact,
+        ).unwrap_err();
+        assert!(late.contains("admission after reviewer dispatch"), "{late}");
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, pin_key],
+        ).unwrap();
+        assert!(council_requests::admit_native_task(
+            &store, &sid, &project, "late-child-task", &artifact,
+        ).is_err(), "a missing pin must not permit binding an already-started child");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_native_task'",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![sid, pin_key, pin.0, pin.1, pin.2],
+        ).unwrap();
+    }
     // A single scored leaf is not a child receipt or a parent vote.
     for _ in 0..4 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();

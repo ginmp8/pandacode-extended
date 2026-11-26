@@ -1292,8 +1292,24 @@ struct RootArtifactRevision {
     writer_stamps_sha256: String,
 }
 
-fn root_artifact_revision_key(root: &TeamSnapshot) -> String {
+pub(super) fn root_artifact_revision_key(root: &TeamSnapshot) -> String {
     format!("native-council-root-artifact:{}", root.council_since)
+}
+
+/// Reservations alone are prospective; any started child is already review
+/// work even when there is no direct or automatic reviewer in the root team.
+pub(super) fn require_unstarted_child_review(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(()) };
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("council_task_denied: expected native child reservation is missing.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("council_task_denied: native child team is missing.")?;
+        if child.status != "blocked" || !child.workers.is_empty() {
+            return Err("council_task_denied: admission after reviewer dispatch is not allowed.".into());
+        }
+    }
+    Ok(())
 }
 
 /// Pin the root's actual native change index when child review begins, not

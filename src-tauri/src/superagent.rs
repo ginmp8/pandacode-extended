@@ -3504,6 +3504,16 @@ fn canonical_checkout_intent(path: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// A still-registered provider retains its durable task identity even after
+/// its assignment settles or its mutable bot thread is detached.
+fn native_provider_scope(store: &Store, session_id: &str) -> Result<Option<(String, String)>> {
+    store.db.query_row(
+        "SELECT a.bot_id,t.project_id FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id WHERE a.session_id=?1",
+        [session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())
+}
+
 /// Native admission must account for ordinary running chats/direct tasks,
 /// not just persisted SuperAgent leases. Unknown live sessions fail closed.
 fn active_manual_conflict(
@@ -3519,7 +3529,13 @@ fn active_manual_conflict(
             ) {
             return Ok(true);
         }
-        if bots::owner_of(store, session_id)?
+        if let Some((assigned_bot, ticket_project)) = native_provider_scope(store, session_id)? {
+            if assigned_bot == candidate_id || checkout_paths_overlap(
+                &checkout_path(store, &ticket_project)?, &requested_path,
+            ) {
+                return Ok(true);
+            }
+        } else if bots::owner_of(store, session_id)?
             .is_some_and(|(bot, _)| bot.id == candidate_id)
         {
             return Ok(true);
@@ -4405,18 +4421,14 @@ pub(crate) fn guard_run_admission(
         let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
             if other_id == session_id { continue; }
-            let task_owned: bool = store.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
-                [other_id], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
-            if !task_owned { continue; }
+            let Some((assigned_bot, ticket_project)) = native_provider_scope(store, other_id)?
+                else { continue; };
             let native_session=store.session(other_id)?;
-            let same_bot = if let Some(bot_id)=session_bot_id.as_ref() {
-                bots::owner_of(store,other_id)?
-                    .is_some_and(|(owner,_)| owner.id.as_str()==bot_id.as_str())
-            } else { false };
+            let same_bot = session_bot_id.as_deref() == Some(assigned_bot.as_str());
             if same_bot || checkout_paths_overlap(
                 &session_path,&checkout_path(store,&native_session.project_id)?,
+            ) || checkout_paths_overlap(
+                &session_path,&checkout_path(store,&ticket_project)?,
             ) {
                 return Err("Native SuperAgent provider is still running on this bot or checkout.".into());
             }
@@ -4428,7 +4440,18 @@ pub(crate) fn guard_run_admission(
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
-            let other_bot_id = bots::owner_of(store, other_id)?.map(|(bot, _)| bot.id);
+            let other_bot_id = if let Some((assigned_bot, ticket_project)) =
+                native_provider_scope(store, other_id)?
+            {
+                if checkout_paths_overlap(
+                    &checkout_path(store, &ticket_project)?, &session_path,
+                ) {
+                    return Err("Project has another active agent; SuperAgent dispatch denied.".into());
+                }
+                Some(assigned_bot)
+            } else {
+                bots::owner_of(store, other_id)?.map(|(bot, _)| bot.id)
+            };
             if (session_bot_id.is_some() && session_bot_id == other_bot_id)
                 || other.project_id == session.project_id
                 || checkout_paths_overlap(
@@ -17795,6 +17818,47 @@ mod tests {
             &store,&independent.id,std::slice::from_ref(&native),
         ).is_ok());
         assert!(guard_run_admission(&store,&ordinary,&[]).is_ok());
+    }
+
+    #[test]
+    fn detached_settled_provider_retains_native_bot_and_ticket_checkout_fences() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(&mut store, &cfg.id, "Inspect checkout",
+            "detached-provider-fence", false).unwrap();
+        assert!(started);
+        let native = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        stop(&store, &ticket.id).unwrap();
+        store.db.execute("DELETE FROM bot_threads WHERE session_id=?1", [&native]).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other','Other workspace','/tmp/sa-detached-provider-other')", [],
+        ).unwrap();
+        store.db.execute("UPDATE bots SET project_id='other' WHERE id='worker'", []).unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, bots::DESKTOP, "moved-worker-chat", "Normal chat",
+        ).unwrap().0;
+        let live = std::slice::from_ref(&native);
+        assert!(guard_run_admission(&store, &ordinary, &[]).is_ok());
+        assert!(guard_run_admission(&store, &ordinary, live).is_err(),
+            "Removing a task thread cannot release its still-running native bot");
+        assert!(active_manual_conflict(&store, live, "worker", "other").unwrap());
+
+        // Simulate stale session metadata after settlement. The original
+        // durable Ticket checkout remains fenced until provider exit.
+        store.db.execute("UPDATE sessions SET project_id='other' WHERE id=?1", [&native]).unwrap();
+        let direct = store.create_session("project", "codex", "default", "plan").unwrap();
+        assert!(guard_run_admission(&store, &direct.id, live).is_err());
+        assert!(active_manual_conflict(&store, live, "router", "project").unwrap());
+        store.db.execute("UPDATE bots SET project_id='project' WHERE id='worker'", []).unwrap();
+        let (next, started) = admit(&mut store, &cfg.id, "Inspect checkout again",
+            "detached-provider-next", false).unwrap();
+        assert!(started);
+        let next_session = assignment_session(&store, &next.id).unwrap().unwrap();
+        assert!(guard_run_admission(&store, &next_session, live).is_err());
+        assert!(guard_run_admission(&store, &next_session, &[]).is_ok(),
+            "After actual provider exit the next native admission can proceed");
     }
 
     #[test]

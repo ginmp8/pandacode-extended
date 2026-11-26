@@ -5,6 +5,7 @@ use crate::{providers::ToolHost, storage::Store, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +236,10 @@ struct ReviewerAuthority {
     /// automatic/selected parallel Councils may consume that legacy format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seat_context: Option<ReviewerSeatContext>,
+    /// New native child leaves bind their exact issued review prompt without
+    /// duplicating its contents. Older grants retain their metadata checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_assignment_sha256: Option<String>,
     artifact_revision: String,
     tool_policy: ReviewerToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,10 +255,27 @@ struct ReviewerAuthority {
 }
 fn authority_key(seat: &str) -> String { format!("native-reviewer-authority:{seat}") }
 pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    record_authority(store, parent, binding, None)
+}
+
+pub(super) fn record_native_child_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, assignment: &str,
+) -> Result<()> {
+    record_authority(store, parent, binding, Some(assignment))
+}
+
+fn assignment_digest(assignment: &str) -> String {
+    format!("{:x}", Sha256::digest(assignment.as_bytes()))
+}
+
+fn record_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
     let record = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
         seat_context: Some(ReviewerSeatContext::from_binding(binding)),
+        child_assignment_sha256: child_assignment.map(assignment_digest),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
@@ -270,6 +292,12 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
     Ok(())
 }
 pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    validate_issued_authority_with_assignment(store, parent, binding, None)
+}
+
+fn validate_issued_authority_with_assignment(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
     let row: Option<(String, String, String)> = store.db.query_row(
         "SELECT kind,content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         params![parent, authority_key(&binding.seat_id)],
@@ -290,6 +318,12 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.required_reviewers != binding.required_reviewers
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
+            }
+            if child_assignment.is_some_and(|assignment|
+                original.child_assignment_sha256.as_ref().is_some_and(|expected|
+                    expected != &assignment_digest(assignment)))
+            {
+                return Err("reviewer_session_mismatch: native child assignment changed.".into());
             }
             match original.seat_context.as_ref() {
                 Some(context) if context == &ReviewerSeatContext::from_binding(binding) => {}
@@ -326,6 +360,18 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
 pub(crate) fn validate_recorded_authority(
     store: &Store, parent: &str, binding: &ReviewerBinding,
 ) -> Result<()> {
+    validate_recorded_authority_with_assignment(store, parent, binding, None)
+}
+
+pub(super) fn validate_recorded_child_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, assignment: &str,
+) -> Result<()> {
+    validate_recorded_authority_with_assignment(store, parent, binding, Some(assignment))
+}
+
+fn validate_recorded_authority_with_assignment(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
     let recorded: i64 = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM architect_requests
          WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_authority' AND worker_id=?3)",
@@ -335,7 +381,7 @@ pub(crate) fn validate_recorded_authority(
     if recorded != 1 {
         return Err("capability_not_authorized: a composed reviewer has no recorded native authority.".into());
     }
-    validate_issued_authority(store, parent, binding)
+    validate_issued_authority_with_assignment(store, parent, binding, child_assignment)
 }
 
 /// Called by the future S2/S4 trusted user-action adapter; never from a model
@@ -356,6 +402,7 @@ pub(crate) fn authorize_user_grants(
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
         seat_context: Some(ReviewerSeatContext::from_binding(binding)),
+        child_assignment_sha256: None,
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),

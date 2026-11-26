@@ -9893,6 +9893,50 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
         save(&store, &mut child).unwrap();
         assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2,
             "restoring exact native issuance must preserve legitimate child reviews");
+
+        // Independent native grants also bind the exact issued leaf prompt.
+        // Even matching edits to the worker and session cannot change it.
+        let leaf_id = child.workers[0].session_id.clone();
+        let original_assignment = child.workers[0].assignment.clone();
+        let original_effort = child.workers[0].reasoning_effort.clone();
+        store.db.execute(
+            "UPDATE sessions SET task_description='Review an unrelated task' WHERE id=?1",
+            [&leaf_id],
+        ).unwrap();
+        assert!(child_council::inspect(&store, &root).is_err());
+        child.workers[0].assignment = "Review an unrelated task".into();
+        save(&store, &mut child).unwrap();
+        assert!(child_council::inspect(&store, &root).is_err());
+        assert!(child_council::next_leaf_launch(&store, &Default::default(), &root).is_err());
+        store.db.execute(
+            "UPDATE sessions SET task_description=?2 WHERE id=?1",
+            rusqlite::params![leaf_id, original_assignment],
+        ).unwrap();
+        child.workers[0].assignment = original_assignment;
+        child.workers[0].resume_prompt = Some("Use unrelated task context".into());
+        save(&store, &mut child).unwrap();
+        assert!(child_council::next_leaf_launch(&store, &Default::default(), &root).is_err());
+        child.workers[0].resume_prompt = Some(council::SCORE_PROMPT.into());
+        save(&store, &mut child).unwrap();
+        assert!(child_council::inspect(&store, &root).is_ok(),
+            "native score nudges remain permitted");
+        child.workers[0].resume_prompt = None;
+        child.workers[0].reasoning_effort = Some("changed-effort".into());
+        store.db.execute(
+            "UPDATE sessions SET reasoning_effort='changed-effort' WHERE id=?1",
+            [&leaf_id],
+        ).unwrap();
+        save(&store, &mut child).unwrap();
+        assert!(child_council::inspect(&store, &root).is_err(),
+            "matching edited worker/session effort cannot replace the coordinator pin");
+        child.workers[0].reasoning_effort = original_effort.clone();
+        store.db.execute(
+            "UPDATE sessions SET reasoning_effort=?2 WHERE id=?1",
+            rusqlite::params![leaf_id, original_effort],
+        ).unwrap();
+        save(&store, &mut child).unwrap();
+        assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
+        assert_eq!(child.workers[0].status, "queued");
     }
     let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     assert!(distinct.contains(&launch.sid), "only an admitted child leaf is scheduled");

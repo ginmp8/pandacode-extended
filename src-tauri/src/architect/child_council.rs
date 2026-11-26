@@ -1169,6 +1169,14 @@ fn validate_admitted(
             || session.worktree_branch != coordinator.worktree_branch
             || session.mode != "plan" || session.archived || session.task_stage == "completed"
             || leaf.provider != session.provider || leaf.model != session.model
+            // Reconcile the native session with the issued task and pinned
+            // coordinator effort. Only native missing-report/score nudges
+            // may replace the initial prompt; no arbitrary resume context.
+            || leaf.assignment != session.task_description
+            || leaf.reasoning_effort != session.reasoning_effort
+            || session.reasoning_effort != coordinator.reasoning_effort
+            || leaf.resume_prompt.as_deref().is_some_and(|prompt|
+                prompt != super::EMPTY_REPLY_PROMPT && prompt != super::council::SCORE_PROMPT)
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
             // A queued snapshot cannot authorize a second provider launch if
@@ -1191,8 +1199,8 @@ fn validate_admitted(
         if binding.reviewer_bot_id.is_some()
             || binding.snapshot.tool_policy != ReviewerToolPolicy::NativeReadOnly
             || binding.validate(team, leaf).is_err()
-            || reviewer_security::validate_recorded_authority(
-                store, &record.child_session_id, binding,
+            || reviewer_security::validate_recorded_child_authority(
+                store, &record.child_session_id, binding, &leaf.assignment,
             ).is_err()
         {
             return Err(invalid().into());
@@ -2540,7 +2548,9 @@ fn issue_leaf_wave(
                 closed_by_selection: false, reported_severe_finding: false, reported_conflict: false,
             };
             let binding = ReviewerBinding::native(child, &id, now, &session.provider, &session.model, &seat);
-            reviewer_security::record_native_authority(store, &record.child_session_id, &binding)?;
+            reviewer_security::record_native_child_authority(
+                store, &record.child_session_id, &binding, &assignment,
+            )?;
             child.workers.push(Worker {
                 id, session_id: leaf.id, name: format!("Child reviewer {}", index + 1),
                 profile_id: "native-child-reviewer".into(), provider: session.provider.clone(),

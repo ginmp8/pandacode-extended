@@ -285,6 +285,15 @@ fn binding(db: &rusqlite::Connection, request_id: &str) -> Result<Option<String>
         [request_id],|r|r.get(0)).optional().map_err(|e|e.to_string())
 }
 
+// A plain plan digest authorizes new WorkItems only. An explicit retry digest
+// retains attempted-item priority, including requests created by older hosts.
+// Consumption still atomically checks the actual reserved Assignment.
+pub(super) fn prefers_new_work(store: &Store, request: Option<&DispatchRequest>) -> Result<bool> {
+    let Some(request) = request else { return Ok(false); };
+    let Some(digest) = binding(&store.db, &request.id)? else { return Ok(false); };
+    Ok(digest == plan_digest(&store.db, &request.ticket_id)?)
+}
+
 fn bind_plan(tx: &Transaction<'_>, request: &DispatchRequest, digest: &str,
     previous: Option<&str>, now: i64) -> Result<()> {
     tx.execute(
@@ -323,7 +332,7 @@ fn enqueue_mode(
             return Err("Dispatch request key is bound to another progression mode or operator surface.".into());
         }
     } else if plan {
-        let item=super::next_work_item(store,ticket_id)?
+        let item=super::next_work_item_with_preference(store,ticket_id,true)?
             .ok_or("Plan progression requires a blocked or queued Demand and a ready WorkItem.")?;
         if item.assignment_id.is_some() && request.kind!="retry" {
             return Err("An attempted WorkItem requires a blocked Demand and explicit retry authorization.".into());
@@ -424,7 +433,7 @@ pub(super) fn advance_after_acceptance(
          OR (SELECT COUNT(*) FROM sa_headless_dispatch_requests WHERE state='pending')>=200",
         [ticket_id],|r|r.get(0),
     ).map_err(|e|e.to_string())?;
-    let ready=super::next_work_item(store,ticket_id)
+    let ready=super::next_work_item_with_preference(store,ticket_id,true)
         .is_ok_and(|item|item.is_some_and(|w|w.assignment_id.is_none()));
     let current_plan=plan_digest(tx,ticket_id)?;
     let previous_attempt=previous_item_attempt(tx,ticket_id,&assignment_id)?;

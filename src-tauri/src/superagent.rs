@@ -4835,7 +4835,10 @@ fn accept_with_pause(
                 params![ticket_id,now],
             ).map_err(|e| e.to_string())?;
             ("blocked", false)
-        } else if coordinated { ("queued", true) } else { ("blocked", true) }
+        } else if coordinated && !next_work_item(store, ticket_id)
+            .is_ok_and(|item| item.is_some_and(|w| w.assignment_id.is_some())) {
+            ("queued", true)
+        } else { ("blocked", true) }
     } else { ("completed", false) };
     let changed = tx.execute(
         "UPDATE sa_tickets SET state=?4,revision=revision+1,updated_at=?3
@@ -6046,6 +6049,14 @@ fn accepted_work_item_dependency(
 /// This is serial, operator-confirmed read-only execution, not autonomous routing
 /// or permission to treat a provider turn as engineering delivery.
 fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::WorkItem>> {
+    next_work_item_with_preference(store, ticket_id, false)
+}
+
+// An explicit reviewed-plan request can advance independent new work before
+// repair. The ordinary one-item retry retains its attempted-item priority.
+fn next_work_item_with_preference(
+    store: &Store, ticket_id: &str, prefer_new: bool,
+) -> Result<Option<work_items::WorkItem>> {
     let (items, truncated) = work_items::list(store, ticket_id, 100)?;
     if truncated {
         return Err("Demand WorkItem plan exceeds the native admission limit.".into());
@@ -6070,7 +6081,7 @@ fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::W
     let ready = |item: &&work_items::WorkItem| item.parent_id.as_ref().is_none_or(|parent_id|
         items.iter().any(|parent| &parent.id == parent_id && parent.state == "accepted"));
     let selected = planned.iter().copied().filter(ready)
-        .find(|item| item.assignment_id.is_some())
+        .find(|item| item.assignment_id.is_none() == prefer_new)
         .or_else(|| planned.iter().copied().find(ready))
         .ok_or("No WorkItem is dependency-ready; accept its parent or resolve the plan.")?;
     Ok(Some(selected.clone()))
@@ -6078,15 +6089,15 @@ fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::W
 
 /// Pick the exact ready item's reviewed route, otherwise the legacy default.
 /// Both dispatch callers repeat this under their admission transaction.
-fn next_dispatch_worker(store: &Store, ticket_id: &str) -> Result<String> {
-    if let Some(worker) = next_work_item(store, ticket_id)?.and_then(|item| item.worker_bot_id) {
+fn next_dispatch_worker(store: &Store, ticket_id: &str, prefer_new: bool) -> Result<String> {
+    if let Some(worker) = next_work_item_with_preference(store, ticket_id, prefer_new)?.and_then(|item| item.worker_bot_id) {
         return Ok(worker);
     }
     ticket_worker(store, ticket_id)
 }
 
-fn manual_work_item_context(store: &Store, ticket_id: &str) -> Result<(String, Vec<String>)> {
-    let Some(selected) = next_work_item(store, ticket_id)? else {
+fn manual_work_item_context(store: &Store, ticket_id: &str, prefer_new: bool) -> Result<(String, Vec<String>)> {
+    let Some(selected) = next_work_item_with_preference(store, ticket_id, prefer_new)? else {
         return Ok((String::new(), Vec::new()));
     };
     if let Some(worker) = selected.worker_bot_id.as_deref() {
@@ -6301,7 +6312,8 @@ fn retry_blocked_with_request(
     if !members.reviewer_bot_ids.is_empty() {
         return Err("Configured Council reviewers require a native task-bound review.".into());
     }
-    let selected_worker_id = next_dispatch_worker(store, ticket_id)?;
+    let prefer_new = headless_dispatch::prefers_new_work(store, dispatch_request)?;
+    let selected_worker_id = next_dispatch_worker(store, ticket_id, prefer_new)?;
     if members.worker_bot_ids.len() > 1 {
         // A legacy blocked Ticket must not acquire a new multi-member roster
         // merely because the Team changed while it was waiting. Compare the
@@ -6357,7 +6369,7 @@ fn retry_blocked_with_request(
     if busy || occupied {
         return Err(RETRY_WORKER_OCCUPIED.into());
     }
-    let (mut work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
+    let (mut work_context, work_item_ids) = manual_work_item_context(store, ticket_id, prefer_new)?;
     if let [item_id] = work_item_ids.as_slice() {
         if let Some(feedback)=rejected_work_item_feedback(store,ticket_id,item_id)? {
             // Correction feedback is mandatory packet context, not optional
@@ -6480,7 +6492,8 @@ fn prepare_coordinated_worker_with_request(
         None => {}
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = direct_team_member(store, &config, &next_dispatch_worker(store, ticket_id)?)?;
+    let prefer_new = headless_dispatch::prefers_new_work(store, dispatch_request)?;
+    let worker = direct_team_member(store, &config, &next_dispatch_worker(store, ticket_id, prefer_new)?)?;
     if coordinator.paused || worker.paused || worker.project_id != config.project_id
     {
         return Err("A selected bot is unavailable or outside the immutable project scope.".into());
@@ -6517,7 +6530,7 @@ fn prepare_coordinated_worker_with_request(
     if busy || occupied {
         return Err(COORDINATED_WORKER_OCCUPIED.into());
     }
-    let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
+    let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id, prefer_new)?;
     // Only the reviewed, persisted item is forwarded for a structured plan.
     // The original proposal remains in the Coordinator Assignment evidence.
     let advice = if structured_coordinator_advice(&plan) { "" } else { plan.as_str() };
@@ -6624,7 +6637,8 @@ async fn dispatch_worker_native(
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let worker = next_dispatch_worker(&store, ticket_id)?;
+        let prefer_new = headless_dispatch::prefers_new_work(&store, request)?;
+        let worker = next_dispatch_worker(&store, ticket_id, prefer_new)?;
         let ticket = get_ticket(&store, ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
         let busy = active_manual_conflict(&store, &active, &worker, &cfg.project_id)?;
@@ -7044,7 +7058,7 @@ mod tests {
         assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().revision,fourth.revision);
         assert_eq!(work_items::cancel(&reopened,&ticket.id,second.revision,
             &child.id,"cancel-child-once").unwrap().state,"cancelled");
-        assert!(next_dispatch_worker(&reopened, &ticket.id).unwrap_err()
+        assert!(next_dispatch_worker(&reopened, &ticket.id, false).unwrap_err()
             .contains("No remaining planned WorkItem"));
     }
 
@@ -17029,7 +17043,7 @@ mod tests {
         drop(store);
         let mut store = Store::open(&path).unwrap();
         assert_eq!(ticket_worker(&store, &ticket.id).unwrap(), "worker");
-        assert_eq!(next_dispatch_worker(&store, &ticket.id).unwrap(), "peer");
+        assert_eq!(next_dispatch_worker(&store, &ticket.id, false).unwrap(), "peer");
         store.db.execute("UPDATE bots SET paused=1 WHERE id='peer'", []).unwrap();
         assert!(retry_blocked_at_revision(&mut store, &ticket.id, blocked.revision, false).is_err());
         store.db.execute("UPDATE bots SET paused=0 WHERE id='peer'", []).unwrap();
@@ -17458,6 +17472,98 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_plan_progresses_independent_item_before_explicit_repair() {
+        for (coordinated, desktop) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut store = fixture();
+            let initial = enabled(&store);
+            let disabled = change_enabled(&store, &initial.id, initial.policy_revision, false).unwrap();
+            let configured = roster::set_worker_attempt_limit(
+                &store, &disabled.id, disabled.policy_revision, 4,
+            ).unwrap();
+            let cfg = change_enabled(&store, &disabled.id, configured.policy_revision, true).unwrap();
+            let (ticket, launched) = admit_role_with_staging(
+                &mut store, &cfg.id, "Inspect independent components", "independent-reviewed-plan",
+                false, coordinated, !coordinated,
+            ).unwrap();
+            assert_eq!(launched, coordinated);
+            let id = &ticket.id;
+            if coordinated {
+                let session = assignment_session(&store, id).unwrap().unwrap();
+                assert!(on_run_finished(&store, &session, true, "Coordinator evidence").unwrap());
+            }
+            let revision = get_ticket(&store, id).unwrap().revision;
+            let root = work_items::plan(&store, id, revision, "root", "Inspect root", None).unwrap();
+            let child = work_items::plan(&store, id, get_ticket(&store, id).unwrap().revision,
+                "child", "Inspect dependent child", Some(&root.id)).unwrap();
+            let enqueue = |store: &Store, revision, key: &str| {
+                if desktop { headless_dispatch::enqueue_desktop_plan(store, id, revision, key) }
+                else { headless_dispatch::enqueue_plan(store, id, revision, key) }
+            };
+            let dispatch = |store: &mut Store, request: &headless_dispatch::DispatchRequest| {
+                if request.kind == "coordinated" {
+                    prepare_coordinated_worker_with_request(store, id, request.expected_revision, false, Some(request))
+                } else {
+                    retry_blocked_with_request(store, id, request.expected_revision, false, Some(request))
+                }
+            };
+            let first = enqueue(&store, get_ticket(&store, id).unwrap().revision, "original").unwrap();
+            let (_, _, _, packet) = dispatch(&mut store, &first).unwrap();
+            assert!(packet.contains(root.id.as_str()));
+            let rejected_session = assignment_session(&store, id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &rejected_session, true, "Rejected evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            let blocked = reject(&store, id, waiting.revision, "Repair root").unwrap();
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            let independent = work_items::plan(&store, id, blocked.revision,
+                "independent", "Inspect independent component", None).unwrap();
+            // The normal one-item retry still identifies the failed root.
+            assert_eq!(next_work_item(&store, id).unwrap().unwrap().id, root.id);
+            let revision = get_ticket(&store, id).unwrap().revision;
+            let request = enqueue(&store, revision, "continue-independent").unwrap();
+            assert!(enqueue(&store, revision, "original").is_err());
+            let (_, _, _, packet) = dispatch(&mut store, &request).unwrap();
+            assert!(packet.contains(independent.id.as_str()));
+            assert!(!packet.contains(child.id.as_str()));
+            assert!(!packet.contains("Repair root"));
+            let session = assignment_session(&store, id).unwrap().unwrap();
+            assert!(!on_run_finished(&store, &rejected_session, true, "Late root result").unwrap());
+            assert!(on_run_finished(&store, &session, true, "Independent evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            let blocked = accept(&store, id, waiting.revision).unwrap();
+            assert_eq!(blocked.state, "blocked");
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none(),
+                "independent acceptance must not implicitly retry the rejected root");
+            let reopened = Store::open_read_only(&store.path).unwrap();
+            let items = work_items::list(&reopened, id, 100).unwrap().0;
+            assert_eq!(items.iter().find(|w| w.id == independent.id).unwrap().state, "accepted");
+            assert_eq!(items.iter().find(|w| w.id == root.id).unwrap().state, "planned");
+            assert!(items.iter().find(|w| w.id == child.id).unwrap().assignment_id.is_none());
+            drop(reopened);
+            let repair = enqueue(&store, blocked.revision, "explicit-repair").unwrap();
+            let (_, _, _, packet) = dispatch(&mut store, &repair).unwrap();
+            assert!(packet.contains(root.id.as_str()));
+            assert!(packet.contains("Repair root"));
+            let session = assignment_session(&store, id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Repaired root evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            accept(&store, id, waiting.revision).unwrap();
+            let continuation = headless_dispatch::next_pending(&store).unwrap().unwrap();
+            let (_, _, _, packet) = dispatch(&mut store, &continuation).unwrap();
+            assert!(packet.contains(child.id.as_str()));
+            assert!(packet.contains("Repaired root evidence"));
+            assert!(!packet.contains("Independent evidence"));
+            assert!(!packet.contains("Rejected evidence"));
+            let session = assignment_session(&store, id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Child evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            assert_eq!(accept(&store, id, waiting.revision).unwrap().state, "completed");
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            assert_eq!(assignments(&store, id, 10).unwrap().len(), if coordinated { 5 } else { 4 });
+            assert!(!mandate(&store, id).unwrap().allowed_side_effects);
+        }
+    }
+
+    #[test]
     fn dependent_work_item_receives_bounded_accepted_attempt_evidence() {
         let mut store = fixture();
         let cfg = enabled(&store);
@@ -17518,7 +17624,7 @@ mod tests {
         assert!(on_run_finished(&store,&session,true,&root_evidence).unwrap());
         let waiting = get_ticket(&store,&ticket.id).unwrap();
         let queued = accept(&store,&ticket.id,waiting.revision).unwrap();
-        let (required_context, ids) = manual_work_item_context(&store,&ticket.id).unwrap();
+        let (required_context, ids) = manual_work_item_context(&store,&ticket.id,false).unwrap();
         assert_eq!(ids,vec![child.id.clone()]);
         assert!(coordinated_worker_message(&queued,&format!("{advice}{required_context}"))
             .chars().count() > bots::gateway::MAX_INBOUND);

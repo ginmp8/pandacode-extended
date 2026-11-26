@@ -436,6 +436,14 @@ pub(super) fn validate_observed_issue(
     // A damaged receipt watermark cannot authorize a new Demand. Replay
     // of an already admitted request remains read-only via its original key.
     require_source_cursor_integrity(tx, &src)?;
+    let unresolved_history: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_source_history_gaps
+         WHERE source_id=?1 AND cursor_sequence=?2 AND verified_at IS NULL)",
+        params![&src.id,src.last_sequence], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved_history {
+        return Err("GitHub source history is unverified; reconcile the exact Observe cursor before staging a new Demand.".into());
+    }
     let (subject_key, repository_id): (String, i64) = tx.query_row(
         "SELECT d.subject_key,repo.repository_id FROM sa_event_decisions d
          JOIN sa_source_repository_identity repo ON repo.source_id=d.source_id
@@ -3713,6 +3721,25 @@ mod tests {
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links", [],
             |row| row.get::<_, i64>(0)).unwrap(), 0);
         store.db.execute_batch("DROP TRIGGER reject_source_issue;").unwrap();
+        // A previously attested receipt is still inspectable, but an unresolved
+        // bounded feed must not create new native work until its exact anchor
+        // is verified. The detached admission uses a separate connection.
+        let anchored = source(&store, &on.id).unwrap();
+        record_observe_fetch_failure(
+            &store, &anchored, "GitHub Events window exceeds three pages; no source cursor advanced.",
+        ).unwrap();
+        assert!(stage("history-gap", &selected).unwrap_err().to_string().contains("history"));
+        assert_eq!(count(&store), 0);
+        assert_eq!(list_decisions(&store, &on.id, 20).unwrap().len(), 1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let recovered = poll_authenticated_events_with_repository_id_scoped(
+            &store, &anchored, 0, &raw, "operator", 1,
+            ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+        ).unwrap();
+        assert_eq!(recovered.duplicates, 1);
+        assert!(inspect_source_integrity(&store, &on.id).unwrap().history_gap_verified_at.is_some());
+        assert_eq!(count(&store), 0);
         // Stage through the live desktop store, then replay through the detached
         // CLI. Both must preserve the same native Ticket and source identity.
         let staged = super::super::stage_observed_issue(
@@ -3725,6 +3752,15 @@ mod tests {
         assert_eq!(receipt["state"], "blocked");
         assert_eq!(receipt["providerDispatchedByCommand"], false);
         assert_eq!(receipt["allowedSideEffects"], false);
+        assert_eq!(count(&store), 1);
+        let anchored = source(&store, &on.id).unwrap();
+        record_observe_fetch_failure(
+            &store, &anchored, "GitHub Events window exceeds three pages; no source cursor advanced.",
+        ).unwrap();
+        // An already admitted request remains a read-only idempotent lookup.
+        let quarantined_replay: serde_json::Value =
+            serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();
+        assert_eq!(quarantined_replay["ticketId"], receipt["ticketId"]);
         assert_eq!(count(&store), 1);
         let links = list_thread_links(&store, id).unwrap();
         assert_eq!(links.len(), 1);

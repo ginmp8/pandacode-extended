@@ -1041,6 +1041,7 @@ test(`explicit ${eventKind} staging confirms exact native source and Worker with
     host.id = 'sa-observed-intake'; document.body.appendChild(host);
     const requests: unknown[] = [];
     const tickets: unknown[] = [];
+    let gapVerified = false;
     const team = {id:'team',name:'Issue Team',coordinatorBotId:'router',workerBotId:'worker',
       enabled:true,policyRevision:3,workerCount:1,reviewerCount:0};
     const source = {id:'source',orchestrationId:'team',repository:'owner/repo',
@@ -1052,6 +1053,21 @@ test(`explicit ${eventKind} staging confirms exact native source and Worker with
       if(command==='superagent_list') return [team] as never;
       if(command==='superagent_tickets') return tickets as never;
       if(command==='superagent_source_list') return [source] as never;
+      if(command==='superagent_source_integrity') return {
+        sourceId:'source',repository:'owner/repo',repositoryId:456,actorId:123,
+        mode:'observe',policyRevision:2,cursorKind:'github_event_identity_high_watermark',
+        lastSequence:5,maxReceiptSequence:5,receiptCount:4,permittedReceiptCount:3,
+        cursorConsistent:true,receiptCapacityReached:false,historyGapCursor:5,
+        historyGapReason:'window_unverified',historyGapOccurrences:1,
+        historyGapVerifiedAt:gapVerified?1794444000000:null,
+        historyGapVerifiedSequence:gapVerified?5:null,
+        backgroundSelected:gapVerified,nextAction:gapVerified?'explicit_observe_available':'investigate_unverified_github_history',
+        observationalOnly:true,
+      } as never;
+      if(command==='superagent_source_poll_authenticated') {
+        gapVerified=true;
+        return {scanned:1,recorded:0,duplicates:1,selfIgnored:0,pagesFetched:1} as never;
+      }
       if(command==='superagent_source_decisions') return [
         {sourceId:'source',deliveryId:'5',eventKind,subjectKey:'issue:42',
           decision:'observed_permitted',sequence:5,policyRevision:2,at:1794444000000},
@@ -1079,6 +1095,16 @@ test(`explicit ${eventKind} staging confirms exact native source and Worker with
   await host.getByRole('button',{name:'Load sources'}).click();
   await host.getByRole('button',{name:'View decisions'}).click();
   const issues=host.getByRole('combobox',{name:'Observed issue'});
+  await expect(issues.locator('option')).toHaveCount(2);
+  await host.getByRole('button',{name:'Inspect source health'}).click();
+  await expect(host.getByRole('region',{name:'Source integrity'})).toContainText('New issue Demand staging is blocked');
+  await expect(host.getByRole('button',{name:'Review issue Demand'})).toHaveCount(0);
+  await expect(host).not.toHaveAttribute('data-requests',/./);
+  await host.getByRole('button',{name:'Poll authenticated GitHub'}).click();
+  await expect(host.getByText('Authenticated bounded poll:',{exact:false})).toBeVisible();
+  await host.getByRole('button',{name:'View decisions'}).click();
+  await host.getByRole('button',{name:'Inspect source health'}).click();
+  await expect(host.getByRole('region',{name:'Source integrity'})).toContainText('was verified by a later bounded feed');
   await expect(issues.locator('option')).toHaveCount(2);
   await issues.selectOption('5');
   await host.getByRole('combobox',{name:'Issue Worker'}).selectOption('worker');

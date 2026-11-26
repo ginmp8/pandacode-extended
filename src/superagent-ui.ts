@@ -402,6 +402,12 @@ let demandArchived = false;
     if (!team?.enabled || team.reviewerCount !== 0 ||
         !source || source.orchestrationId !== team.id ||
         source.mode !== 'observe' || !isIssueIntakeKind(source.eventKind)) return null;
+    // A known native quarantine must not offer a new staging action. The
+    // admission transaction still rechecks fresh state even without this view.
+    if (sourceIntegrity?.sourceId === source.id &&
+        sourceIntegrity.policyRevision === source.policyRevision &&
+        sourceIntegrity.historyGapCursor === sourceIntegrity.lastSequence &&
+        sourceIntegrity.historyGapVerifiedAt == null) return null;
     const workers = team.workerCount === 1 ? [team.workerBotId] :
       roleRoster?.orchestrationId === team.id &&
       roleRoster.policyRevision === team.policyRevision &&
@@ -978,7 +984,7 @@ let demandArchived = false;
                   safe(sourceIntegrity.historyGapReason === 'cursor_missing'
                     ? 'stored cursor absent from bounded feed' : 'bounded feed exhausted') +
                   '). Observed ' + safe(sourceIntegrity.historyGapOccurrences ?? 1) +
-                  ' time(s). Operator reconciliation required; no lost events have been inferred or replayed.</p>')
+                  ' time(s). Operator reconciliation required; no lost events have been inferred or replayed. New issue Demand staging is blocked until the exact cursor is verified.</p>')
               : '') +
             '<p>Observation only. No GitHub subscription completeness, worker admission, Council pass, or Auto authorization is implied.</p>' +
             '</section>' : '') +

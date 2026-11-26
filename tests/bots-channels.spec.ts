@@ -966,6 +966,50 @@ test.describe('shared bot channels', () => {
     await expect(dialog.getByRole('alert')).toHaveCount(0);
   });
 
+  test('closing Channel inspection erases evidence and fences a late native result', async ({ page }) => {
+    test.setTimeout(60_000);
+    const own = {
+      sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 7,
+      status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+      verifiedPass: false, criteria: [], attempts: [], reservedChildren: [],
+    };
+    await seedCouncilDelivery(page, 'Reviewing', null);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(/if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        match => 'if (command === "bot_shared_channel_council_inspect" && args.channelId === "sample-launch" && args.deliveryId === "delivery-one") {' +
+          'if (window.__deferClosedCouncilRead) { await new Promise(resolve => { window.__releaseClosedCouncilRead = resolve; }); window.__closedCouncilReadResolved = true; }' +
+          'return ' + JSON.stringify(own) + '; } ' + match);
+      if (body === source) throw new Error('Deferred Channel inspector interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const open = page.getByRole('button', { name: 'Inspect Council evidence' });
+    const dialog = page.getByRole('dialog', { name: 'Council inspection' });
+    const retained = page.locator('#dialog .bc-council-inspector-host .council-inspection');
+    await open.click();
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Close dialog' }).click();
+    await expect(retained).toHaveCount(0);
+
+    await page.evaluate(() => { (window as any).__deferClosedCouncilRead = true; });
+    await open.click();
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseClosedCouncilRead)).toBe('function');
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__deferClosedCouncilRead = false;
+      w.__releaseClosedCouncilRead();
+    });
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__closedCouncilReadResolved))).toBe(true);
+    await expect(retained).toHaveCount(0);
+    await open.click();
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  });
+
   test('bot collaboration: narrow Channel Council keeps long reviewer identities and inspection actions within the thread', async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 320, height: 640 });

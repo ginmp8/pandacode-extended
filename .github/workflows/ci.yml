@@ -193,6 +193,40 @@ jobs:
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/bots-channels.spec.ts --workers=1 --shard=${{ matrix.shard }}/2
 
+      - name: Collect bounded failed Channel diagnostics
+        if: ${{ failure() }}
+        # These browser tests use synthetic preview Channels, not live user data.
+        # Retain only bounded failure context and traces, never the full report.
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from shutil import copyfile
+
+          root = Path("test-results")
+          destination = Path("channel-failure-diagnostics")
+          remaining = 16 * 1024 * 1024
+          for pattern, per_file in (("*/error-context.md", 128 * 1024), ("*/trace.zip", 8 * 1024 * 1024)):
+              for source in sorted(root.glob(pattern)):
+                  if not source.is_file() or source.is_symlink():
+                      continue
+                  size = source.stat().st_size
+                  if size > min(remaining, per_file):
+                      print(f"Skipping oversized diagnostic: {source.name} ({size} bytes)")
+                      continue
+                  target = destination / source.relative_to(root)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  copyfile(source, target)
+                  remaining -= size
+          PY
+      - name: Publish failed Channel diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: channel-failure-diagnostics-${{ matrix.shard }}
+          path: channel-failure-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 3
+
   customize-skills-browser:
     # Run the Skills regressions independently, even when an unrelated Bots test fails.
     name: Customize Skills UI (Playwright)

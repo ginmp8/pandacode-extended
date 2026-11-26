@@ -7689,7 +7689,15 @@ function outsideDialog(event: MouseEvent): boolean {
 }
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('pointerdown', event => { dialogBackdropPressed = outsideDialog(event); });
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('click', event => { if (dialogBackdropPressed && outsideDialog(event)) closeModal(); dialogBackdropPressed = false; });
-document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', disposeSettingsViews);
+document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', event => {
+  const dialog = event.currentTarget as HTMLDialogElement;
+  // A closed dialog remains mounted. Remove its Channel evidence and detach
+  // in-flight reads; a later inspection must bind a fresh native request.
+  if (!dialog.open && dialog.classList.contains('bc-council-inspector-dialog')) {
+    dialog.querySelector('.bc-council-inspector-host')?.replaceChildren();
+  }
+  disposeSettingsViews();
+});
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('cancel', () => { closeMenus(); openingProjectForTask = undefined; });
 window.matchMedia('(max-width: 920px)').addEventListener('change', event => { if (event.matches) { state.inspector = false; renderInspector(); } });
 document.addEventListener('paste', event => { if ((event.target as HTMLElement | null)?.id === 'prompt' && !document.querySelector<HTMLDialogElement>('#dialog')!.open) attachments.handlePaste(event); });

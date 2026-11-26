@@ -566,7 +566,11 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   const boundSessionId = typeof expectedSessionId === 'string' ? expectedSessionId.trim() : '';
   let serial = 0;
   let loading = false;
+  // Closing an enclosing dialog does not disconnect its DOM or close this
+  // disclosure. Fence native reads before the dialog's asynchronous close event.
+  const canRender = () => details.open && details.isConnected && details.closest('dialog')?.open !== false;
   const load = () => {
+    if (!canRender()) return;
     const current = ++serial;
     loading = true;
     // Native disabled buttons lose keyboard focus during an asynchronous refresh.
@@ -591,7 +595,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     body.textContent = 'Loading native Council result…';
     // A synchronous read failure must also fail closed and release the button.
     void Promise.resolve().then(() => boundSessionId ? read() : null).then(result => {
-      if (serial !== current || !details.open || !details.isConnected) return;
+      if (serial !== current || !canRender()) return;
       const nextScope = scopeOf(result);
       if (!boundSessionId || (result && (nextScope === null || result.sessionId !== boundSessionId))) {
         // A stale/cross-task response is not safe to render, even if it carries
@@ -624,7 +628,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       }
       shownScope = nextScope;
     }).catch((reason: unknown) => {
-      if (serial !== current || !details.open || !details.isConnected) return;
+      if (serial !== current || !canRender()) return;
       shownScope = null;
       body.replaceChildren();
       const error = document.createElement('p');
@@ -642,7 +646,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
         loading = false;
         refresh.removeAttribute('aria-disabled');
         refresh.removeAttribute('aria-busy');
-        refresh.disabled = !details.open;
+        refresh.disabled = !canRender();
       }
     });
   };
@@ -664,7 +668,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   // when a previous inspection request is still in flight. `load` uses the same
   // serial guard as manual refresh to reject older asynchronous responses.
   details.addEventListener('council-evidence-invalidated', () => {
-    if (details.open && details.isConnected) load();
+    if (canRender()) load();
     else {
       // Invalidation must also erase a closed snapshot and fence in-flight reads.
       serial++;
@@ -677,7 +681,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     }
   });
   refresh.addEventListener('click', () => {
-    if (details.open && !loading) load();
+    if (canRender() && !loading) load();
   });
   return details;
 }

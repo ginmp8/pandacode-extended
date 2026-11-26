@@ -1769,7 +1769,7 @@ fn potentially_live_unresolved_tickets(
          WHERE e.state IN ('pending','uncertain')
            AND (?1 IS NULL OR t.id=?1)
            AND (?2 IS NULL OR t.orchestration_id=?2)
-           AND (t.state='running' OR EXISTS(
+           AND (t.state='running' OR t.active_assignment_id IS NOT NULL OR EXISTS(
              SELECT 1 FROM sa_assignments a
              WHERE a.ticket_id=t.id AND a.state='running'))",
         params![ticket_id, orchestration_id], |row| row.get(0),
@@ -9507,6 +9507,69 @@ mod tests {
                 .unwrap()[0].state, "uncertain");
             assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "completed");
         }
+    }
+
+    #[test]
+    fn unresolved_effect_views_require_live_verification_for_unsettled_assignment_pointer() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect uncertain remote outcome",
+            "effect-unsettled-pointer", false,
+        ).unwrap();
+        assert!(launched);
+        store.db.execute(
+            "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'remote-uncertain',?2,'uncertain',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let path = store.path.clone();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let audit_before = history(&store, &ticket.id, 30).unwrap().len();
+        let inspect = || [
+            inspect_headless_effect_receipts(&path, &ticket.id).unwrap(),
+            list_headless_unresolved_effects(&path, None, None, None).unwrap(),
+            list_headless_team_unresolved_effects(&path, &cfg.id, None, None, None).unwrap(),
+        ];
+        let status: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(status["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(status["recovery"]["assignmentStateConsistent"], false);
+        assert_eq!(status["recovery"]["requiresLiveHostVerification"], true);
+        for output in inspect() {
+            let view: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(view["potentiallyLiveUnresolvedTickets"], 1);
+            assert_eq!(view["requiresLiveHostVerification"], true);
+            assert_eq!(view["requiresIndependentRemoteReconciliation"], true);
+        }
+        assert_eq!(history(&store, &ticket.id, 30).unwrap().len(), audit_before);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+
+        let outcome: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(&path, &ticket.id, revision).unwrap(),
+        ).unwrap();
+        assert_eq!(outcome["providerStoppedByCommand"], false);
+        assert_eq!(outcome["externalEffectReplayAllowed"], false);
+        for output in inspect() {
+            let view: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(view["potentiallyLiveUnresolvedTickets"], 0);
+            assert_eq!(view["requiresLiveHostVerification"], false);
+            assert_eq!(view["requiresIndependentRemoteReconciliation"], true);
+        }
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state,
+            "uncertain");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
     }
 
     #[test]

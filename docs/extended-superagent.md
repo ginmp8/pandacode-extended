@@ -151,3 +151,13 @@ JSON plan. The operator must still save a bounded reviewed plan before native
 Worker dispatch; the original role, revision, dependency and attempt-budget
 checks remain mandatory. Worker and ordinary advisory evidence retain their
 existing preview limit. This is not an automatic write or Council grant.
+
+### Unsettled assignment pointers in effect recovery views
+
+The Ticket effect history and global/Team reconciliation queues require live
+host verification when an unresolved receipt belongs to a Ticket with an
+unsettled active Assignment pointer, even if the attempt row is no longer
+running. This matches the native recovery inspector. Explicit revision-bound
+quarantine can clear the pointer but cannot attest that a provider stopped or
+that the remote effect succeeded. The receipt remains unresolved and must be
+independently reconciled; no automatic replay is permitted.

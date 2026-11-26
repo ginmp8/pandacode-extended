@@ -2777,6 +2777,20 @@ fn unforced_s2_rejects_untriggered_and_replayed_clean_waves() {
     team.workers[2].council.as_mut().unwrap().score = Some(8.2);
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "a second distinct below-target wave may trigger a third independent S2 review");
+
+    // A later genuine trigger cannot authorize an earlier unsupported wave.
+    // All three rounds have distinct identities and no artifact change.
+    team.workers[0].council.as_mut().unwrap().score = Some(9.6);
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "a failing second wave must not launder its own untriggered admission");
+    assert!(finish_refusal(&team).is_some(),
+        "terminal settlement must reject the unsupported escalation history");
+
+    team.workers.truncate(4);
+    assert_ne!(council::status(&team).unwrap().state, "dispatch",
+        "an invalid historical wave must not advertise another review");
+    assert!(council::round_for(&team, team.config.council.as_ref().unwrap(), None)
+        .is_err(), "the dispatcher must not extend an unsupported escalation history");
 }
 
 #[test]

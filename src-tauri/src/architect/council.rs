@@ -1892,6 +1892,9 @@ fn s3_phase_one_preflight(team: &TeamSnapshot, config: &CouncilConfig, view: &Ro
 pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: Option<&str>) -> Result<usize> {
     let view = Rounds::of(team, config);
     let latest = view.latest;
+    if !flat_s2_history_has_triggers(team, config, &view) {
+        return Err("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into());
+    }
     // A corrupted M3 source roster cannot mint another native reviewer seat.
     // A valid but incomplete roster can still dispatch its missing reviewers.
     if matches!(config.mode(), "m3" | "m5" | "m6" | "m7")
@@ -2214,6 +2217,26 @@ fn s2_unforced_trigger(team: &TeamSnapshot, config: &CouncilConfig, round: usize
             || !unverified_required_skill_checks(team, round).is_empty())
 }
 
+/// A historical S2 wave may justify a successor only through the existing
+/// failure, evidence or artifact-change conditions. Do not use the last
+/// failing round to retroactively authorize an earlier clean wave's successor.
+fn s2_historical_trigger(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds, round: usize) -> bool {
+    !view.complete(round) || stale(team, round)
+        || in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+            && seat.score.is_some_and(|score| score < config.target))
+        || !criterion_blockers(team, config, round).is_empty()
+        || !unverified_required_skill_checks(team, round).is_empty()
+        || severe_findings(team, round)
+        || reported_conflicts(team, round)
+}
+
+fn flat_s2_history_has_triggers(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
+    config.strategy != CouncilExecutionStrategy::Escalated
+        || config.force_escalation
+        || !config.nested_bot_reviewers.is_empty()
+        || (1..view.latest).all(|round| s2_historical_trigger(team, config, view, round))
+}
+
 /// An S2 score, required-criterion or mandatory native skill-evidence failure
 /// is a deterministic escalation trigger. A later passing round must use distinct native worker identities:
 /// reusing a scored reviewer is not an independent on-demand review. This
@@ -2244,18 +2267,11 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     {
         return false;
     }
-    let last_trigger = (1..=view.latest).rev().find(|&round| {
-        // Missing or stale original proof is itself an escalation trigger.
-        // Otherwise a later high-score wave could conceal an incomplete first
-        // review and evade the cross-round worker/session independence gate.
-        !view.complete(round) || stale(team, round)
-            || in_round(team, round).any(|(worker, seat)| counts(worker, seat)
-            && seat.score.is_some_and(|score| score < config.target))
-            || !criterion_blockers(team, config, round).is_empty()
-            || !unverified_required_skill_checks(team, round).is_empty()
-            || severe_findings(team, round)
-            || reported_conflicts(team, round)
-    });
+    if !flat_s2_history_has_triggers(team, config, view) {
+        return false;
+    }
+    let last_trigger = (1..=view.latest).rev()
+        .find(|&round| s2_historical_trigger(team, config, view, round));
     // An unforced S2 follow-up needs an observed trigger in the immediately
     // preceding wave. A clean first wave cannot authorize an extra review
     // merely because an old or restored snapshot contains more high scores.
@@ -2556,6 +2572,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     let needed = required_reviewers(team, config, round);
     if round == 0 {
         return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
+    }
+    if !flat_s2_history_has_triggers(team, config, view) {
+        return Some(("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into(), false));
     }
     // Unlike legacy M1/M2, a composed root cannot finish at its round limit
     // with a forged/duplicate/missing seat. Limit is not a passing verdict.
@@ -3258,8 +3277,9 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if config.mode() == "m3"
-        && (1..=round).any(|r| m3_source_counts(team, config, r).is_none())
+    } else if (config.mode() == "m3"
+        && (1..=round).any(|r| m3_source_counts(team, config, r).is_none()))
+        || !flat_s2_history_has_triggers(team, config, view)
     {
         "fixing"
     } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && !severe_findings(team, round) && low.is_some_and(|low| low >= config.target)

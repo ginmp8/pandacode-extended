@@ -178,6 +178,15 @@ pub fn try_send(message: &Message) -> Sent {
 }
 
 fn deliver(slot: &mut Option<Link>, message: &Message) -> Sent {
+    // A successful pipe write does not prove the child is alive: another process may
+    // still hold a read descriptor. During deliberate exit, retire a confirmed dead
+    // guard without respawning it, using the same cleanup as the periodic check.
+    if EXITING.load(Ordering::SeqCst)
+        && slot.as_mut().is_some_and(|link| matches!(link.child.try_wait(), Ok(Some(_))))
+    {
+        respawn(slot);
+        return Sent::NoGuard;
+    }
     let sent = deliver_now(slot, message);
     // After `exit` a guard on Windows leaves at once (`guard::LEAVE_AT_EXIT`), and one on Unix
     // may be gone too (killed at logout): a later line (an agent's `unchild` during shutdown)
@@ -511,6 +520,32 @@ mod tests {
         EXITING.store(true, Ordering::SeqCst);
         let sent = deliver(&mut slot, &Message::Unchild(5));
         EXITING.store(false, Ordering::SeqCst);
+        assert_eq!(sent, Sent::NoGuard);
+        assert!(slot.is_none() && !NEEDS_RESPAWN.load(Ordering::SeqCst));
+        assert_eq!(RESPAWNS.load(Ordering::SeqCst), respawns, "no respawn after exit");
+    }
+
+    #[test]
+    fn a_line_after_exit_does_not_report_delivery_through_an_orphaned_pipe() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::process::ChildStdin;
+
+        let _serial = RESPAWN_STATE.lock().unwrap_or_else(|p| p.into_inner());
+        let _link = lock();
+        let mut child = Command::new("/bin/sh").args(["-c", "exit 0"]).stdin(Stdio::null()).spawn().unwrap();
+        child.wait().unwrap();
+        let mut fds = [0; 2];
+        // SAFETY: pipe initializes both descriptors; each is owned exactly once below.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (reader, write_end) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let writer = Writer::new(ChildStdin::from(write_end));
+        // A live read descriptor makes writes succeed even though the guard has exited.
+        let mut slot = Some(Link { writer, child });
+        let respawns = RESPAWNS.load(Ordering::SeqCst);
+        EXITING.store(true, Ordering::SeqCst);
+        let sent = deliver(&mut slot, &Message::Unchild(5));
+        EXITING.store(false, Ordering::SeqCst);
+        drop(reader);
         assert_eq!(sent, Sent::NoGuard);
         assert!(slot.is_none() && !NEEDS_RESPAWN.load(Ordering::SeqCst));
         assert_eq!(RESPAWNS.load(Ordering::SeqCst), respawns, "no respawn after exit");

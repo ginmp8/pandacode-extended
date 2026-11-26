@@ -720,9 +720,9 @@ let demandArchived = false;
             safe(ticketDetails.pendingDispatch.expectedRevision) + '</p>' +
             '<button type="button" data-sa-cancel-dispatch>Cancel pending dispatch</button></section>' : '') +
         (validWorkItems && !ticketDetails.pendingDispatch && ['queued','blocked'].includes(ticketDetails.ticket.state) && !ticketDetails.truncatedWorkItems &&
-          plannedWorkItems.some(item=>item.state==='planned' && !item.assignmentId)
+          plannedWorkItems.some(item=>item.state==='planned' && (!item.assignmentId || ticketDetails?.ticket.state==='blocked'))
           ? '<button type="button" data-sa-dispatch-reviewed-plan>Authorize sequential plan dispatch</button>' +
-            '<p>Read-only Workers only. Each result still requires human acceptance; the native host advances only the reviewed plan.</p>' : '') +
+            '<p>Read-only Workers only. A new explicit authorization may retry a blocked item; subsequent items advance only after human acceptance.</p>' : '') +
         (validWorkItems ? '<ol>' + (plannedWorkItems.map(item => '<li><strong>' +
           safe(item.summary) + '</strong> · ' + safe(item.state) +
           (item.state==='cancelled' ? ' · Cancelled ' + safe(activityTime(item.cancelledAt ?? undefined)) : '') +
@@ -3392,14 +3392,14 @@ let demandArchived = false;
       const detail=ticketDetails;
       if (!detail || detail.ticket.id!==inspectedTicket ||
           detail.ticket.orchestrationId!==selected || !['queued','blocked'].includes(detail.ticket.state) ||
-          detail.pendingDispatch || detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && !item.assignmentId)) return;
+          detail.pendingDispatch || detail.truncatedWorkItems || !detail.workItems?.some(item=>item.state==='planned' && (!item.assignmentId || detail.ticket.state==='blocked'))) return;
       const ticketId=detail.ticket.id, revision=detail.ticket.revision;
       if (!pendingDesktopPlan || pendingDesktopPlan.ticketId!==ticketId || pendingDesktopPlan.revision!==revision) {
         pendingDesktopPlan={ticketId,revision,key:crypto.randomUUID()};
       }
       const pending=pendingDesktopPlan;
       ask('Authorize sequential read-only dispatch of the reviewed WorkItem plan at revision '+revision+
-        '? Each result still requires human acceptance. No write grant or Council verdict is issued.',async()=>{
+        '? This explicitly authorizes retry of a blocked ready item, if selected by native policy. Each result still requires human acceptance. No write grant or Council verdict is issued.',async()=>{
         if (pendingDesktopPlan!==pending || ticketDetails!==detail ||
             inspectedTicket!==ticketId || selected!==detail.ticket.orchestrationId) {
           throw new Error('Demand changed before plan dispatch confirmation.');

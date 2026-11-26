@@ -17090,6 +17090,77 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_reauthorized_reviewed_plan_retries_rejected_item_and_continues() {
+        for desktop in [false, true] {
+            let mut store = fixture();
+            let initial = enabled(&store);
+            let disabled = change_enabled(&store, &initial.id, initial.policy_revision, false).unwrap();
+            let configured = roster::set_worker_attempt_limit(
+                &store, &disabled.id, disabled.policy_revision, 3,
+            ).unwrap();
+            let cfg = change_enabled(&store, &disabled.id, configured.policy_revision, true).unwrap();
+            let (ticket, launched) = admit_role_with_staging(
+                &mut store, &cfg.id, "Inspect two components", "resume-reviewed-plan",
+                false, false, true,
+            ).unwrap();
+            assert!(!launched);
+            let id = &ticket.id;
+            let root = work_items::plan(&store, id, ticket.revision,
+                "root", "Inspect root", None).unwrap();
+            let child = work_items::plan(&store, id, get_ticket(&store, id).unwrap().revision,
+                "child", "Inspect child", Some(&root.id)).unwrap();
+            let enqueue = |store: &Store, revision, key: &str| {
+                if desktop { headless_dispatch::enqueue_desktop_plan(store, id, revision, key) }
+                else { headless_dispatch::enqueue_plan(store, id, revision, key) }
+            };
+            let revision = get_ticket(&store, id).unwrap().revision;
+            let original = enqueue(&store, revision, "original-plan").unwrap();
+            retry_blocked_with_request(&mut store, id, revision, false, Some(&original)).unwrap();
+            let first = assignment_session(&store, id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &first, true, "Rejected root evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            let blocked = reject(&store, id, waiting.revision, "Insufficient evidence").unwrap();
+            assert_eq!(blocked.state, "blocked");
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none(),
+                "a rejected result must never implicitly schedule a retry");
+            assert!(enqueue(&store, blocked.revision, "original-plan").is_err());
+            assert!(enqueue(&store, blocked.revision - 1, "stale-retry").is_err());
+            let retry = enqueue(&store, blocked.revision, "explicit-plan-retry").unwrap();
+            assert_eq!(enqueue(&store, blocked.revision, "explicit-plan-retry").unwrap().id, retry.id);
+            let (_, _, _, packet) = retry_blocked_with_request(
+                &mut store, id, blocked.revision, false, Some(&retry),
+            ).unwrap();
+            assert!(packet.contains(root.id.as_str()));
+            let second = assignment_session(&store, id).unwrap().unwrap();
+            assert_ne!(first, second);
+            assert!(!on_run_finished(&store, &first, true, "Late rejected result").unwrap());
+            assert!(on_run_finished(&store, &second, true, "Accepted root evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            let ready = accept(&store, id, waiting.revision).unwrap();
+            let reopened = Store::open_read_only(&store.path).unwrap();
+            let continuation = headless_dispatch::next_pending(&reopened).unwrap().unwrap();
+            assert_eq!(continuation.expected_revision, ready.revision);
+            assert_ne!(continuation.id, retry.id);
+            assert_eq!(headless_dispatch::pending_for_host(&reopened, true).unwrap().len(),
+                if desktop { 1 } else { 0 });
+            drop(reopened);
+            let (_, _, _, packet) = retry_blocked_with_request(
+                &mut store, id, ready.revision, false, Some(&continuation),
+            ).unwrap();
+            assert!(packet.contains(child.id.as_str()));
+            assert!(packet.contains("Accepted root evidence"));
+            assert!(!packet.contains("Rejected root evidence"));
+            let session = assignment_session(&store, id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Child evidence").unwrap());
+            let waiting = get_ticket(&store, id).unwrap();
+            assert_eq!(accept(&store, id, waiting.revision).unwrap().state, "completed");
+            assert_eq!(assignments(&store, id, 10).unwrap().len(), 3);
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            assert!(!mandate(&store, id).unwrap().allowed_side_effects);
+        }
+    }
+
+    #[test]
     fn dependent_work_item_receives_bounded_accepted_attempt_evidence() {
         let mut store = fixture();
         let cfg = enabled(&store);

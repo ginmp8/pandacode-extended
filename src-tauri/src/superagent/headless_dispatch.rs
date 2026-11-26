@@ -258,6 +258,28 @@ fn plan_digest(db: &rusqlite::Connection, ticket_id: &str) -> Result<String> {
     Ok(format!("{:x}",Sha256::digest(bytes)))
 }
 
+// Preserve legacy first-attempt plan digests. An explicitly authorized retry
+// additionally pins the exact previous attempt; older intents cannot acquire
+// retry authority merely because the selected WorkItem has changed.
+fn attempt_plan_digest(plan: &str, previous: Option<&str>) -> String {
+    match previous {
+        Some(id) => format!("{:x}", Sha256::digest(format!("reviewed-plan-retry-v1:{plan}:{id}").as_bytes())),
+        None => plan.to_owned(),
+    }
+}
+
+fn previous_item_attempt(db: &rusqlite::Connection, ticket_id: &str, assignment_id: &str) -> Result<Option<String>> {
+    db.query_row(
+        "SELECT (SELECT prior.assignment_id FROM sa_work_item_attempts prior
+                 JOIN sa_assignments a ON a.id=prior.assignment_id AND a.ticket_id=prior.ticket_id
+                 WHERE prior.item_id=b.item_id AND prior.ticket_id=b.ticket_id
+                   AND prior.assignment_id<>b.assignment_id
+                 ORDER BY a.attempt DESC LIMIT 1)
+         FROM sa_work_item_attempts b WHERE b.assignment_id=?1 AND b.ticket_id=?2",
+        params![assignment_id,ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 fn binding(db: &rusqlite::Connection, request_id: &str) -> Result<Option<String>> {
     db.query_row("SELECT plan_sha256 FROM sa_headless_plan_dispatch WHERE request_id=?1",
         [request_id],|r|r.get(0)).optional().map_err(|e|e.to_string())
@@ -301,12 +323,12 @@ fn enqueue_mode(
             return Err("Dispatch request key is bound to another progression mode or operator surface.".into());
         }
     } else if plan {
-        if super::next_work_item(store,ticket_id)?
-            .is_none_or(|item|item.assignment_id.is_some())
-        {
-            return Err("Plan progression requires a blocked or queued Demand and a new ready WorkItem.".into());
+        let item=super::next_work_item(store,ticket_id)?
+            .ok_or("Plan progression requires a blocked or queued Demand and a ready WorkItem.")?;
+        if item.assignment_id.is_some() && request.kind!="retry" {
+            return Err("An attempted WorkItem requires a blocked Demand and explicit retry authorization.".into());
         }
-        let digest=plan_digest(&tx,ticket_id)?;
+        let digest=attempt_plan_digest(&plan_digest(&tx,ticket_id)?,item.assignment_id.as_deref());
         bind_plan(&tx,&request,&digest,None,now)?;
         if desktop { mark_desktop(&tx,&request.id)?; }
     }
@@ -379,17 +401,17 @@ fn enqueue_in_transaction(
 pub(super) fn advance_after_acceptance(
     store: &Store, tx: &Transaction<'_>, ticket_id: &str, accepted_revision: i64, now: i64,
 ) -> Result<()> {
-    let prior:Option<(String,String)>=tx.query_row(
-        "SELECT r.id,p.plan_sha256 FROM sa_headless_plan_dispatch p
+    let prior:Option<(String,String,String)>=tx.query_row(
+        "SELECT r.id,p.plan_sha256,b.assignment_id FROM sa_headless_plan_dispatch p
          JOIN sa_headless_dispatch_requests r ON r.id=p.request_id
          JOIN sa_work_item_attempts b ON b.assignment_id=r.assignment_id
          JOIN sa_work_item_acceptances v ON v.assignment_id=b.assignment_id AND v.item_id=b.item_id
          WHERE r.ticket_id=?1 AND b.ticket_id=r.ticket_id AND r.state='admitted'
            AND v.accepted_revision=?2
            AND NOT EXISTS(SELECT 1 FROM sa_headless_plan_dispatch n WHERE n.previous_request_id=r.id)",
-        params![ticket_id,accepted_revision],|r|Ok((r.get(0)?,r.get(1)?)),
+        params![ticket_id,accepted_revision],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(|e|e.to_string())?;
-    let Some((previous,digest))=prior else {return Ok(());};
+    let Some((previous,digest,assignment_id))=prior else {return Ok(());};
     let ticket=get_ticket(store,ticket_id)?;
     if !matches!(ticket.state.as_str(),"queued"|"blocked")
         || ticket.revision!=accepted_revision.saturating_add(1) {
@@ -404,7 +426,9 @@ pub(super) fn advance_after_acceptance(
     ).map_err(|e|e.to_string())?;
     let ready=super::next_work_item(store,ticket_id)
         .is_ok_and(|item|item.is_some_and(|w|w.assignment_id.is_none()));
-    if occupied || !ready || plan_digest(tx,ticket_id)?!=digest {
+    let current_plan=plan_digest(tx,ticket_id)?;
+    let previous_attempt=previous_item_attempt(tx,ticket_id,&assignment_id)?;
+    if occupied || !ready || attempt_plan_digest(&current_plan,previous_attempt.as_deref())!=digest {
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
              VALUES(?1,'headless_plan_progression_paused','Plan changed, queue occupied or next item not new; explicit dispatch required',?2)",
@@ -414,7 +438,9 @@ pub(super) fn advance_after_acceptance(
     }
     let key=format!("plan-next.{}",storage::id());
     let request=enqueue_in_transaction(store,tx,ticket_id,ticket.revision,&key,now)?;
-    bind_plan(tx,&request,&digest,Some(&previous),now)?;
+    // Only the explicitly requested retry may repeat an item. Every automatic
+    // continuation is bound to a new item and the original plain plan digest.
+    bind_plan(tx,&request,&current_plan,Some(&previous),now)?;
     if desktop_authorized(tx,&previous)? { mark_desktop(tx,&request.id)?; }
     Ok(())
 }
@@ -559,15 +585,11 @@ pub(super) fn consume(
         return Err("Headless dispatch request is stale, expired or bound to a different Demand.".into());
     }
     if let Some(digest)=binding(tx,&request.id)? {
-        let first_attempt: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sa_work_item_attempts b
-             WHERE b.assignment_id=?1 AND b.ticket_id=?2
-             AND NOT EXISTS(SELECT 1 FROM sa_work_item_attempts prior
-                 WHERE prior.item_id=b.item_id AND prior.assignment_id<>b.assignment_id))",
-            params![assignment_id,ticket.id],|r|r.get(0),
-        ).map_err(|e|e.to_string())?;
-        if !first_attempt || plan_digest(tx,&ticket.id)?!=digest {
-            return Err("Reviewed WorkItem plan changed or item already attempted; progression authorization is stale.".into());
+        let previous=previous_item_attempt(tx,&ticket.id,assignment_id)?;
+        if (previous.is_some() && expected_kind!="retry")
+            || attempt_plan_digest(&plan_digest(tx,&ticket.id)?,previous.as_deref())!=digest
+        {
+            return Err("Reviewed WorkItem plan or prior attempt changed; progression authorization is stale.".into());
         }
     }
     let changed = tx.execute(

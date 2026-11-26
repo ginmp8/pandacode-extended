@@ -27,7 +27,7 @@ export interface AgentUpdatesHost {
   providers(): Provider[];
   report(error: unknown): void;
 }
-export interface AgentUpdatesController { show(): Promise<void>; dispose(): void; }
+export interface AgentUpdatesController { show(): Promise<void>; providersChanged(): void; dispose(): void; }
 
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 const DISMISS_KEY = 'pandacode.agent-updates.dismissed';
@@ -93,7 +93,9 @@ export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesCont
       showPopover(popup, popup);
     } else {
       for (const entry of candidates()) popupIds.add(entry.provider);
-      renderRows(popup.querySelector('ul')!, visibleEntries().filter(entry => popupIds.has(entry.provider)));
+      const visible = visibleEntries().filter(entry => popupIds.has(entry.provider));
+      if (!visible.length) { hidePopup(); return; }
+      renderRows(popup.querySelector('ul')!, visible);
     }
   }
 
@@ -231,7 +233,7 @@ export function initializeAgentUpdates(host: AgentUpdatesHost): AgentUpdatesCont
     if (!backgroundEnabled) { allowPopup = false; hidePopup(); }
     schedule();
   }).then(off => { if (disposed) off(); else flagsUnlisten = off; }).catch(() => undefined);
-  return { show, dispose() {
+  return { show, providersChanged: render, dispose() {
     disposed = true; clearTimeout(timer); unlisten?.(); flagsUnlisten?.(); overlayObserver.disconnect();
     document.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', backgroundCheck);
     hidePopup(); dialogBody?.removeEventListener('click', onClick); dialogBody = undefined;

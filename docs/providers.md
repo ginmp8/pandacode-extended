@@ -668,21 +668,32 @@ labels and supported controls; image, HTTP MCP, resume, and planning support are
 checked explicitly. No private API, unofficial adapter, or browser-cookie
 authentication is used. Antigravity's own policy applies, with ACP approval
 requests shown in Standard; Auto edits approves explicit edit requests and Full
-access approves offered one-time permissions. Structured questions are not
-auto-selected. Modes not advertised by the server are not invented: when the
-server advertises no Plan counterpart, a Plan task still runs in the server's
-current mode, with PandaCode prefixing the read-only brief, declining
-state-changing permission requests and naming that mode in the status line;
-Accept edits and Full access fall back the same way with the same note. A
-fallback is refused when the server's current mode looks more permissive than
-the chosen one (an edit or bypass mode for Plan or Standard, a bypass mode for
-Accept edits).
+access runs the `agy` CLI in its Auto mode (passing `--dangerously-skip-permissions`)
+and approves offered one-time permissions. When resuming a session fails because
+the server no longer has it, PandaCode retries with `session/load` (when
+advertised), then starts a fresh session and notes that in the task's status.
+Structured questions are not
+auto-selected. Modes not advertised by the server are not invented. A task
+whose approval mode the server does not advertise does not start: agy 1.5.7+
+opens new sessions in Auto, so running it in agy's own default mode would
+approve more than the task allows. The task reports that and what to do: run
+`agy update` in a terminal outside PandaCode (or use its official installer), or
+select the agy CLI instead of the standalone ACP server, which is older and
+advertises no mode. On the other ACP harnesses, when the server advertises no Plan counterpart, a Plan task
+still runs in the server's current mode, with PandaCode prefixing the read-only
+brief, declining state-changing permission requests and naming that mode in the
+status line; Accept edits and Full access fall back the same way with the same
+note. A fallback is refused when the server's current mode looks more
+permissive than the chosen one (an edit or bypass mode for Plan or Standard, a
+bypass mode for Accept edits).
 
 **Connection check.** In Settings, expand Antigravity's installation details and
 choose **Check connection**. This separately verifies ACP initialization and an
 empty session, reports a required sign-in or failed startup, and allows retry. It
 does not send a prompt, sign in automatically, or verify model quota. A detected
-executable alone is never presented as a verified connection.
+executable alone is never presented as a verified connection. Like the model
+list, the check runs on the default account; a named connection is checked by a
+task that uses it.
 
 ACP model discovery allows up to 60 seconds for cold startup. Successful metadata
 is cached for five minutes by executable identity and shared with slash-command
@@ -1009,21 +1020,48 @@ process is trusted like any local CLI. Each run spawns one `zcode app-server` an
 speaks `session/create` → `session/subscribe` → `session/send`, mirroring how the
 ZCode desktop app drives the same binary.
 
+**Launch.** When running the desktop app's bundled CLI (`…/glm/zcode.cjs`),
+PandaCode launches it on the app's own Electron binary (`ELECTRON_RUN_AS_NODE=1`).
+Since ZCode 3.18.2 moved `zcode-builtin.json` out of the CLI's default lookup
+paths (`provider/` beside the script, or five directories up), PandaCode checks
+those paths first and, when neither exists, locates the app's `zcode-builtin.json`
+(first `<resources>/config/provider/`, then a bounded search three directory
+levels below `<resources>` that visits at most 512 directories per level in sorted
+order, skips `node_modules` and does not follow symlinks)
+and passes it as `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. A non-empty value already
+present in the inherited environment or in Settings → ZCode → environment wins.
+
 **Sign-in.** ZCode owns its authentication; sign in once with `zcode` in a terminal.
 PandaCode never handles credentials. If the account is not signed in, the turn stops
 with “ZCode requires sign-in. Run `zcode` in a terminal and sign in, then send again.”
 
 **Models and effort.** Model discovery opens a throwaway session and reads the
 catalog from the `session/create` snapshot (`settings.model.available`), never
-sending a prompt. Each entry keeps its label as the invocation id, with the
-provider label, context window and per-model reasoning levels as advertised; the
-`default` choice delegates to whatever the CLI has configured. Selected model and
-thinking level are applied with `session/setModel` / `session/setThoughtLevel` and
-verified against the returned snapshot — a model the server refuses fails the turn
-instead of silently running in a different one.
+sending a prompt. Positive catalogs are cached for five minutes and cleared by
+Refresh. Discovery drains stderr from spawn and reports cleaned causes on early
+exit or timeout (ANSI stripped, credential-looking lines omitted, and values of
+8+ characters from Settings → ZCode → environment redacted, or 4+ for secret-like
+variable names), with a dedicated
+message when `zcode-builtin.json` / `Built-in Provider Config` is missing. Up to
+50 stray non-JSON stdout lines are skipped; a pre-JSON early exit (other than
+that missing-config cause) retries once within one shared 20 s deadline. A unique
+entry label stays the model id, while labels that repeat across providers get the
+id `providerId/modelId` and the name `label (provider label)`; a saved bare label
+resolves to the entry the session already uses when it carries that label, else
+the first match. The `default` choice delegates to whatever the CLI has
+configured, and a configured thinking level is sent with `default` only when the
+session's current model lists it (or is absent from the catalog). Selected model and thinking level are applied
+with `session/setModel` / `session/setThoughtLevel` and verified against the
+returned snapshot — a model the server refuses fails the turn instead of silently
+running in a different one.
 
 **Approvals.** See [approvals](approvals.md): Plan → `plan`, Standard → `build`,
-Accept edits → `edit`, Full access → `yolo`. Permission requests arrive as
+Accept edits → `edit`, Full access → `yolo`. On CLI 3.18.2 `"plan"` is no longer
+a session mode value (its execution state is `build`, `edit`, `yolo`, `guarded`,
+or `auto` plus a plan flag the snapshot does not expose), so an error-free
+`session/setMode` reply reporting `build` for a `plan` request counts as applied;
+any other mismatch still fails the run. A resumed Standard session re-applies
+`build` to clear that hidden plan flag. Permission requests arrive as
 `interaction/requestPermission` reverse requests with ready-made response objects;
 PandaCode answers with the offered `allow`/`deny` response, never inventing a
 standing grant. In Full access, a request that offers a one-time allow is answered
@@ -1035,8 +1073,18 @@ across turns.
 
 **Turn data.** Streaming text and reasoning deltas (`model.streaming`), tool calls
 (`tool.updated`), per-turn token usage (`turn.completed`) and titles all come from
-the `session/event` stream; a busy session queues a second message server-side, so
-steering holds for the next turn.
+the `session/event` stream; the event type is read from `params.type` (with
+`payload.type` as fallback for older builds). On 3.18.2 `tool.updated`/`scheduled`
+omits tool arguments, so tool rows take their input from `model.streaming` with
+kind `tool_call`. In `turn.completed`, `usage.inputTokens` already includes
+`cacheReadTokens`, so context used is `inputTokens`. A busy session queues a
+second message server-side, so steering holds for the next turn.
+
+**Subagents and checkpoints.** `subagent.lifecycle` (spawned/stopped) is shown
+in the existing subagent panel via the Agent-tool observer. `checkpoint.created`
+is a status line with the checkpoint id. Compaction is the discovered `/compact`
+command (see slash-command discovery). Extra folders (`additionalDirectories` on
+create) wait on a task having extra roots to pass; this checkout has none yet.
 
 **Not yet.** Screenshots are refused (the composer offers documents and folders
 with a note); interactive questions (`interaction/requestUserInput`) decline with a
@@ -1097,6 +1145,16 @@ a fresh deferred session may answer session-not-found there until its first
 send. Coding Plan quota itself is the desktop app's account state and is not
 exposed on this protocol. Event names during a real turn were not re-recorded
 (no prompt was sent), so streaming frames stay pinned to the 3.16.3 recordings.
+
+Re-verified on 2026-11-21 against the CLI bundled with ZCode.app 3.18.2 by driving
+`zcode app-server` directly (create, `setMode`, `setModel` on two providers that
+share a label, `setThoughtLevel`, subscribe, one short turn with a shell tool
+call, `session/resume` on a fresh process, `mcp/list` connect with an unreachable
+server) and through PandaCode's ignored live tests (`installed_zcode_lists_models`,
+`installed_zcode_snapshot_capabilities`, `installed_zcode_connects_the_native_bridge`).
+No `interaction/requestPermission` frame was observed on 3.18.2 (the plain `echo`
+command ran in `build` mode without asking), so the approval round-trip stays
+pinned to the 3.16.3 recordings.
 
 ## Hermes Agent
 
@@ -1433,7 +1491,14 @@ The key lives in the secure store (`alibaba-token-plan`) or comes from
 `ALIBABA_TOKEN_PLAN_API_KEY`, which is scrubbed from the child with the other relay keys.
 Isolation is MiMo's: `--setting-sources ""`, the endpoint and model slots in `--settings`.
 Every Claude Code slot must name a plan model or requests fail, so main and Opus are
-`qwen3.8-max` and Sonnet and Haiku `qwen3.8-flash` (the documented mapping). The picker
-lists the text models from the Personal Edition overview's "Supported models"
-(Qwen 3.6–4 preview, `auto`, DeepSeek V4, GLM 5.2/5.3), read on 2026-11-12;
-`qwen4-max-preview` retires after November 25, 2026. Cloud machines do not run it yet.
+`qwen3.8-max` and Sonnet and Haiku `qwen3.8-flash` (the documented mapping).
+
+The model picker and team editor list stable `qwen4-max` and the October 17 snapshot
+`deepseek-v4.1-flash-1017` as distinct choices, alongside `qwen4-max-preview` and
+`deepseek-v4.1-flash`. Qwen4-Max offers Low, High (default), and Extra high reasoning effort.
+See the [Personal Edition supported models](https://www.alibabacloud.com/help/en/model-studio/token-plan-personal-overview#supported-models)
+and [Anthropic-compatible API reference](https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages).
+
+Existing tasks and teams keep their saved `qwen4-max-preview` ID. Alibaba retires it after
+November 25, 2026 (UTC+8). Select `qwen4-max` to continue using Qwen4-Max after retirement.
+Cloud machines do not run Alibaba Token Plan yet.

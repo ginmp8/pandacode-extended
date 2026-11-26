@@ -817,7 +817,7 @@ fn ledger_totals(ledger: &Value, now_hour: i64, hours: i64) -> Value {
 /// (no main window, as on a headless host).
 async fn ledger_summary(app: &tauri::AppHandle, refresh: bool) -> Value {
     let Some(window) = app.get_webview_window("main") else { return Value::Null };
-    let Ok(ledger) = crate::usage_ledger::usage_ledger(app.clone(), window, Some(refresh)).await else { return Value::Null };
+    let Ok(ledger) = crate::usage_ledger::usage_ledger(app.clone(), window.as_ref().clone(), Some(refresh)).await else { return Value::Null };
     let Ok(ledger) = serde_json::to_value(ledger) else { return Value::Null };
     let now_hour = crate::storage::now().div_euclid(3_600_000);
     json!({ "scannedAt": ledger["scannedAt"], "day": ledger_totals(&ledger, now_hour, DAY_HOURS), "week": ledger_totals(&ledger, now_hour, WEEK_HOURS) })
@@ -826,7 +826,7 @@ async fn ledger_summary(app: &tauri::AppHandle, refresh: bool) -> Value {
 impl Run for UsageGet {
     fn run<'a>(self: Box<Self>, ctx: Ctx<'a>) -> Reply<'a> {
         Box::pin(async move {
-            let providers: Vec<Value> = crate::local_providers(false).await.into_iter().filter(|p| p.installed).map(|p| json!({ "id": p.id, "name": p.name })).collect();
+            let providers: Vec<Value> = crate::installed_providers().await.into_iter().filter(|p| p.installed).map(|p| json!({ "id": p.id, "name": p.name })).collect();
             let ledger = ledger_summary(ctx.app, self.refresh).await;
             let task = match self.session_id {
                 None => Value::Null,

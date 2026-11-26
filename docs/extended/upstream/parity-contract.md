@@ -1,5 +1,12 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## 2026-11-25 — source 0.3.150 reconciliation candidate
+
+Frozen [fork HEAD](https://github.com/ginmp8/pandacode/commit/c814e86607b880ea276927d25f67bb45a46560ed) (tree `83102fa8a7f5b78b3fb8c32bced407bacf487800`, app 0.3.150) and [Extended parent](https://github.com/ginmp8/pandacode-extended/commit/6afc8baf3efbc0dd376376ee079cbf3cbda9de76). The pre-documentation candidate contains 2,162 upstream paths and 58 Extended-only paths, 2,078 identical shared paths, 84 divergent shared paths, zero missing source paths and zero mode/type mismatches. Since the prior pinned source, 434 upstream paths changed (403 exact, 31 adapted). All 195 original version-note blobs and the release-dates blob match the fork. The source-baseline metadata now pins those exact identities. Inherited changes include browser follow-up queues, web/headless access and release signature/preflight checks; no new Extended-exclusive feature is claimed.
+
+Parent-only CI: [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43624496349) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43624501937), 11/11 jobs each on `6afc8baf3efbc0dd376376ee079cbf3cbda9de76`. Candidate CI, local tests and native Settings On/Off acceptance have not run; all customized paths require contextual review. [PR #119](https://github.com/ginmp8/pandacode-extended/pull/119) remains draft. Extended 0.12.0 remains DRAFT, not approved for distribution.
+
+
 ## 2026-11-14 — frozen full-tree reconciliation of upstream 0.3.126
 
 The source is [`ginmp8/pandacode:main` at `6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349), based on four new commits beyond the prior pinned `da1ecb5fc452`. The Extended baseline is [`base/development` at `7206c0592f65`](https://github.com/ginmp8/pandacode-extended/commit/7206c0592f652af3aea01848ea85c44906f0264d). All three recursive Git trees (old source, new source, Extended baseline) were complete and nontruncated. Fifty source changes have identical blob/mode in the candidate, including 11 additions and both PNG assets. Nine files overlap existing Extended code: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/src/architect.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/providers.rs`, `src-tauri/src/providers/mcp_host.rs`, and `src/main.ts`. All source delta hunks matched uniquely in their original context and were applied to the Extended content without replacing unrelated customizations.

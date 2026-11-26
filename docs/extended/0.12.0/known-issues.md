@@ -1,5 +1,12 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-25 — source 0.3.150 reconciliation candidate
+
+The full source tree is represented (2,162 paths, none missing; 84 shared divergences). The source baseline has been refreshed to the exact 0.3.150 commit and original release-note hashes. Local checkout failed DNS resolution; candidate tests have not run. Semantic review of customized paths, build/lockfile consistency, native Settings On/Off and external integration acceptance remain open. Parent CI was green but cannot validate this candidate.
+
+Extended 0.12.0 remains DRAFT. See [candidate inventory](README.md) and [source parity contract](../upstream/parity-contract.md).
+
+
 ## 2026-11-14 — exact-SHA CI uncertainty resolved; native acceptance remains open
 
 The upstream [source commit](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) (tree `23478e308beefa66091d1d2fbceebabc913e4de3`) declares application version `0.3.126`; the corresponding [Extended code commit](https://github.com/ginmp8/pandacode-extended/commit/8dca72763c5a3a798d9d9b84bd7a0641df7f8682) is the verified integration checkpoint. At that exact Extended SHA, [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607984368) and [pull-request CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607990721) both completed successfully (**11/11 jobs each; 22/22 total**). Successful checks include Rust tests/Clippy, TypeScript and unit tests, `npm run test:release`, website build, Expo/mobile, dependency audits, RustSec and ONNX parity. The full source/destination Git trees were independently retrieved without truncation: **2,062 upstream paths, 2,120 Extended paths, 1,981 identical shared paths, 81 customized shared paths, 58 Extended-only paths, zero missing upstream paths and zero type/mode mismatches**. This is a source-coverage and CI receipt, **not** evidence of end-to-end equivalence of the 81 customizations or native Settings On/Off, Connect, MCP, bots, cloud, VM and credential flows. The planned Extended **0.12.0 remains DRAFT**; no release or distribution was authorized.

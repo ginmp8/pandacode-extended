@@ -32,6 +32,7 @@ mod conversation_fork;
 mod conversation_import;
 mod design;
 mod progress;
+mod feature_controls;
 mod file_preview;
 mod run_script;
 mod github;
@@ -44,7 +45,6 @@ mod secret_store;
 mod voice;
 mod cloud;
 mod cloud_agents;
-mod feature_controls;
 mod capabilities;
 mod vsix_themes;
 mod token_saver;
@@ -93,6 +93,7 @@ use run_requests::{lock_agents, record_request_event, run_end, settle_account_sw
 mod jj;
 mod tray;
 mod headless;
+mod web_server;
 mod quit_guard;
 mod headless_bots;
 
@@ -117,6 +118,32 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 type Result<T> = std::result::Result<T, String>;
+
+/// Whether a command's caller is the workspace webview.
+///
+/// Commands that act on the workspace take the calling `tauri::Webview`, not a
+/// `WebviewWindow`: the in-app browser is a child webview of the main window, and
+/// Tauri refuses to resolve a `WebviewWindow` for a window that holds one (its
+/// `is_webview_window` wants every webview in the window to share its label). A
+/// command that asked for the window would fail with "current webview is not a
+/// WebviewWindow" for as long as the browser panel stays open.
+pub(crate) fn is_main_webview(label: &str) -> bool {
+    label == "main"
+}
+
+#[cfg(test)]
+mod main_webview_tests {
+    use super::*;
+
+    #[test]
+    fn the_in_app_browser_is_not_the_workspace_webview() {
+        assert!(is_main_webview("main"));
+        assert!(!is_main_webview("browser-guest"));
+        assert!(!is_main_webview("tray"));
+        assert!(!is_main_webview("launcher"));
+    }
+}
+
 struct RunningAgent {
     input: UnboundedSender<RunInput>,
     stopped: Arc<AtomicBool>,
@@ -381,6 +408,91 @@ fn reconcile_inactive_task(
         task.completed_at = None;
     }
     task
+}
+
+#[cfg(test)]
+mod read_scan_tests {
+    use super::*;
+
+    /// `prompt_activity` and the task search read on their own read-only connection: the shared
+    /// store lock is free while the query runs, and the answers match the store's own.
+    #[test]
+    fn long_scans_run_on_a_read_only_connection_with_the_store_lock_free() {
+        let dir = std::env::temp_dir().join(format!("pandacode-read-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("pandacode.db")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.db.execute("UPDATE sessions SET draft=0 WHERE id=?1", [&task.id]).unwrap();
+        store.message(&task.id, "user", "Find the needle in the haystack.").unwrap();
+        let since = storage::now() - 86_400_000;
+        let expected_activity = store.prompt_activity(since).unwrap();
+        let expected_search = store.search_tasks(&project.id, "needle", 20).unwrap();
+        assert_eq!(expected_activity.len(), 1);
+        assert_eq!(expected_search.len(), 1);
+        let shared = Arc::new(Mutex::new(store));
+
+        let probe = shared.clone();
+        let activity = tauri::async_runtime::block_on(read_scan(shared.clone(), move |reader| {
+            assert!(probe.try_lock().is_ok(), "the store lock is free while the scan runs");
+            assert!(reader.db.is_readonly(rusqlite::MAIN_DB).unwrap(), "a read-only connection");
+            reader.prompt_activity(since)
+        }))
+        .unwrap();
+        assert_eq!(activity, expected_activity);
+
+        let probe = shared.clone();
+        let project_id = project.id.clone();
+        let found = tauri::async_runtime::block_on(read_scan(shared.clone(), move |reader| {
+            assert!(probe.try_lock().is_ok(), "the store lock is free while the search runs");
+            reader.search_tasks(&project_id, "needle", 20)
+        }))
+        .unwrap();
+        assert_eq!(found, expected_search);
+
+        // A writer holding the store lock does not stop a scan that already has its path.
+        let held = shared.lock().unwrap();
+        let path = held.path.clone();
+        let reader = Store::open_read_only(&path).unwrap();
+        assert_eq!(reader.prompt_activity(since).unwrap(), expected_activity);
+        drop(held);
+        drop(reader);
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app store's path is kept at startup: a scan runs while a writer holds the store lock.
+    #[test]
+    fn the_app_store_scans_while_a_writer_holds_its_lock() {
+        let dir = std::env::temp_dir().join(format!("pandacode-read-scan-held-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("pandacode.db")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.message(&task.id, "user", "Count me.").unwrap();
+        let since = storage::now() - 86_400_000;
+        let expected = store.prompt_activity(since).unwrap();
+        let path = store.path.clone();
+        let shared = Arc::new(Mutex::new(store));
+        // Stands in for the app store, which lives for the whole process: its address is never reused.
+        std::mem::forget(shared.clone());
+        assert!(remember_db_path(&shared, path), "only this test keeps a path");
+
+        let held = shared.lock().unwrap();
+        let (done, answer) = std::sync::mpsc::channel();
+        let scanning = shared.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(tauri::async_runtime::block_on(read_scan(scanning, move |reader| reader.prompt_activity(since))));
+        });
+        let activity = answer.recv_timeout(std::time::Duration::from_secs(30)).expect("the scan waited for the store lock");
+        drop(held);
+        assert_eq!(activity.unwrap(), expected);
+
+        // Any other store still finds its own path, under its lock.
+        let other = Arc::new(Mutex::new(Store::open(std::path::Path::new(":memory:")).unwrap()));
+        assert_eq!(db_path(&other).unwrap(), PathBuf::from(":memory:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -743,6 +855,42 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| e.to_string())?
 }
 
+/// The app's task database path, kept at startup beside its one shared store (`remember_db_path`)
+/// so a read-only scan never waits on the store lock (held by a long write) just to learn it.
+/// Keyed by that store's `Arc` address: the app store lives for the whole process, so the
+/// address is never reused, and any other store (tests, a second `AppState`) is not mistaken
+/// for it.
+static DB_PATH: std::sync::OnceLock<(usize, PathBuf)> = std::sync::OnceLock::new();
+
+/// Remembers `path` as `store`'s database. Once per process; a later call changes nothing.
+fn remember_db_path(store: &Arc<Mutex<Store>>, path: PathBuf) -> bool {
+    DB_PATH.set((Arc::as_ptr(store) as usize, path)).is_ok()
+}
+
+/// `store`'s database path: the one kept at startup for the app store, read without its lock;
+/// any other store's copied under its lock.
+fn db_path(store: &Arc<Mutex<Store>>) -> Result<PathBuf> {
+    match DB_PATH.get() {
+        Some((owner, path)) if *owner == Arc::as_ptr(store) as usize => Ok(path.clone()),
+        _ => Ok(store.lock().map_err(|e| e.to_string())?.path.clone()),
+    }
+}
+
+/// Runs a long read (a scan of the messages table) on its own read-only connection to the task
+/// database, never under the shared store lock: the app store's path is known without it.
+/// Call it on the blocking pool (`read_scan`).
+fn scan_read_only<T>(store: &Arc<Mutex<Store>>, scan: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+    scan(&Store::open_read_only(&db_path(store)?)?)
+}
+
+/// `scan_read_only` on the blocking pool.
+async fn read_scan<T: Send + 'static>(
+    store: Arc<Mutex<Store>>,
+    scan: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    blocking(move || scan_read_only(&store, scan)).await
+}
+
 #[tauri::command(rename = "delete_session")]
 async fn delete_session_with_attachment_cleanup(
     app: tauri::AppHandle,
@@ -750,6 +898,9 @@ async fn delete_session_with_attachment_cleanup(
     session_id: String,
 ) -> Result<task_deletion::DeletedSessions> {
     let deleted = task_deletion::delete_session(app.clone(), window, session_id).await?;
+    for sid in &deleted.deleted_session_ids {
+        cloud::colab::activity::forget_session(sid);
+    }
     match app.path().app_data_dir() {
         Ok(data_dir) => {
             let sessions = deleted.deleted_session_ids.clone();
@@ -772,9 +923,11 @@ async fn delete_session_with_attachment_cleanup(
     Ok(deleted)
 }
 
+/// Store lock alone, on the blocking pool.
 #[tauri::command]
 async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>> {
-    state.store.lock().map_err(|e| e.to_string())?.projects()
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.projects()).await
 }
 #[tauri::command]
 async fn add_project(state: State<'_, AppState>, path: String) -> Result<Project> {
@@ -799,9 +952,20 @@ async fn remove_project(state: State<'_, AppState>, project_id: String) -> Resul
     if active_team {
         return Err("Stop this project's architect teams first.".into());
     }
+    // Read before the project (and its threads) go, so their Colab runtime claims can be freed.
+    let session_ids = project_session_ids(&store, &project_id)?;
     let removed = store.remove_project(&project_id);
+    drop(store);
+    if removed.is_ok() {
+        cloud::colab::activity::forget_sessions(&session_ids);
+    }
     skill_manager::projects_changed();
     removed
+}
+fn project_session_ids(store: &storage::Store, project_id: &str) -> Result<Vec<String>> {
+    let mut stmt = store.db.prepare("SELECT id FROM sessions WHERE project_id=?1").map_err(|e| e.to_string())?;
+    let ids = stmt.query_map([project_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+    ids.collect::<rusqlite::Result<Vec<String>>>().map_err(|e| e.to_string())
 }
 #[tauri::command]
 async fn relink_project(state: State<'_, AppState>, project_id: String, path: String) -> Result<Project> {
@@ -830,14 +994,17 @@ async fn relink_project(state: State<'_, AppState>, project_id: String, path: St
     }
     Ok(project)
 }
+/// Agents then store (`listed_sessions`), on the blocking pool.
 #[tauri::command]
-async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>> {
-    listed_sessions(&state)
+async fn list_sessions(app: tauri::AppHandle) -> Result<Vec<Session>> {
+    blocking(move || listed_sessions(&app.state::<AppState>())).await
 }
 /// The ids among `ids` with no task row at all (launch restore drops their saved drafts).
+/// Store lock alone, on the blocking pool.
 #[tauri::command]
 async fn sessions_missing(state: State<'_, AppState>, ids: Vec<String>) -> Result<Vec<String>> {
-    state.store.lock().map_err(|e| e.to_string())?.missing_sessions(&ids)
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.missing_sessions(&ids)).await
 }
 /// Tasks as the sidebar shows them, with stale running states settled.
 pub(crate) fn listed_sessions(state: &AppState) -> Result<Vec<Session>> {
@@ -861,9 +1028,18 @@ async fn clear_usage_limit(app: tauri::AppHandle, state: State<'_, AppState>, se
     Ok(())
 }
 #[tauri::command]
+fn set_queue_hold(app: tauri::AppHandle, session_id: String, held: bool) {
+    message_queue::set_queue_held(&session_id, held);
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id, "held": held }));
+    if !held {
+        crate::headless::queue_changed(&app, &session_id);
+    }
+}
+/// Scans a year of messages: on its own read-only connection (`read_scan`), without the store lock.
+#[tauri::command]
 async fn prompt_activity(state: State<'_, AppState>) -> Result<Vec<(i64, String, u64)>> {
     let since = storage::now() - 366 * 86_400_000;
-    state.store.lock().map_err(|e| e.to_string())?.prompt_activity(since)
+    read_scan(state.store.clone(), move |store| store.prompt_activity(since)).await
 }
 #[tauri::command]
 async fn pin_session(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, pinned: bool) -> Result<Session> {
@@ -883,15 +1059,16 @@ async fn reorder_sessions(app: tauri::AppHandle, state: State<'_, AppState>, ses
     let _ = app.emit("sessions-changed", ());
     Ok(tasks)
 }
+/// Agents then store (the existing order), on the blocking pool.
 #[tauri::command]
-async fn get_task(state: State<'_, AppState>, session_id: String) -> Result<Session> {
-    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    Ok(reconcile_inactive_task(
-        &store,
-        &agents,
-        store.session(&session_id)?,
-    ))
+async fn get_task(app: tauri::AppHandle, session_id: String) -> Result<Session> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        Ok(reconcile_inactive_task(&store, &agents, store.session(&session_id)?))
+    })
+    .await
 }
 #[tauri::command]
 async fn configure_window_appearance(
@@ -1106,11 +1283,9 @@ async fn get_messages(
     session_id: String,
     before_id: Option<i64>,
 ) -> Result<MessagePage> {
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .message_page(&session_id, before_id)
+    // Store lock alone, on the blocking pool.
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.message_page(&session_id, before_id)).await
 }
 
 #[tauri::command]
@@ -1927,6 +2102,7 @@ fn prepare_task_run_in_project(
         skill,
         goal: admission.goal,
         codex_settings: session.codex_settings,
+        no_fresh_resume_fallback: false,
     };
     // Read before `mark_started`, and restored like it, so a failure leaves no started mark.
     let team_worker = worker_launch(&store, admission.team.as_ref(), &session_id).map_err(restore)?;
@@ -1989,6 +2165,7 @@ fn prepare_cloud_attach(
         skill: None,
         goal: None,
         codex_settings: session.codex_settings,
+        no_fresh_resume_fallback: false,
     };
     let mut agent = RunningAgent::new(tx, stopped);
     // A re-attached run has no team admission: whether it is a worker's comes from the store.
@@ -2547,6 +2724,8 @@ async fn launch_operation_admitted(
         let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
         let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
         let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
+        // A cloud agent already runs on its machine; Colab tools are for local agents.
+        let host = if cloud { host } else { cloud::colab_tools::with_colab(host, app.clone(), session_id.clone(), stopped.clone()) };
         let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
         let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
         // A cloud agent's checkout is on its machine, where screenshots cannot be read.
@@ -2941,10 +3120,42 @@ async fn list_providers(app: tauri::AppHandle, force: Option<bool>, device_id: O
     if let Some(remote) = remote::catalog::providers(&app, device_id, force).await? {
         return Ok(remote);
     }
-    serde_json::to_value(local_providers(force).await).map_err(|e| e.to_string())
+    serde_json::to_value(listed_providers(force).await).map_err(|e| e.to_string())
 }
-/// This computer's harnesses; `force` drops the cached ACP catalogs first.
+/// This computer's harnesses for the app, from path lookups only: each version is the
+/// remembered one, else "". Versions unknown or due for a check are probed in the background and
+/// arrive as the `provider-versions` event, `{ versions: { [providerId]: string }, done: bool }`
+/// ('' for a failed or timed-out probe; `done` once no round is pending), announced by
+/// `announce_provider_versions`.
+async fn listed_providers(force: bool) -> Vec<providers::ProviderInfo> {
+    forget_provider_details(force);
+    tauri::async_runtime::spawn_blocking(providers::discover_now).await.unwrap_or_default()
+}
+/// This computer's harnesses with every version answered (joins the background probe and waits
+/// up to 8 s for versions never asked; the saved cache usually answers). For callers that show
+/// versions but cannot hear `provider-versions`.
 pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo> {
+    forget_provider_details(force);
+    tauri::async_runtime::spawn_blocking(providers::discover)
+        .await
+        .unwrap_or_default()
+}
+/// This computer's harnesses for callers that never show a version: remembered versions only,
+/// never waits on or starts a `--version` probe.
+pub(crate) async fn installed_providers() -> Vec<providers::ProviderInfo> {
+    tauri::async_runtime::spawn_blocking(providers::discover_installed).await.unwrap_or_default()
+}
+/// Sends every CLI version round's report to the webview as `provider-versions`.
+fn announce_provider_versions(app: tauri::AppHandle) {
+    providers::set_version_announcer(move |report| {
+        // Called by the probe thread with no lock held.
+        if let Err(error) = app.emit("provider-versions", &report) {
+            eprintln!("PandaCode: could not announce CLI versions: {error}");
+        }
+    });
+}
+/// `force` drops the cached ACP catalogs and CLI versions (failures included).
+fn forget_provider_details(force: bool) {
     if force {
         providers::acp_catalog::invalidate("antigravity");
         providers::acp_catalog::invalidate("grok");
@@ -2952,10 +3163,8 @@ pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo>
         providers::acp_catalog::invalidate("zcode");
         providers::acp_catalog::invalidate("hermes");
         providers::acp_catalog::invalidate("cursor");
+        providers::forget_versions();
     }
-    tauri::async_runtime::spawn_blocking(providers::discover)
-        .await
-        .unwrap_or_default()
 }
 #[tauri::command]
 async fn list_provider_models(app: tauri::AppHandle, provider: String, force: Option<bool>, device_id: Option<String>) -> Result<serde_json::Value> {
@@ -3041,6 +3250,7 @@ fn list_app_tools() -> serde_json::Value {
     serde_json::json!(agent_tools::catalog()
         .into_iter()
         .chain(agent_tools::enabled_jev_catalog())
+        .chain(cloud::colab_tools::enabled_catalog())
         .map(|t| serde_json::json!({"name":t["name"],"description":t["description"]}))
         .collect::<Vec<_>>())
 }
@@ -4310,6 +4520,8 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     secret_store::setup(&dir);
     feature_controls::setup();
+    providers::load_version_cache(&dir);
+    announce_provider_versions(app.handle().clone());
     providers::sweep_cline_mcp_settings(&dir);
     provider_settings::setup(&dir)?;
     connections::setup(&dir)?;
@@ -4326,8 +4538,11 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     if let Err(error) = store.discard_empty_drafts() {
         eprintln!("Could not clear unsent new tasks: {error}");
     }
+    let db_path = store.path.clone();
+    let store = Arc::new(Mutex::new(store));
+    remember_db_path(&store, db_path);
     app.manage(AppState {
-        store: Arc::new(Mutex::new(store)),
+        store,
         agents: Arc::new(Mutex::new(HashMap::new())),
         terminals: Arc::new(Mutex::new(HashMap::new())),
         shutdown: AtomicU8::new(0),
@@ -4339,6 +4554,7 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(vm::Vms::default());
     app.manage(file_preview::FilePreviews::default());
     app.manage(agent_tools::UiRequests::default());
+    app.manage(web_server::WebServer::new(dir.clone()));
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
@@ -4401,6 +4617,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             eprintln!("Could not tell the window PandaCode is quitting: {error}");
         }
         if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
+        if let Some(web) = app.try_state::<web_server::WebServer>() { web.shutdown(); }
         jev::shutdown();
         app.state::<file_preview::FilePreviews>().shutdown();
         if let Ok(agents) = lock_agents(&state.agents) {
@@ -4444,6 +4661,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
         }
         if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
+        if let Some(web) = app.try_state::<web_server::WebServer>() { web.shutdown(); }
         app.state::<file_preview::FilePreviews>().shutdown();
         // VMs PandaCode started release their memory when it quits.
         app.state::<vm::Vms>().shutdown();
@@ -4468,6 +4686,531 @@ fn app_context() -> tauri::Context<tauri::Wry> {
     context
 }
 
+/// The workspace window's own setup: native appearance, the close listeners that hide it instead of
+/// destroying it, and dictation's stop. `tray::show` runs it again for a window it builds back.
+pub(crate) fn install_main_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    if let Err(error) = appearance::setup(window) {
+        eprintln!("Native appearance setup failed: {error}");
+    }
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        // A close that only hides the window (macOS, Windows with a menu bar item)
+        // stops recording and keeps downloads. A close that quits (tray::hide_on_close)
+        // cancels everything at once: transcribing would upload audio only for the
+        // exit to throw the result away.
+        let Some(voice) = handle.try_state::<voice::Voice>() else { return };
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } if tray::main_close_quits(&handle) => voice.shutdown(),
+            tauri::WindowEvent::CloseRequested { .. } => voice.stop_recording(&handle),
+            tauri::WindowEvent::Destroyed => voice.shutdown(),
+            _ => {}
+        }
+    });
+    tray::hide_on_close(window);
+}
+
+/// Commands of the main window. Also the web UI's (web_server.rs replays its calls through
+/// the main webview) and `pandacode serve --port`'s hidden main webview.
+pub(crate) fn main_invoke_handler(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        voice::voice_configuration,
+        voice::voice_save_profile,
+        voice::voice_select_profile,
+        voice::voice_delete_profile,
+        voice::voice_start,
+        voice::voice_stop,
+        voice::voice_retry,
+        voice::voice_cancel,
+        voice::local::voice_local_catalog,
+        voice::local::voice_local_download,
+        voice::local::voice_local_cancel_download,
+        voice::local::voice_local_delete,
+        voice::local::voice_local_select,
+        voice::local::test_recordings::voice_local_test_model,
+        voice::local::test_recordings::voice_mic_devices,
+        voice::local::test_recordings::voice_mic_test_start,
+        voice::local::test_recordings::voice_mic_test_stop,
+        voice::local::test_recordings::voice_mic_test_cancel,
+        voice::local::voice_preferences,
+        voice::local::voice_update_preferences,
+        agents_dock::agents_dock_snapshot,
+        agents_dock::agents_dock_preferences,
+        agents_dock::agents_dock_save_preferences,
+        agents_dock::agents_dock_pin,
+        support::open_support,
+        support::support_details,
+        model_routing::model_routing_status_command,
+        model_routing::model_routing_exclusions,
+        model_routing::model_routing_set_exclusions,
+        model_routing::model_routing_configure_command,
+        model_routing::model_routing_prepare,
+        model_routing::model_routing_route,
+        model_routing::model_routing_tiers,
+        model_routing::model_routing_set_tiers,
+        model_routing::model_routing_tier_models,
+        model_health::model_health_list,
+        model_health::model_health_clear,
+        local_sign_app,
+        crash_guard::commands::crash_recovery_take,
+        crash_guard::commands::crash_recovery_shown,
+        crash_guard::commands::crash_restart_enabled,
+        crash_guard::commands::set_crash_restart_enabled,
+        crash_guard::commands::crash_report_reveal,
+        sessions_missing,
+        app_updates::app_update_install_supported,
+        agent_updates::check_agent_updates,
+        agent_updates::update_agent,
+        feature_controls::feature_controls_get,
+        feature_controls::feature_controls_set,
+        moodboards::list_moodboards,
+        moodboards::create_moodboard,
+        moodboards::read_moodboard,
+        moodboards::rename_moodboard,
+        moodboards::delete_moodboard,
+        moodboards::add_moodboard_image,
+        moodboards::import_moodboard_images,
+        moodboards::update_moodboard_image,
+        moodboards::remove_moodboard_image,
+        moodboards::moodboard_image,
+        overlay::overlay_preferences,
+        overlay::overlay_save_preferences,
+        overlay::overlay_recording,
+        overlay::overlay_sync_context,
+        overlay::overlay_toggle,
+        overlay::overlay_hide,
+        overlay::overlay_snapshot,
+        overlay::overlay_thread,
+        overlay::overlay_launch,
+        overlay::overlay_select_model,
+        overlay::overlay_open_task,
+        remote::remote_status,
+        remote::remote_sign_in_start,
+        remote::remote_sign_in_finish,
+        remote::remote_sign_in_cancel,
+        remote::remote_sign_out,
+        remote::remote_set_host_enabled,
+        remote::remote_set_connection_enabled,
+        remote::remote_set_notify_enabled,
+        remote::remote_devices,
+        remote::remote_revoke_device,
+        remote::remote_targets,
+        remote::mirror::remote_start_task,
+        remote::orchestrate::links::orchestration_status,
+        remote::orchestrate::links::orchestration_set_enabled,
+        remote::orchestrate::links::orchestration_set_link,
+        remote::orchestrate::links::orchestration_pending,
+        remote::orchestrate::links::orchestration_link_respond,
+        remote::orchestrate::orchestration_children,
+        remote::orchestrate::orchestration_threads,
+        remote::mirror::remote_team,
+        remote::mirror::remote_worker_messages,
+        remote::mirror::remote_cancel_start,
+        remote::routes::remote_reconnect,
+        remote::routes::remote_direct_routes_status,
+        remote::routes::remote_set_direct_routes,
+        remote::grants::remote_device_grants,
+        remote::grants::remote_set_device_grant,
+        remote::grants::remote_pair_code,
+        remote::grants::remote_pair_code_cancel,
+        remote::grants::remote_pair_redeem,
+        remote::diagnostics::remote_diagnostics,
+        remote::diagnostics::remote_diagnostics_export,
+        remote_resubscribe,
+        remote_workspace_image,
+        cloud_agents::tasks::cloud_agent_targets,
+        cloud_agents::tasks::cloud_agent_start,
+        cloud_agents::tasks::cloud_agent_action,
+        cloud_agents::tasks::cloud_agent_set_claude_token,
+        remote::mirror::remote_repo_check,
+        provider_settings::provider_configuration,
+        connections::connections_list,
+        connections::connection_save,
+        connections::connection_delete,
+        connections::connection_assign,
+        connections::connection_pool_set,
+        connections::connection_new_account,
+        connections::connection_pool_member_set,
+        account_pool::account_pool_status,
+        account_pool::account_pool_clear,
+        account_sign_in::account_sign_in_start,
+        account_sign_in::account_sign_in_code,
+        account_sign_in::account_sign_in_cancel,
+        agent_usage::agent_usage,
+        agent_usage::agent_usage_asking_claude,
+        tray::tray_seen,
+        usage_ledger::usage_ledger,
+        capabilities::capabilities_inventory,
+        capabilities::cache_alignment,
+        prompt_activity,
+        set_resume_at_reset,
+        clear_usage_limit,
+        discard_draft,
+        set_queue_hold,
+        message_queue::queue_list,
+        message_queue::queue_add,
+        message_queue::queue_update,
+        message_queue::queue_remove,
+        message_queue::queue_take_steered,
+        message_queue::queue_reorder,
+        message_queue::queue_take,
+        message_queue::queue_restore,
+        message_queue::steer_task,
+        bots::bots_list,
+        bots::bot_desktop_thread,
+        bots::bot_detail,
+        bots::bot_create,
+        bots::bot_update,
+        bots::extended::bot_set_fresh_context,
+        bots::extended::bot_set_channel_history,
+        bots::bot_set_mode,
+        bots::bot_set_paused,
+        bots::bot_reset,
+        bots::bot_delete,
+        bots::bot_remember,
+        bots::bot_forget,
+        bots::bot_activity,
+        bots::bot_project_ids,
+        bots::bot_message,
+        bots::shared_channels::bot_shared_channels,
+        bots::shared_channels::bot_shared_channel_detail,
+        bots::shared_channels::bot_shared_channel_create,
+        bots::shared_channels::bot_shared_channel_update,
+        bots::shared_channels::bot_shared_channel_archive,
+        bots::shared_channels::bot_shared_channel_post,
+        bots::shared_channels::bot_shared_channel_stop,
+        bots::shared_channels::bot_shared_channel_continue,
+        bots::shared_channels::bot_shared_channel_reassign,
+        bots::shared_channels::bot_message_markers,
+        bots::failover::bot_failover_decide,
+        bots::failover::bot_failover_pending,
+        bots::failover::bot_model_switches,
+        bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
+        bots::schedule::bot_schedule_create,
+        bots::schedule::bot_schedule_set_enabled,
+        bots::schedule::bot_schedule_delete,
+        bots::schedule::bot_run_schedule_now,
+        schedules::schedules_list,
+        schedules::schedule_create,
+        schedules::schedule_update,
+        schedules::schedule_set_enabled,
+        schedules::schedule_delete,
+        schedules::schedule_run_now,
+        schedules::schedule_snooze,
+        schedules::schedule_runs,
+        schedules::scheduler_settings,
+        schedules::scheduler_set_settings,
+        bots::channels::bot_channel_add,
+        bots::channels::bot_channel_test,
+        bots::channels::bot_channel_configure,
+        bots::channels::bot_channel_set_enabled,
+        bots::channels::bot_channel_remove,
+        bots::channels::bot_pairing_decide,
+        bots::channels::bot_web_link,
+        bots::channels::bot_web_new_link,
+        bots::guard::bot_rule_add,
+        bots::guard::bot_rule_delete,
+        conversation_import::list_importable_conversations,
+        conversation_import::import_conversations,
+        provider_settings::provider_set_claude_connection_mode,
+        provider_settings::provider_set_claude_cli_refresh,
+        providers::privacy::harness_privacy,
+        providers::privacy::harness_privacy_set,
+        providers::claude_auth::provider_claude_status,
+        provider_settings::list_opencode_models,
+        provider_settings::save_opencode_models,
+        provider_settings::provider_set_executable,
+        provider_settings::provider_set_environment_variable,
+        provider_settings::provider_remove_environment_variable,
+        provider_settings::provider_set_global_environment_variable,
+        provider_settings::provider_remove_global_environment_variable,
+        provider_settings::provider_set_use_global_environment,
+        provider_settings::provider_save_glm_key,
+        provider_settings::provider_remove_glm_key,
+        provider_settings::provider_save_mimo_key,
+        provider_settings::provider_remove_mimo_key,
+        provider_settings::provider_save_alibaba_key,
+        provider_settings::provider_remove_alibaba_key,
+        provider_settings::provider_save_deepseek_key,
+        provider_settings::provider_remove_deepseek_key,
+        provider_settings::provider_save_commandcode_key,
+        provider_settings::provider_remove_commandcode_key,
+        provider_settings::provider_set_mimo_endpoint,
+        architect::profiles::architect_profiles,
+        architect::profiles::architect_set_lead_guidance,
+        architect::profiles::architect_save_profile,
+        architect::profiles::architect_delete_profile,
+        architect::architect_get,
+        architect::architect_configure,
+        architect::architect_set_council,
+        architect::architect_council_accept,
+        architect::architect_start,
+        architect::architect_control,
+        architect::architect_worker_messages,
+        architect::coordination::architect_team_messages,
+        task_controls::task_goal,
+        task_controls::codex_command,
+        task_controls::codex_jobs,
+        task_controls::set_task_preference,
+        task_controls::fork_codex_task,
+        task_controls::fork_session_at_message,
+        task_controls::get_message_content,
+        task_controls::archive_codex_task,
+        task_controls::export_task,
+        task_controls::save_task_export,
+        task_controls::start_harness_terminal,
+        list_projects,
+        add_project,
+        remove_project,
+        relink_project,
+        list_sessions,
+        pin_session,
+        dismiss_error_messages,
+        reorder_sessions,
+        get_task,
+        configure_window_appearance,
+        create_session,
+        create_board_task,
+        update_task_details,
+        set_task_stage,
+        start_task,
+        configure_session,
+        set_reasoning_effort,
+        update_session,
+        delete_session_with_attachment_cleanup,
+        chats::chat_create,
+        chats::chat_cleanup,
+        get_messages,
+        turn_changes::turn_change_diff,
+        turn_changes::turn_change_summary,
+        list_subagents,
+        get_subagent,
+        send_message,
+        list_slash_commands,
+        recipes_list,
+        recipes_save,
+        recipes_delete,
+        recipes_dry_run,
+        providers::acp::provider_check_connection,
+        resolve_slash_command,
+        stop_session,
+        respond_approval,
+        respond_user_input,
+        list_agent_integrations,
+        list_app_tools,
+        open_external_url,
+        agent_tools::agent_ui_request_active,
+        agent_tools::resolve_agent_ui_action,
+        browser::browser_inspect,
+        list_providers,
+        list_provider_models,
+        git_status,
+        git_diff,
+        jj_status,
+        jj_diff,
+        jj_describe,
+        jj_new,
+        jj_commit,
+        jj_log,
+        git_stage,
+        git_commit,
+        git_branches,
+        git_switch_branch,
+        git_push,
+        create_worktree,
+        attach_worktree,
+        worktree_status,
+        remove_worktree,
+        merge_worktree,
+        recreate_worktree,
+        github_status,
+        github_repos,
+        project_icon,
+        github_repo_pulls,
+        github_repo_issues,
+        github_repo_runs,
+        github_run_details,
+        github_project_repos,
+        github_clone_repo,
+        github_search,
+        github_issues,
+        github_resolve,
+        github_refresh_links,
+        github_create_pull_request,
+        github_pull_request,
+        github_pull_request_diff,
+        github_merge_pull_request,
+        github_detect_pull_request,
+        github_link_pull_request,
+        simulator::commands::simulator_status,
+        simulator::commands::simulator_select,
+        simulator::commands::simulator_create_duo,
+        simulator::commands::simulator_pose,
+        simulator::commands::simulator_power,
+        simulator::commands::simulator_frame,
+        simulator::commands::simulator_input,
+        simulator::commands::simulator_appearance,
+        simulator::commands::simulator_capture,
+        simulator::android_setup::android_setup,
+        vm::commands::vm_status,
+        vm::commands::vm_show,
+        vm::commands::vm_create,
+        vm::commands::vm_power,
+        vm::commands::vm_frame,
+        vm::commands::vm_input,
+        vm::commands::vm_desktop,
+        vm::setup::vm_setup,
+        cloud::commands::cloud_connections,
+        cloud::commands::cloud_connect,
+        cloud::commands::cloud_disconnect,
+        cloud::commands::cloud_set_inherit_environment,
+        cloud::commands::cloud_setup_sandboxes,
+        cloud::commands::cloud_instabox_images,
+        cloud::commands::cloud_instabox_set_image,
+        cloud::commands::cloud_digitalocean_catalog,
+        cloud::commands::cloud_digitalocean_set_options,
+        cloud::commands::cloud_colab_sign_in_start,
+        cloud::commands::cloud_colab_sign_in_cancel,
+        cloud::commands::cloud_colab_sign_in_status,
+        cloud::commands::cloud_colab_config,
+        cloud::commands::cloud_colab_usage,
+        cloud::commands::cloud_colab_set_config,
+        cloud::commands::cloud_colab_install_cli,
+        cloud::commands::cloud_colab_thread_runtimes,
+        cloud::commands::cloud_colab_runtime_action,
+        cloud::commands::cloud_machines,
+        cloud::commands::cloud_create,
+        cloud::commands::cloud_power,
+        cloud::commands::cloud_frame,
+        cloud::commands::cloud_input,
+        vsix_themes::themes_list,
+        vsix_themes::theme_import,
+        vsix_themes::theme_install,
+        vsix_themes::theme_remove,
+        token_saver::token_saver_tools,
+        token_saver::token_saver_install,
+        task_usage::task_token_usage,
+        skill_manager::skill_manager_list,
+        skill_manager::skill_manager_set,
+        skill_manager::skill_manager_reset,
+        skill_manager::skill_manager_restore,
+        skill_manager::skill_manager_uninstall,
+        skill_manager::skill_manager_undo_uninstall,
+        skill_manager::skill_manager_preview,
+        skill_manager::skill_manager_add,
+        skill_manager::skill_manager_add_library,
+        skills::skills_list,
+        skills::skills_import_folder,
+        skills::skills_import_github,
+        skills::skills_activate,
+        skills::skills_deactivate,
+        skills::skills_deactivate_all,
+        skills::skills_matrix,
+        skills::skills_scan,
+        skills::skills_remove,
+        set_task_link,
+        import_prompt_image,
+        read_clipboard_image,
+        prompt_image,
+        reveal_path,
+        open_third_party_notices,
+        open_workspace_file,
+        read_document,
+        dragged_file_paths,
+        describe_folder,
+        list_files,
+        manage_workspace_entry,
+        write_workspace_file,
+        workspace_file_stamp,
+        search_files,
+        search_text,
+        read_file,
+        read_document_file,
+        design::design_list,
+        design::design_read,
+        design::design_comments,
+        design::design_save_comments,
+        progress::progress_list,
+        progress::progress_media,
+        progress::progress_thumb,
+        progress::progress_clear,
+        workspace_image,
+        tool_image,
+        resolve_workspace_files,
+        prepare_file_preview,
+        get_run_script,
+        get_run_script_preview,
+        run_turn_checks,
+        start_run_script_terminal,
+        start_terminal,
+        write_terminal,
+        resize_terminal,
+        close_terminal,
+        get_terminal_activity,
+        read_terminal_output,
+        get_terminal_preferences,
+        get_metrics,
+        list_local_servers,
+        jev::jev_configuration,
+        jev::jev_save_configuration,
+        jev::jev_decision_models,
+        jev::jev_doctor,
+        jev::jev_install_runtime,
+        jev::jev_start,
+        jev::jev_watch_run,
+        jev::jev_cancel,
+        jev::jev_list_runs,
+        jev::jev_read_run,
+        jev_decisions::jev_assist_prepare,
+        jev_decisions::jev_assist_run,
+        jev_decisions::jev_assist_list,
+        jev_decisions::jev_assist_save_rules,
+        browser::browser_open,
+        browser::browser_bounds,
+        browser::browser_action,
+        browser::browser_pick,
+        browser::browser_capture,
+        browser::browser_close,
+        web_server::web_server_status,
+        web_server::web_server_configure,
+        web_server::web_server_rotate_token,
+        web_server::app_version,
+    ];
+    handler(invoke)
+}
+
+/// Says where a command-line web UI start is listening (warning when that is plain HTTP
+/// off loopback), or why it isn't. Returns the status on success.
+fn report_web_start(
+    result: std::result::Result<web_server::WebServerStatus, String>,
+    host: Option<std::net::IpAddr>,
+) -> Option<web_server::WebServerStatus> {
+    match result {
+        Ok(status) => {
+            web_server::print_start_notice(&status, host);
+            Some(status)
+        }
+        Err(error) => {
+            eprintln!("PandaCode web UI could not start: {error}");
+            None
+        }
+    }
+}
+
+/// Sent to the running app (with the WebServerStatus) when a second launch's `--port`
+/// started or moved the web UI, so the window can show its link.
+const WEB_SERVER_CLI_STARTED_EVENT: &str = "web-server-cli-started";
+
+/// Sent to the running app (`{ "error": … }`) when a second launch's `--port`/`--host` was
+/// invalid or the web UI could not start, so the window shows why instead of nothing.
+const WEB_SERVER_CLI_FAILED_EVENT: &str = "web-server-cli-failed";
+
+fn report_web_cli_failure(app: &tauri::AppHandle, error: &str) {
+    if let Err(emit_error) = app.emit(WEB_SERVER_CLI_FAILED_EVENT, serde_json::json!({ "error": error })) {
+        eprintln!("Could not tell the window about the web UI error: {emit_error}");
+    }
+    tray::show(app);
+}
+
 pub fn run() {
     // The npx installer signs the fresh bundle this way, before any window exists.
     if std::env::args().skip(1).any(|arg| arg == "--local-sign") {
@@ -4485,7 +5228,32 @@ pub fn run() {
     }
     let app = builder
         // First, as its docs require: a second launch focuses this window instead of opening another.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            // `pandacode --port N` while PandaCode runs: serve the running session there.
+            match web_server::parse_cli(&args, None, None) {
+                Ok(Some(web)) => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let result = web_server::start_cli(&app, web.port, web.host).await;
+                        let failure = result.as_ref().err().cloned();
+                        if let Some(status) = report_web_start(result, web.host) {
+                            // Never the token: app events reach every subscribed WebSocket.
+                            let status = web_server::WebServerStatus { token_url: None, ..status };
+                            if let Err(error) = app.emit(WEB_SERVER_CLI_STARTED_EVENT, status) {
+                                eprintln!("Could not tell the window about the web UI: {error}");
+                            }
+                        }
+                        if let Some(error) = failure {
+                            report_web_cli_failure(&app, &error);
+                        }
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("PandaCode web UI: {error}");
+                    report_web_cli_failure(app, &error);
+                }
+            }
             tray::show(app)
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -4513,28 +5281,25 @@ pub fn run() {
                 crash_guard::desktop_startup_failed(&error);
             }
             vm::watch_idle(app.handle().clone());
+            // The local web UI binds a port only when asked: a flag, the environment, or a saved "on".
+            match web_server::cli_from_env() {
+                Ok(Some(web)) => {
+                    report_web_start(web_server::start_from_cli(app.handle(), web.port, web.host), web.host);
+                }
+                Ok(None) => web_server::start_if_saved(app.handle()),
+                Err(error) => {
+                    eprintln!("PandaCode web UI: {error}");
+                    // A GUI launch has no terminal: Settings -> Web access shows it instead.
+                    if let Some(server) = app.try_state::<web_server::WebServer>() {
+                        server.record_error(error);
+                    }
+                }
+            }
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("Menu bar item is unavailable: {error}");
             }
             if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = appearance::setup(&window) {
-                    eprintln!("Native appearance setup failed: {error}");
-                }
-                let handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    // A close that only hides the window (macOS, Windows with a menu bar item)
-                    // stops recording and keeps downloads. A close that quits (tray::hide_on_close)
-                    // cancels everything at once: transcribing would upload audio only for the
-                    // exit to throw the result away.
-                    let Some(voice) = handle.try_state::<voice::Voice>() else { return };
-                    match event {
-                        tauri::WindowEvent::CloseRequested { .. } if tray::main_close_quits(&handle) => voice.shutdown(),
-                        tauri::WindowEvent::CloseRequested { .. } => voice.stop_recording(&handle),
-                        tauri::WindowEvent::Destroyed => voice.shutdown(),
-                        _ => {}
-                    }
-                });
-                tray::hide_on_close(&window);
+                install_main_window(app.handle(), &window);
             }
             Ok(())
         })
@@ -4587,454 +5352,7 @@ pub fn run() {
                     .reject("Browser content has no application access.");
                 return true;
             }
-            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
-                voice::voice_configuration,
-                voice::voice_save_profile,
-                voice::voice_select_profile,
-                voice::voice_delete_profile,
-                voice::voice_start,
-                voice::voice_stop,
-                voice::voice_retry,
-                voice::voice_cancel,
-                voice::local::voice_local_catalog,
-                voice::local::voice_local_download,
-                voice::local::voice_local_cancel_download,
-                voice::local::voice_local_delete,
-                voice::local::voice_local_select,
-                voice::local::test_recordings::voice_local_test_model,
-                voice::local::test_recordings::voice_mic_devices,
-                voice::local::test_recordings::voice_mic_test_start,
-                voice::local::test_recordings::voice_mic_test_stop,
-                voice::local::test_recordings::voice_mic_test_cancel,
-                voice::local::voice_preferences,
-                voice::local::voice_update_preferences,
-                agents_dock::agents_dock_snapshot,
-                agents_dock::agents_dock_preferences,
-                agents_dock::agents_dock_save_preferences,
-                agents_dock::agents_dock_pin,
-                support::open_support,
-                support::support_details,
-                model_routing::model_routing_status,
-                model_routing::model_routing_exclusions,
-                model_routing::model_routing_set_exclusions,
-                model_routing::model_routing_configure,
-                model_routing::model_routing_prepare,
-                model_routing::model_routing_route,
-                model_routing::model_routing_tiers,
-                model_routing::model_routing_set_tiers,
-                model_routing::model_routing_tier_models,
-                model_health::model_health_list,
-                model_health::model_health_clear,
-                local_sign_app,
-                crash_guard::commands::crash_recovery_take,
-                crash_guard::commands::crash_recovery_shown,
-                crash_guard::commands::crash_restart_enabled,
-                crash_guard::commands::set_crash_restart_enabled,
-                crash_guard::commands::crash_report_reveal,
-                sessions_missing,
-                app_updates::app_update_install_supported,
-                agent_updates::check_agent_updates,
-                agent_updates::update_agent,
-                feature_controls::feature_controls_get,
-                feature_controls::feature_controls_set,
-                moodboards::list_moodboards,
-                moodboards::create_moodboard,
-                moodboards::read_moodboard,
-                moodboards::rename_moodboard,
-                moodboards::delete_moodboard,
-                moodboards::add_moodboard_image,
-                moodboards::import_moodboard_images,
-                moodboards::update_moodboard_image,
-                moodboards::remove_moodboard_image,
-                moodboards::moodboard_image,
-                overlay::overlay_preferences,
-                overlay::overlay_save_preferences,
-                overlay::overlay_recording,
-                overlay::overlay_sync_context,
-                overlay::overlay_toggle,
-                overlay::overlay_hide,
-                overlay::overlay_snapshot,
-                overlay::overlay_thread,
-                overlay::overlay_launch,
-                overlay::overlay_select_model,
-                overlay::overlay_open_task,
-                remote::remote_status,
-                remote::remote_sign_in_start,
-                remote::remote_sign_in_finish,
-                remote::remote_sign_in_cancel,
-                remote::remote_sign_out,
-                remote::remote_set_host_enabled,
-                remote::remote_set_connection_enabled,
-                remote::remote_set_notify_enabled,
-                remote::remote_devices,
-                remote::remote_revoke_device,
-                remote::remote_targets,
-                remote::mirror::remote_start_task,
-                remote::orchestrate::links::orchestration_status,
-                remote::orchestrate::links::orchestration_set_enabled,
-                remote::orchestrate::links::orchestration_set_link,
-                remote::orchestrate::links::orchestration_pending,
-                remote::orchestrate::links::orchestration_link_respond,
-                remote::orchestrate::orchestration_children,
-                remote::orchestrate::orchestration_threads,
-                remote::mirror::remote_team,
-                remote::mirror::remote_worker_messages,
-                remote::mirror::remote_cancel_start,
-                remote::routes::remote_reconnect,
-                remote::routes::remote_direct_routes_status,
-                remote::routes::remote_set_direct_routes,
-                remote::grants::remote_device_grants,
-                remote::grants::remote_set_device_grant,
-                remote::grants::remote_pair_code,
-                remote::grants::remote_pair_code_cancel,
-                remote::grants::remote_pair_redeem,
-                remote::diagnostics::remote_diagnostics,
-                remote::diagnostics::remote_diagnostics_export,
-                remote_resubscribe,
-                remote_workspace_image,
-                cloud_agents::tasks::cloud_agent_targets,
-                cloud_agents::tasks::cloud_agent_start,
-                cloud_agents::tasks::cloud_agent_action,
-                cloud_agents::tasks::cloud_agent_set_claude_token,
-                remote::mirror::remote_repo_check,
-                provider_settings::provider_configuration,
-                connections::connections_list,
-                connections::connection_save,
-                connections::connection_delete,
-                connections::connection_assign,
-                connections::connection_pool_set,
-                connections::connection_new_account,
-                connections::connection_pool_member_set,
-                account_pool::account_pool_status,
-                account_pool::account_pool_clear,
-                account_sign_in::account_sign_in_start,
-                account_sign_in::account_sign_in_code,
-                account_sign_in::account_sign_in_cancel,
-                agent_usage::agent_usage,
-                agent_usage::agent_usage_asking_claude,
-                tray::tray_seen,
-                usage_ledger::usage_ledger,
-                capabilities::capabilities_inventory,
-                capabilities::cache_alignment,
-                prompt_activity,
-                set_resume_at_reset,
-                clear_usage_limit,
-                discard_draft,
-                message_queue::queue_list,
-                message_queue::queue_add,
-                message_queue::queue_update,
-                message_queue::queue_remove,
-                message_queue::queue_take_steered,
-                message_queue::queue_reorder,
-                message_queue::queue_take,
-                message_queue::queue_restore,
-                message_queue::steer_task,
-                bots::bots_list,
-                bots::bot_desktop_thread,
-                bots::bot_detail,
-                bots::bot_create,
-                bots::bot_update,
-                bots::extended::bot_set_fresh_context,
-                bots::extended::bot_set_channel_history,
-                bots::bot_set_mode,
-                bots::bot_set_paused,
-                bots::bot_reset,
-                bots::bot_delete,
-                bots::bot_remember,
-                bots::bot_forget,
-                bots::bot_activity,
-                bots::bot_project_ids,
-                bots::bot_message,
-                bots::shared_channels::bot_shared_channels,
-                bots::shared_channels::bot_shared_channel_detail,
-                bots::shared_channels::bot_shared_channel_create,
-                bots::shared_channels::bot_shared_channel_update,
-                bots::shared_channels::bot_shared_channel_archive,
-                bots::shared_channels::bot_shared_channel_post,
-                bots::shared_channels::bot_shared_channel_stop,
-                bots::shared_channels::bot_shared_channel_continue,
-                bots::shared_channels::bot_shared_channel_reassign,
-                bots::shared_channels::bot_message_markers,
-                bots::failover::bot_failover_decide,
-                bots::failover::bot_failover_pending,
-                bots::failover::bot_model_switches,
-                bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
-                bots::schedule::bot_schedule_create,
-                bots::schedule::bot_schedule_set_enabled,
-                bots::schedule::bot_schedule_delete,
-                bots::schedule::bot_run_schedule_now,
-                schedules::schedules_list,
-                schedules::schedule_create,
-                schedules::schedule_update,
-                schedules::schedule_set_enabled,
-                schedules::schedule_delete,
-                schedules::schedule_run_now,
-                schedules::schedule_snooze,
-                schedules::schedule_runs,
-                schedules::scheduler_settings,
-                schedules::scheduler_set_settings,
-                bots::channels::bot_channel_add,
-                bots::channels::bot_channel_test,
-                bots::channels::bot_channel_configure,
-                bots::channels::bot_channel_set_enabled,
-                bots::channels::bot_channel_remove,
-                bots::channels::bot_pairing_decide,
-                bots::channels::bot_web_link,
-                bots::channels::bot_web_new_link,
-                bots::guard::bot_rule_add,
-                bots::guard::bot_rule_delete,
-                conversation_import::list_importable_conversations,
-                conversation_import::import_conversations,
-                provider_settings::provider_set_claude_connection_mode,
-                provider_settings::provider_set_claude_cli_refresh,
-                providers::privacy::harness_privacy,
-                providers::privacy::harness_privacy_set,
-                providers::claude_auth::provider_claude_status,
-                provider_settings::list_opencode_models,
-                provider_settings::save_opencode_models,
-                provider_settings::provider_set_executable,
-                provider_settings::provider_set_environment_variable,
-                provider_settings::provider_remove_environment_variable,
-                provider_settings::provider_set_global_environment_variable,
-                provider_settings::provider_remove_global_environment_variable,
-                provider_settings::provider_set_use_global_environment,
-                provider_settings::provider_save_glm_key,
-                provider_settings::provider_remove_glm_key,
-                provider_settings::provider_save_mimo_key,
-                provider_settings::provider_remove_mimo_key,
-                provider_settings::provider_save_alibaba_key,
-                provider_settings::provider_remove_alibaba_key,
-                provider_settings::provider_save_deepseek_key,
-                provider_settings::provider_remove_deepseek_key,
-                provider_settings::provider_save_commandcode_key,
-                provider_settings::provider_remove_commandcode_key,
-                provider_settings::provider_set_mimo_endpoint,
-                architect::profiles::architect_profiles,
-                architect::profiles::architect_set_lead_guidance,
-                architect::profiles::architect_save_profile,
-                architect::profiles::architect_delete_profile,
-                architect::architect_get,
-                architect::architect_configure,
-                architect::architect_set_council,
-                architect::architect_council_accept,
-                architect::architect_start,
-                architect::architect_control,
-                architect::architect_worker_messages,
-                architect::coordination::architect_team_messages,
-                task_controls::task_goal,
-                task_controls::codex_command,
-                task_controls::codex_jobs,
-                task_controls::set_task_preference,
-                task_controls::fork_codex_task,
-                task_controls::fork_session_at_message,
-                task_controls::get_message_content,
-                task_controls::archive_codex_task,
-                task_controls::export_task,
-                task_controls::save_task_export,
-                task_controls::start_harness_terminal,
-                list_projects,
-                add_project,
-                remove_project,
-                relink_project,
-                list_sessions,
-                pin_session,
-                dismiss_error_messages,
-                reorder_sessions,
-                get_task,
-                configure_window_appearance,
-                create_session,
-                create_board_task,
-                update_task_details,
-                set_task_stage,
-                start_task,
-                configure_session,
-                set_reasoning_effort,
-                update_session,
-                delete_session_with_attachment_cleanup,
-                chats::chat_create,
-                chats::chat_cleanup,
-                get_messages,
-                turn_changes::turn_change_diff,
-                turn_changes::turn_change_summary,
-                list_subagents,
-                get_subagent,
-                send_message,
-                list_slash_commands,
-                recipes_list,
-                recipes_save,
-                recipes_delete,
-                recipes_dry_run,
-                providers::acp::provider_check_connection,
-                resolve_slash_command,
-                stop_session,
-                respond_approval,
-                respond_user_input,
-                list_agent_integrations,
-                list_app_tools,
-                open_external_url,
-                agent_tools::agent_ui_request_active,
-                agent_tools::resolve_agent_ui_action,
-                browser::browser_inspect,
-                list_providers,
-                list_provider_models,
-                git_status,
-                git_diff,
-                jj_status,
-                jj_diff,
-                jj_describe,
-                jj_new,
-                jj_commit,
-                jj_log,
-                git_stage,
-                git_commit,
-                git_branches,
-                git_switch_branch,
-                git_push,
-                create_worktree,
-                attach_worktree,
-                worktree_status,
-                remove_worktree,
-                merge_worktree,
-                recreate_worktree,
-                github_status,
-                github_repos,
-                project_icon,
-                github_repo_pulls,
-                github_repo_issues,
-                github_repo_runs,
-                github_run_details,
-                github_project_repos,
-                github_clone_repo,
-                github_search,
-                github_issues,
-                github_resolve,
-                github_refresh_links,
-                github_create_pull_request,
-                github_pull_request,
-                github_pull_request_diff,
-                github_merge_pull_request,
-                github_detect_pull_request,
-                github_link_pull_request,
-                simulator::commands::simulator_status,
-                simulator::commands::simulator_select,
-                simulator::commands::simulator_create_duo,
-                simulator::commands::simulator_pose,
-                simulator::commands::simulator_power,
-                simulator::commands::simulator_frame,
-                simulator::commands::simulator_input,
-                simulator::commands::simulator_appearance,
-                simulator::commands::simulator_capture,
-                simulator::android_setup::android_setup,
-                vm::commands::vm_status,
-                vm::commands::vm_show,
-                vm::commands::vm_create,
-                vm::commands::vm_power,
-                vm::commands::vm_frame,
-                vm::commands::vm_input,
-                vm::commands::vm_desktop,
-                vm::setup::vm_setup,
-                cloud::commands::cloud_connections,
-                cloud::commands::cloud_connect,
-                cloud::commands::cloud_disconnect,
-                cloud::commands::cloud_set_inherit_environment,
-                cloud::commands::cloud_setup_sandboxes,
-                cloud::commands::cloud_instabox_images,
-                cloud::commands::cloud_instabox_set_image,
-                cloud::commands::cloud_machines,
-                cloud::commands::cloud_create,
-                cloud::commands::cloud_power,
-                cloud::commands::cloud_frame,
-                cloud::commands::cloud_input,
-                vsix_themes::themes_list,
-                vsix_themes::theme_import,
-                vsix_themes::theme_install,
-                vsix_themes::theme_remove,
-                token_saver::token_saver_tools,
-                token_saver::token_saver_install,
-                task_usage::task_token_usage,
-                skill_manager::skill_manager_list,
-                skill_manager::skill_manager_set,
-                skill_manager::skill_manager_reset,
-                skill_manager::skill_manager_restore,
-                skill_manager::skill_manager_uninstall,
-                skill_manager::skill_manager_undo_uninstall,
-                skill_manager::skill_manager_preview,
-                skill_manager::skill_manager_add,
-                skill_manager::skill_manager_add_library,
-                skills::skills_list,
-                skills::skills_import_folder,
-                skills::skills_import_github,
-                skills::skills_activate,
-                skills::skills_deactivate,
-                skills::skills_deactivate_all,
-                skills::skills_matrix,
-                skills::skills_scan,
-                skills::skills_remove,
-                set_task_link,
-                import_prompt_image,
-                read_clipboard_image,
-                prompt_image,
-                reveal_path,
-                open_third_party_notices,
-                open_workspace_file,
-                read_document,
-                dragged_file_paths,
-                describe_folder,
-                list_files,
-                manage_workspace_entry,
-                write_workspace_file,
-                workspace_file_stamp,
-                search_files,
-                search_text,
-                read_file,
-                read_document_file,
-                design::design_list,
-                design::design_read,
-                design::design_comments,
-                design::design_save_comments,
-                progress::progress_list,
-                progress::progress_media,
-                progress::progress_thumb,
-                progress::progress_clear,
-                workspace_image,
-                tool_image,
-                resolve_workspace_files,
-                prepare_file_preview,
-                get_run_script,
-                get_run_script_preview,
-                run_turn_checks,
-                start_run_script_terminal,
-                start_terminal,
-                write_terminal,
-                resize_terminal,
-                close_terminal,
-                get_terminal_activity,
-                read_terminal_output,
-                get_terminal_preferences,
-                get_metrics,
-                list_local_servers,
-                jev::jev_configuration,
-                jev::jev_save_configuration,
-                jev::jev_decision_models,
-                jev::jev_doctor,
-                jev::jev_install_runtime,
-                jev::jev_start,
-                jev::jev_watch_run,
-                jev::jev_cancel,
-                jev::jev_list_runs,
-                jev::jev_read_run,
-                jev_decisions::jev_assist_prepare,
-                jev_decisions::jev_assist_run,
-                jev_decisions::jev_assist_list,
-                jev_decisions::jev_assist_save_rules,
-                browser::browser_open,
-                browser::browser_bounds,
-                browser::browser_action,
-                browser::browser_pick,
-                browser::browser_capture,
-                browser::browser_close
-            ];
-            handler(invoke)
+            main_invoke_handler(invoke)
         })
         .build(context)
         .expect("Failed to launch PandaCode");

@@ -1,5 +1,17 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-25 — source 0.3.150 reconciliation candidate
+
+- [x] Retrieve nontruncated source and candidate inventories; zero missing source paths and mode/type differences.
+- [x] Verify six inherited app-version fields and original release-note identities.
+- [x] Refresh pinned source baseline and draft documentation.
+- [ ] Complete contextual review of all shared divergences.
+- [ ] Run candidate CI, local/native acceptance and security checks.
+- [ ] Complete separate release approval.
+
+[Parent push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43624496349) and [parent PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43624501937) passed for `6afc8baf3efbc0dd376376ee079cbf3cbda9de76` only (11/11 each). Candidate CI is not established. [PR #119](https://github.com/ginmp8/pandacode-extended/pull/119) remains draft. Extended 0.12.0 remains DRAFT, not released or approved.
+
+
 ## 2026-11-14 — CI verified for the 0.3.126 source-pinned code SHA
 
 - [x] Freeze and recheck upstream commit `6c91efdb4d5ff317c2e7597fcb717e0814939349` and Extended code commit `8dca72763c5a3a798d9d9b84bd7a0641df7f8682`.

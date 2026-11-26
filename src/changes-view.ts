@@ -43,15 +43,19 @@ const SHADOW_CSS = `
   pre[data-diff][data-overflow='wrap'] [data-line] { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
   pre[data-diff] [data-code] { scrollbar-gutter: stable; }
   pre[data-diff] [data-code]::-webkit-scrollbar { height: 10px; background: transparent; }
-  pre[data-diff] [data-code]::-webkit-scrollbar-thumb { background: color-mix(in srgb, currentColor 35%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+  pre[data-diff] [data-code]::-webkit-scrollbar-thumb { background: color-mix(in srgb, currentColor 35%, transparent); border-radius: var(--radius-chip); border: 2px solid transparent; background-clip: content-box; }
   pre[data-diff] [data-code]::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, currentColor 55%, transparent); background-clip: content-box; }
   [data-file-info] { border-block: 0; }
   pre[data-diff] [data-gutter] { background-color: color-mix(in srgb, var(--diffs-fg, currentColor) 5%, var(--diffs-bg)); }
-  pre[data-diff] [data-separator='metadata'] { height: 20px; }
+  pre[data-diff] [data-separator='metadata'] { height: calc(var(--mono-size) * 5 / 3); }
   pre[data-diff] [data-separator='metadata'] [data-separator-wrapper] {
-    font-size: .68rem; line-height: 20px; opacity: .8;
+    font-size:var(--type-caption); line-height:calc(var(--mono-size) * 5 / 3); opacity: .8;
     background-color: color-mix(in srgb, var(--diffs-bg-separator) 45%, var(--diffs-bg));
-  }`;
+  }
+  /* The vendor sheet is one @layer base block; these unlayered rules win and put its literal radii (3px, 4px, 6px) on the scale. */
+  [data-diff-span] { border-radius: var(--radius-hair); }
+  [data-utility-button] { border-radius: var(--ds-control-radius); }
+  [data-separator-content] { border-start-end-radius: var(--radius-chip); border-end-end-radius: var(--radius-chip); }`;
 const TRUNCATED = /\n*\[Preview truncated at [^\]]*\]\n*$/;
 const SCOPES: Record<Scope, string> = { all: 'All changes', unstaged: 'Unstaged', staged: 'Staged' };
 const STATUS: Record<string, string> = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', C: 'Copied', T: 'Modified', U: 'Conflict', '?': 'Untracked' };
@@ -109,14 +113,29 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   const addsLabel = q('.cv-adds'), delsLabel = q('.cv-dels'), branchLabel = q('.cv-branch'), foldButton = q<HTMLButtonElement>('[data-cv-action="fold-all"]');
   const commitBar = q<HTMLFormElement>('.cv-commit'), commitInput = q<HTMLInputElement>('.cv-commit-input'), commitSubmit = q<HTMLButtonElement>('.cv-commit-submit');
 
+  /** The list has a real box: a hidden or closed inspector gives it 0×0, where every row "intersects" the empty root.
+   *  Nothing loads or mounts then, so a closed inspector never starts the diff engine. */
+  const hasSize = (): boolean => {
+    if (!body.isConnected) return false;
+    const rect = body.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  /** Set when something was skipped for want of a size: the next resize with a size runs reveal(). */
+  let skipped = false;
+  /** Mounts parked while the list had no size: each runs once it has one. */
+  const parked = new Set<Entry>();
   const observer = new IntersectionObserver(records => {
+    if (!hasSize()) { skipped = true; return; }
     for (const record of records) {
       if (!record.isIntersecting) continue;
       const entry = entries.get((record.target as HTMLElement).dataset.path ?? '');
       if (entry && entry.load === 'idle') void load(entry);
     }
   }, { root: body, rootMargin: '800px 0px' });
-  const resizer = new ResizeObserver(() => scheduleFit());
+  const resizer = new ResizeObserver(() => {
+    scheduleFit();
+    if (skipped && hasSize()) reveal();
+  });
   resizer.observe(body);
 
   const files = (): GitFile[] => status?.isRepo ? status.files : [];
@@ -216,6 +235,7 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   }
 
   function drop(entry: Entry): void {
+    parked.delete(entry);
     entry.viewer?.dispose();
     for (const old of entry.stale.splice(0)) old.viewer.dispose();
     entry.viewer = entry.slot = entry.shown = undefined;
@@ -272,6 +292,8 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   /** Mounts the patch, or swaps in a new viewer once it has rendered so the old one never flashes away. */
   function mountViewer(entry: Entry): void {
     if (entry.load !== 'loaded' || (entry.viewer && entry.shown === entry.raw)) return;
+    if (!hasSize()) { parked.add(entry); skipped = true; return; }
+    parked.delete(entry);
     const token = entry.token, raw = entry.raw;
     viewerModule ??= import('./diff-viewer');
     viewerModule.then(({ mountDiffViewer }) => {
@@ -291,6 +313,20 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
         slot.classList.remove('cv-diff-next');
       });
     }, () => { if (!disposed && token === entry.token) entry.body.innerHTML = `<pre class="cv-raw">${escape(entry.patch)}</pre>`; });
+  }
+
+  /** The list got a size: load the eager patches, mount the parked ones, and observe the idle rows again so the
+   *  IntersectionObserver reports the ones really in view (it reported them while the box was empty). */
+  function reveal(): void {
+    if (disposed) return;
+    skipped = false;
+    for (const entry of [...parked]) { parked.delete(entry); mountViewer(entry); }
+    for (const entry of entries.values()) {
+      if (entry.load !== 'idle') continue;
+      if (order.indexOf(entry.path) < EAGER) { void load(entry); continue; }
+      observer.unobserve(entry.el);
+      observer.observe(entry.el);
+    }
   }
 
   function refetch(): void {
@@ -363,7 +399,10 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
     });
     order = wanted.map(w => w.file.path);
     // The first few patches load right away; the rest load as they near the viewport.
-    for (const entry of fresh) if (order.indexOf(entry.path) < EAGER && entry.load === 'idle') void load(entry);
+    // With no size (inspector hidden) they wait for reveal().
+    const eager = fresh.filter(entry => order.indexOf(entry.path) < EAGER && entry.load === 'idle');
+    if (eager.length && !hasSize()) skipped = true;
+    else for (const entry of eager) void load(entry);
     if (fresh.length) scheduleFit();
   }
 

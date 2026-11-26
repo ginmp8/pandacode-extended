@@ -16,9 +16,13 @@ async function open(page: Page, url = '/?teams'): Promise<void> {
     await route.fulfill({ response, body: `${await response.text()}\nwindow.__pandacodePreviewUrl = import.meta.url;\n` });
   });
   await page.goto(url);
-  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
-  await trigger(page).click();
-  await expect(picker(page)).toBeVisible();
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1', { timeout: 15_000 });
+  await expect(trigger(page)).toBeVisible({ timeout: 15_000 });
+  // A composer redraw while the app starts cancels a menu just opened, so try again until one stays.
+  await expect(async () => {
+    if (!await picker(page).isVisible()) await trigger(page).click();
+    await expect(picker(page)).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
 }
 
 // Issue #123: the picker lists only installed harnesses. The preview marks
@@ -80,7 +84,7 @@ test('the picker is a small inset shell: a bare rail beside one inset list panel
       rail: getComputedStyle(panel.querySelector('.model-menu-rail')!).backgroundColor,
       listBorder: [list.borderTopWidth, list.borderTopColor], border: resolved('color', '--ds-border'),
       listFill: list.backgroundColor, inner: resolved('backgroundColor', '--ds-card-inner'),
-      listRadius: list.borderTopLeftRadius, radius: getComputedStyle(document.documentElement).getPropertyValue('--ds-radius-inner').trim(),
+      listRadius: list.borderTopLeftRadius, radius: getComputedStyle(document.documentElement).getPropertyValue('--radius-inner').trim(),
       thumb: thumb.backgroundColor, thumbToken: resolved('backgroundColor', '--ds-thumb'),
       listEdges: [box('.model-menu-list').left, box('.model-menu-list').right], trackEdges: [box('.model-menu-effort').left, box('.model-menu-effort').right],
     };
@@ -97,6 +101,7 @@ test('the picker is a small inset shell: a bare rail beside one inset list panel
 test('a team row keeps its name readable; the detail gives way first', async ({ page }) => {
   await open(page);
   await picker(page).getByRole('tab', { name: 'Teams, 2' }).click();
+  await expect(picker(page).getByRole('tab', { name: 'Teams, 2' }).locator('.model-menu-count')).toHaveCSS('font-weight', '400');
   const names = picker(page).locator('.model-menu-team .model-menu-name');
   await expect(names).toHaveCount(2);
   expect(await names.evaluateAll(nodes => nodes.every(node => node.scrollWidth <= Math.ceil(node.getBoundingClientRect().width)))).toBe(true);
@@ -209,6 +214,23 @@ test('effort is a segmented radiogroup that saves on choice', async ({ page }) =
   await expect(picker(page)).toBeVisible();
 });
 
+test('effort is a segmented radiogroup with full labels at --ui-scale 1.6 in the minimum window', async ({ page }) => {
+  // open() may retry a startup redraw for up to 15s; triple the budget so that fits under load.
+  test.slow();
+  await page.setViewportSize({ width: 860, height: 940 });
+  await page.addInitScript(() => localStorage.setItem('pandacode.uiScale', '1.6'));
+  await open(page);
+  const segments = picker(page).getByRole('radiogroup', { name: 'Effort' }).getByRole('radio');
+  await expect(segments).toHaveCount(4);
+  expect(await segments.evaluateAll(buttons => buttons.every(button => {
+    const style = getComputedStyle(button);
+    const range = document.createRange();
+    range.selectNodeContents(button);
+    return button.scrollWidth <= button.clientWidth && style.textOverflow !== 'ellipsis'
+      && range.getBoundingClientRect().width <= button.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  }))).toBe(true);
+});
+
 test('teams: picking one sets the team, a plain model clears it', async ({ page }) => {
   await open(page);
   await picker(page).getByRole('tab', { name: 'Teams, 2' }).click();
@@ -298,6 +320,61 @@ test('a harness list that answers late still fills the picker', async ({ page })
   await page.keyboard.type('sonne');
   await expect(search(page)).toHaveValue('sonne');
   await expect(picker(page).getByRole('tab', { name: 'Grok Build', exact: true })).toBeVisible();
+});
+
+/** Holds `list_providers` until the test releases it, exposing `window.__releaseProviders`. */
+async function holdProviders(page: Page): Promise<void> {
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const marker = /switch\s*\(command\)\s*\{/;
+    const gate = `const __providersGate = new Promise(done => { window.__releaseProviders = done; });\n`;
+    const body = (await response.text()).replace(marker, `if (command === 'list_providers') await __providersGate;\nswitch (command) {`);
+    await route.fulfill({ response, body: `${gate}${body}\nwindow.__pandacodePreviewUrl = import.meta.url;\n` });
+  });
+}
+
+test('opening the picker on a single-agent task with saved teams while harnesses load stays off Teams', async ({ page }) => {
+  await holdProviders(page);
+  await page.goto('/?teams');
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await trigger(page).click();
+  await expect(picker(page)).toBeVisible();
+  // While harnesses are still loading, saved teams must not hijack the view or Enter selection.
+  await expect(search(page)).toHaveAttribute('placeholder', 'Loading models…');
+  await expect(picker(page).getByRole('tab', { name: 'Teams, 2' })).toHaveAttribute('aria-selected', 'false');
+  await expect(picker(page).locator('.model-menu-list')).toHaveText(/Loading…/);
+  await expect(picker(page).locator('.model-menu-team')).toHaveCount(0);
+  await expect(activeOption(page)).toHaveCount(0);
+  await page.keyboard.press('Enter');
+  await expect(picker(page)).toBeVisible();
+  await expect(trigger(page)).not.toContainText('Ship crew');
+  const teamBefore = await page.evaluate(async () => {
+    const { invoke } = await import((window as any).__pandacodePreviewUrl);
+    return invoke('architect_get', { sessionId: 'session-1' });
+  });
+  expect(teamBefore).toBeNull();
+  // Once harnesses resolve, the picker lands on the task's harness and current model, not Teams.
+  await page.evaluate(() => (window as any).__releaseProviders());
+  await expect(picker(page).getByRole('tab', { name: 'Claude Code', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(picker(page).getByRole('tab', { name: 'Teams, 2' })).toHaveAttribute('aria-selected', 'false');
+  await expect(activeOption(page)).toHaveAccessibleName('Claude Code · Claude Sonnet 5');
+  await expect(activeOption(page)).toHaveAttribute('aria-current', 'true');
+  await expect(picker(page).locator('.model-menu-team')).toHaveCount(0);
+});
+
+test('explicitly clicking Teams while harnesses load shows saved teams and stays there', async ({ page }) => {
+  await holdProviders(page);
+  await page.goto('/?teams');
+  await expect(page.locator('.task-item.selected')).toHaveAttribute('data-id', 'session-1');
+  await trigger(page).click();
+  await expect(picker(page).locator('.model-menu-list')).toHaveText(/Loading…/);
+  await picker(page).getByRole('tab', { name: 'Teams, 2' }).click();
+  await expect(picker(page).getByRole('tab', { name: 'Teams, 2' })).toHaveAttribute('aria-selected', 'true');
+  await expect(picker(page).getByRole('option', { name: 'Agent team · Ship crew', exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__releaseProviders());
+  await expect(picker(page).getByRole('tab', { name: 'Claude Code', exact: true })).toBeVisible();
+  await expect(picker(page).getByRole('tab', { name: 'Teams, 2' })).toHaveAttribute('aria-selected', 'true');
+  await expect(picker(page).getByRole('option', { name: 'Agent team · Ship crew', exact: true })).toBeVisible();
 });
 
 test('the Model button pressed while New task is on its way opens on the new task and stays open', async ({ page }) => {

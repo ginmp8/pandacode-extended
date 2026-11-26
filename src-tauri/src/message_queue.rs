@@ -1,15 +1,36 @@
 //! Durable per-task message queues. Messages typed while an agent works are stored
-//! here and delivered in order once the run finishes; the app holds a queue after a
-//! restart, a failure or a stop until the user resumes it. Steering sends a message
-//! into the running turn instead, where the harness supports it.
+//! here and delivered in order at a settled team wake or once the run finishes.
+//! The app holds a queue after a restart, failure or stop until the user resumes it.
+//! Steering sends into the running turn where the harness supports it.
 
 use crate::{providers::RunInput, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, Mutex, PoisonError},
+};
+use tauri::{Emitter, State};
 
 const MAX_PER_TASK: i64 = 50;
 const MAX_ATTACHMENTS: usize = 1024 * 1024;
+
+static HELD_QUEUES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+// The desktop queue-hold IPC will call this when its hold changes.
+#[allow(dead_code)]
+pub fn set_queue_held(session_id: &str, held: bool) {
+    let mut queues = HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    if held {
+        queues.insert(session_id.to_owned());
+    } else {
+        queues.remove(session_id);
+    }
+}
+
+pub fn is_queue_held(session_id: &str) -> bool {
+    HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner).contains(session_id)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,8 +147,45 @@ pub(crate) fn reorder(store: &Store, session_id: &str, ids: &[String]) -> Result
 /// Removes and returns an entry for delivery, so it can only ever be sent once.
 pub(crate) fn take(store: &Store, id: &str) -> Result<QueuedMessage> {
     let entry = withdraw(store, id)?;
-    count_delivery(&entry.session_id, true);
+    record_deliveries(&entry.session_id, 1);
     Ok(entry)
+}
+
+/// Takes the ready prefix in queue order. The caller records the delivery in the same
+/// transaction and updates the in-memory delivery count once the transaction commits.
+pub(crate) fn take_all_ready(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    mut ready: impl FnMut(&QueuedMessage) -> bool,
+) -> Result<Vec<QueuedMessage>> {
+    if is_queue_held(session_id) {
+        return Ok(Vec::new());
+    }
+    let blocked: bool = transaction.query_row(
+        "SELECT archived OR (limited_at IS NOT NULL AND COALESCE(limited_until > ?2, 1)) FROM sessions WHERE id=?1",
+        params![session_id, crate::storage::now()],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if blocked {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    {
+        let mut statement = transaction.prepare(&format!("SELECT {COLUMNS} FROM queued_messages WHERE session_id=?1 ORDER BY position,created_at")).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([session_id], row).map_err(|e| e.to_string())?;
+        for entry in rows {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !ready(&entry) {
+                break;
+            }
+            entries.push(entry);
+        }
+    }
+    let mut delete = transaction.prepare_cached("DELETE FROM queued_messages WHERE id=?1").map_err(|e| e.to_string())?;
+    for entry in &entries {
+        delete.execute([&entry.id]).map_err(|e| e.to_string())?;
+    }
+    Ok(entries)
 }
 
 /// Removes and returns an entry without counting a queue delivery: a sender that queued an
@@ -148,25 +206,25 @@ pub(crate) fn withdraw(store: &Store, id: &str) -> Result<QueuedMessage> {
 pub(crate) fn remove_delivered(store: &Store, id: &str) -> Result<()> {
     let session: Option<String> = store.db.query_row("DELETE FROM queued_messages WHERE id=?1 RETURNING session_id", [id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
     if let Some(session) = session {
-        count_delivery(&session, true);
+        record_deliveries(&session, 1);
     }
     Ok(())
 }
 
-/// How many entries each task's queue has handed out for delivery since launch. Only
-/// [`take`] and [`remove_delivered`] move it up and [`restore`] (a failed delivery) back down, so a prompt sent
+/// How many entries each task's queue has handed out for delivery since launch. Taking queued
+/// entries for delivery moves it up and [`restore`] (a failed delivery) moves it back down, so a prompt sent
 /// straight to the task never does; PandaConnect's queue Undo compares it to refuse putting
 /// an entry back once the queue moved on.
 static DELIVERIES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
 
-fn count_delivery(session_id: &str, delivered: bool) {
+pub(crate) fn record_deliveries(session_id: &str, change: i64) {
     // A poisoned lock still holds a usable map.
     let mut counts = DELIVERIES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let count = counts.entry(session_id.to_owned()).or_default();
-    *count = if delivered { count.saturating_add(1) } else { count.saturating_sub(1) };
+    *count = count.saturating_add_signed(change);
 }
 
-/// The number of entries [`take`] has delivered from the task's queue since launch.
+/// The number of entries delivered from the task's queue since launch.
 pub(crate) fn deliveries(session_id: &str) -> u64 {
     DELIVERIES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(session_id).copied().unwrap_or(0)
 }
@@ -176,7 +234,7 @@ pub(crate) fn deliveries(session_id: &str) -> u64 {
 /// entry already held its place. The [`take`] it undoes no longer counts as a delivery.
 pub(crate) fn restore(store: &Store, entry: &QueuedMessage) -> Result<QueuedMessage> {
     let restored = reinsert(store, entry)?;
-    count_delivery(&entry.session_id, false);
+    record_deliveries(&entry.session_id, -1);
     Ok(restored)
 }
 
@@ -242,23 +300,30 @@ async fn refuse_switched_off_skill(state: &AppState, session_id: &str, text: &st
 
 #[tauri::command]
 pub async fn queue_add(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     text: String,
     attachments: Option<serde_json::Value>,
 ) -> Result<QueuedMessage> {
     refuse_switched_off_skill(&state, &session_id, &text).await?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    add(
-        &store,
-        &session_id,
-        &text,
-        &attachments.unwrap_or_else(|| serde_json::json!([])),
-    )
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        add(
+            &store,
+            &session_id,
+            &text,
+            &attachments.unwrap_or_else(|| serde_json::json!([])),
+        )?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    crate::headless::queue_changed(&app, &session_id);
+    Ok(entry)
 }
 
 #[tauri::command]
 pub async fn queue_update(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     text: String,
@@ -268,45 +333,77 @@ pub async fn queue_update(
         let session_id = get(&*state.store.lock().map_err(|e| e.to_string())?, &id)?.session_id;
         refuse_switched_off_skill(&state, &session_id, &text).await?;
     }
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    update(
-        &store,
-        &id,
-        &text,
-        &attachments.unwrap_or_else(|| serde_json::json!([])),
-    )
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        update(
+            &store,
+            &id,
+            &text,
+            &attachments.unwrap_or_else(|| serde_json::json!([])),
+        )?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": entry.session_id }));
+    Ok(entry)
 }
 
 #[tauri::command]
-pub async fn queue_remove(state: State<'_, AppState>, id: String) -> Result<()> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    remove(&store, &id)
+pub async fn queue_remove(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let session_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let session_id = get(&store, &id).ok().map(|e| e.session_id);
+        remove(&store, &id)?;
+        session_id
+    };
+    if let Some(session_id) = session_id {
+        let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    }
+    Ok(())
 }
 
 /// The desktop composer's steer of a queued entry: once the running turn took it, the entry
 /// leaves the queue as a delivery ([`remove_delivered`]); otherwise like `queue_remove`.
 #[tauri::command]
-pub async fn queue_take_steered(state: State<'_, AppState>, id: String) -> Result<()> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    remove_delivered(&store, &id)
+pub async fn queue_take_steered(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let session_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let session_id = get(&store, &id).ok().map(|e| e.session_id);
+        remove_delivered(&store, &id)?;
+        session_id
+    };
+    if let Some(session_id) = session_id {
+        let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn queue_reorder(state: State<'_, AppState>, session_id: String, ids: Vec<String>) -> Result<Vec<QueuedMessage>> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    reorder(&store, &session_id, &ids)
+pub async fn queue_reorder(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, ids: Vec<String>) -> Result<Vec<QueuedMessage>> {
+    let entries = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        reorder(&store, &session_id, &ids)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    Ok(entries)
 }
 
 #[tauri::command]
-pub async fn queue_take(state: State<'_, AppState>, id: String) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    take(&store, &id)
+pub async fn queue_take(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<QueuedMessage> {
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        take(&store, &id)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": entry.session_id }));
+    Ok(entry)
 }
 
 #[tauri::command]
-pub async fn queue_restore(state: State<'_, AppState>, entry: QueuedMessage) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    restore(&store, &entry)
+pub async fn queue_restore(app: tauri::AppHandle, state: State<'_, AppState>, entry: QueuedMessage) -> Result<QueuedMessage> {
+    let restored = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        restore(&store, &entry)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": restored.session_id }));
+    Ok(restored)
 }
 
 /// Sends a message to the running agent without stopping it: into the current turn
@@ -382,6 +479,55 @@ mod tests {
         let project = store.add_project(&std::env::temp_dir()).unwrap();
         let task = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
         (store, task.id)
+    }
+
+    #[test]
+    fn queue_mutations_emit_session_changes() {
+        let source = include_str!("message_queue.rs");
+        for (command, mutation) in [
+            ("queue_add", "add("),
+            ("queue_update", "update("),
+            ("queue_remove", "remove(&store, &id)?;"),
+            ("queue_take_steered", "remove_delivered(&store, &id)?;"),
+            ("queue_reorder", "reorder(&store, &session_id, &ids)"),
+            ("queue_take", "take(&store, &id)"),
+            ("queue_restore", "restore(&store, &entry)"),
+        ] {
+            let body = source.split_once(&format!("pub async fn {command}(")).unwrap().1;
+            let body = body.split_once("\n}\n").unwrap().0;
+            let emit = body.find("app.emit(\"queue-changed\", serde_json::json!({ \"sessionId\": ").unwrap_or_else(|| panic!("{command} must emit the session change"));
+            let lock_scope_end = body[..emit].rfind("\n    };").unwrap_or_else(|| panic!("{command} must drop the store lock before notifying"));
+            assert!(body.find(mutation).unwrap() < lock_scope_end, "{command} must mutate under the store lock");
+        }
+    }
+
+    #[test]
+    fn adding_a_queued_message_wakes_the_headless_drain() {
+        let source = include_str!("message_queue.rs");
+        let body = source.split_once("pub async fn queue_add(").unwrap().1;
+        let body = body.split_once("\n}\n").unwrap().0;
+        assert!(body.find("app.emit(\"queue-changed\"").unwrap() < body.find("crate::headless::queue_changed(&app, &session_id);").unwrap());
+    }
+
+    #[test]
+    fn batch_take_respects_usage_limits_and_stays_within_its_session() {
+        let (store, task) = store();
+        let parent = store.session(&task).unwrap().project_id;
+        let other = store.create_session(&parent, "claude", "sonnet", "full").unwrap();
+        let queued = add(&store, &task, "steering", &json!([])).unwrap();
+        let elsewhere = add(&store, &other.id, "elsewhere", &json!([])).unwrap();
+        for until in [None, Some(crate::storage::now() + 60_000)] {
+            store.set_limited(&task, until).unwrap();
+            let transaction = store.db.unchecked_transaction().unwrap();
+            assert!(take_all_ready(&transaction, &task, |_| true).unwrap().is_empty());
+            transaction.commit().unwrap();
+            assert_eq!(list(&store, Some(&task)).unwrap(), std::slice::from_ref(&queued));
+        }
+        store.set_limited(&task, Some(crate::storage::now() - 1)).unwrap();
+        let transaction = store.db.unchecked_transaction().unwrap();
+        assert_eq!(take_all_ready(&transaction, &task, |_| true).unwrap(), [queued]);
+        transaction.commit().unwrap();
+        assert_eq!(list(&store, None).unwrap(), [elsewhere]);
     }
 
     #[test]

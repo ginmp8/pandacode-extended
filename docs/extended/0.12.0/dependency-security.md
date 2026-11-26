@@ -1,5 +1,12 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-25 — source 0.3.150 reconciliation candidate
+
+All six application-version fields agree with the frozen fork (0.3.150). The candidate Cargo manifest retains Tokio 1.53.3, Rusqlite 0.41.1, Rustls 0.23.46, ZIP exactly 9.5.1 and rustls-tls updater configuration. Dependency manifests and lockfiles remain customized. Resolver consistency, npm and RustSec scans have not been run on this candidate. The upstream 0.3.150 release's audit statements are historical upstream evidence, not an Extended audit result.
+
+Extended 0.12.0 remains DRAFT. See [candidate inventory](README.md) and [source parity contract](../upstream/parity-contract.md).
+
+
 ## 2026-11-14 — upstream app 0.3.126 without Extended dependency rollback
 
 Source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) declares application **0.3.126**. The candidate synchronizes root `package.json`, both root/version entries in `package-lock.json`, the app package in `src-tauri/Cargo.lock`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`; the last is source-exact. Existing Extended dependency overrides, remediated package versions and lockfile fixes remain. The 0.3.126 upstream manifest delta is a version-only update in these files, not a dependency downgrade.

@@ -1,5 +1,12 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-25 — source 0.3.150 reconciliation candidate
+
+The candidate retains the Extended feature-control modules and adapts browser command routing, warm and normal agent launch paths, updates and cloud/VM tools. Static comparison of `providers/warm.rs` and `providers.rs` shows the process-local external-MCP restriction and per-run MCP configuration remain represented. Authenticated web settings commands were added to the source web command allowlist. Native On/Off, Connect/direct routes, bot pause/resume, external MCP, credential transfer, cloud/VM and browser authorization acceptance remain open; static inspection does not establish behavior parity.
+
+Extended 0.12.0 remains DRAFT. See [candidate inventory](README.md) and [source parity contract](../upstream/parity-contract.md).
+
+
 ## 2026-11-14 — upstream 0.3.126 continuity of optional controls
 
 The 0.3.126 source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) introduces project-file editing and ZCode team MCP host tools. Existing Extended changes in `src/main.ts`, `src-tauri/src/architect.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/providers.rs` and `src-tauri/src/providers/mcp_host.rs` are retained; upstream edits in these files are applied by uniquely matching original patch hunks, not by overwriting Extended logic. The source changes do not authorize removing or changing existing Settings defaults.

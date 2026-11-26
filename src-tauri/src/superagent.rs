@@ -1308,6 +1308,28 @@ pub(crate) fn inspect_headless_ticket_graph(
     })).map_err(|e| e.to_string())
 }
 
+/// Explicit local operator access to the validated Coordinator proposal.
+/// The ordinary headless status remains redacted. Reuse the same revisioned
+/// snapshot as Desktop and expose only its pending proposal, never transcripts
+/// or unrelated Worker results. Saving a plan is a separate native action.
+pub(crate) fn inspect_headless_coordinator_plan(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let snapshot = ticket_snapshot(&store, ticket_id, 50)?;
+    let proposal = if snapshot.archived { None } else { snapshot.coordinator_plan_proposal };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": snapshot.ticket.id,
+        "revision": snapshot.ticket.revision,
+        "planReviewRequired": snapshot.coordinator_plan_review_required,
+        "proposal": proposal,
+        "observationalOnly": true,
+        "providerDispatchedByCommand": false,
+        "grantIssued": false,
+        "recoveryPerformed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Headless Team-member activity uses the same native page handler as the
 /// desktop workspace, but only opens the persisted database read-only.
 /// It cannot trigger startup recovery, provider work or task approval.
@@ -16634,6 +16656,62 @@ mod tests {
         assert_eq!(waiting.state,"waiting_approval");
         assert_eq!(accept(&store,&ticket.id,waiting.revision).unwrap().state,"completed");
         assert!(prepare_coordinated_worker(&mut store,&ticket.id,false).is_err());
+    }
+
+    #[test]
+    fn headless_coordinator_plan_preview_is_task_scoped_read_only_and_revision_bound() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Private objective", "headless-coordinator-preview", false, true,
+        ).unwrap();
+        assert!(launched);
+        let path = store.path.clone();
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let inspect = |id: &str| -> serde_json::Value {
+            serde_json::from_str(&inspect_headless_coordinator_plan(&path, id).unwrap()).unwrap()
+        };
+        let running = inspect(&ticket.id);
+        assert!(running["proposal"].is_null());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+
+        let raw = r#"[{"requestKey":"inspect","summary":"Inspect source","workerBotId":"worker","routingReason":"Admitted Worker"}]"#;
+        assert!(on_run_finished(&store, &session, true, raw).unwrap());
+        let current = get_ticket(&store, &ticket.id).unwrap();
+        let revision = current.revision;
+        let history_count = history(&store, &ticket.id, 100).unwrap().len();
+        let preview = inspect(&ticket.id);
+        assert_eq!(preview["ticketId"], ticket.id);
+        assert_eq!(preview["revision"], revision);
+        assert_eq!(preview["proposal"]["ticketRevision"], revision);
+        assert_eq!(preview["proposal"]["planJson"], raw);
+        assert_eq!(preview["proposal"]["assignmentId"],
+            assignments(&store, &ticket.id, 10).unwrap()[0].id);
+        assert_eq!(preview["observationalOnly"], true);
+        assert_eq!(preview["providerDispatchedByCommand"], false);
+        assert_eq!(preview["grantIssued"], false);
+        assert!(!preview.to_string().contains("Private objective"));
+        assert!(!inspect_headless_status(&path, Some(&ticket.id)).unwrap().contains("Admitted Worker"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), history_count);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
+        assert!(work_items::list(&store, &ticket.id, 100).unwrap().0.is_empty());
+
+        let (other, _) = admit_role_with_staging(
+            &mut store, &config.id, "Different objective", "other-preview", true, false, true,
+        ).unwrap();
+        assert!(inspect(&other.id)["proposal"].is_null());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(inspect(&ticket.id)["proposal"].is_null());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
+        assert_eq!(inspect(&ticket.id)["proposal"]["planJson"], raw);
+
+        let inputs = work_items::decode_plan(raw).unwrap();
+        work_items::headless_plan_batch(&path, &ticket.id, revision, &inputs).unwrap();
+        let saved = inspect(&ticket.id);
+        assert_eq!(saved["revision"], revision + 1);
+        assert!(saved["proposal"].is_null());
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
     }
 
     #[test]

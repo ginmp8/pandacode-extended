@@ -55,6 +55,7 @@ enum Command {
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
+    InspectCoordinatorPlan { ticket_id: String },
     InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
     InspectTicketSource {
         ticket_id: String, paginated: bool, before_at: Option<i64>,
@@ -285,6 +286,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectCoordinatorPlan { ticket_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_coordinator_plan(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(plan) => { println!("{plan}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Coordinator plan inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -1151,6 +1166,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ListTeamUnresolvedEffects { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
+        | Command::InspectCoordinatorPlan { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::PreflightDemand { .. } | Command::PreflightWorkerDemand { .. }
         | Command::InspectTicketEffects { .. }
@@ -2404,6 +2420,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 };
                 ops += 1;
             }
+            "--inspect-coordinator-plan" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--inspect-coordinator-plan needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::InspectCoordinatorPlan { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--inspect-ticket-graph" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-graph needs a Ticket ID.\n\n{}", help()))?;
@@ -2878,7 +2902,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --quarantine-inactive-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-coordinator-plan <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --quarantine-inactive-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -3007,6 +3031,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          first Worker implicitly. No provider/tool grant or launch;
                          native Desktop retry independently rechecks the Ticket.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
+  --inspect-coordinator-plan <id>
+                         Inspect the exact validated pending Coordinator proposal without dispatch or recovery.
   --inspect-ticket-graph <id>
                          Inspect bounded native Ticket/attempt topology without task
                          objectives, results, inferred subagents or Council verdicts; exit.
@@ -3981,6 +4007,15 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert!(parsed("--inspect-ticket-effects ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--inspect-coordinator-plan ticket_123"),
+            Ok(Command::InspectCoordinatorPlan { ticket_id: "ticket_123".into() }));
+        for invalid in [
+            "--inspect-coordinator-plan",
+            "--inspect-coordinator-plan ../outside",
+            "--inspect-coordinator-plan ticket_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-ticket-graph ticket_123"),
             Ok(Command::InspectTicketGraph { ticket_id: "ticket_123".into() }));
         for invalid in [
@@ -4270,6 +4305,7 @@ mod tests {
             "--inspect-team-roster",
             "--inspect-ticket",
             "--inspect-ticket-graph",
+            "--inspect-coordinator-plan",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
             "--list-ticket-source-links",

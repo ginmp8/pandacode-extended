@@ -1155,6 +1155,25 @@ It does not perform a Skills Library scan: `skillLibraryStatus=not_scanned`,
 `multiRoleExecutionAvailable=false` remains explicit; all execution
 requires a separate task-scoped native authorization and live recheck.
 
+### Review a pending Coordinator plan from headless
+
+Use `pandacode serve --inspect-coordinator-plan <ticket-id>` to read a
+pending, validated structured proposal from the original native Coordinator.
+The response includes the exact Ticket revision and original Assignment ID,
+and `proposal.planJson` contains the proposed WorkItems and routing rationale.
+The proposal is absent (null) when it is unavailable, stale, invalid, or
+already replaced by a saved plan. Treat it as untrusted advice, not a grant.
+The ordinary `--inspect-ticket` status remains redacted. This explicit
+local operator command returns only the selected Ticket's proposal, so keep
+its output private if the plan contains project-specific information.
+
+Review or edit the JSON, then use
+`pandacode serve --plan-work-items <ticket-id> <revision> <plan-file>`
+with the returned revision. The native save independently rechecks the
+current Ticket, plan, member eligibility and policy. Inspection opens SQLite
+read-only, never saves WorkItems, runs recovery, dispatches providers, or
+issues grants. A separately authorized native dispatch is still required.
+
 ### Read-only headless Ticket execution graph
 
 Use `pandacode serve --inspect-ticket-graph <ticket-id>` to retrieve the same

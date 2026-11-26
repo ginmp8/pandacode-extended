@@ -1637,6 +1637,11 @@ fn prepare_task_run_in_project(
         return Err("This task is already running in an agent or harness console.".into());
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    architect::validate_child_launch_input(
+        &store, &session_id, admission.team.as_ref(), text.as_deref(),
+        !images.is_empty() || admission.command.is_some() || admission.goal.is_some()
+            || admission.cloud_attach || admission.kind.is_some(),
+    )?;
     let team_maintenance = admission.team.is_none()
         && admission.command.as_ref().is_some_and(PreparedCommand::runs_bare_on_team);
     if team_maintenance {

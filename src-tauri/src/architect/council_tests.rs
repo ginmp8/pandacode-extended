@@ -10037,6 +10037,42 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
     }
     let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     assert!(distinct.contains(&launch.sid), "only an admitted child leaf is scheduled");
+    // An authenticated worker identity alone must not authorize a different
+    // prompt, an implicit task restart, or an unrelated attachment. Exercise
+    // the actual provider preparation boundary before any turn is persisted.
+    {
+        let (before, messages, status) = {
+            let store = state.store.lock().unwrap();
+            (serde_json::to_value(load(&store, &launch.admission.parent).unwrap()).unwrap(),
+                store.db.query_row("SELECT COUNT(*) FROM messages WHERE session_id=?1",
+                    [&launch.sid], |row| row.get::<_, i64>(0)).unwrap(),
+                store.session(&launch.sid).unwrap().status)
+        };
+        for (text, images, cloud_attach) in [
+            (Some("Review a different artifact".into()), Vec::new(), false),
+            (None, Vec::new(), false),
+            (Some(launch.prompt.clone()), vec![std::path::PathBuf::from("unrelated.png")], false),
+            (Some(launch.prompt.clone()), Vec::new(), true),
+        ] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let denied = crate::prepare_task_run_in_project(
+                &state, launch.sid.clone(), text, images, tx,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                crate::RunAdmission {
+                    team: Some(launch.admission.clone()), cloud_attach, ..Default::default()
+                },
+            ).err().expect("unissued child launch input must be rejected");
+            assert!(denied.contains("child_council_denied: launch input"), "{denied}");
+        }
+        let store = state.store.lock().unwrap();
+        assert_eq!(serde_json::to_value(load(&store, &launch.admission.parent).unwrap()).unwrap(), before);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM messages WHERE session_id=?1",
+            [&launch.sid], |row| row.get::<_, i64>(0)).unwrap(), messages);
+        assert_eq!(store.session(&launch.sid).unwrap().status, status);
+        validate_child_launch_input(&store, &launch.sid, Some(&launch.admission),
+            Some(launch.prompt.as_str()), false).unwrap();
+    }
+    assert!(!state.agents.lock().unwrap().contains_key(&launch.sid));
     {
         let store = state.store.lock().unwrap();
         validate_admission(&store, &launch.sid, Some(&launch.admission)).unwrap();

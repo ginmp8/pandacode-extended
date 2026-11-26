@@ -1112,6 +1112,32 @@ pub(crate) fn reviewer_boundary(store: &Store, sid: &str, admission: Option<&Adm
     Ok(reviewer_policy(store, sid, admission)?.is_some())
 }
 
+/// Bind the provider-facing input to the exact native child launch. A valid
+/// admission identifies a worker; it does not authorize a substituted message,
+/// attachments, a cloud reattach, or another operation in that worker's context.
+/// Check before admission can mutate the session or persist a user turn.
+pub(crate) fn validate_child_launch_input(
+    store: &Store,
+    sid: &str,
+    admission: Option<&Admission>,
+    text: Option<&str>,
+    extra_input: bool,
+) -> Result<()> {
+    let Some(admission) = admission else { return Ok(()) };
+    if parent_of(store, &admission.parent)?.is_none() {
+        return Ok(());
+    }
+    let team = load(store, &admission.parent)?
+        .ok_or("child_council_denied: launch input has no native child team.")?;
+    let worker = team.workers.iter().find(|worker| worker.session_id == sid)
+        .ok_or("child_council_denied: launch input has no native child reviewer.")?;
+    let expected = worker.resume_prompt.as_deref().unwrap_or(&worker.assignment);
+    if extra_input || text != Some(expected) {
+        return Err("child_council_denied: launch input differs from the scheduled native review.".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_admission(
     store: &Store,
     sid: &str,

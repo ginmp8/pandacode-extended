@@ -1,5 +1,9 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-26 — RustSec remediation candidate for the 0.3.150 integration
+
+The frozen fork remains [c814e86607b8](https://github.com/ginmp8/pandacode/commit/c814e86607b880ea276927d25f67bb45a46560ed), app 0.3.150; Extended remains 0.12.0 DRAFT. At [Extended af1624ba0b04](https://github.com/ginmp8/pandacode-extended/commit/af1624ba0b0477f55537208229dd40874ab9cd05), [CI run 45739734101](https://github.com/ginmp8/pandacode-extended/actions/runs/45739734101) passed 10/11 jobs; RustSec failed on [RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594) (cookie 0.18.2) and [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592) (url 2.5.8). The scoped lockfile candidate selects cookie 0.18.3 and url 2.5.9, plus form_urlencoded 1.2.3 required by url 2.5.9. Versions and checksums were obtained from the public crates.io index; dependency and feature requirements were compared, including Tauri 2.12.5's tagged manifest. Existing percent-encoding 2.3.2 satisfies the new minimum. No audit suppression, app version bump, feature removal or unrelated dependency change is introduced. Local Cargo resolution and execution are unavailable (Cargo absent, GitHub and registry DNS failure); fresh exact-SHA locked builds, tests and RustSec audit must establish the result. Native Settings On/Off and external integrations remain unverified.
+
 ## 2026-11-25 — source 0.3.150 reconciliation candidate
 
 The full source tree is represented (2,162 paths, none missing; 84 shared divergences). The source baseline has been refreshed to the exact 0.3.150 commit and original release-note hashes. Local checkout failed DNS resolution; candidate tests have not run. Semantic review of customized paths, build/lockfile consistency, native Settings On/Off and external integration acceptance remain open. Parent CI was green but cannot validate this candidate.

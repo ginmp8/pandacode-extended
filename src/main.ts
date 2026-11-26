@@ -2805,6 +2805,8 @@ const settleUnfolded = (element: HTMLElement): void => settleIn(element, 4, { re
 /** The reference's steer arrow (↳) and effort gauge; dom.ts has no such glyphs. */
 const STEER_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a3 3 0 0 0 3 3h10m-4-4 4 4-4 4"/></svg>';
 const GAUGE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13 3.5-4"/></svg>';
+// Cache generated markup, not the live per-message draft or open menus.
+const sharedChannelComposerMarkup = new WeakMap<HTMLFormElement, string>();
 function renderComposer(): void {
   refreshTeamProgress();
   syncProgressPip();
@@ -2831,6 +2833,17 @@ function renderComposer(): void {
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
+    const composerArea = $('#composer-area');
+    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    const nextMarkup = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    // A history refresh with unchanged controls must not destroy a live pointer
+    // or keyboard target. Changed rosters/actions, posting and rejected drafts
+    // still rebuild through the normal validation and restoration path.
+    if (oldChannelComposer && oldChannelComposer.parentElement === composerArea
+      && oldChannelComposer.dataset.channelId === state.sharedChannelId
+      && sharedChannelComposerMarkup.get(oldChannelComposer) === nextMarkup
+      && !posting && !state.failedChannelCouncilDrafts.has(state.sharedChannelId)
+      && oldChannelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.disabled === false) return;
     // Channel events redraw the composer while Council settings may be open.
     // Capture its live keyboard/scroll state before removing the old popover.
     const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
@@ -2858,9 +2871,9 @@ function renderComposer(): void {
       && oldPrompt && document.activeElement === oldPrompt ? {
         start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd, direction: oldPrompt.selectionDirection,
       } : null;
-    $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    composerArea.innerHTML = nextMarkup;
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    if (channelComposer) sharedChannelComposerMarkup.set(channelComposer, nextMarkup);
     if (!posting && channelComposer) {
       const failedDraft = state.failedChannelCouncilDrafts.get(state.sharedChannelId);
       restoreSharedChannelCouncilInputs(failedDraft ?? oldChannelComposer, channelComposer);
@@ -7436,7 +7449,8 @@ document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
     const channelId = state.sharedChannelId, data = new FormData(form), text = String(data.get('text') ?? '').trim();
-    if (!text || state.sharedChannelPosting.has(channelId)) return;
+    if (form.dataset.channelId !== channelId || state.sharedChannelDetail?.id !== channelId
+      || !text || state.sharedChannelPosting.has(channelId)) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
     const showCouncilError = (message: string): void => {
       notify(message);

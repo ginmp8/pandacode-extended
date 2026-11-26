@@ -2,6 +2,21 @@ import { expect, test, type Page } from '@playwright/test';
 
 const sidebar = (page: Page) => page.getByRole('region', { name: 'Bots', exact: true });
 
+// Wait for a real detail refresh, not just the notification. With unchanged
+// controls the form must retain its identity, including its live event targets.
+async function refreshUnchangedChannel(page: Page, channelId?: string): Promise<void> {
+  const history = await page.locator('.bc-history').elementHandle();
+  const form = await page.locator('#shared-channel-composer').elementHandle();
+  expect(history).not.toBeNull();
+  expect(form).not.toBeNull();
+  await page.evaluate(id => (window as any).__previewEmit('bot-shared-channel-changed', id ? { channelId: id } : {}), channelId);
+  await expect.poll(() => page.evaluate(old => {
+    const current = document.querySelector('.bc-history');
+    return current !== null && current !== old;
+  }, history)).toBe(true);
+  expect(await page.evaluate(old => document.querySelector('#shared-channel-composer') === old, form)).toBe(true);
+}
+
 async function showBots(page: Page): Promise<void> {
   await page.goto('/?bots=sample');
   const bar = page.locator('.sidebar-bots-bar');
@@ -72,10 +87,7 @@ test.describe('shared bot channels', () => {
 
     await prompt.focus();
     await prompt.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(9, 16, 'backward'));
-    const before = await composer.elementHandle();
-    expect(before).not.toBeNull();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' }));
-    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, before)).toBe(true);
+    await refreshUnchangedChannel(page, 'sample-launch');
     await expect(prompt).toBeFocused();
     await expect.poll(() => prompt.evaluate(element => {
       const input = element as HTMLTextAreaElement;
@@ -112,7 +124,14 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).getByRole('button', { name: '#followup' })).toBeVisible();
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     await page.getByRole('textbox', { name: 'Message channel' }).fill('Review the first Channel only.');
-    await page.locator('#shared-channel-composer button[type=submit]').click();
+    // Hold a real pointer press across a detail refresh. Replacing the form
+    // between mouse-down and mouse-up loses the click instead of posting.
+    const send = page.locator('#shared-channel-composer button[type=submit]');
+    await expect(send).toBeEnabled();
+    await send.hover();
+    await page.mouse.down();
+    await refreshUnchangedChannel(page, 'sample-launch');
+    await page.mouse.up();
     await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseLaunchPost)).toBe('function');
 
     await page.evaluate(() => {
@@ -194,10 +213,7 @@ test.describe('shared bot channels', () => {
     });
     expect(scrollTop).toBeGreaterThan(0);
 
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(async () => page.evaluate(old =>
-      document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
 
     const restored = page.locator('#shared-channel-composer');
     const restoredPanel = restored.getByRole('dialog', { name: 'Council' });
@@ -232,9 +248,7 @@ test.describe('shared bot channels', () => {
     await reviewers.first().check();
     await page.keyboard.press('Escape');
 
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
     const restored = page.locator('#shared-channel-composer');
     await expect(restored.getByRole('button', { name: 'Council: on' })).toBeVisible();
     await expect(restored.locator('.bc-council-panel')).toBeHidden();
@@ -360,9 +374,7 @@ test.describe('shared bot channels', () => {
         await panel.getByRole('button', { name: 'Remove criterion' }).last().click();
         await panel.getByRole('button', { name: 'Remove criterion' }).last().click();
         await page.keyboard.press('Escape');
-        const previous = await composer.elementHandle();
-        await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-        await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+        await refreshUnchangedChannel(page);
         composer = page.locator('#shared-channel-composer');
         await composer.getByRole('button', { name: 'Council: on' }).click();
         panel = composer.getByRole('dialog', { name: 'Council' });
@@ -533,9 +545,7 @@ test.describe('shared bot channels', () => {
     expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
 
     // A same-Channel refresh cannot discard the restored draft.
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
     await composer.getByRole('button', { name: 'Council: on' }).click();
     await expect(panel.getByRole('checkbox', { name: 'Writer', exact: true })).toBeChecked();
     await expect(panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' })).not.toBeChecked();
@@ -589,9 +599,7 @@ test.describe('shared bot channels', () => {
     await expect(writer).toBeChecked();
     expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
 
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
     await expect(panel.getByRole('alert')).toBeVisible();
     await panel.getByRole('button', { name: 'Confirm updated reviewer roster' }).click();
     await expect(panel.getByRole('alert')).not.toBeVisible();
@@ -639,9 +647,7 @@ test.describe('shared bot channels', () => {
 
     await panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1).fill('data_integrity');
     await page.keyboard.press('Escape');
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
     composer = page.locator('#shared-channel-composer');
     await composer.getByRole('button', { name: 'Council: on' }).click();
     panel = composer.getByRole('dialog', { name: 'Council' });
@@ -686,9 +692,7 @@ test.describe('shared bot channels', () => {
     await panel.locator('input[name="councilChildReviewers"]').nth(2).fill('3');
     await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('two_phase');
     await page.keyboard.press('Escape');
-    const previous = await composer.elementHandle();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await refreshUnchangedChannel(page);
     composer = page.locator('#shared-channel-composer');
     await composer.getByRole('button', { name: 'Council: on' }).click();
     panel = composer.getByRole('dialog', { name: 'Council' });
@@ -1220,9 +1224,9 @@ test.describe('shared bot channels', () => {
     await expect(menu).toBeVisible();
     const before = await menu.elementHandle();
     expect(before).not.toBeNull();
-    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
-    // The refresh rewrote the actions (a new menu element), and the menu is still open.
-    await expect.poll(() => page.evaluate(old => document.querySelector('#composer-area .bc-reassign-menu') !== old, before)).toBe(true);
+    await refreshUnchangedChannel(page);
+    // The real detail refresh must retain the open menu and its event targets.
+    expect(await page.evaluate(old => document.querySelector('#composer-area .bc-reassign-menu') === old, before)).toBe(true);
     await expect(menu).toBeVisible();
     await expect(actions.getByRole('button', { name: /Reassign/ })).toHaveAttribute('aria-expanded', 'true');
   });

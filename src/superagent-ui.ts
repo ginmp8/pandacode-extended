@@ -102,6 +102,7 @@ interface PendingDispatch {
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  archived?: boolean;
   pendingDispatch?: PendingDispatch | null;
   admittedProfile?: AdmittedTeamProfile | null;
   admittedStrategy?: {policyRevision:number;purpose:string;strategy:string;capturedAt:number} | null;
@@ -242,8 +243,8 @@ let demandArchived = false;
     !filter || filter === state ||
       (filter === 'needs_attention' &&
         ['blocked','failed','interrupted','inconclusive'].includes(state));
-  const fetchDemandPage = async (query: DemandQuery): Promise<DemandIndex[]> => {
-    const nativeQuery: DemandQuery = demandArchived ? {...query, archived:true} : query;
+  const fetchDemandPage = async (query: DemandQuery, archived = demandArchived): Promise<DemandIndex[]> => {
+    const nativeQuery: DemandQuery = archived ? {...query, archived:true} : query;
     const page = await call<DemandIndex[]>('superagent_all_demands', {query:nativeQuery});
     // A first page is untrusted until its native filter scope and identities
     // match this request. Never expose foreign rows or their Stop controls.
@@ -266,7 +267,7 @@ let demandArchived = false;
                   (item.updatedAt === page[index - 1].updatedAt && item.id < page[index - 1].id))) ||
                 (query.orchestrationId && item.orchestrationId !== query.orchestrationId) ||
                 !isDemandStateMatch(query.stateFilter, item.state) ||
-                (demandArchived ? item.archived !== true : item.archived === true) ||
+                (archived ? item.archived !== true : item.archived === true) ||
                 (query.projectId && item.projectId !== query.projectId) ||
                 seen.has(item.id)) return true;
             seen.add(item.id);
@@ -284,7 +285,7 @@ let demandArchived = false;
           !Number.isSafeInteger(item.revision) || item.revision < 0 ||
           !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
           (item.projectId !== undefined && typeof item.projectId !== 'string') ||
-          (demandArchived ? item.archived !== true : item.archived === true))) {
+          (archived ? item.archived !== true : item.archived === true))) {
       // Continuations get ordering, overlap and filter checks at the caller,
       // but still require valid native Ticket metadata before exposing actions.
       throw new Error('Native Demand continuation has malformed Ticket identity or revision; refresh the index.');
@@ -1678,7 +1679,7 @@ let demandArchived = false;
     }
     host.setAttribute('aria-busy', String(busy || loading));
   }
-  async function refreshTicketDetails(): Promise<void> {
+  async function refreshTicketDetails(preloaded?: {snapshot:TicketDetails; links:ThreadLink[]}): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
@@ -1688,7 +1689,7 @@ let demandArchived = false;
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
     runGraph = null; runGraphLoaded = false;
-    const [snapshot, links] = await Promise.all([
+    const [snapshot, links] = preloaded ? [preloaded.snapshot, preloaded.links] as const : await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
     ]);
@@ -2875,14 +2876,35 @@ let demandArchived = false;
               assignment.attempt === item.attempt)) {
           throw new Error('Native Demand or Assignment identity changed; refresh member activity.');
         }
-        const latest = await call<Ticket[]>('superagent_tickets', {
-          orchestrationId:item.orchestrationId,limit:50,
-        });
+        const archived = fresh.archived === true;
+        const [latest,page,links] = await Promise.all([
+          call<Ticket[]>('superagent_tickets', {orchestrationId:item.orchestrationId,limit:50}),
+          fetchDemandPage({limit:200,orchestrationId:item.orchestrationId}, archived),
+          call<ThreadLink[]>('superagent_source_thread_links',{ticketId:item.ticketId}),
+        ]);
         if (!Array.isArray(latest) ||
             latest.some(ticket => ticket.orchestrationId !== item.orchestrationId)) {
           throw new Error('Native Team Ticket list returned foreign records; navigation denied.');
         }
-        const page = await fetchDemandPage({limit:200,orchestrationId:item.orchestrationId});
+        // Keep the same bounded historical Assignment window on the final read.
+        // Do not replace the verified attempt with the ordinary 50-row inspector.
+        const verified = await call<TicketDetails>('superagent_snapshot', {
+          ticketId:item.ticketId,limit:200,
+        });
+        if (!verified?.ticket || !verified.mandate ||
+            verified.ticket.id !== item.ticketId ||
+            verified.ticket.orchestrationId !== item.orchestrationId ||
+            verified.ticket.revision !== fresh.ticket.revision ||
+            (verified.archived === true) !== archived ||
+            !Array.isArray(verified.assignments) ||
+            !verified.assignments.some(assignment => assignment.id === item.assignmentId &&
+              assignment.botId === item.botId && assignment.sessionId === item.sessionId &&
+              assignment.attempt === item.attempt) ||
+            page.some(ticket => ticket.id === item.ticketId && ticket.revision !== verified.ticket.revision) ||
+            latest.some(ticket => ticket.id === item.ticketId &&
+              (archived || ticket.revision !== verified.ticket.revision))) {
+          throw new Error('Native Demand visibility or Assignment changed; refresh member activity.');
+        }
         if (selected !== item.orchestrationId ||
             memberActivityTeamId !== item.orchestrationId ||
             memberActivityBotId !== item.botId) {
@@ -2890,11 +2912,12 @@ let demandArchived = false;
         }
         // The selected assignment may be older than the Team's last 50
         // Tickets; inject only its reverified canonical Ticket snapshot.
-        tickets = [fresh.ticket, ...latest.filter(ticket => ticket.id !== item.ticketId)];
+        tickets = [verified.ticket, ...latest.filter(ticket => ticket.id !== item.ticketId)];
         inspectedTicket = item.ticketId;
         inspectedAssignmentId = item.assignmentId;
         ticketDetails = null; threadLinks = [];
-        await refreshTicketDetails();
+        await refreshTicketDetails({snapshot:verified,links});
+        demandArchived = archived;
         demandTeamFilter = item.orchestrationId;
         demandProjectFilter = ''; demandStateFilter = '';
         demandSearch = ''; demandSearchDraft = '';

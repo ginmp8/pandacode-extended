@@ -3580,9 +3580,9 @@ test('Team effective policy view is native-backed and never grants or launches t
   expect(calls.some(c=>/submit|dispatch|accept|reserve|enable|activate/.test(c))).toBe(false);
 });
 
-test('Team member Activity pages are native-backed, Team-scoped and open the original bot chat only after recheck', async ({page}) => {
+async function mountMemberActivityFixture(page: import('@playwright/test').Page, archived = false) {
   await page.goto('/?bots=sample');
-  await page.evaluate(async () => {
+  await page.evaluate(async (archived) => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
     host.id='sa-member-activity-test'; document.body.appendChild(host);
@@ -3668,24 +3668,35 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
         if (args?.ticketId!=='ticket-old') throw Error('wrong Ticket requested');
         return {
           ticket:{id:'ticket-old',orchestrationId:'team',objective:'Historical native demand',
-            revision:2,state:'waiting_approval',evidence:'Worker evidence'},
+            revision:2,state:archived?'stopped':'waiting_approval',evidence:'Worker evidence'},
+          archived,
           mandate:{actor:'operator',authorizationId:'manual',policyRevision:3,
             projectId:'worker-project',expiresAt:1800000000000,revoked:false,
             allowedTools:[],allowedSideEffects:false},
-          assignments:[{id:'a-old',botId:'worker',sessionId:'real-session',attempt:1,
-            state:'finished',createdAt:499,updatedAt:499}],activity:[],
+          assignments:[...Array.from({length:archived?50:0},(_,index)=>({
+            id:'later-'+index,botId:'worker',sessionId:'later-session-'+index,
+            attempt:51-index,state:'finished',createdAt:600-index,updatedAt:600-index
+          })),{id:'a-old',botId:'worker',sessionId:'real-session',attempt:1,
+            state:'finished',createdAt:499,updatedAt:499}].slice(0,Number(args?.limit??50)),activity:[],
         } as never;
       }
       if (command==='superagent_source_thread_links') return [] as never;
       if (command==='superagent_all_demands') {
         if ((args?.query as {orchestrationId?:string} | undefined)?.orchestrationId!=='team')
           throw Error('Historical Demand query crossed Team boundary');
+        if (Boolean((args?.query as {archived?:boolean} | undefined)?.archived)!==archived)
+          return [] as never;
         return [{id:'ticket-old',orchestrationId:'team',objective:'Historical native demand',
-          state:'waiting_approval',revision:2,projectId:'worker-project',updatedAt:499}] as never;
+          state:archived?'stopped':'waiting_approval',revision:2,projectId:'worker-project',updatedAt:499,
+          archived}] as never;
       }
       throw Error('Unexpected command: '+command);
     }, async route => { routes.push(route); });
-  });
+  }, archived);
+}
+
+test('Team member Activity pages are native-backed, Team-scoped and open the original bot chat only after recheck', async ({page}) => {
+  await mountMemberActivityFixture(page);
   const host=page.locator('#sa-member-activity-test');
   const roles=host.getByRole('region',{name:'Configured Team roles'});
   await roles.getByRole('button',{name:'Load native members'}).click();
@@ -3751,6 +3762,14 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
   await expect(host).toContainText('invalid or out-of-scope history');
   await expect(roles.getByRole('region',{name:'Team member activity'}))
     .not.toContainText('foreign-ticket');
+});
+
+for (const archived of [false,true]) test(`historical member Activity opens ${archived?'archived':'active'} Demand and exact native attempt`, async ({page}) => {
+  await mountMemberActivityFixture(page, archived);
+  const host=page.locator('#sa-member-activity-test');
+  const roles=host.getByRole('region',{name:'Configured Team roles'});
+  await roles.getByRole('button',{name:'Load native members'}).click();
+  await roles.getByRole('button',{name:'Inspect effective policy and Skills'}).click();
   // An older Assignment outside the Team's latest 50 Tickets resolves to
   // the original canonical Demand and selects its native attempt inspector.
   await roles.getByRole('button',{name:'View activity for Worker'}).click();
@@ -3764,16 +3783,20 @@ test('Team member Activity pages are native-backed, Team-scoped and open the ori
     .toHaveAttribute('aria-current','page');
   await expect(host.getByRole('combobox',{name:'Filter Demands by Team'}))
     .toHaveValue('team');
+  await expect(host.getByRole('combobox',{name:'Filter Demands by Visibility'}))
+    .toHaveValue(archived?'archived':'active');
   await expect(host.getByRole('region',{name:'Ticket evidence'}))
     .toContainText('ticket-old');
-  await expect(host.getByRole('button',{name:'Inspect attempt 1'}))
+  if (archived) await expect(host.getByRole('button',{name:'Restore Demand',exact:true})).toBeVisible();
+  await expect(host.getByRole('button',{name:'Inspect attempt 1',exact:true}))
     .toHaveAttribute('aria-expanded','true');
   const finalEvidence=await page.evaluate(() =>
     (window as unknown as {saMemberActivityEvidence:()=>{
       seen:Array<{command:string;args?:Record<string,unknown>}>;routes:unknown[]
     }}).saMemberActivityEvidence());
   expect(finalEvidence.seen.some(call=>call.command==='superagent_all_demands' &&
-    (call.args?.query as {orchestrationId?:string} | undefined)?.orchestrationId==='team')).toBe(true);
+    (call.args?.query as {orchestrationId?:string} | undefined)?.orchestrationId==='team' &&
+    Boolean((call.args?.query as {archived?:boolean} | undefined)?.archived)===archived)).toBe(true);
   expect(finalEvidence.seen.some(call=>
     /submit|dispatch|accept|grant|enable|reserve|stop/.test(call.command))).toBe(false);
 });

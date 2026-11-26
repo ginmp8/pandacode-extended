@@ -1012,6 +1012,8 @@ pub struct AssignmentInsight {
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
     pub ticket: Ticket,
+    /// Reversible visibility from the same native snapshot as Ticket revision.
+    pub archived: bool,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
     pub attempt_insights: Vec<AssignmentInsight>,
@@ -1151,7 +1153,12 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     let native_history = history(store, ticket_id, limit)?;
     let (work_items, truncated_work_items) = work_items::list(store, ticket_id, 100)?;
     let timeline = task_timeline(&native_history, &native_assignments, &work_items);
+    let archived: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_archives WHERE ticket_id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
     let result = TaskSnapshot {
+        archived,
         current_team_policy_revision,
         team_policy_changed_since_admission,
         finalization_gate: finalization_gate.to_owned(),
@@ -6947,6 +6954,7 @@ mod tests {
         assert!(list(&store,false).is_empty());
         assert_eq!(list(&store,true).len(),1);
         assert!(list(&store,true)[0].archived);
+        assert!(ticket_snapshot(&store,&ticket.id,20).unwrap().archived);
         assert!(change_demand_archive(&store,&ticket.id,stopped.revision,false).is_err());
         assert_eq!(change_demand_archive(&store,&ticket.id,archived.revision,true)
             .unwrap().revision,archived.revision);
@@ -6958,8 +6966,10 @@ mod tests {
         drop(store);
         let store=Store::open(&path).unwrap();
         assert_eq!(list(&store,true).len(),1);
+        assert!(ticket_snapshot(&store,&ticket.id,20).unwrap().archived);
         let restored=change_demand_archive(&store,&ticket.id,archived.revision,false).unwrap();
         assert_eq!(restored.revision,archived.revision+1);
+        assert!(!ticket_snapshot(&store,&ticket.id,20).unwrap().archived);
         assert_eq!(list_tickets(&store,&team.id,20).unwrap().len(),1);
         assert!(history(&store,&ticket.id,20).unwrap().iter()
             .any(|item|item.kind=="demand_restored"));

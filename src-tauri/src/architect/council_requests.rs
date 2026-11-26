@@ -559,6 +559,34 @@ pub(super) fn resolve_native_admission_collision(
     Ok(existing.request)
 }
 
+// Prospective admission is a compare-and-insert against the exact persisted
+// team observed before preflight. A different SQLite connection can advance
+// the cycle, dispatch root reviewers, settle the session or change its owner.
+// Keep the existing child pin and assignment uniqueness checks in the same
+// statement so stale preflight cannot mint new native task authority.
+pub(super) const NATIVE_TASK_ADMISSION_SQL: &str = "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+         SELECT ?1,?2,'council_native_task',?3,?1
+         WHERE NOT EXISTS (
+             SELECT 1 FROM architect_requests
+              WHERE parent_session_id=?1 AND kind='council_native_task'
+                AND CASE WHEN json_valid(content) THEN (
+                    json_type(content,'$.request.cycleId') IS NOT 'text'
+                    OR json_extract(content,'$.request.cycleId')=''
+                    OR json_extract(content,'$.request.cycleId')=?4
+                ) ELSE 1 END
+         )
+         AND NOT EXISTS (
+             SELECT 1 FROM architect_requests WHERE parent_session_id=?1 AND key=?5
+         )
+         AND EXISTS (SELECT 1 FROM architect_teams WHERE session_id=?1 AND content=?6)
+         AND EXISTS (
+             SELECT 1 FROM sessions WHERE id=?1 AND project_id=?7
+               AND remote_device IS NULL AND archived=0 AND task_stage<>'completed'
+               AND status NOT IN ('interrupted','error','completed','stopped','paused')
+         )
+         AND NOT EXISTS (SELECT 1 FROM architect_workers WHERE session_id=?1)
+         AND NOT EXISTS (SELECT 1 FROM bot_shared_channel_deliveries WHERE session_id=?1)";
+
 /// Existing architect_requests provides task-scoped, cascade-deleted storage.
 /// This is a native-only operation; it does not launch or grant reviewers.
 pub(crate) fn admit_native_task(
@@ -566,6 +594,11 @@ pub(crate) fn admit_native_task(
     assignment_key: &str, artifact_sha256: &str,
 ) -> Result<NativeTaskCouncilRequest> {
     let key = native_task_key(assignment_key)?;
+    let team_before: String = store.db.query_row(
+        "SELECT content FROM architect_teams WHERE session_id=?1",
+        [session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("council_task_denied: native Architect task does not exist.")?;
     let candidate = native_task_candidate(
         store, session_id, project_id, assignment_key, artifact_sha256, storage::id(),
     )?;
@@ -634,21 +667,9 @@ pub(crate) fn admit_native_task(
     // assignment in the current cycle must not inherit the same native verdict.
     // The SQL predicate makes this guard atomic across SQLite connections.
     let inserted = store.db.execute(
-        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
-         SELECT ?1,?2,'council_native_task',?3,?1
-         WHERE NOT EXISTS (
-             SELECT 1 FROM architect_requests
-              WHERE parent_session_id=?1 AND kind='council_native_task'
-                AND CASE WHEN json_valid(content) THEN (
-                    json_type(content,'$.request.cycleId') IS NOT 'text'
-                    OR json_extract(content,'$.request.cycleId')=''
-                    OR json_extract(content,'$.request.cycleId')=?4
-                ) ELSE 1 END
-         )
-         AND NOT EXISTS (
-             SELECT 1 FROM architect_requests WHERE parent_session_id=?1 AND key=?5
-         )",
-        params![session_id, key, body, &candidate.cycle_id, &child_artifact_key],
+        NATIVE_TASK_ADMISSION_SQL,
+        params![session_id, key, body, &candidate.cycle_id, &child_artifact_key,
+            &team_before, project_id],
     ).map_err(|e| format!("council_task_conflict: {e}"))?;
     if inserted != 1 {
         // SELECT and INSERT are not one transaction across independently
@@ -656,7 +677,7 @@ pub(crate) fn admit_native_task(
         // won the reservation; a different assignment must still fail closed.
         return resolve_native_admission_collision(
             store, session_id, project_id, assignment_key, artifact_sha256,
-        ).map_err(|_| "council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".to_owned());
+        ).map_err(|_| "council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts, or the root changed during admission.".to_owned());
     }
     Ok(candidate)
 }

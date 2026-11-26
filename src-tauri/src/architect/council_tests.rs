@@ -9668,6 +9668,85 @@ fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
 }
 
 #[test]
+fn native_task_admission_insert_rejects_revoked_preflight() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review before concurrent admission", None, None).unwrap();
+    let (project, snapshot, request, body, artifact_key) = {
+        let store = state.store.lock().unwrap();
+        let session = store.session(&sid).unwrap();
+        let project = session.project_id;
+        let snapshot: String = store.db.query_row(
+            "SELECT content FROM architect_teams WHERE session_id=?1",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "racing-task", &"a".repeat(64),
+        ).unwrap();
+        // Capture the real candidate, then remove its row in this disposable
+        // fixture to replay the precise point between preflight and INSERT.
+        let body: String = store.db.query_row(
+            "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, "native-council-task:racing-task"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, "native-council-task:racing-task"],
+        ).unwrap(), 1);
+        let team = load(&store, &sid).unwrap().unwrap();
+        let artifact_key = child_council::root_artifact_revision_key(&team);
+        let insert = || store.db.execute(
+            council_requests::NATIVE_TASK_ADMISSION_SQL,
+            rusqlite::params![sid, "native-council-task:racing-task", body,
+                request.cycle_id, artifact_key, snapshot, project],
+        ).unwrap();
+        store.db.execute("UPDATE sessions SET status='paused' WHERE id=?1", [&sid]).unwrap();
+        assert_eq!(insert(), 0, "a paused admission window cannot mint authority");
+        store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![sid, session.status]).unwrap();
+        let mut accepted = team;
+        accepted.council_accepted = Some(accepted.council_since);
+        save(&store, &mut accepted).unwrap();
+        assert_eq!(insert(), 0, "a newly accepted cycle revokes the stale preflight");
+        store.db.execute("UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            rusqlite::params![sid, snapshot]).unwrap();
+        // Positive control: the same immutable candidate and unchanged root
+        // still admit exactly once through the production SQL.
+        assert_eq!(insert(), 1);
+        assert_eq!(insert(), 0);
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, "native-council-task:racing-task"],
+        ).unwrap(), 1);
+        (project, snapshot, request, body, artifact_key)
+    };
+    // Exercise real native dispatch rather than fabricating a reviewer score.
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("concurrent-reviewer", "security")]
+    })).unwrap();
+    let store = state.store.lock().unwrap();
+    assert!(load(&store, &sid).unwrap().unwrap().workers.iter().any(|w| w.council.is_some()));
+    let inserted = store.db.execute(
+        council_requests::NATIVE_TASK_ADMISSION_SQL,
+        rusqlite::params![sid, "native-council-task:racing-task", body,
+            request.cycle_id, artifact_key, snapshot, project],
+    ).unwrap();
+    assert_eq!(inserted, 0, "a newly dispatched native reviewer invalidates preflight");
+    let count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_native_task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
 fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     // Exercise the existing worker admission, read-only execution and score
     // extraction, not fabricated scores or a second Council verdict engine.

@@ -139,3 +139,15 @@ Linked PR Check Run observations, including empty and pending-only windows, must
 ### Recovery of unsettled native assignment pointers
 
 A non-running Demand must not retain an active Assignment pointer, even if its underlying attempt is already finished or missing. Native finalization and the Desktop inspector deny human acceptance until recovery; the headless recovery inbox exposes the fault without mutating it. Startup recovery, the live watchdog, or revision-bound terminal quarantine revoke the Mandate, clear the pointer, preserve finished evidence and terminal verdicts, and never infer a remote effect outcome. Nonterminal inconsistent Demands are interrupted rather than approved or automatically replayed. This does not implement a provider-effect dispatcher or remote reconciliation.
+
+### Bounded structured Coordinator proposals
+
+Successful structured Coordinator responses are retained up to the native 16 KiB
+reviewed-plan byte budget rather than the generic 4,096-character evidence
+preview. The whole response is classified before truncation, so a late JSON
+route cannot silently become unreviewed free-text advice. Oversized structured
+responses retain an explicit native diagnostic and audit event, not a partial
+JSON plan. The operator must still save a bounded reviewed plan before native
+Worker dispatch; the original role, revision, dependency and attempt-budget
+checks remain mandatory. Worker and ordinary advisory evidence retain their
+existing preview limit. This is not an automatic write or Council grant.

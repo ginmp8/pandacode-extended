@@ -452,8 +452,10 @@ pub(crate) struct PlannedWorkItemInput {
     routing_reason: Option<String>,
 }
 
+pub(super) const MAX_PLAN_BYTES: usize = 16 * 1024;
+
 pub(crate) fn decode_plan(text: &str) -> Result<Vec<PlannedWorkItemInput>> {
-    if text.len() > 16 * 1024 {
+    if text.len() > MAX_PLAN_BYTES {
         return Err("WorkItem plan exceeds the native 16 KiB limit.".into());
     }
     serde_json::from_str(text)

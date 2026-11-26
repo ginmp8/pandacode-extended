@@ -4557,7 +4557,21 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             .and_then(|bot| coordinator_plan_current(store, &task_id, &bot.id, &bot.project_id))
             .unwrap_or(false)
     };
-    let trimmed = text.trim().chars().take(4096).collect::<String>();
+    let response = text.trim();
+    // Structured Coordinator proposals use the same byte budget as the
+    // native reviewed-plan decoder. The generic evidence preview must not
+    // cut valid JSON or hide a structured route after its 4096th character.
+    let structured = coordinator && successful && structured_coordinator_advice(response);
+    let oversized_plan = structured && response.len() > work_items::MAX_PLAN_BYTES;
+    let trimmed = if oversized_plan {
+        // A native diagnostic, not provider evidence. Its deliberately invalid
+        // JSON shape requires explicit review and cannot be dispatched as advice.
+        "[Native diagnostic: oversized structured Coordinator proposal omitted; submit a bounded reviewed plan.]".to_owned()
+    } else if structured {
+        response.to_owned()
+    } else {
+        response.chars().take(4096).collect::<String>()
+    };
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
     let within_budget = assignment_within_budget(started_at, storage::now());
@@ -4619,6 +4633,13 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             else if !authorized { "callback_rejected" }
             else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
     ).map_err(|e| e.to_string())?;
+    if authorized && oversized_plan {
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'coordinator_plan_oversized','Structured proposal exceeded native plan byte budget; explicit review required',?2)",
+            params![task_id,now],
+        ).map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -16379,6 +16400,87 @@ mod tests {
         assert_eq!(accept(&store, id, waiting.revision).unwrap().state, "completed");
         assert!(!mandate(&store, id).unwrap().allowed_side_effects);
         assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn bounded_coordinator_plan_survives_generic_evidence_preview_limit() {
+        let mut store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Long dependency plan".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let roles = roster::set_worker_attempt_limit(&store, &cfg.id, cfg.policy_revision, 4).unwrap();
+        let cfg = change_enabled(&store, &cfg.id, roles.policy_revision, true).unwrap();
+        let (ticket, started) = admit_role(
+            &mut store, &cfg.id, "Inspect four components", "long-plan", false, true,
+        ).unwrap();
+        assert!(started);
+        let items = (0..4).map(|index| {
+            let mut item = serde_json::json!({
+                "requestKey": format!("item-{index}"),
+                "summary": format!("Inspect component {index}: {}", "x".repeat(950)),
+                "workerBotId": "worker",
+                "routingReason": format!("Admitted Worker: {}", "r".repeat(250)),
+            });
+            if index > 0 {
+                item["parentRequestKey"] = serde_json::json!(format!("item-{}", index - 1));
+            }
+            item
+        }).collect::<Vec<_>>();
+        let raw = serde_json::to_string(&items).unwrap();
+        assert!(raw.len() > 4096 && raw.len() <= work_items::MAX_PLAN_BYTES);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, &raw).unwrap());
+        let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(snapshot.coordinator_plan_review_required, Some(true));
+        assert_eq!(snapshot.coordinator_plan_proposal.unwrap().plan_json, raw);
+        assert!(prepare_coordinated_worker_at_revision(
+            &mut store, &ticket.id, snapshot.ticket.revision, false,
+        ).is_err());
+        let reviewed = work_items::decode_plan(&raw).unwrap();
+        assert_eq!(work_items::plan_batch(
+            &store, &ticket.id, snapshot.ticket.revision, &reviewed,
+        ).unwrap().len(), 4);
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let (_, _, worker, packet) = prepare_coordinated_worker_at_revision(
+            &mut store, &ticket.id, revision, false,
+        ).unwrap();
+        assert_eq!(worker, "worker");
+        assert!(packet.contains("Inspect component 0:"));
+        assert!(!packet.contains("Inspect component 1:"));
+        assert!(!mandate(&store, &ticket.id).unwrap().allowed_side_effects);
+    }
+
+    #[test]
+    fn late_or_oversized_structured_proposal_cannot_become_free_text_advice() {
+        for size in [5000, work_items::MAX_PLAN_BYTES + 1] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, started) = admit_role(
+                &mut store, &cfg.id, "Inspect source", "late-plan", false, true,
+            ).unwrap();
+            assert!(started);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let raw = format!("{}\n[{{\"requestKey\":\"late\",\"summary\":\"Inspect\"}}]", "x".repeat(size));
+            assert!(on_run_finished(&store, &session, true, &raw).unwrap());
+            let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+            assert_eq!(snapshot.coordinator_plan_review_required, Some(true));
+            assert!(snapshot.coordinator_plan_proposal.is_none());
+            assert!(prepare_coordinated_worker_at_revision(
+                &mut store, &ticket.id, snapshot.ticket.revision, false,
+            ).is_err());
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
+            let oversized = size > work_items::MAX_PLAN_BYTES;
+            assert_eq!(history(&store, &ticket.id, 30).unwrap().iter()
+                .filter(|event| event.kind == "coordinator_plan_oversized").count(),
+                oversized as usize);
+            if oversized {
+                assert!(snapshot.ticket.evidence.as_deref().unwrap().starts_with("[Native diagnostic:"));
+            } else {
+                assert_eq!(snapshot.ticket.evidence.as_deref(), Some(raw.as_str()));
+            }
+        }
     }
 
     #[test]

@@ -12500,6 +12500,47 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     ).unwrap(), terminal, "restoring exact S3 evidence must revalidate the same task receipt");
 }
 
+
+/// An oversized S2 report cannot become a clean callback merely because its
+/// final score fits in the legacy tail window. Test ASCII truncation, UTF-8
+/// byte limits, and recovery of the original native message.
+fn assert_s2_report_bound(
+    store: &Store, session_id: &str, mut assert_revoked: impl FnMut(),
+) {
+    let (report_id, original): (i64, String) = store.db.query_row(
+        "SELECT id,content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+        [session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    let hidden_finding = json!([{"severity":"high","category":"security",
+        "title":"Omitted critical evidence","explanation":"This finding is outside the legacy score tail"}]);
+    for changed in [
+        format!("Council findings JSON: {hidden_finding}\n{}\n{original}", "x".repeat(8192)),
+        format!("{}\n{original}", "\u{00e9}".repeat(4200)),
+    ] {
+        assert!(changed.len() > 8192);
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, changed]).unwrap();
+        assert_revoked();
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, &original]).unwrap();
+    }
+}
+
+fn assert_s2_child_reports_are_bounded(store: &Store, root: &TeamSnapshot) {
+    let children = child_council::inspect(store, root).unwrap();
+    for reservation in children {
+        let child = load(store, &reservation.child_session_id).unwrap().unwrap();
+        for worker in &child.workers {
+            assert_s2_report_bound(store, &worker.session_id, || {
+                assert!(!verified_council_pass(store, root),
+                    "oversized native child report must revoke root approval");
+            });
+            assert!(verified_council_pass(store, root),
+                "restoring the original child evidence must revalidate the existing proof");
+        }
+    }
+}
+
 #[test]
 fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     let (state, sid) = state_fixture();
@@ -12609,6 +12650,7 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
     assert_child_receipt_metadata_is_bound(&store, &saved, &key);
     assert!(verified_council_pass(&store, &saved));
+    assert_s2_child_reports_are_bounded(&store, &saved);
     store.db.execute(
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![sid, key],
@@ -12753,6 +12795,7 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
     let child = child_council::inspect(&store, &saved).unwrap()
         .into_iter().find(|child| child.bot_id == "security-child").unwrap();
     assert!(child.verified_escalation_receipt.is_some());
+    assert_s2_child_reports_are_bounded(&store, &saved);
     store.db.execute(
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![sid,
@@ -14082,6 +14125,16 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                                     ).is_err(), "{mode}/{strategy:?}: changed claims must revoke receipt");
                                     store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
                                         rusqlite::params![report_id, &original]).unwrap();
+                                }
+                                if strategy == council::CouncilExecutionStrategy::Escalated {
+                                    assert_s2_report_bound(&store, &reviewer.session_id, || {
+                                        assert!(!verified_council_pass(&store, &snapshot),
+                                            "{mode}/S2: truncated native report must revoke pass");
+                                        assert!(council_requests::read_native_terminal(
+                                            &store, &sid, &project, "root-matrix-task",
+                                            &artifact, &request.request_id,
+                                        ).is_err(), "{mode}/S2: truncated report must revoke receipt");
+                                    });
                                 }
                                 assert_eq!(council_requests::read_native_terminal(
                                     &store, &sid, &project, "root-matrix-task",

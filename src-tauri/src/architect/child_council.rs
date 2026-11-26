@@ -805,7 +805,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                         && seat.score.is_some_and(|score| score.is_finite()
                             && score >= target && score <= 10.0)
                         && !seat.reported_severe_finding && !seat.reported_conflict
-                        && super::council::scored_report_is_current(store, &leaf.session_id, seat)
+                        && super::council::scored_report_is_current_for_strategy(store, &leaf.session_id, seat, config.strategy)
                 })
         };
         let recoverable_first_wave = old_team.status == "running"
@@ -1338,8 +1338,9 @@ fn root_artifact_revision(
 /// Construct child evidence only from settled, freshly scored native leaves.
 /// The root Council remains blocked until its separate composite-seat gate exists.
 fn verified_receipt(
-    store: &Store, record: &FrozenChildReservation, child: &TeamSnapshot,
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation, child: &TeamSnapshot,
 ) -> Result<Option<VerifiedChildReceipt>> {
+    let Some(root_config) = root.config.council.as_ref() else { return Ok(None) };
     // Keep the immutable first-wave receipt verifiable after independently
     // admitted S2 leaves appear. The old evidence is never rewritten.
     let mut first = child.clone();
@@ -1364,7 +1365,7 @@ fn verified_receipt(
         if !leaf.read_only || leaf.abandoned || leaf.wrote_at != 0
             || !leaf.files.is_empty() || seat.round != 1 || seat.started_at <= 0
             || seat.reported_severe_finding || seat.reported_conflict
-            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
+            || !super::council::scored_report_is_current_for_strategy(store, &leaf.session_id, seat, root_config.strategy)
             || binding.validate(&first, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
@@ -1427,7 +1428,7 @@ fn read_verified_receipt(
     let Some(existing) = existing else { return Ok(None) };
     let stored: VerifiedChildReceipt = serde_json::from_str(&existing)
         .map_err(|_| "child_council_stale: malformed child evidence receipt.")?;
-    if verified_receipt(store, record, child)?.as_ref() != Some(&stored) {
+    if verified_receipt(store, root, record, child)?.as_ref() != Some(&stored) {
         return Err("child_council_stale: child receipt no longer matches native reviewer evidence.".into());
     }
     Ok(Some(stored))
@@ -1439,7 +1440,7 @@ fn record_verified_receipt(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot,
 ) -> Result<bool> {
-    let Some(candidate) = verified_receipt(store, record, child)? else {
+    let Some(candidate) = verified_receipt(store, root, record, child)? else {
         // A previously recorded receipt cannot survive revoked or altered evidence.
         if read_verified_receipt(store, root, record, child)?.is_some() {
             return Err("child_council_stale: completed child evidence was revoked.".into());
@@ -1553,7 +1554,7 @@ fn escalation_receipt(
             || previous_sessions.contains(leaf.session_id.as_str())
             || !fresh_ids.insert(leaf.id.as_str())
             || !fresh_sessions.insert(leaf.session_id.as_str())
-            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
+            || !super::council::scored_report_is_current_for_strategy(store, &leaf.session_id, seat, root_config.strategy)
             || binding.validate(child, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
@@ -2571,7 +2572,7 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
             || worker.wrote_at != 0 || !worker.files.is_empty()
             || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
             || seat.score.is_none_or(|score| !score.is_finite() || score < config.target)
-            || !super::council::scored_report_is_current(store, &worker.session_id, seat)
+            || !super::council::scored_report_is_current_for_strategy(store, &worker.session_id, seat, config.strategy)
             || first_sessions.contains(worker.session_id.as_str())
             || !sessions.insert(worker.session_id.as_str())
             || binding.validate(root, worker).is_err()
@@ -2871,7 +2872,7 @@ fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool>
                     || (leaf.status == "completed" && leaf.council.as_ref()
                         .is_some_and(|seat| seat.score.is_some_and(|score|
                             !score.is_finite()
-                                || !super::council::scored_report_is_current(store, &leaf.session_id, seat))))
+                                || !super::council::scored_report_is_current_for_strategy(store, &leaf.session_id, seat, config.strategy))))
                 {
                     return Err("child_council_stale: triggered S2 leaf authority or identity changed.".into());
                 }
@@ -3183,7 +3184,7 @@ fn authenticated_first_wave_s2_triggers(
             || leaf.id.is_empty() || leaf.session_id.is_empty()
             || !identities.insert(leaf.id.as_str()) || !sessions.insert(leaf.session_id.as_str())
             || seat.started_at <= 0 || !score.is_finite()
-            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
+            || !super::council::scored_report_is_current_for_strategy(store, &leaf.session_id, seat, config.strategy)
             || seat.reported_severe_finding != native_severe
             || seat.reported_conflict != native_conflict
             || binding.validate(child, leaf).is_err()

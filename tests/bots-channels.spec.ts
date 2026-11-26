@@ -485,6 +485,58 @@ test.describe('shared bot channels', () => {
     await expect(prompt).toHaveValue('');
   });
 
+  test('Channel membership removal requires explicit confirmation before sending a reduced Council roster', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const writer = panel.getByRole('checkbox', { name: 'Writer', exact: true });
+    await writer.check();
+    const writerId = await writer.inputValue();
+    await panel.getByRole('checkbox', { name: 'Ledger', exact: true }).check();
+    await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    await page.keyboard.press('Escape');
+    const prompt = composer.getByRole('textbox', { name: 'Message channel' });
+    await prompt.fill('Review this artifact.');
+    await page.locator('.bc-channel').getByRole('button', { name: 'Channel settings' }).click();
+    const settings = page.getByRole('dialog', { name: 'Channel settings' });
+    await settings.getByRole('checkbox', { name: 'Ledger', exact: true }).uncheck();
+    await settings.getByRole('button', { name: 'Save' }).click();
+    await expect(settings).not.toBeVisible();
+    await expect(composer.locator('input[name="councilReviewer"]')).toHaveCount(3);
+    await composer.locator('button[type=submit]').click();
+    await expect(panel.getByRole('alert')).toContainText('A selected Council reviewer is no longer available');
+    await expect(writer).toBeChecked();
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    await expect(panel.getByRole('alert')).toBeVisible();
+    await panel.getByRole('button', { name: 'Confirm updated reviewer roster' }).click();
+    await expect(panel.getByRole('alert')).not.toBeVisible();
+    await page.keyboard.press('Escape');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts[0].council)).toMatchObject({
+      reviewerBotIds: [writerId], automaticReviewers: 1,
+    });
+  });
+
   test('shared Channel preserves and validates multiple user-required criteria across refresh', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {

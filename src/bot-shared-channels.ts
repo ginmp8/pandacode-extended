@@ -178,6 +178,12 @@ export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | nu
       newRows.append(template.cloneNode(true));
     }
   }
+  // A refreshed membership roster may no longer contain a selected reviewer.
+  // Never silently submit a smaller (but still valid) Council on the user's behalf.
+  const nextReviewerIds = new Set([...next.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]')].map(input => input.value));
+  const lostReviewer = previous.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected'
+    && [...previous.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')].some(input => !nextReviewerIds.has(input.value));
+  if (lostReviewer || previous.dataset.councilRosterChanged === 'true') next.dataset.councilRosterChanged = 'true';
   const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
   const nextInputs = [...next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
   for (const input of nextInputs) {
@@ -245,6 +251,7 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
             <button type="button" class="secondary-button" data-council-criterion-add>Add criterion</button>
             <small>Up to eight unique required criteria. Required user criteria cannot be removed or weakened by automatic reviewers.</small>
           </div>
+          <div class="bc-council-roster-warning" hidden><p role="alert">A selected Council reviewer is no longer available in this channel. Review the updated roster before sending.</p><button type="button" class="secondary-button" data-council-roster-confirm>Confirm updated reviewer roster</button></div>
           <p class="bc-council-plan" role="status" aria-live="polite">Council preview: automatic native reviewers.</p>
         </div>
         <div class="bc-council-followup"><label><input type="checkbox" name="councilGithubIssue"> After Council approval, create one GitHub issue with accepted findings</label>
@@ -270,6 +277,7 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     // An opt-out message has no Council configuration to validate. Keep its
     // editable draft, but do not let inactive numeric constraints block sending.
     form.noValidate = !enabled;
+    panel.querySelector<HTMLElement>('.bc-council-roster-warning')!.hidden = !enabled || form.dataset.councilRosterChanged !== 'true';
     trigger.dataset.on = enabled ? 'true' : 'false';
     trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
     const selected = panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected';
@@ -315,6 +323,12 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     }
   };
   panel.addEventListener('click', event => {
+    if ((event.target as Element).closest('[data-council-roster-confirm]')) {
+      delete form.dataset.councilRosterChanged;
+      sync();
+      panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.focus({ preventScroll: true });
+      return;
+    }
     const action = (event.target as Element).closest<HTMLButtonElement>('[data-council-criterion-add], [data-council-criterion-remove]');
     if (action) {
       const rows = panel.querySelector<HTMLElement>('.bc-council-criterion-rows')!;

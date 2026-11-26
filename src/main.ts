@@ -7433,6 +7433,10 @@ document.addEventListener('submit', event => {
       // Reopen it so the rejected configuration can be corrected in place.
       if (trigger && panel && !panel.matches(':popover-open')) toggleSharedChannelCouncil(trigger);
     };
+    if (councilEnabled && form.dataset.councilRosterChanged === 'true') {
+      showCouncilError('Confirm the updated Council reviewer roster before sending.');
+      return;
+    }
     const councilMode = data.get('councilMode');
     const isSelected = councilMode === 'selected';
     const channel = state.sharedChannelDetail;

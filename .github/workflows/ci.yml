@@ -150,13 +150,13 @@ jobs:
   council-bot-reviewers-browser:
     # Run every Council browser test, partitioned across independent CI runners to
     # stay within the job timeout without relaxing assertions or test coverage.
-    name: Council selected bot reviewers (Playwright, shard ${{ matrix.shard }}/3)
+    name: Council selected bot reviewers (Playwright, shard ${{ matrix.shard }}/5)
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -168,7 +168,7 @@ jobs:
       - name: Exercise selected bot reviewer UI and native Council preview regression
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
-            npx playwright test tests/council.spec.ts --workers=1 --shard=${{ matrix.shard }}/3
+            npx playwright test tests/council.spec.ts --workers=1 --shard=${{ matrix.shard }}/5
 
   council-channel-browser:
     # The bot workflow grep does not cover the complete Channel Council matrix.

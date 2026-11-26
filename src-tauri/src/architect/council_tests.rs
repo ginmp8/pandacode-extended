@@ -13636,6 +13636,10 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
         let store = state.store.lock().unwrap();
         let project = store.session(&sid).unwrap().project_id;
         store.db.execute(
+            "UPDATE sessions SET worktree_branch='council-review-fixture' WHERE id=?1",
+            [&sid],
+        ).unwrap();
+        store.db.execute(
             "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
              VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
             rusqlite::params![project, storage::now()],
@@ -13663,6 +13667,21 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
         "assignments":[reviewer_assignment("root-initial", "correctness")]
     })).unwrap();
     let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.session(&action.sid).unwrap().worktree_branch.as_deref(),
+            Some("council-review-fixture"), "root reviewer must inherit the pinned branch");
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='foreign-reviewer-branch' WHERE id=?1",
+            [&action.sid],
+        ).unwrap();
+        let denied = validate_admission(&store, &action.sid, Some(&action.admission)).unwrap_err();
+        assert!(denied.contains("reviewer checkout branch"), "{denied}");
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='council-review-fixture' WHERE id=?1",
+            [&action.sid],
+        ).unwrap();
+    }
     let (first_run, _) = claim(&state, action);
     finish(&state, &first_run, "Authenticated low root review.\nCouncil score: 8.5/10", true);
     let second = json!({
@@ -13721,6 +13740,26 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
     assert_eq!(final_status.lowest, Some(9.7));
     assert!(verified_council_pass(&store, &root),
         "only native current-policy receipts may authorize the completed S2 root gate");
+    // Both waves are authenticated native evidence. Changing only the stored
+    // branch while retaining the project, checkout path and grant must revoke
+    // approval, including when the original low-scoring reviewer is changed.
+    for worker in root.workers.iter().filter(|worker| worker.council.is_some()) {
+        assert_eq!(store.session(&worker.session_id).unwrap().worktree_branch.as_deref(),
+            Some("council-review-fixture"));
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='foreign-reviewer-branch' WHERE id=?1",
+            [&worker.session_id],
+        ).unwrap();
+        assert!(authenticated_hierarchical_status(&store, &root).is_none());
+        assert!(!verified_council_pass(&store, &root),
+            "a same-path reviewer from a different branch cannot authorize S2");
+        store.db.execute(
+            "UPDATE sessions SET worktree_branch='council-review-fixture' WHERE id=?1",
+            [&worker.session_id],
+        ).unwrap();
+        assert!(verified_council_pass(&store, &root),
+            "restoring the exact native branch restores current evidence");
+    }
     let fresh_root = root.workers.iter().find(|worker|
         worker.council.as_ref().is_some_and(|seat| seat.round == 2)
     ).unwrap();

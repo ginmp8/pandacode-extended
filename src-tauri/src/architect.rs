@@ -757,6 +757,7 @@ fn native_root_reviewer_session_is_current(
     linked == 1 && store.session(&worker.session_id).is_ok_and(|session| {
         session.project_id == parent.project_id
             && session.worktree_path == parent.worktree_path
+            && session.worktree_branch == parent.worktree_branch
             && !session.archived
             && !matches!(session.status.as_str(), "interrupted" | "error" | "paused" | "stopped")
     })
@@ -1148,6 +1149,16 @@ pub(crate) fn validate_admission(
         let worker = store.session(sid)?;
         if worker.project_id != parent.project_id || worker.worktree_path != parent.worktree_path {
             return Err("The worker checkout no longer matches its architect.".into());
+        }
+        // Composed and opt-in strategy reviews bind their branch as well as
+        // their checkout path. Keep ordinary workers and legacy M1 admission
+        // unchanged; child leaves have their own native admission guard.
+        if team.config.council.as_ref().is_some_and(|config|
+            config.mode() != "m1" || config.strategy != council::CouncilExecutionStrategy::Parallel)
+            && team.workers.iter().any(|w| w.session_id == sid && w.council.is_some())
+            && worker.worktree_branch != parent.worktree_branch
+        {
+            return Err("The reviewer checkout branch no longer matches its architect.".into());
         }
         // Revoking Full access while paused must affect retries and follow-ups too.
         store
@@ -2905,7 +2916,8 @@ fn dispatch_as(
                     &profile.model,
                     &parent.mode,
                 )?;
-                store.db.execute("UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",params![session.id,shown,assignment.prompt,parent.worktree_path,profile.reasoning_effort]).map_err(|e|e.to_string())?;
+                let reviewer_branch = seat.as_ref().and(parent.worktree_branch.as_deref());
+                store.db.execute("UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5,worktree_branch=?6 WHERE id=?1",params![session.id,shown,assignment.prompt,parent.worktree_path,profile.reasoning_effort,reviewer_branch]).map_err(|e|e.to_string())?;
                 let id = storage::id();
                 store.db.execute("INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",params![sid,id,session.id]).map_err(|e|e.to_string())?;
                 record_request(&store, sid, &request_key(&assignment.key), "dispatch", &request, &id)?;

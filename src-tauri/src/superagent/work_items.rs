@@ -349,6 +349,12 @@ fn plan_in_transaction(
     if ticket.revision != expected_revision {
         return Err("Demand revision changed; planning denied.".into());
     }
+    // An unreviewed structured Coordinator plan cannot be resolved by an
+    // implicit default Worker, including the single-item planning endpoint.
+    // Identical historical request-key replays already returned above.
+    if route.is_none() && super::unreviewed_coordinator_plan(store, &ticket)? {
+        return Err("Review each Coordinator WorkItem with an explicit Worker ID and routing rationale.".into());
+    }
     if let Some((worker, _)) = route {
         if super::roster::ticket_profile(store, ticket_id)?.is_none() {
             return Err("WorkItem routing requires an admitted Team profile.".into());
@@ -515,6 +521,15 @@ pub(super) fn plan_batch(
     let tx = rusqlite::Transaction::new_unchecked(
         &store.db, rusqlite::TransactionBehavior::Immediate,
     ).map_err(|e|e.to_string())?;
+    // Freeze the review requirement before the first insert. Otherwise an
+    // explicitly routed first item would hide the pending review from later
+    // items in this same transaction and permit an implicit default route.
+    let ticket = super::get_ticket(store, ticket_id)?;
+    if inputs.iter().any(|input| input.worker_bot_id.is_none() || input.routing_reason.is_none())
+        && super::unreviewed_coordinator_plan(store, &ticket)?
+    {
+        return Err("Review each Coordinator WorkItem with an explicit Worker ID and routing rationale.".into());
+    }
     let mut revision = expected_revision;
     let mut keys = std::collections::BTreeMap::<String, String>::new();
     let mut items = Vec::with_capacity(inputs.len());

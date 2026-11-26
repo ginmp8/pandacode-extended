@@ -3116,15 +3116,26 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   const input=plans.getByLabel('Reviewed dependency plan (JSON)');
   await expect(plans).toContainText('Worker dispatch requires a reviewed dependency plan.');
   await expect(host.getByRole('button',{name:'Retry manually'})).toBeDisabled();
-  const invalid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout'},
-    {requestKey:'child',summary:'Verify results',parentRequestKey:'foreign'}]);
+  await expect(plans.getByLabel('New planned work item')).toHaveCount(0);
+  const unrouted=JSON.stringify([{requestKey:'root',summary:'Inspect checkout',
+    workerBotId:'worker',routingReason:'Backend specialist'},
+    {requestKey:'child',summary:'Verify results',parentRequestKey:'root'}]);
+  await input.fill(unrouted);
+  await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
+  await expect(host).toContainText('Review each Coordinator WorkItem with an explicit Worker ID');
+  await expect(input).toHaveValue(unrouted);
+  const invalid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout',
+    workerBotId:'worker',routingReason:'Backend specialist'},
+    {requestKey:'child',summary:'Verify results',parentRequestKey:'foreign',
+      workerBotId:'worker',routingReason:'Verify backend evidence'}]);
   await input.fill(invalid);
   await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
   await expect(host).toContainText('WorkItem parent key must precede its child');
   await expect(input).toHaveValue(invalid);
   const valid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout',
     workerBotId:'worker',routingReason:'Backend specialist'},
-    {requestKey:'child',summary:'Verify results',parentRequestKey:'root'}]);
+    {requestKey:'child',summary:'Verify results',parentRequestKey:'root',
+      workerBotId:'worker',routingReason:'Verify backend evidence'}]);
   await input.fill(valid);
   await plans.getByRole('button',{name:'Save dependency plan without dispatch'}).click();
   await expect(plans).toContainText('Inspect checkout');
@@ -3141,6 +3152,8 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   expect(result.items[1].parentId).toBe(result.items[0].id);
   expect(result.items[0].workerBotId).toBe('worker');
   expect(result.items[0].routingReason).toBe('Backend specialist');
+  expect(result.items[1].workerBotId).toBe('worker');
+  expect(result.items[1].routingReason).toBe('Verify backend evidence');
   expect(result.revision).toBe(5);
 });
 

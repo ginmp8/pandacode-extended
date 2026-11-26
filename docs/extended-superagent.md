@@ -148,8 +148,13 @@ preview. The whole response is classified before truncation, so a late JSON
 route cannot silently become unreviewed free-text advice. Oversized structured
 responses retain an explicit native diagnostic and audit event, not a partial
 JSON plan. The operator must still save a bounded reviewed plan before native
-Worker dispatch; the original role, revision, dependency and attempt-budget
-checks remain mandatory. Worker and ordinary advisory evidence retain their
+Worker dispatch. Every item in the initial reviewed dependency plan must
+explicitly identify an admitted Worker and routing rationale; a single-item
+default route or a mixed routed/unrouted batch cannot resolve pending review.
+The native transaction rejects the entire invalid batch without advancing the
+Demand revision, and the Desktop plan editor explains the requirement. The
+original role, revision, dependency and attempt-budget checks remain mandatory.
+Worker and ordinary advisory evidence retain their
 existing preview limit. This is not an automatic write or Council grant.
 
 ### Unsettled assignment pointers in effect recovery views

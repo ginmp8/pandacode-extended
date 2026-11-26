@@ -706,7 +706,7 @@ let demandArchived = false;
         'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
         (ticketDetails.coordinatorPlanReviewRequired === true
           ? '<p id="sa-plan-review-required" role="status">Worker dispatch requires a reviewed dependency plan. ' +
-            'Review or enter the plan below and save it before dispatch. Unsupported response formats are not imported automatically.</p>' : '') +
+            'Choose an explicit Worker and routing rationale for every item, then save the plan before dispatch. Unsupported response formats are not imported automatically.</p>' : '') +
         (ticketDetails.pendingDispatch?.ticketId===inspected.id && ticketDetails.pendingDispatch.state==='pending'
           ? '<section role="region" aria-label="Pending dispatch request">' +
             '<p><strong>Pending dispatch · Not admitted</strong> · ' +
@@ -735,14 +735,15 @@ let demandArchived = false;
           '<p>WorkItem snapshot inconsistent; reload before planning.</p>') +
         (ticketDetails.truncatedWorkItems ? '<p>Only the first 100 plans are shown.</p>' : '') +
         (validWorkItems && ['blocked','queued'].includes(ticketDetails.ticket.state)
-          ? '<form data-sa-form="plan-work-item"><label>New planned work item' +
+          ? (ticketDetails.coordinatorPlanReviewRequired === true ? '' :
+            '<form data-sa-form="plan-work-item"><label>New planned work item' +
             '<input type="text" name="summary" maxlength="1000" required ' +
             'placeholder="Describe a discrete task"></label>' +
             '<label>Parent work item<select name="parentId"><option value="">Demand root</option>' +
             plannedWorkItems.filter(item=>item.state!=='cancelled').map(item =>
               '<option value="' + safe(item.id) + '">' + safe(item.summary) +
               '</option>').join('') + '</select></label>' +
-            '<button type="submit">Save plan without dispatch</button></form>' +
+            '<button type="submit">Save plan without dispatch</button></form>') +
             '<form data-sa-form="plan-work-items"><label>Reviewed dependency plan (JSON)' +
             '<textarea name="planJson" rows="5" maxlength="16384" required>' +
             safe(batchPlanDraft?.ticketId===ticketDetails.ticket.id ? batchPlanDraft.json :
@@ -755,7 +756,9 @@ let demandArchived = false;
                 '. Review or edit every item before saving; no plan has been accepted.</p>' : '') +
             '<p>Up to 16 items. Each needs a stable requestKey and summary; ' +
             'optional parentRequestKey must refer to a preceding item in the same plan. ' +
-            'Optional workerBotId and routingReason must be supplied together and match an admitted same-project Worker. ' +
+            (ticketDetails.coordinatorPlanReviewRequired === true
+              ? 'Every item requires workerBotId and routingReason matching an admitted same-project Worker. '
+              : 'Optional workerBotId and routingReason must be supplied together and match an admitted same-project Worker. ') +
             'Review the entire plan before saving. No Worker is dispatched or authorized.</p>' +
             '<button type="submit">Save dependency plan without dispatch</button></form>' : '') +
         '</section>' +
@@ -3752,6 +3755,11 @@ let demandArchived = false;
               ((item.workerBotId!=null || item.routingReason!=null) &&
                 (typeof item.workerBotId!=='string' || typeof item.routingReason!=='string')))) {
           throw Error('Provide 1 to 16 WorkItems with stable requestKey and summary.');
+        }
+        if (detail.coordinatorPlanReviewRequired === true && parsed.some(item=>
+            typeof item.workerBotId!=='string' || !item.workerBotId.trim() ||
+            typeof item.routingReason!=='string' || !item.routingReason.trim())) {
+          throw Error('Review each Coordinator WorkItem with an explicit Worker ID and routing rationale.');
         }
         const items=await call<PlannedWorkItem[]>('superagent_plan_work_items',{
           ticketId,expectedRevision:detail.ticket.revision,planJson,

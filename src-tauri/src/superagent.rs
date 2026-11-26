@@ -16607,6 +16607,16 @@ mod tests {
         assert!(snapshot.coordinator_plan_proposal.is_none());
         assert_eq!(snapshot.coordinator_plan_review_required, Some(true));
         let revision = snapshot.ticket.revision;
+        assert!(work_items::plan(&store, &ticket.id, revision, "implicit",
+            "Unrouted inspection", None).unwrap_err().contains("explicit Worker ID"));
+        let mixed = work_items::decode_plan(
+            r#"[{"requestKey":"first","summary":"Explicit inspection","workerBotId":"worker","routingReason":"Admitted Worker"},{"requestKey":"second","summary":"Implicit inspection","parentRequestKey":"first"}]"#,
+        ).unwrap();
+        assert!(work_items::plan_batch(&store, &ticket.id, revision, &mixed)
+            .unwrap_err().contains("explicit Worker ID"));
+        assert!(work_items::list(&store, &ticket.id, 100).unwrap().0.is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert_eq!(ticket_snapshot(&store, &ticket.id, 50).unwrap().coordinator_plan_review_required, Some(true));
         assert!(headless_dispatch::enqueue(&store, &ticket.id, revision, "wrapped-denied").is_err());
         assert!(prepare_coordinated_worker_at_revision(&mut store, &ticket.id, revision, false).is_err());
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);

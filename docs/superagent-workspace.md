@@ -374,6 +374,11 @@ Duplicating a Team includes the strategy, but never copies runtime state.
 Portable SuperAgent manifest **v6** carries both fields, validates them before
 import, rejects conflicts with existing Teams and imports new Teams disabled.
 Versions 1–5 remain importable with empty purpose and balanced strategy.
+Version 6 shares the native roster capacity: 1–16 Workers (including the
+compatibility primary Worker) and 0–8 Reviewers. Versions 2–5 retain their
+original limits of 8 Workers and 4 Reviewers; version 1 remains single-worker.
+This is portable configuration capacity only, not permission to execute
+parallel Workers or native Council reviews.
 No strategy value grants tools, changes existing bot models, selects providers,
 infers costs, initiates GitHub work, supplies a Council verdict or launches a
 multi-worker runtime. An actual optimization scheduler remains out of scope for

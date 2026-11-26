@@ -221,7 +221,15 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             && (!preset.extra_worker_bots.is_empty() || !preset.reviewer_bots.is_empty()) {
             return Err("Version 1 manifests cannot declare multi-member Teams.".into());
         }
-        if preset.extra_worker_bots.len()>7 || preset.reviewer_bots.len()>4 {
+        // Current exports must roundtrip every native roster. Older schemas
+        // retain their original conservative import limits.
+        let (extra_worker_limit, reviewer_limit) = if manifest.schema_version == 6 {
+            (super::roster::MAX_WORKERS - 1, super::roster::MAX_REVIEWERS)
+        } else {
+            (7, 4)
+        };
+        if preset.extra_worker_bots.len() > extra_worker_limit
+            || preset.reviewer_bots.len() > reviewer_limit {
             return Err("Portable Team exceeds member limits.".into());
         }
         let mut unique=HashSet::new();
@@ -1012,6 +1020,93 @@ mod tests {
         assert_eq!(destination.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
         ).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(backup);
+    }
+
+    #[test]
+    fn portable_v6_roundtrips_full_native_roster_and_rejects_over_capacity() {
+        use super::super::roster::{self, RosterInput, MAX_REVIEWERS, MAX_WORKERS};
+
+        let source = fixture();
+        apply(&source, &document("Capacity Team"), true).unwrap();
+        let team_id: String = source.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Capacity Team'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let config = super::super::configuration(&source, &team_id).unwrap();
+        let destination = fixture();
+        // Use distinct local IDs for every additional role, keeping portable
+        // names and effective bot profiles identical.
+        let mut source_workers = vec!["worker".to_owned()];
+        let mut target_workers = source_workers.clone();
+        let mut source_reviewers = Vec::new();
+        let mut target_reviewers = Vec::new();
+        for (role, count) in [("Worker", MAX_WORKERS), ("Reviewer", MAX_REVIEWERS + 1)] {
+            let start = usize::from(role == "Worker");
+            for index in start..=count {
+                let name = format!("{role} {index}");
+                let source_id = format!("source-{role}-{index}");
+                let target_id = format!("target-{role}-{index}");
+                for (store, id) in [(&source, &source_id), (&destination, &target_id)] {
+                    store.db.execute(
+                        "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                         VALUES(?1,?2,'worker-project','codex','default','plan',?3,?3)",
+                        params![id, name, storage::now()],
+                    ).unwrap();
+                }
+                if role == "Worker" && index < MAX_WORKERS {
+                    source_workers.push(source_id);
+                    target_workers.push(target_id);
+                } else if role == "Reviewer" && index < MAX_REVIEWERS {
+                    source_reviewers.push(source_id);
+                    target_reviewers.push(target_id);
+                }
+            }
+        }
+        roster::set(&source, &team_id, config.policy_revision, &RosterInput {
+            worker_bot_ids: source_workers,
+            reviewer_bot_ids: source_reviewers,
+        }).unwrap();
+        let exported = export(&source).unwrap();
+        assert_eq!(exported["schemaVersion"], 6);
+        assert_eq!(exported["orchestrations"][0]["extraWorkerBots"].as_array().unwrap().len(),
+            MAX_WORKERS - 1);
+        assert_eq!(exported["orchestrations"][0]["reviewerBots"].as_array().unwrap().len(),
+            MAX_REVIEWERS);
+
+        let backup = std::env::temp_dir().join(format!("sa-capacity-backup-{}", storage::id()));
+        for (field, name) in [("extraWorkerBots", format!("Worker {MAX_WORKERS}")),
+                              ("reviewerBots", format!("Reviewer {MAX_REVIEWERS}"))] {
+            let mut over = exported.clone();
+            over["orchestrations"][0][field].as_array_mut().unwrap().push(json!(name));
+            assert!(preview(&destination, &over).unwrap_err().contains("member limits"));
+        }
+        let mut legacy = document("Legacy Capacity");
+        legacy["schemaVersion"] = json!(2);
+        legacy["orchestrations"][0]["extraWorkerBots"] =
+            exported["orchestrations"][0]["extraWorkerBots"].clone();
+        assert!(preview(&destination, &legacy).unwrap_err().contains("member limits"));
+        assert!(!backup.exists());
+        assert_eq!(destination.db.query_row("SELECT COUNT(*) FROM sa_orchestrations",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+
+        let checked = preview(&destination, &exported).unwrap();
+        let imported = apply_reviewed_with_backup(
+            &destination, &backup, &exported, true, &checked.review_digest,
+        ).unwrap();
+        assert_eq!(imported.created, vec!["Capacity Team"]);
+        let target_team: String = destination.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Capacity Team'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let roles = roster::read(&destination, &target_team).unwrap();
+        assert_eq!(roles.worker_bot_ids, target_workers);
+        assert_eq!(roles.reviewer_bot_ids, target_reviewers);
+        assert!(!super::super::configuration(&destination, &target_team).unwrap().enabled);
+        assert!(!roles.execution_ready);
+        assert_eq!(preview(&destination, &exported).unwrap().unchanged, vec!["Capacity Team"]);
+        assert_eq!(destination.db.query_row("SELECT COUNT(*) FROM sa_tickets",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         let _ = std::fs::remove_dir_all(backup);
     }
 

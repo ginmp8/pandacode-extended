@@ -104,8 +104,8 @@ pub(super) fn ticket_strategy(store:&Store,ticket_id:&str)->Result<Option<Admitt
         }),
     ).optional().map_err(|e|e.to_string())
 }
-const MAX_WORKERS:usize=16;
-const MAX_REVIEWERS:usize=8;
+pub(super) const MAX_WORKERS:usize=16;
+pub(super) const MAX_REVIEWERS:usize=8;
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]

@@ -8857,6 +8857,45 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     start_state(&state, &sid, "Review this exact task objective", None, None).unwrap();
     let store = state.store.lock().unwrap();
     let project = store.session(&sid).unwrap().project_id;
+    // Admission and inspection must agree on malformed historical cycle pins.
+    // Do not persist a new authority that would immediately fail inspection.
+    for raw in [
+        "invalid JSON",
+        r#"{"request":{}}"#,
+        r#"{"request":{"cycleId":null}}"#,
+        r#"{"request":{"cycleId":false}}"#,
+        r#"{"request":{"cycleId":42}}"#,
+        r#"{"request":{"cycleId":[]}}"#,
+        r#"{"request":{"cycleId":{}}}"#,
+        r#"{"request":{"cycleId":""}}"#,
+    ] {
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,'native-council-task:corrupt-history','council_native_task',?2,?1)",
+            rusqlite::params![sid, raw],
+        ).unwrap();
+        let denied = council_requests::admit_native_task(
+            &store, &sid, &project, "assignment-1", &artifact,
+        ).unwrap_err();
+        assert!(denied.contains("one root Council cycle"), "{raw}: {denied}");
+        let rows: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_native_task'",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(rows, 1, "denied admission must not persist a new request: {raw}");
+        let unchanged: String = store.db.query_row(
+            "SELECT content FROM architect_requests
+             WHERE parent_session_id=?1 AND key='native-council-task:corrupt-history'",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, raw);
+        store.db.execute(
+            "DELETE FROM architect_requests
+             WHERE parent_session_id=?1 AND key='native-council-task:corrupt-history'",
+            [&sid],
+        ).unwrap();
+    }
     let first = council_requests::admit_native_task(
         &store, &sid, &project, "assignment-1", &artifact,
     ).unwrap();

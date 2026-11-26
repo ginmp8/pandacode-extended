@@ -626,8 +626,11 @@ pub(crate) fn admit_native_task(
          WHERE NOT EXISTS (
              SELECT 1 FROM architect_requests
               WHERE parent_session_id=?1 AND kind='council_native_task'
-                AND (json_extract(content,'$.request.cycleId')=?4
-                     OR json_type(content,'$.request.cycleId') IS NULL)
+                AND CASE WHEN json_valid(content) THEN (
+                    json_type(content,'$.request.cycleId') IS NOT 'text'
+                    OR json_extract(content,'$.request.cycleId')=''
+                    OR json_extract(content,'$.request.cycleId')=?4
+                ) ELSE 1 END
          )",
         params![session_id, key, body, &candidate.cycle_id],
     ).map_err(|e| format!("council_task_conflict: {e}"))?;

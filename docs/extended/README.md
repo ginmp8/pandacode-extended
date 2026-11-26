@@ -1,5 +1,15 @@
 # PandaCode Extended documentation
 
+## 2026-11-26 — upstream 0.3.153 reconciliation
+
+Source: [fork main `677c82c482fc`](https://github.com/ginmp8/pandacode/commit/677c82c482fc8c886830c836bc2bfef4c982745f) (tree `5179839c2fd087cf485783f49ca97e28f37a0269`); Extended parent: [`9305d19535d2`](https://github.com/ginmp8/pandacode-extended/commit/9305d19535d222b311bd95bc018b4989de0acda0). The planned Extended distribution remains **0.12.0 DRAFT**, independently of the inherited application version.
+
+All four source commits and 20 changed paths are represented: 11 source-exact and nine reconciled. Complete candidate trees contain 2,166 upstream and 2,224 Extended paths: 2,081 exact shared, 85 divergent shared, 58 Extended-only, no missing paths or mode/type differences. All 198 historical upstream release-note blobs match. All six inherited version fields are 0.3.153. Inherited changes include host queue holds across desktop, headless, bots and browser reconnect, coalesced drain wakeups and stale-snapshot protection, Colab assignment recovery after dropped responses, sanitized cloud transport diagnostics, and stricter artifact-only release preflight/signing checks.
+
+The four adapted app manifests/lockfiles change only inherited version metadata, preserving Extended dependency remediations (including cookie 0.18.3 and url 2.5.9). The native gateway and main UI preserve Extended delivery notifications; the headless regression is adapted to the claim/hold helpers. Release preflight retains hardened action pins, resolved release identity and manual-only publishing. All existing Extended-only paths remain; native Settings On/Off and all 85 shared divergences still require functional acceptance.
+
+Parent CI: [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45788266158) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45788279069), 22/22 jobs successful on the exact parent SHA. The new candidate has no executed CI yet; local Git DNS failed and Cargo is unavailable. [PR #119](https://github.com/ginmp8/pandacode-extended/pull/119) was open and draft at inspection. No distribution approval is implied.
+
 ## 2026-11-26 — verified CI for the upstream 0.3.151 code checkpoint
 
 For [Extended code `40647c544c85`](https://github.com/ginmp8/pandacode-extended/commit/40647c544c85836d151e9e25f12f2f71737430ed) and frozen [fork main `52702085784e`](https://github.com/ginmp8/pandacode/commit/52702085784ee5a4d78ef3817f433935ba29d1a8), both [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45752654751) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45752661101) completed successfully: **11/11 jobs each, 22/22 total**, with every returned job bound to that exact Extended SHA. Checks include Linux Rust tests, five Clippy targets, TypeScript/unit/website, Expo/mobile, npm and RustSec audits, and macOS ONNX parity. The prior intermittent crash-guard failure did not fail either current Linux job; its root cause remains unproven.

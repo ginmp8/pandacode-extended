@@ -1,5 +1,13 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-26 — verified 0.3.154 CI and pending storage reconciliation
+
+The published code checkpoint [`73c2434ca652`](https://github.com/ginmp8/pandacode-extended/commit/73c2434ca652483c8763e066ad3fc722b1d3365b) has **22/22 successful CI jobs** (11 each on [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45816387755) and [pull request](https://github.com/ginmp8/pandacode-extended/actions/runs/45816403874)), all job head SHAs verified against that commit. This includes Linux Rust checks/tests, five Clippy targets per run, Node/typecheck/website, mobile/Expo, npm and RustSec audits, and macOS ONNX parity. It does not validate the pending upstream changes. The planned distribution remains **0.12.0 DRAFT**.
+
+Frozen [fork main `f8378a31b614`](https://github.com/ginmp8/pandacode/commit/f8378a31b614cb061979f29e2e4759a6221339b4) declares application 0.3.156; its [nine-commit delta](https://github.com/ginmp8/pandacode/compare/e6de802e705d...f8378a31b614cb061979f29e2e4759a6221339b4) from the last imported source changes 73 paths (57 eligible for exact copy, 16 concurrent). Complete nontruncated recursive trees show 2,190 source and 2,225 destination files, 2,048 identical shared paths, 119 divergent shared paths, 23 missing source paths, 58 Extended-only paths and no shared mode/type mismatches. The code and source-baseline metadata remain at 0.3.154: no 0.3.156 integration is claimed.
+
+Pending before importing 0.3.156: finish the 16 concurrent paths, including the modular SQLite migration and rollback fixtures, preserve existing Extended bot tables and schedule provenance, validate the resolved tree and run exact-SHA CI. See [known issues](known-issues.md#2026-11-26--verified-03154-ci-and-pending-storage-reconciliation). Local checkout failed DNS; Cargo is absent. No product candidate or native acceptance is claimed.
+
 ## 2026-11-26 — upstream 0.3.154 reconciliation
 
 Source: [fork main `e6de802e705d`](https://github.com/ginmp8/pandacode/commit/e6de802e705d53a5ff196266f775a4738dd5d701) (tree `52d7475bca059cb6adf699a3df14c2e7209a9438`); Extended parent: [`e15874afdc58`](https://github.com/ginmp8/pandacode-extended/commit/e15874afdc587833c943490a4c2c747703fb1808). The planned Extended distribution remains **0.12.0 DRAFT**, independent of the inherited application version.

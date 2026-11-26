@@ -3088,7 +3088,8 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
       if(command==='superagent_snapshot') return {ticket:ticket(),
         mandate:{actor:'local-user',authorizationId:'native-user-issued',policyRevision:1,
           projectId:'project',expiresAt:1900000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
-        assignments:[],activity:[],workItems:items,truncatedWorkItems:false} as never;
+        assignments:[],activity:[],workItems:items,truncatedWorkItems:false,
+        coordinatorPlanReviewRequired:items.length===0} as never;
       if(command==='superagent_plan_work_items') {
         const request=args as Record<string,unknown>;
         calls.push(request);
@@ -3113,6 +3114,8 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   await host.getByRole('button',{name:'View evidence'}).click();
   const plans=host.getByRole('region',{name:'Operator-planned WorkItems'});
   const input=plans.getByLabel('Reviewed dependency plan (JSON)');
+  await expect(plans).toContainText('Worker dispatch requires a reviewed dependency plan.');
+  await expect(host.getByRole('button',{name:'Retry manually'})).toBeDisabled();
   const invalid=JSON.stringify([{requestKey:'root',summary:'Inspect checkout'},
     {requestKey:'child',summary:'Verify results',parentRequestKey:'foreign'}]);
   await input.fill(invalid);
@@ -3127,6 +3130,8 @@ test('reviewed dependency plan sends one revision-bound native batch', async ({p
   await expect(plans).toContainText('Inspect checkout');
   await expect(plans).toContainText('Verify results');
   await expect(plans).toContainText('Reviewed route worker: Backend specialist');
+  await expect(plans.getByRole('status')).toHaveCount(0);
+  await expect(host.getByRole('button',{name:'Retry manually'})).toBeEnabled();
   const result=await page.evaluate(()=>(window as unknown as {batchPlanEvidence:()=> {
     calls:Array<Record<string,unknown>>;revision:number;items:Array<Record<string,unknown>>;
   }}).batchPlanEvidence());

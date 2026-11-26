@@ -111,6 +111,7 @@ interface TicketDetails {
   activity: Activity[]; timeline?: TaskTimelineEntry[];
   workItems?: PlannedWorkItem[]; truncatedWorkItems?: boolean;
   coordinatorPlanProposal?: {assignmentId:string;ticketRevision:number;planJson:string};
+  coordinatorPlanReviewRequired?: boolean | null;
   council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
@@ -700,6 +701,9 @@ let demandArchived = false;
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
         '<h5>Planned WorkItems</h5><p>Manual dispatch selects one dependency-ready item. Accept its evidence before dispatching the next; ' +
         'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
+        (ticketDetails.coordinatorPlanReviewRequired === true
+          ? '<p id="sa-plan-review-required" role="status">Worker dispatch requires a reviewed dependency plan. ' +
+            'Review or enter the plan below and save it before dispatch. Unsupported response formats are not imported automatically.</p>' : '') +
         (ticketDetails.pendingDispatch?.ticketId===inspected.id && ticketDetails.pendingDispatch.state==='pending'
           ? '<section role="region" aria-label="Pending dispatch request">' +
             '<p><strong>Pending dispatch · Not admitted</strong> · ' +
@@ -1179,8 +1183,14 @@ let demandArchived = false;
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
-        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '"' +
+          (ticketDetails?.ticket.id === ticket.id && ticketDetails.ticket.revision === ticket.revision &&
+            ticketDetails.coordinatorPlanReviewRequired === true
+            ? ' disabled aria-describedby="sa-plan-review-required"' : '') + '>Dispatch worker</button>' : '') +
+        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '"' +
+          (ticketDetails?.ticket.id === ticket.id && ticketDetails.ticket.revision === ticket.revision &&
+            ticketDetails.coordinatorPlanReviewRequired === true
+            ? ' disabled aria-describedby="sa-plan-review-required"' : '') + '>Retry manually</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +

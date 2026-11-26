@@ -1022,6 +1022,9 @@ pub struct TaskSnapshot {
     /// This is a preview, never a WorkItem, grant, or dispatch receipt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_plan_proposal: Option<CoordinatorPlanProposal>,
+    /// Read-side projection of the native dispatch fence. Unknown is not
+    /// permission; dispatch must revalidate the exact Ticket.
+    pub coordinator_plan_review_required: Option<bool>,
     /// Historical task-effective bot profiles, not permission or execution proof.
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1153,6 +1156,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         coordinator_plan_proposal: if work_items.is_empty() && !truncated_work_items {
             coordinator_plan_proposal(store, &ticket, &native_mandate).ok().flatten()
         } else { None },
+        coordinator_plan_review_required: unreviewed_coordinator_plan(store, &ticket).ok(),
         ticket,
         mandate: native_mandate,
         assignments: native_assignments,
@@ -1411,6 +1415,7 @@ pub(crate) fn inspect_headless_status(
         let native_history = history(&store, ticket_id, 50)?;
         let unresolved = effects::unresolved_count(&store, ticket_id)?;
         let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+        let plan_review_required = unreviewed_coordinator_plan(&store, &ticket).ok();
         read.commit().map_err(|e| e.to_string())?;
         let result = serde_json::json!({
             "ticketId": ticket.id,
@@ -1421,6 +1426,7 @@ pub(crate) fn inspect_headless_status(
             "hasEvidence": ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
             "unresolvedExternalEffects": unresolved,
             "recovery": recovery,
+            "coordinatorPlanReviewRequired": plan_review_required,
             "mandate": native_mandate.as_ref().map(|grant| serde_json::json!({
                 "revoked": grant.revoked,
                 "policyRevision": grant.policy_revision,
@@ -5867,18 +5873,11 @@ fn next_work_item(store: &Store, ticket_id: &str) -> Result<Option<work_items::W
         if !items.is_empty() {
             return Err("No remaining planned WorkItem; review the Demand, add a new plan or stop before dispatch.".into());
         }
-        // An array-shaped Coordinator response is a proposed dependency plan,
-        // even when its schema or routes are invalid. It must not fall through
-        // to the broader original Worker objective before operator review.
+        // A structured or ambiguously wrapped plan is not free-text advice.
+        // The native dispatch fence and both operator surfaces share this check.
         let ticket = get_ticket(store, ticket_id)?;
-        if matches!(ticket.state.as_str(), "queued" | "blocked") {
-            let config = configuration(store, &ticket.orchestration_id)?;
-            let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-            if original_coordinator_advice(store, ticket_id, &coordinator.id, &coordinator.project_id)?
-                .is_some_and(|advice| structured_coordinator_advice(&advice))
-            {
-                return Err("Review and save the Coordinator dependency plan before Worker dispatch.".into());
-            }
+        if unreviewed_coordinator_plan(store, &ticket)? {
+            return Err("Review and save the Coordinator dependency plan before Worker dispatch.".into());
         }
         return Ok(None);
     }
@@ -5972,10 +5971,59 @@ fn original_coordinator_advice(
     ).optional().map_err(|e| e.to_string())
 }
 
-// The Coordinator is instructed to return a raw JSON array. Treat even a
-// malformed array-shaped response as a proposal, not an executable fallback.
+// Only a complete raw JSON array can prefill the reviewed plan editor.
+// JSON containers and Markdown JSON wrappers (including malformed ones)
+// must never turn into a broader free-text Worker objective. Detect these
+// formats without extracting, repairing or accepting provider-authored plans.
 fn structured_coordinator_advice(advice: &str) -> bool {
-    advice.trim_start().starts_with('[')
+    let advice = advice.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if advice.starts_with('[') || advice.starts_with('{') {
+        return true;
+    }
+    let has_plan_key = advice.contains("\"requestKey\"");
+    let mut bare_fence = false;
+    for line in advice.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if bare_fence && (line.starts_with('[') || line.starts_with('{')) {
+            return true;
+        }
+        bare_fence = false;
+        if let Some(info) = line.strip_prefix("```").or_else(|| line.strip_prefix("~~~")) {
+            let info = info.trim_start_matches(['`', '~']).trim();
+            if info.eq_ignore_ascii_case("json") || info.eq_ignore_ascii_case("jsonc") {
+                return true;
+            }
+            bare_fence = info.is_empty();
+        }
+        // A plan placed after an explanatory preamble is still unreviewed.
+        if has_plan_key && (line.starts_with('[') || line.starts_with('{')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Shared dispatch/inspection predicate. The original Coordinator attempt is
+/// the only proposal source. An explicit persisted operator plan resolves the
+/// review requirement; its own readiness and authorization still apply.
+fn unreviewed_coordinator_plan(store: &Store, ticket: &Ticket) -> Result<bool> {
+    if !matches!(ticket.state.as_str(), "queued" | "blocked") {
+        return Ok(false);
+    }
+    let has_plan: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1)",
+        [&ticket.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if has_plan {
+        return Ok(false);
+    }
+    let config = configuration(store, &ticket.orchestration_id)?;
+    let coordinator = bots::get(store, &config.coordinator_bot_id)?;
+    Ok(original_coordinator_advice(store, &ticket.id, &coordinator.id, &coordinator.project_id)?
+        .is_some_and(|advice| structured_coordinator_advice(&advice)))
 }
 
 /// Gateway truncates at MAX_INBOUND characters. Fit advisory text into the
@@ -16192,12 +16240,20 @@ mod tests {
 
     #[test]
     fn coordinator_proposal_rejects_untrusted_routes_and_unstructured_results() {
-        for (index, raw) in [
-            r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"router","routingReason":"Not a Worker"}]"#,
-            r#"[{"requestKey":"x","summary":"Inspect"}]"#,
-            r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"worker","routingReason":"Admitted","allowedTools":["shell"]}]"#,
-            r#"[{"requestKey":"x","summary":"Inspect","parentRequestKey":"missing","workerBotId":"worker","routingReason":"Admitted"}]"#,
-            r#"Advisory text, not a structured proposal."#,
+        for (index, (raw, requires_review)) in [
+            (r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"router","routingReason":"Not a Worker"}]"#, true),
+            (r#"[{"requestKey":"x","summary":"Inspect"}]"#, true),
+            (r#"[{"requestKey":"x","summary":"Inspect","workerBotId":"worker","routingReason":"Admitted","allowedTools":["shell"]}]"#, true),
+            (r#"[{"requestKey":"x","summary":"Inspect","parentRequestKey":"missing","workerBotId":"worker","routingReason":"Admitted"}]"#, true),
+            (r#"{"plan":[{"requestKey":"x","summary":"Inspect"}]}"#, true),
+            ("```json\n[{\"requestKey\":\"x\"}]\n```", true),
+            ("Here is the plan:\n~~~JSON\n[{broken\n~~~", true),
+            ("```\n\n[{\"requestKey\":\"x\"}]\n```", true),
+            ("\u{feff}[{\"requestKey\":\"x\"}]", true),
+            ("Plan:\n[{\"requestKey\":\"x\"}]", true),
+            ("Plan:\n[\n  {\n    \"requestKey\": \"x\"\n  }\n]", true),
+            ("Advisory text with a Rust snippet.\n```rust\nfn example() {}\n```", false),
+            ("Advisory text, not a structured proposal.", false),
         ].iter().enumerate() {
             let mut store = fixture();
             let config = enabled(&store);
@@ -16211,7 +16267,13 @@ mod tests {
             assert!(snapshot.work_items.is_empty());
             assert_eq!(snapshot.assignments.len(), 1);
             assert_eq!(snapshot.ticket.state, "queued");
-            if raw.starts_with('[') {
+            assert_eq!(snapshot.coordinator_plan_review_required, Some(*requires_review));
+            let headless: serde_json::Value = serde_json::from_str(
+                &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+            ).unwrap();
+            assert_eq!(headless["coordinatorPlanReviewRequired"], serde_json::json!(requires_review));
+            assert!(!headless.to_string().contains(raw.trim()));
+            if *requires_review {
                 assert!(headless_dispatch::enqueue(
                     &store, &ticket.id, snapshot.ticket.revision, "invalid-route",
                 ).is_err());
@@ -16221,6 +16283,43 @@ mod tests {
                 assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn wrapped_coordinator_plan_requires_explicit_review_and_never_enters_worker_context() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, _) = admit_role(
+            &mut store, &config.id, "Inspect source", "wrapped-plan-review", false, true,
+        ).unwrap();
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let raw = "```json\n[{\"requestKey\":\"x\",\"summary\":\"UNREVIEWED_WRAPPED_MARKER\"}]\n```";
+        assert!(on_run_finished(&store, &session, true, raw).unwrap());
+        let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert!(snapshot.coordinator_plan_proposal.is_none());
+        assert_eq!(snapshot.coordinator_plan_review_required, Some(true));
+        let revision = snapshot.ticket.revision;
+        assert!(headless_dispatch::enqueue(&store, &ticket.id, revision, "wrapped-denied").is_err());
+        assert!(prepare_coordinated_worker_at_revision(&mut store, &ticket.id, revision, false).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        let reviewed = work_items::decode_plan(
+            r#"[{"requestKey":"reviewed","summary":"Reviewed source inspection","workerBotId":"worker","routingReason":"Admitted Worker"}]"#,
+        ).unwrap();
+        let items = work_items::plan_batch(&store, &ticket.id, revision, &reviewed).unwrap();
+        let snapshot = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        assert_eq!(snapshot.coordinator_plan_review_required, Some(false));
+        assert_eq!(snapshot.assignments.len(), 1);
+        let request = headless_dispatch::enqueue_plan(
+            &store, &ticket.id, snapshot.ticket.revision, "wrapped-reviewed",
+        ).unwrap();
+        let (_, _, worker, packet) = prepare_coordinated_worker_with_request(
+            &mut store, &ticket.id, snapshot.ticket.revision, false, Some(&request),
+        ).unwrap();
+        assert_eq!(worker, "worker");
+        assert!(packet.contains(items[0].id.as_str()));
+        assert!(packet.contains("Reviewed source inspection"));
+        assert!(!packet.contains("UNREVIEWED_WRAPPED_MARKER"));
+        assert!(!mandate(&store, &ticket.id).unwrap().allowed_side_effects);
     }
 
     #[test]

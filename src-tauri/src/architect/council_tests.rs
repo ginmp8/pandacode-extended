@@ -12288,6 +12288,44 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
     }
+    // The native score remains valid at the end of each oversized report,
+    // but the adversarial wave must not be admitted from a truncated handoff.
+    let (report_id, original_report) = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        let first = load(&store, &children[0].child_session_id).unwrap().unwrap();
+        store.db.query_row(
+            "SELECT id, content FROM messages WHERE session_id=?1 AND role='assistant'
+             ORDER BY id DESC LIMIT 1",
+            [&first.workers[0].session_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        ).unwrap()
+    };
+    for padding in ["x".repeat(8_500), "∑".repeat(3_000)] {
+        {
+            let store = state.store.lock().unwrap();
+            let oversized = original_report.replace("\nCouncil score: 9.6/10",
+                &format!("\n{padding}\nCouncil score: 9.6/10"));
+            assert!(oversized.len() > 8192);
+            store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+                rusqlite::params![report_id, oversized]).unwrap();
+        }
+        let denied = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"Reject oversized S3 evidence"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap_err();
+        assert!(denied.contains("exceeds the bounded native report budget"), "{denied}");
+        {
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            assert!(child_council::inspect(&store, &root).unwrap().iter()
+                .all(|child| child.leaf_attempts.len() == 2),
+                "denied S3 handoff must roll back all challenger admission");
+            assert!(!verified_council_pass(&store, &root));
+            store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+                rusqlite::params![report_id, &original_report]).unwrap();
+        }
+    }
     let (pending, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"Admit independent S3 challengers"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();

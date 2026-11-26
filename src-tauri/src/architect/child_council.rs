@@ -1708,6 +1708,9 @@ fn challenge_receipt(
     {
         return Ok(None);
     }
+    // Revalidate the complete phase-one report bound before consuming a
+    // previously admitted challenge, including receipts from older builds.
+    require_s3_child_phase_one_reports(store, child)?;
     let mut challenge_ids = HashSet::new();
     let mut challenge_sessions = HashSet::new();
     let mut lowest_score = f64::INFINITY;
@@ -2398,6 +2401,26 @@ pub(super) fn require_total_attempt_capacity(
     super::council::require_composed_attempt_budget(root, all_attempts, additional_attempts)
 }
 
+/// The inspector intentionally projects best-effort tail findings. S3
+/// admission and receipt verification instead require every complete report.
+fn require_s3_child_phase_one_reports(store: &Store, child: &TeamSnapshot) -> Result<()> {
+    for leaf in &child.workers {
+        let Some(seat) = leaf.council.as_ref().filter(|seat| seat.round == 1) else {
+            continue;
+        };
+        if leaf.status != "completed" || leaf.abandoned
+            || leaf.reviewer_binding.is_none()
+            || !super::council::current_finding_origin_is_authorized(store, child, leaf)
+            || store.session(&leaf.session_id)?.archived
+            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
+        {
+            return Err("S3 child challenge handoff requires current native reviewer authority.".into());
+        }
+        super::council::bounded_s3_report(store, &leaf.session_id, seat)?;
+    }
+    Ok(())
+}
+
 /// Issue one fresh, independently authorized native child reviewer wave.
 /// Parent seats remain task-bound; this never creates a second Council engine.
 fn issue_leaf_wave(
@@ -2429,6 +2452,7 @@ fn issue_leaf_wave(
     {
         // Only native, currently authenticated first-wave seats can reach this
         // path. Reported findings are bounded untrusted claims, never new grants.
+        require_s3_child_phase_one_reports(store, child)?;
         let findings = super::council::reported_findings(store, child)
             .into_iter().filter(|finding| finding.round == 1)
             .map(|finding| serde_json::json!({

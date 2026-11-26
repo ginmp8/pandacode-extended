@@ -880,7 +880,7 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
 /// A native-bound reviewer cannot supply another session's text simply by
 /// changing the mutable worker's session ID. Legacy unbound M1 snapshots keep
 /// their existing compatibility path; composed reviewers have native grants.
-fn current_finding_origin_is_authorized(
+pub(super) fn current_finding_origin_is_authorized(
     store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
 ) -> bool {
     // Only the original automatic M1 Council retains its historical unbound
@@ -2193,6 +2193,28 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
             && fresh_sessions.insert(worker.session_id.as_str()))
 }
 
+/// Read one complete, bounded native S3 report after the caller authenticates
+/// its reviewer authority. A valid score at the tail cannot justify dropping
+/// earlier findings. Measure UTF-8 bytes rather than SQLite characters.
+pub(super) fn bounded_s3_report(
+    store: &storage::Store, session_id: &str, seat: &CouncilSeat,
+) -> Result<(i64, String)> {
+    let report: Option<(i64, String, i64)> = store.db.query_row(
+        "SELECT id, substr(content,-8192), length(CAST(content AS BLOB)) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+        params![session_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (message_id, report, report_bytes) = report
+        .ok_or("S3 challenge handoff cannot locate the native first-phase report.")?;
+    if report_bytes > 8192 {
+        return Err("S3 challenge handoff denied: phase-one report exceeds the bounded native report budget; obtain a shorter fresh scored review.".into());
+    }
+    if parse_score(&report) != seat.score {
+        return Err("S3 challenge handoff rejected a changed or unscored first-phase report.".into());
+    }
+    Ok((message_id, report))
+}
+
 /// Build the S3 challenge handoff from *authenticated native phase-one reports*,
 /// never from the Architect's prompt, cached scores or arbitrary model assertions.
 /// Only structured reported findings are relayed, explicitly as unverified claims;
@@ -2283,23 +2305,7 @@ pub(super) fn phase_one_challenge_handoff(
         if native_owner != 1 || store.session(&worker.session_id)?.archived {
             return Err("S3 challenge handoff denied: revoked or unlinked native reviewer session.".into());
         }
-        // The adversarial handoff must cover the *entire* native report. A
-        // suffix-only read could silently drop early findings while keeping
-        // the score at the end, misleading a fresh phase-two challenger.
-        // Measure UTF-8 bytes, not SQLite character count.
-        let report: Option<(i64, String, i64)> = store.db.query_row(
-            "SELECT id, substr(content,-8192), length(CAST(content AS BLOB)) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
-            params![worker.session_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional().map_err(|e| e.to_string())?;
-        let (message_id, report, report_bytes) = report
-            .ok_or("S3 challenge handoff cannot locate the native first-phase report.")?;
-        if report_bytes > 8192 {
-            return Err("S3 challenge handoff denied: phase-one report exceeds the bounded native report budget; obtain a shorter fresh scored review.".into());
-        }
-        if parse_score(&report) != seat.score {
-            return Err("S3 challenge handoff rejected a changed or unscored first-phase report.".into());
-        }
+        let (message_id, report) = bounded_s3_report(store, &worker.session_id, seat)?;
         verified_reports += 1;
         // Verify *every* phase-one report before filtering; a forged own
         // report must not disappear from the integrity check. Never expose

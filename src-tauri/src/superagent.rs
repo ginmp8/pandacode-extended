@@ -4140,7 +4140,9 @@ pub(crate) fn read_only_policy(
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
-         WHERE a.session_id=?1 AND t.active_assignment_id=a.id",
+         WHERE a.session_id=?1 AND t.active_assignment_id=a.id
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=t.id AND other.state='running')=1",
         [session_id],
         |r| Ok(AssignmentPolicyScope {
             ticket_state: r.get(0)?, assignment_state: r.get(1)?,
@@ -4590,10 +4592,23 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         crate::feature_controls::get().bots_paused,
     );
     let now = storage::now();
+    // The active pointer alone cannot prove exclusive execution. An inconsistent
+    // legacy Ticket may contain another running attempt even though the native
+    // lease triggers prevent normal admission of that state. Revoke the Mandate,
+    // retain the other attempt's lease for native recovery, and reject this
+    // callback's output instead of staging it as evidence or a Coordinator plan.
+    let unique_running: bool = tx.query_row(
+        "SELECT COUNT(*)=1 FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        [&task_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !unique_running {
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&task_id])
+            .map_err(|e| e.to_string())?;
+    }
     let unresolved_effects = quarantine_assignment_effects(&tx, &task_id, now)?;
     // A provider response is not remote reconciliation. Do not stage its
     // result for approval or Coordinator dispatch while any effect is unknown.
-    let authorized = authorized && !unresolved_effects;
+    let authorized = authorized && unique_running && !unresolved_effects;
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
@@ -4631,7 +4646,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,if unresolved_effects { "callback_effect_unresolved" }
             else if !within_budget { "assignment_timed_out" }
             else if !authorized { "callback_rejected" }
-            else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
+            else if coordinator { "coordinator_planned" } else { "turn_settled" },
+            if !unique_running { "blocked: conflicting running Assignments require native recovery" }
+            else { next },now],
     ).map_err(|e| e.to_string())?;
     if authorized && oversized_plan {
         tx.execute(
@@ -13388,6 +13405,57 @@ mod tests {
         ).is_err());
         assert!(crate::agent_tools::pending_ui_permission(&store, &session_id, &pending_active).is_err(),
             "tampered grants must never revive pending app effects");
+    }
+
+    #[test]
+    fn conflicting_native_assignments_deny_provider_authority_and_callback_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Inspect checkout", "conflicting-native-assignment", false,
+        ).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &sid).unwrap().is_some());
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        assert!(read_only_policy(&store, &ordinary.id).unwrap().is_none());
+
+        // Normal lease triggers reject this state. Inject an old/damaged
+        // database shape to exercise the independent provider and callback fences.
+        store.db.execute_batch(
+            "DROP TRIGGER sa_project_lease_insert;
+             DROP TRIGGER sa_project_lease_update;",
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_assignments
+             (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'router','conflicting-legacy-session','running',2,?3,?3)",
+            params![storage::id(), &ticket.id, storage::now()],
+        ).unwrap();
+        assert!(read_only_policy(&store, &sid).is_err(),
+            "the active pointer must not authorize a provider with competing attempts");
+        assert!(guard_run_admission(&store, &sid, &[]).is_err());
+        assert!(read_only_policy(&store, "conflicting-legacy-session").is_err());
+        assert!(read_only_policy(&store, &ordinary.id).unwrap().is_none(),
+            "ordinary sessions must not inherit task authority");
+
+        assert!(on_run_finished(&store, &sid, true, "Untrusted successful result").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        let (state, result): (String, Option<String>) = store.db.query_row(
+            "SELECT state,result FROM sa_assignments WHERE session_id=?1",
+            [&sid], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(state, "failed");
+        assert!(result.is_none());
+        assert!(has_unsettled_assignment(&store, &blocked).unwrap(),
+            "the other provider's lease must remain visible until native recovery");
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &sid, true, "Late success").unwrap());
+        assert!(!on_run_finished(&store, "conflicting-legacy-session", true, "Late success").unwrap());
+        assert!(read_only_policy(&store, &sid).is_err());
     }
 
     #[test]

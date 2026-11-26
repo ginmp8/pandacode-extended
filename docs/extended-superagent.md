@@ -166,3 +166,7 @@ running. This matches the native recovery inspector. Explicit revision-bound
 quarantine can clear the pointer but cannot attest that a provider stopped or
 that the remote effect succeeded. The receipt remains unresolved and must be
 independently reconciled; no automatic replay is permitted.
+
+### Conflicting running Assignment recovery
+
+Native provider authority requires exactly one running Assignment for a Ticket, not merely a matching active pointer. If a legacy or damaged database contains competing running attempts, the active provider is denied further native admission and its completion callback cannot contribute a plan or result. Callback settlement revokes the Mandate, records the rejected result without retaining provider output, and leaves the other attempt's lease visible for native recovery; it does not claim that the other provider was stopped. Ordinary session policy classification is unchanged. This is a read-only admission and recovery fence, not positive Worker write authority or authenticated remote reconciliation.

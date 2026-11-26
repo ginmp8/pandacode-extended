@@ -27,7 +27,7 @@ enum Command {
     ExportBots { path: PathBuf },
     SyncBots { path: PathBuf },
     PreviewOrchestrations { path: PathBuf },
-    ImportOrchestrations { path: PathBuf },
+    ImportOrchestrations { path: PathBuf, review_digest: String },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     CreateOrchestration { config_file: PathBuf },
@@ -232,13 +232,13 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 &database, path,
                             )?;
                             Ok(format!(
-                                "Would create disabled presets: {}\nUnchanged presets: {}",
-                                plan.would_create.join(", "), plan.unchanged.join(", "),
+                                "Would create disabled presets: {}\nUnchanged presets: {}\nReview digest: {}",
+                                plan.would_create.join(", "), plan.unchanged.join(", "), plan.review_digest,
                             ))
                         }
-                        Command::ImportOrchestrations { path } => {
+                        Command::ImportOrchestrations { path, review_digest } => {
                             let imported = crate::superagent::manifest::run_headless_import(
-                                &database, &dir, path,
+                                &database, &dir, path, review_digest,
                             )?;
                             let mut summary = format!(
                                 "Created {} disabled orchestration presets; {} unchanged.",
@@ -1540,10 +1540,17 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             }
             "--import-orchestrations" => {
                 let value = args.get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
                     .ok_or_else(|| format!("--import-orchestrations needs a file path.\n\n{}", help()))?;
-                command = Command::ImportOrchestrations { path: PathBuf::from(value) };
+                let review_digest = args.get(index + 2)
+                    .filter(|digest| digest.len() == 64 && digest.bytes().all(|b|
+                        b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                    .ok_or_else(|| "Provide the exact review digest from --preview-orchestrations.".to_owned())?;
+                command = Command::ImportOrchestrations {
+                    path: PathBuf::from(value), review_digest: review_digest.clone(),
+                };
                 ops += 1;
-                index += 1;
+                index += 2;
             }
             "--export-orchestrations" => {
                 let value = args.get(index + 1)
@@ -2854,7 +2861,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2871,10 +2878,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --sync-bots <file>     Fetch pinned GitHub manifests from a source registry, back up,
                          import once, report results and exit (does not start serving).
   --preview-orchestrations <file>
-                         Validate and preview disabled presets without importing or backing up.
-  --import-orchestrations <file>
-                         Explicitly import disabled SuperAgent presets after native validation
-                         and a verified config-only backup; exit without starting tasks.
+                         Validate disabled presets and print the review digest without importing.
+  --import-orchestrations <file> <review-digest>
+                         Import disabled presets using the exact current preview digest and a
+                         verified config-only backup; exit without starting tasks.
   --export-orchestrations <file>
                          Export portable SuperAgent presets without tickets or secrets; exit.
   --create-orchestration <json-file>
@@ -3224,8 +3231,14 @@ mod tests {
             Ok(Command::PreviewOrchestrations { path: PathBuf::from("presets.json") }));
         assert!(parsed("--preview-orchestrations").is_err());
         assert!(parsed("--preview-orchestrations p.json --import-orchestrations p.json").is_err());
-        assert_eq!(parsed("--import-orchestrations presets.json"),
-            Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
+        let digest = "a".repeat(64);
+        assert_eq!(parsed(&format!("--import-orchestrations presets.json {digest}")),
+            Ok(Command::ImportOrchestrations {
+                path: PathBuf::from("presets.json"), review_digest: digest.clone(),
+            }));
+        assert!(parsed("--import-orchestrations presets.json").is_err());
+        assert!(parsed("--import-orchestrations presets.json invalid").is_err());
+        assert!(parsed(&format!("--import-orchestrations presets.json {digest} --export-bots b.json")).is_err());
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));

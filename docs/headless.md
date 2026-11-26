@@ -521,20 +521,26 @@ configuration-only companion manifest used by the desktop UI:
 ```sh
 pandacode serve --export-orchestrations orchestrations.json
 pandacode serve --preview-orchestrations orchestrations.json
-pandacode serve --import-orchestrations orchestrations.json
+# Review the preview output and pass its exact 64-character Review digest.
+pandacode serve --import-orchestrations orchestrations.json <review-digest>
 ```
 
-Each command exits after the local operation. Import parses and preflights the
-1 MB-bounded document, writes a verified private recovery snapshot before a
-new preset is inserted, commits native SQLite changes transactionally, and
-leaves every imported preset **Off**. Preview and export use an existing-schema,
+Each command exits after the local operation. Import now requires the review
+digest printed by preview; earlier file-only invocations fail with instructions
+to preview again. The digest binds the manifest and its resolved local identities,
+not execution authority. Import reserves the SQLite writer before rechecking
+the digest, writes a verified private recovery snapshot before a new preset is
+inserted, and commits the exact resolved plan transactionally. Changes by another
+process to reviewed identities or policy require a new preview. Every imported
+preset remains **Off**. Preview and export use an existing-schema,
 read-only connection; import uses the existing native write connection without
 Store startup recovery. They can run beside a healthy headless host without
 interrupting its live Tickets or changing pending external-effect receipts.
 An absent or outdated schema fails closed rather than running migrations.
 No task starts, no credential or live Ticket is imported, and no remote
-unauthenticated management endpoint is opened. Repeating the same import is idempotent; headless errors produce a
-non-zero exit code. This is configuration administration, **not** headless
+unauthenticated management endpoint is opened. Repeating the same import after
+a fresh preview is idempotent and does not create another backup; headless
+errors produce a non-zero exit code. This is configuration administration, **not** headless
 task dispatch/approval parity; that remains a separate implementation gate.
 
 ### Read-only task inspection (local CLI)

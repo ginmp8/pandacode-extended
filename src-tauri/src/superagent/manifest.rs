@@ -352,14 +352,22 @@ fn preview(store: &Store, document: &serde_json::Value) -> Result<ImportPreview>
     })
 }
 
+#[cfg(test)]
 fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result<ImportResult> {
     if !confirmed {
         return Err("Confirm the preview before importing SuperAgent presets.".into());
     }
-    // Full dependency and conflict preflight precedes the first mutation.
-    let resolved = resolve(store, document)?;
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
+    let result = apply_resolved(&tx, resolve(store, document)?)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// Insert exactly the already resolved plan under its original write transaction.
+fn apply_resolved(tx: &rusqlite::Transaction<'_>, resolved: Vec<Resolved>) -> Result<ImportResult> {
     let mut result = ImportResult { created: Vec::new(), unchanged: Vec::new(), backup_path: None };
-    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     for candidate in resolved {
         if candidate.existing {
             result.unchanged.push(candidate.name);
@@ -400,23 +408,40 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
         ).map_err(|e| format!("Atomic Team strategy import aborted: {e}"))?;
         result.created.push(candidate.name);
     }
-    tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
 }
 
-
-/* Take a verified private configuration snapshot before applying a new preset.
- * Existing native import remains transactional and rechecks dependencies.
- */
+#[cfg(test)]
 fn apply_with_backup(
     store: &Store, data_dir: &Path, document: &serde_json::Value, confirmed: bool,
+) -> Result<ImportResult> {
+    let plan = preview(store, document)?;
+    apply_reviewed_with_backup(store, data_dir, document, confirmed, &plan.review_digest)
+}
+
+/// Both desktop and detached CLI must pin the reviewed manifest and native
+/// identities before backup or insertion, including against other processes.
+fn apply_reviewed_with_backup(
+    store: &Store, data_dir: &Path, document: &serde_json::Value,
+    confirmed: bool, review_digest: &str,
 ) -> Result<ImportResult> {
     if !confirmed {
         return Err("Confirm the preview before importing SuperAgent presets.".into());
     }
-    let plan = preview(store, document)?;
-    if plan.would_create.is_empty() {
-        return apply(store, document, true);
+    // A process-local Store mutex does not exclude a separate serve/CLI
+    // writer. Hold the SQLite write reservation across resolution, digest
+    // validation, private snapshot and insertion of the exact resolved plan.
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
+    let resolved = resolve(store, document)?;
+    if reviewed_plan_digest(document, &resolved)? != review_digest {
+        return Err("Portable Team preview is stale; review the current manifest and native bot identities again.".into());
+    }
+    if resolved.iter().all(|candidate| candidate.existing) {
+        let result = apply_resolved(&tx, resolved)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(result);
     }
     let folder = data_dir.join("bot-backups");
     crate::extended_bot_manifest::set_private_directory(&folder)?;
@@ -428,25 +453,10 @@ fn apply_with_backup(
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ"), storage::id(),
     ));
     crate::extended_bot_manifest::atomic_write_new(&path, &bytes)?;
-    let mut result = apply(store, document, true)?;
+    let mut result = apply_resolved(&tx, resolved)?;
+    tx.commit().map_err(|e| e.to_string())?;
     result.backup_path = Some(path.display().to_string());
     Ok(result)
-}
-
-fn apply_reviewed_with_backup(
-    store: &Store, data_dir: &Path, document: &serde_json::Value,
-    confirmed: bool, review_digest: &str,
-) -> Result<ImportResult> {
-    if !confirmed {
-        return Err("Confirm the preview before importing SuperAgent presets.".into());
-    }
-    let resolved = resolve(store, document)?;
-    if reviewed_plan_digest(document, &resolved)? != review_digest {
-        return Err("Portable Team preview is stale; review the current manifest and native bot identities again.".into());
-    }
-    // The outer Tauri entrypoint holds the native Store lock across this
-    // freshness check, private backup and transactional disabled-only import.
-    apply_with_backup(store, data_dir, document, true)
 }
 
 fn export(store: &Store) -> Result<serde_json::Value> {
@@ -565,11 +575,11 @@ pub(crate) fn run_headless_preview(
 /// Imported Teams are disabled and committed by the existing transactional
 /// importer, without interrupting a live serve process through Store::open.
 pub(crate) fn run_headless_import(
-    database_path: &Path, data_dir: &Path, path: &Path,
+    database_path: &Path, data_dir: &Path, path: &Path, review_digest: &str,
 ) -> Result<ImportResult> {
     let document = read_headless_document(path)?;
     let store = super::open_headless_transition_store(database_path)?;
-    apply_with_backup(&store, data_dir, &document, true)
+    apply_reviewed_with_backup(&store, data_dir, &document, true, review_digest)
 }
 
 /// Passive configuration backup must not migrate or recover a live database.
@@ -693,10 +703,25 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&exported).unwrap()).unwrap();
         assert_eq!(saved["orchestrations"].as_array().unwrap().len(), 1);
-        let imported = run_headless_import(&database, &root, &input).unwrap();
+        // A different manifest or a changed local profile cannot reuse the
+        // operator's preview, even from a separate administrative process.
+        std::fs::write(&input,serde_json::to_vec(&document("Unreviewed Team")).unwrap()).unwrap();
+        assert!(run_headless_import(&database, &root, &input, &preview.review_digest)
+            .unwrap_err().contains("stale"));
+        std::fs::write(&input,serde_json::to_vec(&document("Imported Team")).unwrap()).unwrap();
+        store.db.execute("UPDATE bots SET model='changed' WHERE id='worker'", []).unwrap();
+        assert!(run_headless_import(&database, &root, &input, &preview.review_digest)
+            .unwrap_err().contains("stale"));
+        assert!(!root.join("bot-backups").exists());
+        store.db.execute("UPDATE bots SET model='default' WHERE id='worker'", []).unwrap();
+        let current = run_headless_preview(&database, &input).unwrap();
+        let imported = run_headless_import(&database, &root, &input, &current.review_digest).unwrap();
         assert_eq!(imported.created, vec!["Imported Team"]);
         assert!(imported.backup_path.is_some());
-        let repeated = run_headless_import(&database, &root, &input).unwrap();
+        assert!(run_headless_import(&database, &root, &input, &current.review_digest)
+            .unwrap_err().contains("stale"));
+        let refreshed = run_headless_preview(&database, &input).unwrap();
+        let repeated = run_headless_import(&database, &root, &input, &refreshed.review_digest).unwrap();
         assert_eq!(repeated.unchanged, vec!["Imported Team"]);
         assert!(repeated.backup_path.is_none());
         let imported_enabled: i64 = store.db.query_row(

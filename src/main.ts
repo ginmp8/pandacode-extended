@@ -2853,7 +2853,11 @@ function renderComposer(): void {
       end: councilFocusedText.selectionEnd ?? 0,
       direction: councilFocusedText.selectionDirection ?? 'none',
     } : null;
-    const promptWasFocused = document.activeElement === oldChannelComposer?.querySelector('#shared-channel-prompt');
+    const oldPrompt = oldChannelComposer?.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    const promptCaret = oldChannelComposer?.dataset.channelId === state.sharedChannelId
+      && oldPrompt && document.activeElement === oldPrompt ? {
+        start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd, direction: oldPrompt.selectionDirection,
+      } : null;
     $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     const posting = state.sharedChannelPosting.has(state.sharedChannelId);
@@ -2879,8 +2883,6 @@ function renderComposer(): void {
                 || (focus instanceof HTMLInputElement && ['text', 'search', 'tel', 'url'].includes(focus.type))))
               focus.setSelectionRange(councilCaret.start, councilCaret.end, councilCaret.direction);
           }
-        } else if (promptWasFocused) {
-          channelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.focus({ preventScroll: true });
         }
         nextPanel.scrollTop = councilScrollTop;
       }
@@ -2888,7 +2890,16 @@ function renderComposer(): void {
     const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
-    if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
+    if (prompt) {
+      prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? '';
+      prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting;
+      // A native Channel update must not interrupt typing or move the caret in
+      // the same Channel, even when its Council settings are closed.
+      if (promptCaret && !prompt.disabled) {
+        prompt.focus({ preventScroll: true });
+        prompt.setSelectionRange(promptCaret.start, promptCaret.end, promptCaret.direction);
+      }
+    }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;
     return;
@@ -6909,7 +6920,9 @@ function syncChannelWorkingLabel(): void {
 /** Channel history rows per page, as `HISTORY_PAGE` in `shared_channels.rs`. */
 const CHANNEL_PAGE = 100;
 async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<void> {
-  if (!channelId) return;
+  // A late post/stop/retry completion from a departed Channel must not
+  // advance the active Channel's request serial or invalidate its detail read.
+  if (!channelId || channelId !== state.sharedChannelId) return;
   const request = ++state.sharedChannelRequest;
   const history = document.querySelector<HTMLElement>('.bc-history');
   if (history) {

@@ -69,6 +69,72 @@ test.describe('shared bot channels', () => {
     await prompt.fill('Keep the message composer independent');
     await expect(prompt).toHaveValue('Keep the message composer independent');
     await expect(composer.locator('.bc-council-controls')).toBeHidden();
+
+    await prompt.focus();
+    await prompt.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(9, 16, 'backward'));
+    const before = await composer.elementHandle();
+    expect(before).not.toBeNull();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' }));
+    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, before)).toBe(true);
+    await expect(prompt).toBeFocused();
+    await expect.poll(() => prompt.evaluate(element => {
+      const input = element as HTMLTextAreaElement;
+      return [input.selectionStart, input.selectionEnd, input.selectionDirection];
+    })).toEqual([9, 16, 'backward']);
+    await page.keyboard.insertText('draft');
+    await expect(prompt).toHaveValue('Keep the draft composer independent');
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: on');
+  });
+
+  test('a late post from another Channel cannot invalidate the active Channel detail read', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        match => "if (command === 'bot_shared_channel_post' && args.channelId === 'sample-launch') " +
+          "await new Promise(resolve => { window.__releaseLaunchPost = resolve; });\n" +
+          "if (command === 'bot_shared_channel_detail' && window.__otherChannelGate) {" +
+          " if (args.channelId === 'sample-launch') window.__lateLaunchReads = (window.__lateLaunchReads ?? 0) + 1;" +
+          " else { window.__otherChannelReadStarted = true; await window.__otherChannelGate; } }\n" + match,
+      );
+      if (body === source) throw new Error('Delayed Channel command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: 'Bot actions', exact: true }).click();
+    await sidebar(page).getByRole('menu', { name: 'Bot actions', exact: true }).getByRole('menuitem', { name: 'New channel' }).click();
+    const create = page.getByRole('dialog', { name: 'New channel' });
+    await create.getByRole('textbox', { name: 'Channel name' }).fill('followup');
+    await create.getByRole('checkbox', { name: 'Scout' }).check();
+    await create.getByRole('button', { name: 'Create channel' }).click();
+    await expect(sidebar(page).getByRole('button', { name: '#followup' })).toBeVisible();
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.getByRole('textbox', { name: 'Message channel' }).fill('Review the first Channel only.');
+    await page.locator('#shared-channel-composer button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseLaunchPost)).toBe('function');
+
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__otherChannelGate = new Promise<void>(resolve => { w.__releaseOtherChannel = resolve; });
+    });
+    await sidebar(page).getByRole('button', { name: '#followup' }).click();
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__otherChannelReadStarted))).toBe(true);
+    // Complete the old post while the active detail read is outstanding.
+    // The task boundary drains the completed post's promise continuations
+    // before releasing the active read; no arbitrary network delay is needed.
+    await page.evaluate(async () => {
+      const w = window as any;
+      w.__releaseLaunchPost();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      w.__releaseOtherChannel();
+    });
+    await expect(page.locator('#breadcrumb')).toContainText('#followup');
+    const composer = page.locator('#shared-channel-composer');
+    await expect(composer.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
+    await expect(page.locator('.bc-channel')).not.toContainText('Review the first Channel only.');
+    expect(await page.evaluate(() => (window as any).__lateLaunchReads ?? 0)).toBe(0);
   });
 
   test('channel Council keeps keyboard focus within the popover at narrow widths', async ({ page }) => {

@@ -98,6 +98,21 @@ fn child_config(root: &CouncilConfig, child: &CouncilNestedReviewer) -> Result<T
     Ok(config)
 }
 
+// A session can have both a bot thread and an explicitly assigned bot task.
+// Check every explicit owner, not an arbitrary first result of a UNION.
+// Project membership alone does not identify the executor.
+fn require_independent_coordinator(store: &Store, root_id: &str, bot_id: &str) -> Result<()> {
+    let is_executor: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1 AND bot_id=?2
+                       UNION ALL SELECT 1 FROM bot_tasks WHERE session_id=?1 AND bot_id=?2)",
+        params![root_id, bot_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if is_executor {
+        return Err("reviewer_unavailable: the task executor cannot coordinate its own child Council.".into());
+    }
+    Ok(())
+}
+
 fn frozen(
     store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
     session_id: &str, child_config: &TeamConfig,
@@ -112,6 +127,7 @@ fn frozen_with_recovery_status(
     session_id: &str, child_config: &TeamConfig, allow_revoked_for_recovery: bool,
 ) -> Result<FrozenChildReservation> {
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
+    require_independent_coordinator(store, &root.session_id, &child.bot_id)?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
     // The task-owned coordinator is a native scheduling reservation, not a
@@ -3100,14 +3116,11 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         return Err("child_council_denied: child reservation requires a started root objective.".into());
     }
     let parent = store.session(&root.session_id)?;
-    let executor: Option<String> = store.db.query_row(
-        "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION ALL SELECT bot_id FROM bot_tasks WHERE session_id=?1 LIMIT 1",
-        [&root.session_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    // Validate the entire coordinator roster before allocating any child.
     for child in &council.nested_bot_reviewers {
-        if executor.as_deref() == Some(child.bot_id.as_str()) {
-            return Err("reviewer_unavailable: the task executor cannot coordinate its own child Council.".into());
-        }
+        require_independent_coordinator(store, &root.session_id, &child.bot_id)?;
+    }
+    for child in &council.nested_bot_reviewers {
         if read(store, root, child)?.is_some() { continue; }
         let bot = bots::get(store, &child.bot_id)
             .map_err(|_| "child_council_unavailable: selected bot no longer exists.")?;

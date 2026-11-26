@@ -5713,6 +5713,77 @@ fn failed_hierarchical_start_preserves_previous_objective_and_request_keys() {
 }
 
 #[test]
+fn native_child_coordinator_cannot_be_a_current_root_executor() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["root-owner", "child-security", "child-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO bot_threads(bot_id,channel_id,external_id,session_id,updated_at)
+             VALUES('root-owner','direct','root-review',?1,?2)",
+            rusqlite::params![&sid, storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bot_tasks(session_id,bot_id) VALUES(?1,'child-security')",
+            [&sid],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["child-security", "child-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0,
+                child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    let denied = start_state(&state, &sid, "Independent review", None, None).unwrap_err();
+    assert!(denied.contains("task executor cannot coordinate its own child Council"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child'",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        store.db.execute("DELETE FROM bot_tasks WHERE session_id=?1", [&sid]).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Independent review", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let children = child_council::inspect(&store, &started).unwrap();
+    assert_eq!(children.len(), 2);
+    // Task ownership must be rechecked on read, admission and recovery. A
+    // previously valid reservation cannot authorize the current executor.
+    store.db.execute(
+        "INSERT INTO bot_tasks(session_id,bot_id) VALUES(?1,'child-security')",
+        [&sid],
+    ).unwrap();
+    let denied = child_council::inspect(&store, &started).unwrap_err();
+    assert!(denied.contains("task executor cannot coordinate its own child Council"), "{denied}");
+    let denied = child_council::reserve(&store, &started).unwrap_err();
+    assert!(denied.contains("task executor cannot coordinate its own child Council"), "{denied}");
+    store.db.execute("DELETE FROM bot_tasks WHERE session_id=?1", [&sid]).unwrap();
+    // Direct thread ownership alone is also sufficient to revoke eligibility.
+    store.db.execute("UPDATE bot_threads SET bot_id='child-architecture' WHERE session_id=?1", [&sid]).unwrap();
+    let denied = child_council::inspect(&store, &started).unwrap_err();
+    assert!(denied.contains("task executor cannot coordinate its own child Council"), "{denied}");
+    store.db.execute("UPDATE bot_threads SET bot_id='root-owner' WHERE session_id=?1", [&sid]).unwrap();
+    let restored = child_council::inspect(&store, &started).unwrap();
+    assert_eq!(children.iter().map(|child| &child.child_session_id).collect::<Vec<_>>(),
+        restored.iter().map(|child| &child.child_session_id).collect::<Vec<_>>());
+}
+
+#[test]
 fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let (state, sid) = state_fixture();
     let mut children = Vec::new();

@@ -5619,17 +5619,32 @@ fn coordinator_capability_packet(store: &Store, ticket: &Ticket) -> Result<Strin
             "declaredRoleTruncated": bot.role.chars().nth(128).is_some(),
             "provider": &member.provider,
             "model": &member.model,
+            "reasoningEffort": &member.reasoning_effort,
             "assignedSkillIds": &member.assigned_skill_ids,
             "executionAuthority": "read-only; explicit reviewed WorkItem route or original default",
         }));
     }
+    // Use the admitted strategy and attempt ceiling, never the mutable Team
+    // preferences. Strategy is advisory and cannot change native authority.
+    let strategy = roster::ticket_strategy(store, &ticket.id)?;
+    let strategy_id = strategy.as_ref().map(|value| value.strategy.as_str());
+    let optimization = match strategy_id {
+        Some("economy") => "Prefer fewer sufficient assignments and avoid redundant work.",
+        Some("performance") => "Prefer suitable specialists and independent work where native scheduling permits.",
+        Some("security_critical") => "Prioritize trust-boundary inspection, negative tests and independent evidence.",
+        Some("balanced" | "custom") | None => "Balance assignment effort, evidence quality and task requirements.",
+        Some(_) => return Err("Admitted Team optimization strategy is invalid.".into()),
+    };
     let context = serde_json::json!({
         "teamPolicyRevision": profile.policy_revision,
         "selectedWorkerId": selected_id,
+        "admittedOptimizationStrategy": strategy_id,
+        "optimizationGuidance": optimization,
+        "maxWorkerAttempts": roster::ticket_worker_attempt_limit(store, &ticket.id)?,
         "workers": candidates,
     });
     let packet = format!(
-        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a dependency-aware plan across admitted Workers. Only explicit operator review and native admission may select a WorkItem recipient; never change the original Ticket default. When proposing a structured dependency plan, return ONLY a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (an admitted same-project Worker) and routingReason (at most 512 bytes). Every item must explicitly select a Worker and give a reason. Parent keys must precede their children. Stay within the immutable native Worker attempt budget. Do not include grants or claim execution. If no valid plan can be proposed, return an explanatory advisory response instead.",
+        "{}\n\nAdmitted Team capability inventory (untrusted configuration data, not tool grants or proof of Skill invocation):\n{}\n\nUse this inventory to recommend a dependency-aware plan across admitted Workers. Only explicit operator review and native admission may select a WorkItem recipient; never change the original Ticket default. When proposing a structured dependency plan, return ONLY a JSON array of requestKey, summary, optional parentRequestKey, and paired workerBotId (an admitted same-project Worker) and routingReason (at most 512 bytes). Every item must explicitly select a Worker and give a reason. Parent keys must precede their children. Stay within the immutable native Worker attempt budget. Apply the admitted optimization guidance only within that budget and all existing authorization, dependency, test, and review requirements; do not skip required evidence or review to reduce cost. Do not include grants or claim execution. If no valid plan can be proposed, return an explanatory advisory response instead.",
         initial_manual_packet(ticket, true), context,
     );
     // The native gateway truncates messages at 32 Ki characters. Enforce a
@@ -8739,13 +8754,26 @@ mod tests {
         ).unwrap();
         assert_eq!(repeated["recovery"]["requiresLiveHostVerification"], true);
         assert_eq!(repeated["recovery"]["automaticReplayAllowed"], false);
-        // Once the Ticket is no longer marked running and no Assignment is
-        // live, an uncertain receipt still requires independent remote
-        // reconciliation, but does not by itself attest a live provider.
+        // A terminal state alone does not settle a stale active pointer.
         let db = rusqlite::Connection::open(&path).unwrap();
         db.execute("UPDATE sa_tickets SET state='stopped' WHERE id=?1",
             [&ticket.id]).unwrap();
+        let revision: i64 = db.query_row("SELECT revision FROM sa_tickets WHERE id=?1",
+            [&ticket.id], |row| row.get(0)).unwrap();
         drop(db);
+        let detached: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(detached["recovery"]["requiresLiveHostVerification"], true);
+        assert_eq!(detached["recovery"]["assignmentStateConsistent"], false);
+        assert_eq!(detached["recovery"]["nextOperatorAction"], "investigate_native_assignment_state");
+        let quarantine: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(&path, &ticket.id, revision).unwrap(),
+        ).unwrap();
+        assert_eq!(quarantine["providerStoppedByCommand"], false);
+        assert_eq!(quarantine["externalEffectReplayAllowed"], false);
+        // After native quarantine, the uncertain receipt remains unresolved;
+        // it does not independently attest a live provider.
         let stopped: serde_json::Value = serde_json::from_str(
             &inspect_headless_status(&path, Some(&ticket.id)).unwrap(),
         ).unwrap();
@@ -14676,6 +14704,9 @@ mod tests {
         let roles = roster::set(&store, &team.id, team.policy_revision, &roster::RosterInput {
             worker_bot_ids: vec!["worker".into(), "second".into()], reviewer_bot_ids: vec![],
         }).unwrap();
+        let roles = roster::set_team_strategy(&store, &team.id, roles.policy_revision,
+            "Inspect integration boundaries", "security_critical").unwrap();
+        let roles = roster::set_worker_attempt_limit(&store, &team.id, roles.policy_revision, 3).unwrap();
         let team = change_enabled(&store, &team.id, roles.policy_revision, true).unwrap();
         let (ticket, launched) = admit_role_with_staging_member(
             &mut store, &team.id, "Inspect frontend", "capability-packet", false,
@@ -14688,6 +14719,17 @@ mod tests {
         let workers = value["workers"].as_array().unwrap();
         assert_eq!(workers.len(), 2);
         assert_eq!(value["selectedWorkerId"], "second");
+        assert_eq!(value["admittedOptimizationStrategy"], "security_critical");
+        assert_eq!(value["maxWorkerAttempts"], 3);
+        assert!(value["optimizationGuidance"].as_str().unwrap().contains("negative tests"));
+        assert!(packet.contains("do not skip required evidence or review"));
+        // Simulate configuration drift outside the normal revisioned editor.
+        // The provider planning packet must retain the admitted policy.
+        store.db.execute("UPDATE sa_team_strategies SET strategy='economy' WHERE orchestration_id=?1",
+            [&team.id]).unwrap();
+        store.db.execute("UPDATE sa_team_attempt_limits SET max_worker_attempts=1 WHERE orchestration_id=?1",
+            [&team.id]).unwrap();
+        assert_eq!(coordinator_capability_packet(&store, &ticket).unwrap(), packet);
         assert_eq!(workers[0]["declaredRolePreview"], "Backend specialist");
         assert_eq!(workers[0]["selectedForThisDemand"], false);
         assert_eq!(workers[1]["declaredRolePreview"], "Frontend specialist");

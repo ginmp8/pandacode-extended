@@ -12568,6 +12568,52 @@ fn assert_bounded_native_report(
         store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
             rusqlite::params![report_id, &original]).unwrap();
     }
+    // A later native tool event makes the previously scored report stale.
+    // Revalidation must enforce the same turn boundary as the callback.
+    store.message(session_id, "tool", "Review tool activity after the scored report").unwrap();
+    let tool_id: i64 = store.db.query_row(
+        "SELECT MAX(id) FROM messages WHERE session_id=?1 AND role='tool'",
+        [session_id], |row| row.get(0),
+    ).unwrap();
+    assert!(tool_id > report_id);
+    assert_revoked();
+    assert_eq!(store.db.execute("DELETE FROM messages WHERE id=?1", [tool_id]).unwrap(), 1);
+}
+
+#[test]
+fn native_s2_s3_reports_must_follow_the_latest_same_session_tool_event() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let root = store.session(&sid).unwrap();
+    let reviewer = store.create_session(&root.project_id, "codex", "", "full").unwrap();
+    let other = store.create_session(&root.project_id, "codex", "", "full").unwrap();
+    let mut review = seat("native-reviewer", 1, Some(9.8), SINCE + 1).council.unwrap();
+    let report = "Independent report.\nCouncil score: 9.8/10";
+    store.message(&reviewer.id, "tool", "Tool activity before report").unwrap();
+    store.message(&reviewer.id, "assistant", report).unwrap();
+    store.message(&other.id, "tool", "Unrelated reviewer activity").unwrap();
+    for strategy in [council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase] {
+        assert!(council::scored_report_is_current_for_strategy(&store, &reviewer.id, &review, strategy));
+    }
+    assert!(council::bounded_s3_report(&store, &reviewer.id, &review).is_ok());
+    store.message(&reviewer.id, "tool", "Tool activity after report").unwrap();
+    for round in [1, 2] {
+        review.round = round;
+        for strategy in [council::CouncilExecutionStrategy::Escalated,
+            council::CouncilExecutionStrategy::TwoPhase] {
+            assert!(!council::scored_report_is_current_for_strategy(&store, &reviewer.id, &review, strategy));
+        }
+    }
+    assert!(council::bounded_s3_report(&store, &reviewer.id, &review).is_err());
+    assert!(council::scored_report_is_current(&store, &reviewer.id, &review),
+        "the original S1 compatibility path keeps its legacy report boundary");
+    store.message(&reviewer.id, "assistant", report).unwrap();
+    for strategy in [council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase] {
+        assert!(council::scored_report_is_current_for_strategy(&store, &reviewer.id, &review, strategy));
+    }
+    assert!(council::bounded_s3_report(&store, &reviewer.id, &review).is_ok());
 }
 
 fn assert_s2_child_reports_are_bounded(store: &Store, root: &TeamSnapshot) {

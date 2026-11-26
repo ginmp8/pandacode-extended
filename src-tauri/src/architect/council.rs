@@ -1360,10 +1360,13 @@ pub(super) fn scored_report_is_current_for_strategy(
     // must not hide an adverse challenge finding outside the legacy score tail.
     let require_complete = strategy == CouncilExecutionStrategy::Escalated
         || (strategy == CouncilExecutionStrategy::TwoPhase && seat.round == 2);
+    // The native completion callback requires assistant output after the latest
+    // tool activity. Revalidate that same boundary for S2/S3, including S3 phase one.
+    // Preserve the legacy S1 report boundary.
     let tail: Option<String> = store.db.query_row(
         "SELECT CASE WHEN ?3 AND length(CAST(content AS BLOB)) > abs(?2)
-          THEN NULL ELSE substr(content,?2) END FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
-        params![session_id, -SCORE_TAIL_CHARS, require_complete],
+          THEN NULL ELSE substr(content,?2) END FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND (role IN ('user','coordination') OR (?4 AND role='tool'))) ORDER BY id DESC LIMIT 1",
+        params![session_id, -SCORE_TAIL_CHARS, require_complete, strategy != CouncilExecutionStrategy::Parallel],
         |row| row.get::<_, Option<String>>(0),
     ).optional().ok().flatten().flatten();
     let Some(tail) = tail.filter(|report| parse_score(report) == Some(score)) else {
@@ -2235,7 +2238,7 @@ pub(super) fn bounded_s3_report(
     store: &storage::Store, session_id: &str, seat: &CouncilSeat,
 ) -> Result<(i64, String)> {
     let report: Option<(i64, String, i64)> = store.db.query_row(
-        "SELECT id, substr(content,-8192), length(CAST(content AS BLOB)) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+        "SELECT id, substr(content,-8192), length(CAST(content AS BLOB)) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination','tool')) ORDER BY id DESC LIMIT 1",
         params![session_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;

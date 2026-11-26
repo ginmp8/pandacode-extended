@@ -931,11 +931,29 @@ pub(super) fn current_finding_origin_is_authorized(
     ).optional().ok().flatten() == Some(1)
 }
 
+/// S2/S3 live findings and receipt verification must agree about the native
+/// report boundary and its escalation claims. S1 keeps its legacy projection.
+fn matching_report_findings(
+    report: &str, seat: &CouncilSeat, require_complete: bool,
+) -> Option<Vec<ReportedFindingDraft>> {
+    if seat.score.is_none() || parse_score(report) != seat.score { return None; }
+    let findings = if require_complete {
+        complete_reported_findings(report)?
+    } else {
+        parse_reported_findings(report)
+    };
+    let severe = findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "high"));
+    let conflict = findings.iter().any(|finding| finding.category.eq_ignore_ascii_case("conflict"));
+    ((severe, conflict) == (seat.reported_severe_finding, seat.reported_conflict)).then_some(findings)
+}
+
 /// Extract from the SAME native assistant turn whose score was admitted. A later
-/// user/coordination turn invalidates the projection. Durable message IDs make
-/// read-only finding IDs stable across restart without a second state store.
+/// user/coordination turn (or S2/S3 tool event) invalidates the live projection.
+/// Durable message IDs keep read-only finding IDs stable across restart.
 pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> Vec<CouncilReportedFinding> {
     let mut findings = Vec::new();
+    let strict = team.config.council.as_ref().is_some_and(|config|
+        config.strategy != CouncilExecutionStrategy::Parallel);
     for (worker, seat) in seats(team) {
         if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none()
             || !current_finding_origin_is_authorized(store, team, worker)
@@ -943,13 +961,24 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
             continue;
         }
         let latest = store.db.query_row(
-            "SELECT id, substr(content,-8192) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
-            params![worker.session_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            "SELECT id, CASE WHEN ?2 AND length(CAST(content AS BLOB)) > 8192
+                    THEN NULL ELSE substr(content,-8192) END
+             FROM messages WHERE session_id=?1 AND role='assistant'
+               AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1
+                 AND (role IN ('user','coordination') OR (?2 AND role='tool')))
+             ORDER BY id DESC LIMIT 1",
+            params![worker.session_id, strict],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
         ).optional().ok().flatten();
-        let Some((message_id, report)) = latest else { continue };
+        let Some((message_id, Some(report))) = latest else { continue };
         if parse_score(&report) != seat.score { continue; }
-        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+        let drafts = if strict {
+            let Some(drafts) = matching_report_findings(&report, seat, true) else { continue };
+            drafts
+        } else {
+            parse_reported_findings(&report)
+        };
+        for (index, draft) in drafts.into_iter().enumerate() {
             findings.push(CouncilReportedFinding {
                 schema_version: 1,
                 id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
@@ -1032,21 +1061,32 @@ pub(super) fn historical_reported_findings(
             }
             current_cycle.clone()
         };
+        // The current cycle has a known strategy. A retired cycle may have
+        // different settings; retain its existing explicitly unverified history.
+        let strict = !prior_cycle && team.config.council.as_ref().is_some_and(|config|
+            config.strategy != CouncilExecutionStrategy::Parallel);
         let latest = store.db.query_row(
-            "SELECT m.id, substr(m.content,-8192),
+            "SELECT m.id, CASE WHEN ?2 AND length(CAST(m.content AS BLOB)) > 8192
+                    THEN NULL ELSE substr(m.content,-8192) END,
                     EXISTS(SELECT 1 FROM messages newer
                            WHERE newer.session_id=m.session_id AND newer.id>m.id
-                             AND newer.role IN ('user','coordination'))
+                             AND (newer.role IN ('user','coordination') OR (?2 AND newer.role='tool')))
              FROM messages m WHERE m.session_id=?1 AND m.role='assistant'
              ORDER BY m.id DESC LIMIT 1",
-            params![worker.session_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            params![worker.session_id, strict],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?)),
         ).optional().ok().flatten();
-        let Some((message_id, report, has_newer_turn)) = latest else { continue };
+        let Some((message_id, Some(report), has_newer_turn)) = latest else { continue };
         if (!prior_cycle && has_newer_turn == 0) || parse_score(&report) != seat.score {
             continue;
         }
-        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+        let drafts = if strict {
+            let Some(drafts) = matching_report_findings(&report, seat, true) else { continue };
+            drafts
+        } else {
+            parse_reported_findings(&report)
+        };
+        for (index, draft) in drafts.into_iter().enumerate() {
             history.push(CouncilReportedFinding {
                 schema_version: 1,
                 id: format!("{}:{}:{message_id}:{index}", cycle_id, worker.id),
@@ -1355,11 +1395,10 @@ pub(super) fn scored_report_is_current_for_strategy(
     store: &storage::Store, session_id: &str, seat: &CouncilSeat,
     strategy: CouncilExecutionStrategy,
 ) -> bool {
-    let Some(score) = seat.score else { return false };
-    // S3 phase one already has a separate complete handoff gate. Phase two
-    // must not hide an adverse challenge finding outside the legacy score tail.
-    let require_complete = strategy == CouncilExecutionStrategy::Escalated
-        || (strategy == CouncilExecutionStrategy::TwoPhase && seat.round == 2);
+    if seat.score.is_none() { return false; }
+    // Both S3 phases remain bound to complete reports after handoff. A
+    // replacement phase-one report cannot hide findings beyond the score tail.
+    let require_complete = strategy != CouncilExecutionStrategy::Parallel;
     // The native completion callback requires assistant output after the latest
     // tool activity. Revalidate that same boundary for S2/S3, including S3 phase one.
     // Preserve the legacy S1 report boundary.
@@ -1369,18 +1408,7 @@ pub(super) fn scored_report_is_current_for_strategy(
         params![session_id, -SCORE_TAIL_CHARS, require_complete, strategy != CouncilExecutionStrategy::Parallel],
         |row| row.get::<_, Option<String>>(0),
     ).optional().ok().flatten().flatten();
-    let Some(tail) = tail.filter(|report| parse_score(report) == Some(score)) else {
-        return false;
-    };
-    let findings = if require_complete {
-        let Some(findings) = complete_reported_findings(&tail) else { return false };
-        findings
-    } else {
-        parse_reported_findings(&tail)
-    };
-    let severe = findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "high"));
-    let conflict = findings.iter().any(|finding| finding.category.eq_ignore_ascii_case("conflict"));
-    (severe, conflict) == (seat.reported_severe_finding, seat.reported_conflict)
+    tail.is_some_and(|report| matching_report_findings(&report, seat, require_complete).is_some())
 }
 
 /// This cycle's reviewers: each new user objective starts a new cycle.

@@ -2375,6 +2375,28 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
     assert!(!payload.contains("9.4"));
     assert!(!payload.contains("9.5"));
     assert!(council::phase_one_challenge_handoff(&store, &team, 1, None).unwrap().is_none());
+    let live = council::reported_findings(&store, &team);
+    assert_eq!(live.len(), 1);
+    let original_id = live[0].id.clone();
+    let report_id = live[0].report_message_id;
+    let seat = team.workers[0].council.as_ref().unwrap();
+    for changed in [
+        format!("{}\n{}", "x".repeat(8192), reports[0]),
+        format!("{}\n{}", "\u{00e9}".repeat(4200), reports[0]),
+        format!("Council findings JSON: []\n{}", reports[0]),
+        "Council findings JSON: [\nCouncil score: 9.4/10".to_string(),
+    ] {
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, changed]).unwrap();
+        assert!(!council::scored_report_is_current_for_strategy(
+            &store, &sessions[0], seat, council::CouncilExecutionStrategy::TwoPhase),
+            "phase-one evidence must remain complete after challenge handoff");
+        assert!(council::reported_findings(&store, &team).is_empty(),
+            "malformed or oversized phase-one evidence cannot appear as live findings");
+        store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
+            rusqlite::params![report_id, reports[0]]).unwrap();
+    }
+    assert_eq!(council::reported_findings(&store, &team)[0].id, original_id);
     // A recorded reviewer grant cannot be redirected to a different same-project
     // session, even when the foreign session reports the identical score.
     let foreign = store.create_session(&parent.project_id, "codex", "test-model", "plan").unwrap();
@@ -13589,6 +13611,23 @@ fn nested_m5_unforced_s2_severe_root_report_triggers_native_review_without_false
             worker.council.as_ref().is_some_and(|seat| seat.round == 1)).unwrap();
         assert_eq!(initial.council.as_ref().unwrap().score, Some(9.8));
         assert!(initial.council.as_ref().unwrap().reported_severe_finding);
+        // The read-only inspector must agree with the native S2 report gate.
+        let live = council::reported_findings(&store, &root);
+        assert_eq!(live.len(), 1);
+        let finding_id = live[0].id.clone();
+        store.message(&initial.session_id, "tool", "Further review activity").unwrap();
+        let tool_id: i64 = store.db.query_row(
+            "SELECT MAX(id) FROM messages WHERE session_id=?1 AND role='tool'",
+            [&initial.session_id], |row| row.get(0),
+        ).unwrap();
+        assert!(council::reported_findings(&store, &root).is_empty(),
+            "a report preceding later tool activity cannot appear as current S2 evidence");
+        let history = council::historical_reported_findings(&store, &root);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, finding_id);
+        assert!(!history[0].evidence_verified);
+        store.db.execute("DELETE FROM messages WHERE id=?1", [tool_id]).unwrap();
+        assert_eq!(council::reported_findings(&store, &root)[0].id, finding_id);
         assert!(council::root_s2_unforced_trigger(&root, config, 1),
             "a native high-severity report must trigger S2 despite a passing numeric score");
         assert!(!verified_council_pass(&store, &root),

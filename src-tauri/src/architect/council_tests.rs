@@ -847,6 +847,81 @@ fn automatic_council_reserves_real_native_seats_for_every_required_criterion() {
 }
 
 #[test]
+fn native_hybrid_dispatch_reserves_required_criteria_before_optional_or_duplicate_lenses() {
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.criteria_source = council::CouncilCriteriaSource::Hybrid;
+    config.criteria = ["Security", "Quality"].into_iter().map(|lens| council::CouncilCriterion {
+        id: lens.to_lowercase(), lens: lens.into(),
+        required: true, target: 9.0, evidence_required: false, native_evidence: None,
+    }).collect();
+    let (state, sid) = council_state(config);
+    for second in ["Optional architecture", " SECURITY "] {
+        let denied = call(&state, &sid, "pandacode_dispatch_workers", json!({
+            "assignments": [
+                reviewer_assignment("security", "Security"),
+                reviewer_assignment("other", second)
+            ]
+        })).unwrap_err();
+        assert!(denied.contains("reserve seats for required criteria"), "{denied}");
+        assert!(saved(&state, &sid).workers.is_empty(), "denied batch must roll back all reviewer admissions");
+        let store = state.store.lock().unwrap();
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "rejected batch must not retain native worker ownership");
+    }
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [
+            reviewer_assignment("security", "Security"),
+            reviewer_assignment("other", "Quality")
+        ]
+    })).unwrap();
+    assert_ne!(council::status(&saved(&state, &sid)).unwrap().state, "passed");
+    for _ in 0..2 {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, action);
+        assert!(run.config.reviewer_boundary);
+        finish(&state, &run, "Independent native review.\nCouncil score: 9.7/10", true);
+    }
+    let completed = saved(&state, &sid);
+    assert_eq!(completed.workers.len(), 2);
+    assert_eq!(council::status(&completed).unwrap().state, "passed");
+    assert!(finish_refusal(&completed).is_none());
+}
+
+#[test]
+fn flat_council_reserves_required_lenses_across_modes_and_strategies() {
+    use council::CouncilExecutionStrategy::{Parallel, Escalated, TwoPhase};
+    for strategy in [Parallel, Escalated, TwoPhase] {
+        for mode in ["m1", "m2", "m3"] {
+            let mut config = on(9.0, 3, if mode == "m1" { 2 } else { 0 });
+            config.strategy = strategy;
+            config.criteria_source = council::CouncilCriteriaSource::Hybrid;
+            config.criteria = ["Security", "Quality"].into_iter().map(|lens| council::CouncilCriterion {
+                id: lens.to_lowercase(), lens: lens.into(),
+                required: true, target: 9.0, evidence_required: false, native_evidence: None,
+            }).collect();
+            if mode == "m2" { config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()]; }
+            if mode == "m3" {
+                config.reviewer_bot_ids = vec!["bot-a".into()];
+                config.automatic_reviewers = 1;
+            }
+            assert_eq!(config.mode(), mode);
+            config.validate().unwrap();
+            let team = team_with(config.clone(), Vec::new());
+            assert!(council::seat_for(&team, Some("Optional"), None).unwrap_err()
+                .contains("reserve seats for required criteria"), "{mode}");
+            assert!(council::seat_for(&team, Some(" security "), None).is_ok(), "{mode}");
+            config.criteria[1].required = false;
+            let spare = team_with(config, Vec::new());
+            assert!(council::seat_for(&spare, Some("Optional"), None).is_ok(), "{mode}");
+        }
+    }
+}
+
+#[test]
 fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
     let mut council = on(9.0, 10, 0);
     council.optional_skill_ids = vec!["optional".into()];

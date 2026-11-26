@@ -2033,6 +2033,35 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
+    // In flat Councils, root reviewers must cover every immutable user anchor.
+    // Do not let optional or repeated lenses consume the last available seats.
+    // Nested Councils cover required anchors independently in each child, so
+    // their root allocation is checked by the existing composite receipt gate.
+    if config.nested_bot_reviewers.is_empty() && config.criteria.iter().any(|criterion| criterion.required) {
+        let capacity = if config.reviewer_bot_ids.is_empty() && config.reviewers == 0 {
+            MAX_REVIEWERS
+        } else {
+            config.needed()
+        };
+        let mut reserved = fixed;
+        for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
+            if !reserved.iter().any(|known| same_lens(known, &criterion.lens)) {
+                reserved.push(criterion.lens.clone());
+            }
+        }
+        let occupied: Vec<_> = in_round(team, round)
+            .filter(|(worker, seat)| counts(worker, seat) && Some(worker.id.as_str()) != replaces)
+            .collect();
+        let missing = reserved.iter().filter(|known| {
+            !same_lens(known, lens)
+                && !occupied.iter().any(|(_, seat)| same_lens(known, &seat.lens))
+        }).count();
+        if occupied.len() + 1 + missing > capacity
+            || in_round(team, round).count() + 1 + missing > MAX_REVIEWERS
+        {
+            return Err("Council must reserve seats for required criteria and fixed lenses; choose a missing required lens before adding optional or duplicate reviewers.".into());
+        }
+    }
     Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false, reported_conflict: false }))
 }
 

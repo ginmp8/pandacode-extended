@@ -970,6 +970,68 @@ test.describe('shared bot channels', () => {
     await expect(prompt).toHaveValue('Keep this Channel draft.');
   });
 
+  test('Channel settings ignores departed reads and a completed save cannot close a newer dialog', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        match => `if (command === 'bot_shared_channel_detail' && args.limit === undefined && window.__holdSettingsRead) {
+          window.__holdSettingsRead = false;
+          const detail = await invoke(command, args);
+          await new Promise(resolve => { window.__releaseSettingsRead = resolve; });
+          window.__settingsReadReturned = true;
+          return detail;
+        }
+        if (command === 'bot_shared_channel_update' && window.__holdSettingsWrite) {
+          window.__holdSettingsWrite = false;
+          await new Promise(resolve => { window.__releaseSettingsWrite = resolve; });
+          const result = await invoke(command, args);
+          window.__settingsWriteReturned = true;
+          return result;
+        }
+        ${match} `,
+      );
+      if (body === source) throw new Error('Channel settings delay interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    const launch = sidebar(page).getByRole('button', { name: '#launch' });
+    await launch.click();
+    const channel = page.locator('.bc-channel');
+    const settingsButton = channel.getByRole('button', { name: 'Channel settings' });
+    const settings = page.getByRole('dialog', { name: 'Channel settings' });
+    await expect(settingsButton).toBeVisible();
+    await page.evaluate(() => { (window as any).__holdSettingsRead = true; });
+    await settingsButton.click();
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseSettingsRead)).toBe('function');
+    await page.getByRole('button', { name: 'Back to conversation' }).click();
+    await launch.click();
+    await expect(settingsButton).toBeVisible();
+    await page.evaluate(() => (window as any).__releaseSettingsRead());
+    await expect.poll(() => page.evaluate(() => (window as any).__settingsReadReturned)).toBe(true);
+    await expect(settings).not.toBeVisible();
+
+    await settingsButton.click();
+    await expect(settings.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('launch');
+    await page.evaluate(() => { (window as any).__holdSettingsWrite = true; });
+    await settings.getByRole('textbox', { name: 'Name', exact: true }).fill('launch-renamed');
+    await settings.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseSettingsWrite)).toBe('function');
+    await settings.getByRole('button', { name: 'Cancel' }).click();
+    await settingsButton.click();
+    const name = settings.getByRole('textbox', { name: 'Name', exact: true });
+    await expect(name).toHaveValue('launch');
+    await name.fill('New unsaved draft');
+    await page.evaluate(() => (window as any).__releaseSettingsWrite());
+    await expect.poll(() => page.evaluate(() => (window as any).__settingsWriteReturned)).toBe(true);
+    await expect(sidebar(page).getByRole('button', { name: '#launch-renamed' })).toBeVisible();
+    await expect(settings).toBeVisible();
+    await expect(name).toHaveValue('New unsaved draft');
+    await settings.getByRole('button', { name: 'Cancel' }).click();
+  });
+
   test('Channel native inspection never replaces its bound delivery with a foreign root result', async ({ page }) => {
     const own = {
       sessionId: 'channel-root', cycleStartedAt: 1000, teamRevision: 7,

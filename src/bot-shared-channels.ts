@@ -454,7 +454,8 @@ async function editChannel(options: SharedChannelUiOptions, channel: SharedChann
     const leadBotId = memberIds.includes(requestedLead) ? requestedLead : memberIds[0] ?? null;
     const save = form.querySelector<HTMLButtonElement>('button[type="submit"]'); if (save) save.disabled = true;
     void options.call('bot_shared_channel_update', { channelId: channel.id, name: String(data.get('name') ?? ''), memberIds, leadBotId }).then(async () => {
-      options.closeModal();
+      // The native update still refreshes the sidebar, but must not close a newer dialog.
+      if (dialog.open && form.isConnected) options.closeModal();
       await options.changed();
     }).catch(error => options.notify(error instanceof Error ? error.message : String(error))).finally(() => { if (save?.isConnected) save.disabled = false; });
   });
@@ -465,9 +466,14 @@ export async function openSharedChannel(channelId: string, options: SharedChanne
   options.openChannel(channelId);
 }
 
-export async function openSharedChannelSettings(channelId: string, options: SharedChannelUiOptions): Promise<void> {
-  try { await editChannel(options, await readSharedChannelDetail(options.call, channelId)); }
-  catch (error) { options.notify(error instanceof Error ? error.message : String(error)); }
+export async function openSharedChannelSettings(channelId: string, options: SharedChannelUiOptions, isCurrent: () => boolean): Promise<void> {
+  if (!isCurrent()) return;
+  try {
+    const detail = await readSharedChannelDetail(options.call, channelId);
+    if (isCurrent()) await editChannel(options, detail);
+  } catch (error) {
+    if (isCurrent()) options.notify(error instanceof Error ? error.message : String(error));
+  }
 }
 
 

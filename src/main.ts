@@ -173,6 +173,8 @@ const state = {
   sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
   sharedChannelDrafts: new Map<string, string>(), failedChannelCouncilDrafts: new Map<string, HTMLFormElement>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
 };
+// A pending Channel settings read belongs to one navigation/modal intent.
+let sharedChannelSettingsIntent = 0;
 let renderFrame = 0;
 /** Shows the open thread's scene behind the conversation (set once the sky mounts; `renderTranscript` calls it). */
 let showThreadScene: (id: string | null) => void = () => {};
@@ -5338,6 +5340,7 @@ function disposeSettingsViews(): void {
   wallpaperSettingsCleanup?.(); wallpaperSettingsCleanup = undefined;
 }
 function modal(title: string, body: string, cls = ''): HTMLDialogElement {
+  sharedChannelSettingsIntent++;
   disposeSettingsViews();
   closeMenus();
   openingProjectForTask = undefined;
@@ -5372,7 +5375,7 @@ function modal(title: string, body: string, cls = ''): HTMLDialogElement {
 }
 const LONG_DESCRIPTION = 90;
 // Close before disposing so the departing dialog still shows its content while it fades.
-function closeModal(): void { closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
+function closeModal(): void { sharedChannelSettingsIntent++; closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
 async function showTurnDiff(element: HTMLElement): Promise<void> {
   const request = changeRequest(element); if (!request) return;
   await openSavedDiff(request.sessionId, request.changes, request.path);
@@ -6953,6 +6956,7 @@ async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<
   } catch (error) { if (request === state.sharedChannelRequest && channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
 }
 function activateSharedChannel(channelId: string): void {
+  sharedChannelSettingsIntent++;
   voiceDictation.detach();
   state.sharedChannelId = channelId;
   state.sharedChannelDetail = null;
@@ -6965,6 +6969,7 @@ function activateSharedChannel(channelId: string): void {
 /** Leave the channel before showing any task, preserving its draft and discarding late refreshes. */
 function leaveSharedChannel(): void {
   if (!state.sharedChannelId) return;
+  sharedChannelSettingsIntent++;
   const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
   if (prompt) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
   state.sharedChannelId = ''; state.sharedChannelDetail = null;
@@ -6977,6 +6982,17 @@ function closeSharedChannel(): void {
 }
 function sharedChannelUi(): SharedChannelUiOptions {
   return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify };
+}
+/** A delayed settings response must not replace a newer dialog or navigation. */
+async function showSharedChannelSettings(channelId: string): Promise<void> {
+  const intent = ++sharedChannelSettingsIntent;
+  const { view, projectId, sessionId, sharedChannelId } = state;
+  const isCurrent = () => intent === sharedChannelSettingsIntent
+    && state.view === view && state.projectId === projectId
+    && state.sessionId === sessionId && state.sharedChannelId === sharedChannelId
+    && !document.querySelector<HTMLDialogElement>('#dialog')?.open;
+  const { openSharedChannelSettings } = await import('./bot-shared-channels');
+  if (isCurrent()) await openSharedChannelSettings(channelId, sharedChannelUi(), isCurrent);
 }
 async function createSharedChannel(): Promise<void> {
   const { openCreateChannel } = await import('./bot-shared-channels');
@@ -6996,8 +7012,7 @@ async function showSharedChannelMenu(anchor: HTMLElement, channelId: string): Pr
 async function sharedChannelMenuAction(action: string, channel: SharedChannelSummary): Promise<void> {
   try {
     if (action === 'edit') {
-      const { openSharedChannelSettings } = await import('./bot-shared-channels');
-      await openSharedChannelSettings(channel.id, sharedChannelUi());
+      await showSharedChannelSettings(channel.id);
     }
     else {
       await call('bot_shared_channel_archive', { channelId: channel.id, archived: action !== 'restore' });
@@ -7257,7 +7272,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'export-bots': hideCreateBotMenu(); await showBotManifestDialog('export'); break;
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
-    case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'shared-channel-settings': if (state.sharedChannelId) await showSharedChannelSettings(state.sharedChannelId); break;
     case 'channel-council': toggleSharedChannelCouncil(element); break;
     case 'channel-council-accept': {
       const deliveryId = element.dataset.deliveryId;

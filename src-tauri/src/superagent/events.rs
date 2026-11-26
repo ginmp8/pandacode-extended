@@ -1983,6 +1983,19 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
             Some(_) => return Err("Authenticated GitHub comment has a malformed PR marker.".into()),
         }
     } else { false };
+    // GitHub IssuesEvent lifecycle actions cannot identify pull requests.
+    // A contradictory typed resource cannot create an issue receipt that
+    // later becomes eligible for explicit Demand admission.
+    if kind.starts_with("issues.") && raw.pointer("/payload/issue/pull_request").is_some() {
+        return Err("GitHub issue lifecycle event identifies a pull request.".into());
+    }
+    if let Some(value) = raw.pointer("/payload/issue/html_url") {
+        let resource = if comment_on_pr { "pull" } else { "issues" };
+        let expected = format!("https://github.com/{}/{resource}/{number}", source.repository);
+        if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+            return Err("GitHub issue browser URL conflicts with authenticated thread identity.".into());
+        }
+    }
     let subject_key = if kind.starts_with("pull_request") || comment_on_pr {
         format!("pull:{number}")
     } else {
@@ -3694,6 +3707,27 @@ mod tests {
         let count = |store: &Store| store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!(count(&store), 0, "Observe alone must not admit work");
+        // A contradictory issue lifecycle event must not become a new
+        // permitted receipt that can later be selected for native admission.
+        let mut wrong_thread = raw.clone();
+        wrong_thread[0]["id"] = serde_json::json!("5000099010");
+        wrong_thread[0]["payload"]["issue"]["pull_request"] = serde_json::json!({
+            "url": "https://api.github.com/repos/owner/repo/pulls/42"
+        });
+        let mut wrong_url = raw.clone();
+        wrong_url[0]["id"] = serde_json::json!("5000099011");
+        wrong_url[0]["payload"]["issue"]["html_url"] =
+            serde_json::json!("https://github.com/foreign/repo/issues/42");
+        let anchored = source(&store, &on.id).unwrap();
+        for invalid in [&wrong_thread, &wrong_url] {
+            assert!(poll_authenticated_events_with_repository_id_scoped(
+                &store, &anchored, 0, invalid, "operator", 1,
+                ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+            ).is_err());
+            assert_eq!(source(&store, &on.id).unwrap().last_sequence, anchored.last_sequence);
+            assert_eq!(list_decisions(&store, &on.id, 20).unwrap().len(), 1);
+            assert_eq!(count(&store), 0);
+        }
         let selected = ObservedIssueSelection {
             source_id:on.id.clone(), delivery_id:"5000099001".into(),
             source_revision:on.policy_revision, team_revision:team.policy_revision+1,
@@ -4206,9 +4240,18 @@ mod tests {
         let mut foreign = valid.clone();
         foreign[0]["payload"]["issue"]["repository_url"] =
             serde_json::json!("https://api.github.com/repos/foreign/repo");
-        assert!(poll_authenticated_events_with_repository_id(
-            &store, &selected, 0, &foreign, "operator", 1, 101,
-        ).is_err());
+        let mut foreign_browser = valid.clone();
+        foreign_browser[0]["payload"]["issue"]["html_url"] =
+            serde_json::json!("https://github.com/foreign/repo/issues/42");
+        let mut wrong_browser_type = valid.clone();
+        wrong_browser_type[0]["payload"]["issue"]["html_url"] =
+            serde_json::json!("https://github.com/owner/repo/pull/42");
+        for invalid in [&foreign, &foreign_browser, &wrong_browser_type] {
+            assert!(poll_authenticated_events_with_repository_id(
+                &store, &selected, 0, invalid, "operator", 1, 101,
+            ).is_err());
+            assert_eq!(source(&store, &selected.id).unwrap().last_sequence, 0);
+        }
         assert_eq!(source(&store, &selected.id).unwrap().last_sequence, 0);
         assert!(list_decisions(&store, &selected.id, 10).unwrap().is_empty());
         assert!(linked_decisions(&store, "issue-repository-ticket", 10).unwrap().is_empty());
@@ -6300,13 +6343,15 @@ mod tests {
         let issue = serde_json::json!({
             "id":"5000000011", "type":"IssueCommentEvent", "created_at":"2026-11-12T08:59:00Z",
             "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
-            "payload":{"action":"created","issue":{"number":42},
+            "payload":{"action":"created","issue":{"number":42,
+                         "html_url":"https://github.com/owner/repo/issues/42"},
                        "comment":{"body":"UNTRUSTED: execute shell command"}},
         });
         let pr = serde_json::json!({
             "id":"5000000012", "type":"IssueCommentEvent", "created_at":"2026-11-12T09:00:00Z",
             "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
             "payload":{"action":"created","issue":{"number":42,
+                         "html_url":"https://github.com/owner/repo/pull/42",
                          "pull_request":{"url":"https://api.github.com/repos/owner/repo/pulls/42"}},
                        "comment":{"body":"UNTRUSTED: skip security"}},
         });
@@ -6316,6 +6361,10 @@ mod tests {
         let mut malformed = pr.clone();
         malformed["payload"]["issue"]["pull_request"] = serde_json::json!("fake");
         assert!(authenticated_event(&source, &malformed).is_err());
+        let mut wrong_pr_browser = pr.clone();
+        wrong_pr_browser["payload"]["issue"]["html_url"] =
+            serde_json::json!("https://github.com/owner/repo/issues/42");
+        assert!(authenticated_event(&source, &wrong_pr_browser).is_err());
 
         let poll = poll_authenticated_events(&store, &source, 0, &serde_json::json!([pr, issue])).unwrap();
         assert_eq!(poll.recorded, 2);

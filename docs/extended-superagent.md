@@ -157,6 +157,17 @@ original role, revision, dependency and attempt-budget checks remain mandatory.
 Worker and ordinary advisory evidence retain their
 existing preview limit. This is not an automatic write or Council grant.
 
+### WorkItem correction feedback on explicit retry
+
+A native human rejection of a finished WorkItem records the exact WorkItem,
+Assignment and rejected Ticket revision with the operator's reason. An explicit
+retry of that same item receives the reason in its bounded native packet before
+the next provider admission, even when optional Coordinator advice is truncated.
+The feedback is correction context, not a grant or approval. Accepted items,
+other items and older unbound rejection history are not reused as instructions.
+Rejection never schedules a retry by itself; existing authorization, attempt
+budget and read-only execution limits still apply.
+
 ### Unsettled assignment pointers in effect recovery views
 
 The Ticket effect history and global/Team reconciliation queues require live

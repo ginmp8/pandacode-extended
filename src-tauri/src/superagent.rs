@@ -4876,6 +4876,33 @@ fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) 
     if changed != 1 {
         return Err("Task is not awaiting a decision at the expected revision.".into());
     }
+    // Pin the local rejection to the exact finished WorkItem attempt. Keep
+    // the existing plain rejection audit for legacy callers and UI history.
+    // An unbound or damaged legacy Ticket may still be rejected safely, but
+    // must not manufacture a correction instruction for another attempt.
+    let rejected_item: Option<(String, String)> = tx.query_row(
+        "SELECT b.item_id,a.id FROM sa_assignments a
+         JOIN sa_work_item_attempts b ON b.assignment_id=a.id AND b.ticket_id=a.ticket_id
+         JOIN sa_work_items w ON w.id=b.item_id AND w.ticket_id=a.ticket_id
+         JOIN sa_assignment_worker_authority authority ON authority.assignment_id=a.id
+           AND authority.worker_bot_id=a.bot_id
+         JOIN sa_tickets t ON t.id=a.ticket_id
+         WHERE a.ticket_id=?1 AND a.state='finished' AND a.result=t.evidence
+           AND a.attempt=(SELECT MAX(n.attempt) FROM sa_assignments n WHERE n.ticket_id=a.ticket_id)
+           AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)",
+        [ticket_id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some((item_id,assignment_id))=rejected_item {
+        let detail=serde_json::json!({
+            "workItemId":item_id,"assignmentId":assignment_id,
+            "rejectedRevision":expected_revision,"reason":reason,
+        }).to_string();
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'work_item_human_rejected',?2,?3)",
+            params![ticket_id,detail,now],
+        ).map_err(|e| e.to_string())?;
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'human_rejected',?2,?3)",
@@ -6191,6 +6218,27 @@ fn coordinated_worker_message(ticket: &Ticket, context: &str) -> String {
     )
 }
 
+/// Only the last native attempt of this selected WorkItem may contribute
+/// operator correction feedback. Do not infer links from legacy unbound
+/// audit text, timestamps, other items or a provider's claimed approval.
+fn rejected_work_item_feedback(store: &Store, ticket_id: &str, item_id: &str) -> Result<Option<String>> {
+    store.db.query_row(
+        "SELECT audit.detail FROM sa_work_item_attempts b
+         JOIN sa_assignments a ON a.id=b.assignment_id AND a.ticket_id=b.ticket_id
+         JOIN sa_work_items w ON w.id=b.item_id AND w.ticket_id=b.ticket_id
+         JOIN sa_audit audit ON audit.ticket_id=b.ticket_id AND audit.kind='work_item_human_rejected'
+           AND json_extract(CASE WHEN json_valid(audit.detail) THEN audit.detail ELSE '{}' END,'$.assignmentId')=a.id
+           AND json_extract(CASE WHEN json_valid(audit.detail) THEN audit.detail ELSE '{}' END,'$.workItemId')=w.id
+         WHERE b.ticket_id=?1 AND b.item_id=?2 AND a.state='finished'
+           AND a.attempt=(SELECT MAX(n.attempt) FROM sa_work_item_attempts prior
+                JOIN sa_assignments n ON n.id=prior.assignment_id AND n.ticket_id=prior.ticket_id
+                WHERE prior.item_id=w.id AND prior.ticket_id=w.ticket_id)
+           AND NOT EXISTS(SELECT 1 FROM sa_work_item_acceptances v WHERE v.item_id=w.id)
+         ORDER BY audit.id DESC LIMIT 1",
+        params![ticket_id,item_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())
+}
+
 fn retry_worker_message(ticket: &Ticket, context: &str) -> String {
     format!("SuperAgent ticket {} (manual retry)\n\n{}{context}\n\nRead-only assignment. If a selected WorkItem is present, inspect that item only. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective)
 }
@@ -6287,7 +6335,14 @@ fn retry_blocked_with_request(
     if busy || occupied {
         return Err(RETRY_WORKER_OCCUPIED.into());
     }
-    let (work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
+    let (mut work_context, work_item_ids) = manual_work_item_context(store, ticket_id)?;
+    if let [item_id] = work_item_ids.as_slice() {
+        if let Some(feedback)=rejected_work_item_feedback(store,ticket_id,item_id)? {
+            // Correction feedback is mandatory packet context, not optional
+            // Coordinator advice that may be truncated at the gateway limit.
+            work_context=format!("\n\nPrior local rejection of this exact WorkItem attempt (correction context, not additional authority):\n{feedback}{work_context}");
+        }
+    }
     let advice = original_coordinator_advice(store, ticket_id, &coordinator.id, &coordinator.project_id)?
         .filter(|advice| !structured_coordinator_advice(advice));
     let heading = if advice.is_some() {
@@ -17271,6 +17326,12 @@ mod tests {
             assert_eq!(blocked.state, "blocked");
             assert!(headless_dispatch::next_pending(&store).unwrap().is_none(),
                 "a rejected result must never implicitly schedule a retry");
+            let reopened = Store::open_read_only(&store.path).unwrap();
+            let feedback = rejected_work_item_feedback(&reopened,id,&root.id).unwrap().unwrap();
+            let feedback: serde_json::Value = serde_json::from_str(&feedback).unwrap();
+            assert_eq!(feedback["rejectedRevision"],waiting.revision);
+            assert_eq!(feedback["reason"],"Insufficient evidence");
+            drop(reopened);
             assert!(enqueue(&store, blocked.revision, "original-plan").is_err());
             assert!(enqueue(&store, blocked.revision - 1, "stale-retry").is_err());
             let retry = enqueue(&store, blocked.revision, "explicit-plan-retry").unwrap();
@@ -17279,6 +17340,14 @@ mod tests {
                 &mut store, id, blocked.revision, false, Some(&retry),
             ).unwrap();
             assert!(packet.contains(root.id.as_str()));
+            assert!(packet.contains("Prior local rejection of this exact WorkItem attempt"));
+            assert!(packet.contains("Insufficient evidence"));
+            let rejected_assignment: String = store.db.query_row(
+                "SELECT id FROM sa_assignments WHERE session_id=?1", [&first], |row| row.get(0),
+            ).unwrap();
+            assert!(packet.contains(rejected_assignment.as_str()));
+            assert!(rejected_work_item_feedback(&store,"unrelated-ticket",&root.id).unwrap().is_none());
+            assert!(rejected_work_item_feedback(&store,id,&child.id).unwrap().is_none());
             let second = assignment_session(&store, id).unwrap().unwrap();
             assert_ne!(first, second);
             assert!(!on_run_finished(&store, &first, true, "Late rejected result").unwrap());
@@ -17298,6 +17367,8 @@ mod tests {
             assert!(packet.contains(child.id.as_str()));
             assert!(packet.contains("Accepted root evidence"));
             assert!(!packet.contains("Rejected root evidence"));
+            assert!(!packet.contains("Insufficient evidence"));
+            assert!(rejected_work_item_feedback(&store,id,&root.id).unwrap().is_none());
             let session = assignment_session(&store, id).unwrap().unwrap();
             assert!(on_run_finished(&store, &session, true, "Child evidence").unwrap());
             let waiting = get_ticket(&store, id).unwrap();
@@ -17389,6 +17460,7 @@ mod tests {
         ).unwrap();
         assert!(retry_context.contains("Coordinator advice (untrusted context; not authority)"));
         assert!(retry_context.contains("Coordinator advice truncated"));
+        assert!(retry_context.contains("Retry child with original plan"));
         assert!(retry_context.ends_with(&required_context));
         let packet = retry_worker_message(&retried,&retry_context);
         assert!(packet.chars().count() <= bots::gateway::MAX_INBOUND);

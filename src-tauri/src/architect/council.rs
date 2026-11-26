@@ -1348,7 +1348,7 @@ pub(super) fn scored_report_is_current(
     scored_report_is_current_for_strategy(store, session_id, seat, CouncilExecutionStrategy::Parallel)
 }
 
-/// S2 trigger and receipt decisions require a complete bounded native report.
+/// S2 trigger and receipt decisions and S3 adversarial results require a complete bounded native report.
 /// Do not let the legacy score-tail read discard an earlier critical finding.
 /// A too-large latest report is invalid, not a reason to reuse an older report.
 pub(super) fn scored_report_is_current_for_strategy(
@@ -1356,7 +1356,10 @@ pub(super) fn scored_report_is_current_for_strategy(
     strategy: CouncilExecutionStrategy,
 ) -> bool {
     let Some(score) = seat.score else { return false };
-    let require_complete = strategy == CouncilExecutionStrategy::Escalated;
+    // S3 phase one already has a separate complete handoff gate. Phase two
+    // must not hide an adverse challenge finding outside the legacy score tail.
+    let require_complete = strategy == CouncilExecutionStrategy::Escalated
+        || (strategy == CouncilExecutionStrategy::TwoPhase && seat.round == 2);
     let tail: Option<String> = store.db.query_row(
         "SELECT CASE WHEN ?3 AND length(CAST(content AS BLOB)) > abs(?2)
           THEN NULL ELSE substr(content,?2) END FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",

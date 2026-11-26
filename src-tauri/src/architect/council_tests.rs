@@ -4092,6 +4092,13 @@ fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
     }
     assert!(mixed_native_authority_current(&store, &team),
         "a complete M3 S3 Council needs recorded read-only authority in both phases");
+    for worker in &team.workers[2..] {
+        assert_bounded_native_report(&store, &worker.session_id, || {
+            assert!(!mixed_native_authority_current(&store, &team),
+                "invalid S3 challenger reports cannot authorize a root pass");
+        });
+        assert!(mixed_native_authority_current(&store, &team));
+    }
 
     store.db.execute(
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
@@ -12468,6 +12475,26 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     assert_eq!(leaves.len(), 8);
     assert_eq!(leaves.iter().collect::<std::collections::HashSet<_>>().len(), 8,
         "S3 native reviewer identities must remain distinct across two children and two phases");
+    for reservation in child_council::inspect(&store, &root).unwrap() {
+        let child = load(&store, &reservation.child_session_id).unwrap().unwrap();
+        for leaf in child.workers.iter().filter(|leaf|
+            leaf.council.as_ref().is_some_and(|seat| seat.round == 2))
+        {
+            assert_bounded_native_report(&store, &leaf.session_id, || {
+                assert!(!verified_council_pass(&store, &root),
+                    "an invalid native S3 challenge must revoke root approval");
+                assert!(council_requests::read_native_terminal(
+                    &store, &sid, &project, "nested-m4-s3-native", &artifact,
+                    &request.request_id,
+                ).is_err());
+            });
+            assert!(verified_council_pass(&store, &root));
+            assert_eq!(council_requests::read_native_terminal(
+                &store, &sid, &project, "nested-m4-s3-native", &artifact,
+                &request.request_id,
+            ).unwrap(), terminal);
+        }
+    }
     // Persisted challenge receipts must match the original native callbacks,
     // including after an untrusted record is modified and later restored.
     let key = format!("native-council-child-s3-receipt:{}:security-child", root.council_since);
@@ -12512,10 +12539,10 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
 }
 
 
-/// Oversized, malformed or duplicate S2 findings must not become a clean
+/// Oversized, malformed or duplicate S2/S3 findings must not become a clean
 /// callback merely because the final score is unchanged. Exercise report
 /// bounds and structured findings validation with recovery of exact proof.
-fn assert_s2_report_bound(
+fn assert_bounded_native_report(
     store: &Store, session_id: &str, mut assert_revoked: impl FnMut(),
 ) {
     let (report_id, original): (i64, String) = store.db.query_row(
@@ -12548,7 +12575,7 @@ fn assert_s2_child_reports_are_bounded(store: &Store, root: &TeamSnapshot) {
     for reservation in children {
         let child = load(store, &reservation.child_session_id).unwrap().unwrap();
         for worker in &child.workers {
-            assert_s2_report_bound(store, &worker.session_id, || {
+            assert_bounded_native_report(store, &worker.session_id, || {
                 assert!(!verified_council_pass(store, root),
                     "invalid native child report must revoke root approval");
             });
@@ -14144,7 +14171,7 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                                         rusqlite::params![report_id, &original]).unwrap();
                                 }
                                 if strategy == council::CouncilExecutionStrategy::Escalated {
-                                    assert_s2_report_bound(&store, &reviewer.session_id, || {
+                                    assert_bounded_native_report(&store, &reviewer.session_id, || {
                                         assert!(!verified_council_pass(&store, &snapshot),
                                             "{mode}/S2: invalid native report must revoke pass");
                                         assert!(council_requests::read_native_terminal(

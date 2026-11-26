@@ -1730,7 +1730,8 @@ fn challenge_receipt(
             || original_sessions.contains(leaf.session_id.as_str())
             || !challenge_ids.insert(leaf.id.as_str())
             || !challenge_sessions.insert(leaf.session_id.as_str())
-            || !super::council::scored_report_is_current(store, &leaf.session_id, seat)
+            || !super::council::scored_report_is_current_for_strategy(
+                store, &leaf.session_id, seat, super::council::CouncilExecutionStrategy::TwoPhase)
             || binding.validate(child, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,

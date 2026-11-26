@@ -221,19 +221,24 @@ INSERT INTO sa_audit(ticket_id,kind,detail,at)
  SELECT t.id,'restart_inconsistent_assignment',
   'Active assignment did not match ticket state; execution revoked',
   CAST(strftime('%s','now') AS INTEGER)*1000
- FROM sa_tickets t WHERE t.state<>'running' AND EXISTS (
-  SELECT 1 FROM sa_assignments a WHERE a.ticket_id=t.id AND a.state='running'
+ FROM sa_tickets t WHERE t.state<>'running' AND (
+  t.active_assignment_id IS NOT NULL OR EXISTS (
+   SELECT 1 FROM sa_assignments a WHERE a.ticket_id=t.id AND a.state='running'
+  )
  );
 UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
  SELECT ticket_id FROM sa_assignments WHERE state='running'
+ UNION SELECT id FROM sa_tickets WHERE state<>'running' AND active_assignment_id IS NOT NULL
 );
 UPDATE sa_tickets SET
  state=CASE WHEN state IN ('completed','failed','stopped','inconclusive')
   THEN state ELSE 'interrupted' END,
  active_assignment_id=NULL,revision=revision+1,
  updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
- WHERE state<>'running' AND EXISTS (
-  SELECT 1 FROM sa_assignments a WHERE a.ticket_id=sa_tickets.id AND a.state='running'
+ WHERE state<>'running' AND (
+  active_assignment_id IS NOT NULL OR EXISTS (
+   SELECT 1 FROM sa_assignments a WHERE a.ticket_id=sa_tickets.id AND a.state='running'
+  )
  );
 INSERT INTO sa_audit(ticket_id,kind,detail,at)
  SELECT id,'restart_interrupted','Native worker session interrupted; no automatic replay',
@@ -1134,6 +1139,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         .map(|attempt| attempt.session_id.as_str()).unwrap_or_default();
     let finalization_gate = if ticket.state != "waiting_approval" {
         "not_pending"
+    } else if has_unsettled_assignment(store, &ticket)? {
+        "assignment_inconsistent"
     } else if council_adapter::requires_task_review(store, ticket_id, candidate_session)? {
         "council_required"
     } else if unresolved_external_effects > 0 {
@@ -1458,6 +1465,18 @@ pub(crate) fn inspect_headless_status(
         .map_err(|e| e.to_string())
 }
 
+/// Non-running Tickets must have neither an active pointer nor a live
+/// Assignment. Check all native rows, not a bounded inspector page.
+fn has_unsettled_assignment(store: &Store, ticket: &Ticket) -> Result<bool> {
+    if ticket.active_assignment_id.is_some() {
+        return Ok(true);
+    }
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1 AND state='running')",
+        [&ticket.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 /// Read-only, bounded recovery classification for a local operator. The CLI
 /// cannot observe another process's live provider handle, and these fields are
 /// never a grant to retry or to acknowledge an external effect.
@@ -1509,7 +1528,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     } else {
         // A completed/stopped Ticket with an orphan live assignment is not
         // healthy, even if its own state is terminal.
-        running == 0
+        running == 0 && ticket.active_assignment_id.is_none()
     };
     // A structurally linked Assignment may still have lost its native
     // provider/tool authority (disabled Team, paused bot, stale role/profile,
@@ -1584,7 +1603,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // A running Ticket with a detached/interrupted Assignment is not proof the
         // provider has stopped. Detached headless inspection must ask the
         // operator to verify the live host before uncertain-effect action.
-        "requiresLiveHostVerification": ticket.state == "running" || running > 0 || pending > 0,
+        "requiresLiveHostVerification": ticket.state == "running" || running > 0
+            || ticket.active_assignment_id.is_some() || pending > 0,
         "mandateMissing": !mandate_present,
         "mandateCorrupt": mandate_corrupt,
         "mandateRevoked": mandate.as_ref().map(|m| m.revoked),
@@ -2087,7 +2107,8 @@ fn list_headless_recovery_inbox_page_scoped(
                SELECT t.id,t.created_at,t.state,
                  CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
                                   WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
-                      THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
+                      THEN 0 WHEN t.active_assignment_id IS NOT NULL
+                           OR EXISTS(SELECT 1 FROM sa_assignments a
                                          WHERE a.ticket_id=t.id AND a.state='running')
                       THEN 1 ELSE 2 END AS priority
                FROM sa_tickets t
@@ -2096,6 +2117,7 @@ fn list_headless_recovery_inbox_page_scoped(
                                   'failed','interrupted','inconclusive')
                       OR EXISTS(SELECT 1 FROM sa_effect_receipts e
                                 WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                      OR t.active_assignment_id IS NOT NULL
                       OR EXISTS(SELECT 1 FROM sa_assignments a
                                 WHERE a.ticket_id=t.id AND a.state='running'))
              )
@@ -2950,9 +2972,9 @@ pub(crate) fn headless_quarantine_terminal_orphan(
 ) -> Result<String> {
     let store = open_headless_transition_store(database_path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let (state, revision): (String, i64) = tx.query_row(
-        "SELECT state,revision FROM sa_tickets WHERE id=?1",
-        [ticket_id], |r| Ok((r.get(0)?, r.get(1)?)),
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional().map_err(|e| e.to_string())?
         .ok_or("SuperAgent Ticket not found.")?;
     if revision != expected_revision {
@@ -2967,8 +2989,8 @@ pub(crate) fn headless_quarantine_terminal_orphan(
         "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
         [ticket_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
-    if running == 0 {
-        return Err("No orphaned running native assignment to quarantine.".into());
+    if running == 0 && active.is_none() {
+        return Err("No orphaned native assignment or active pointer to quarantine.".into());
     }
     let now = storage::now();
     if tx.execute(
@@ -3311,8 +3333,9 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         let mut stmt = store.db.prepare(
             "SELECT t.id,t.revision,t.state FROM sa_tickets t
              WHERE t.state!='running'
-               AND EXISTS(SELECT 1 FROM sa_assignments a
-                          WHERE a.ticket_id=t.id AND a.state='running')
+               AND (t.active_assignment_id IS NOT NULL OR EXISTS(
+                    SELECT 1 FROM sa_assignments a
+                    WHERE a.ticket_id=t.id AND a.state='running'))
              ORDER BY t.updated_at,t.id",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
@@ -3340,8 +3363,9 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             "UPDATE sa_tickets
              SET state=?4,active_assignment_id=NULL,revision=revision+1,updated_at=?3
              WHERE id=?1 AND revision=?2 AND state=?5 AND state!='running'
-               AND EXISTS(SELECT 1 FROM sa_assignments a
-                          WHERE a.ticket_id=sa_tickets.id AND a.state='running')",
+               AND (active_assignment_id IS NOT NULL OR EXISTS(
+                    SELECT 1 FROM sa_assignments a
+                    WHERE a.ticket_id=sa_tickets.id AND a.state='running'))",
             params![&ticket_id,revision,now,next_state,&previous_state],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -3362,10 +3386,10 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         ).map_err(|e| e.to_string())?;
         let (kind, detail) = if terminal {
             ("watchdog_terminal_orphan_quarantined",
-             "Terminal Ticket retained a running native Assignment; revoke, cancel provider and reconcile effects before any new action")
+             "Terminal Ticket retained a native Assignment or active pointer; revoke, cancel provider and reconcile effects before any new action")
         } else {
             ("watchdog_inactive_orphan_quarantined",
-             "Non-running Ticket retained a live Assignment; interrupted and revoked without approval or replay")
+             "Non-running Ticket retained a live Assignment or active pointer; interrupted and revoked without approval or replay")
         };
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
@@ -4613,6 +4637,9 @@ fn accept_with_pause(
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
     {
         return Err("Task has no current verified worker result to accept.".into());
+    }
+    if has_unsettled_assignment(store, &ticket)? {
+        return Err("SuperAgent has an unsettled native Assignment; recover it before accepting.".into());
     }
     // A provider timeout or restart can leave a remote change uncertain
     // even after the worker produced text evidence. Human acceptance must
@@ -14893,6 +14920,70 @@ mod tests {
         assert_eq!(get_ticket(&store, &task.id).unwrap().state, "waiting_approval");
     }
 
+
+    #[test]
+    fn stale_active_pointer_blocks_acceptance_and_is_quarantined_without_replay() {
+        for recovery in ["watchdog", "restart", "terminal-cli"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (task, launched) = admit(&mut store, &cfg.id, "Inspect recovery",
+                "stale-active-pointer", false).unwrap();
+            assert!(launched);
+            let sid = assignment_session(&store, &task.id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &sid, true, "Recorded result").unwrap());
+            let waiting = get_ticket(&store, &task.id).unwrap();
+            assert!(waiting.active_assignment_id.is_none());
+            let attempt = assignments(&store, &task.id, 20).unwrap().remove(0);
+            assert_eq!(attempt.state, "finished");
+            // Simulate a partial settlement from a legacy writer. The actual
+            // attempt is finished but the Ticket still names it as active.
+            store.db.execute(
+                "UPDATE sa_tickets SET active_assignment_id=?2 WHERE id=?1",
+                params![&task.id,&attempt.id],
+            ).unwrap();
+            let snap = ticket_snapshot(&store, &task.id, 20).unwrap();
+            assert_eq!(snap.finalization_gate, "assignment_inconsistent");
+            assert!(accept(&store, &task.id, waiting.revision).is_err());
+            assert_eq!(get_ticket(&store, &task.id).unwrap().revision, waiting.revision);
+            if recovery == "terminal-cli" {
+                store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id=?1",
+                    [&task.id]).unwrap();
+            }
+            let inbox: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&store.path).unwrap(),
+            ).unwrap();
+            assert_eq!(inbox["items"][0]["ticketId"], task.id);
+            assert_eq!(inbox["items"][0]["recovery"]["assignmentStateConsistent"], false);
+            assert_eq!(inbox["items"][0]["recovery"]["requiresLiveHostVerification"], true);
+            let path = store.path.clone();
+            match recovery {
+                "watchdog" => {
+                    assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+                    assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+                }
+                "restart" => {
+                    drop(store);
+                    store = Store::open(&path).unwrap();
+                }
+                _ => {
+                    assert!(headless_quarantine_terminal_orphan(&path,&task.id,waiting.revision-1).is_err());
+                    let result: serde_json::Value = serde_json::from_str(
+                        &headless_quarantine_terminal_orphan(&path,&task.id,waiting.revision).unwrap()
+                    ).unwrap();
+                    assert_eq!(result["quarantinedAssignments"], 0);
+                    assert_eq!(result["providerStoppedByCommand"], false);
+                    assert!(headless_quarantine_terminal_orphan(&path,&task.id,waiting.revision+1).is_err());
+                }
+            }
+            let after = get_ticket(&store, &task.id).unwrap();
+            assert_eq!(after.state, if recovery == "terminal-cli" {"completed"} else {"interrupted"});
+            assert!(after.active_assignment_id.is_none());
+            assert_eq!(after.revision, waiting.revision+1);
+            assert!(mandate(&store, &task.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &task.id, 20).unwrap()[0].state, "finished");
+            assert!(!on_run_finished(&store, &sid, true, "Late result").unwrap());
+        }
+    }
 
     #[test]
     fn assignment_settlement_quarantines_unresolved_effects_without_trusting_provider_text() {

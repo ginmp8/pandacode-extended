@@ -135,3 +135,7 @@ Writable tools and remote effects still require separate task-scoped native
 tool/provider grants; this change does not enable them.
 
 Linked PR Check Run observations, including empty and pending-only windows, must match the numeric repository identity of every previously attested same-name source linked to the Ticket. A conflicting repository incarnation is rejected without creating a receipt, pinning the Check Run source, advancing its cursor, or issuing authority. A compatible empty/pending-only window remains observational only; it is not completed CI evidence.
+
+### Recovery of unsettled native assignment pointers
+
+A non-running Demand must not retain an active Assignment pointer, even if its underlying attempt is already finished or missing. Native finalization and the Desktop inspector deny human acceptance until recovery; the headless recovery inbox exposes the fault without mutating it. Startup recovery, the live watchdog, or revision-bound terminal quarantine revoke the Mandate, clear the pointer, preserve finished evidence and terminal verdicts, and never infer a remote effect outcome. Nonterminal inconsistent Demands are interrupted rather than approved or automatically replayed. This does not implement a provider-effect dispatcher or remote reconciliation.

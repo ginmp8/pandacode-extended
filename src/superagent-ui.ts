@@ -113,7 +113,7 @@ interface TicketDetails {
   coordinatorPlanProposal?: {assignmentId:string;ticketRevision:number;planJson:string};
   coordinatorPlanReviewRequired?: boolean | null;
   council?: CouncilObservation | null;
-  finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
+  finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved' | 'assignment_inconsistent';
   unresolvedExternalEffects?: number;
 }
 interface EventSource {
@@ -661,6 +661,8 @@ let demandArchived = false;
         '<dt>Finalization</dt><dd id="sa-finalization-blocked">' +
         (ticketDetails.finalizationGate === 'council_required'
           ? 'Blocked: native Council task review required; no verified task-bound approval.'
+          : ticketDetails.finalizationGate === 'assignment_inconsistent'
+            ? 'Blocked: native Assignment is unsettled; recover it before accepting.'
           : ticketDetails.finalizationGate === 'effects_unresolved'
             ? 'Blocked: ' + (ticketDetails.unresolvedExternalEffects ?? 0) +
               ' unresolved external effects require authoritative reconciliation.'
@@ -1179,7 +1181,8 @@ let demandArchived = false;
           ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '"' +
             (ticketDetails?.ticket.id === ticket.id &&
             (ticketDetails.finalizationGate === 'council_required' ||
-             ticketDetails.finalizationGate === 'effects_unresolved')
+             ticketDetails.finalizationGate === 'effects_unresolved' ||
+             ticketDetails.finalizationGate === 'assignment_inconsistent')
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
@@ -1439,7 +1442,8 @@ let demandArchived = false;
           '<button type="button" data-sa-accept="' + safe(ticket.id) + '"' +
             (ticketDetails?.ticket.id === ticket.id &&
             (ticketDetails.finalizationGate === 'council_required' ||
-             ticketDetails.finalizationGate === 'effects_unresolved')
+             ticketDetails.finalizationGate === 'effects_unresolved' ||
+             ticketDetails.finalizationGate === 'assignment_inconsistent')
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
           '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button></li>'
@@ -2448,6 +2452,7 @@ let demandArchived = false;
         }
         if (snapshot.finalizationGate === 'council_required' ||
             snapshot.finalizationGate === 'effects_unresolved' ||
+            snapshot.finalizationGate === 'assignment_inconsistent' ||
             snapshot.finalizationGate === 'not_pending') {
           throw new Error('Native finalization gate blocks human acceptance; inspect the Demand.');
         }
@@ -3525,6 +3530,7 @@ let demandArchived = false;
         }
         if (fresh.finalizationGate === 'council_required' ||
             fresh.finalizationGate === 'effects_unresolved' ||
+            fresh.finalizationGate === 'assignment_inconsistent' ||
             fresh.finalizationGate === 'not_pending') {
           throw new Error('Native finalization gate changed; acceptance denied.');
         }

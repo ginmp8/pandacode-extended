@@ -168,6 +168,12 @@ impl RunningAgent {
             .ok_or("This approval belongs to an earlier run.")?
             .to_string();
         let store = store.lock().map_err(|error| error.to_string())?;
+        // Approval cards and ambient bot rules are not task-scoped grants.
+        // Recheck durable ownership at the shared native response boundary,
+        // including detached or revoked Assignments. Explicit denial is safe.
+        if approved && superagent::read_only_policy(&store, session_id)?.is_some() {
+            return Err("policy_unsupported: SuperAgent read-only assignments cannot approve provider effects.".into());
+        }
         self.send(RunInput::Approval {
             request_id: original_id,
             approved,

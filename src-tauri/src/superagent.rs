@@ -13369,6 +13369,55 @@ mod tests {
     }
 
     #[test]
+    fn task_owned_provider_approval_cannot_expand_native_read_only_authority() {
+        use crate::{providers::RunInput, RunningAgent};
+        use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect checkout", "direct-provider-approval", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let store = Mutex::new(store);
+
+        let (input, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = RunningAgent::new(input, Arc::new(AtomicBool::new(false)));
+        let request = format!("{}:permission", agent.run_id);
+        agent.approvals.lock().unwrap().insert(request.clone());
+
+        // Exercise the actual desktop approval response transport, not a
+        // simulated provider verdict or an ambient bot approval rule.
+        assert!(agent.respond_approval(&store, &session_id, request.clone(), true).is_err());
+        assert!(receiver.try_recv().is_err(), "No positive approval may reach the provider");
+        assert!(agent.approvals.lock().unwrap().contains(&request));
+
+        store.lock().unwrap().db.execute(
+            "DELETE FROM bot_threads WHERE session_id=?1 AND channel_id=?2",
+            params![&session_id, CHANNEL],
+        ).unwrap();
+        assert!(agent.respond_approval(&store, &session_id, request.clone(), true).is_err());
+        assert!(receiver.try_recv().is_err(), "Detached task authority must fail closed");
+
+        // Denial remains possible even after authority has become stale.
+        agent.respond_approval(&store, &session_id, request, false).unwrap();
+        assert!(matches!(receiver.try_recv().unwrap(),
+            RunInput::Approval { request_id, approved: false } if request_id == "permission"));
+
+        // An independent ordinary chat must still be able to approve.
+        let (input, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = RunningAgent::new(input, Arc::new(AtomicBool::new(false)));
+        let request = format!("{}:ordinary", agent.run_id);
+        agent.approvals.lock().unwrap().insert(request.clone());
+        agent.respond_approval(&store, &ordinary.id, request, true).unwrap();
+        assert!(matches!(receiver.try_recv().unwrap(),
+            RunInput::Approval { request_id, approved: true } if request_id == "ordinary"));
+    }
+
+    #[test]
     fn ordinary_bot_tools_cannot_escape_an_active_or_revoked_superagent_mandate() {
         let mut store = fixture();
         let config = enabled(&store);

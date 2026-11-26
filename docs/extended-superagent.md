@@ -171,6 +171,8 @@ independently reconciled; no automatic replay is permitted.
 
 Native provider authority requires exactly one running Assignment for a Ticket, not merely a matching active pointer. If a legacy or damaged database contains competing running attempts, the active provider is denied further native admission and its completion callback cannot contribute a plan or result. Callback settlement revokes the Mandate, records the rejected result without retaining provider output, and leaves the other attempt's lease visible for native recovery; it does not claim that the other provider was stopped. Ordinary session policy classification is unchanged. This is a read-only admission and recovery fence, not positive Worker write authority or authenticated remote reconciliation.
 
+The shared native provider approval response also rejects positive approvals for task-owned read-only Assignments, even if an unexpected permission card is pending or the bot thread was detached. Explicit denials and ordinary chat approvals remain available. This is an additional transport boundary, not a new grant mode.
+
 A provider that is still registered as running after a native Assignment settles keeps its original Assignment bot and Ticket project fenced, even if its mutable bot thread has been removed or its session metadata has changed. Manual preflight and the ordinary/native run-admission boundaries consult this durable identity until the provider actually exits. Unrelated ordinary chats remain unaffected by the native fence. This does not issue writable Worker authority.
 
 ### Typed issue intake before Demand staging

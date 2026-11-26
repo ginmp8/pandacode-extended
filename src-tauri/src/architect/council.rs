@@ -862,19 +862,33 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
     let Some(raw) = report.lines().rev().find_map(|line| line.trim().strip_prefix(PREFIX)) else {
         return Vec::new();
     };
-    if raw.len() > 8192 { return Vec::new(); }
-    let Ok(items) = serde_json::from_str::<Vec<ReportedFindingDraft>>(raw.trim()) else {
-        return Vec::new();
-    };
-    if items.len() > 16 { return Vec::new(); }
+    parse_finding_payload(raw).unwrap_or_default()
+}
+
+fn parse_finding_payload(raw: &str) -> Option<Vec<ReportedFindingDraft>> {
+    if raw.len() > 8192 { return None; }
+    let items = serde_json::from_str::<Vec<ReportedFindingDraft>>(raw.trim()).ok()?;
+    if items.len() > 16 { return None; }
     let valid = |value: &str, cap: usize| !value.trim().is_empty()
         && value.chars().count() <= cap && !value.chars().any(char::is_control);
     if items.iter().any(|f| !matches!(f.severity.as_str(), "critical" | "high" | "medium" | "low" | "info")
         || !valid(&f.category, 80) || !valid(&f.title, 160) || !valid(&f.explanation, 2000))
     {
-        return Vec::new();
+        return None;
     }
-    items
+    Some(items)
+}
+
+/// Optional findings may be absent, but a supplied malformed or duplicate
+/// findings block is not a clean report. In particular a trailing empty block
+/// must not suppress a preceding high-severity finding.
+fn complete_reported_findings(report: &str) -> Option<Vec<ReportedFindingDraft>> {
+    let mut blocks = report.lines().filter_map(|line|
+        line.trim().strip_prefix("Council findings JSON:")
+    );
+    let Some(raw) = blocks.next() else { return Some(Vec::new()) };
+    if blocks.next().is_some() { return None; }
+    parse_finding_payload(raw)
 }
 
 /// A native-bound reviewer cannot supply another session's text simply by
@@ -1352,7 +1366,12 @@ pub(super) fn scored_report_is_current_for_strategy(
     let Some(tail) = tail.filter(|report| parse_score(report) == Some(score)) else {
         return false;
     };
-    let findings = parse_reported_findings(&tail);
+    let findings = if require_complete {
+        let Some(findings) = complete_reported_findings(&tail) else { return false };
+        findings
+    } else {
+        parse_reported_findings(&tail)
+    };
     let severe = findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "high"));
     let conflict = findings.iter().any(|finding| finding.category.eq_ignore_ascii_case("conflict"));
     (severe, conflict) == (seat.reported_severe_finding, seat.reported_conflict)
@@ -2224,6 +2243,9 @@ pub(super) fn bounded_s3_report(
     }
     if parse_score(&report) != seat.score {
         return Err("S3 challenge handoff rejected a changed or unscored first-phase report.".into());
+    }
+    if complete_reported_findings(&report).is_none() {
+        return Err("S3 challenge handoff rejected malformed or duplicate structured findings.".into());
     }
     Ok((message_id, report))
 }

@@ -2442,6 +2442,17 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
             .unwrap_err().contains("exceeds the bounded native report budget"),
             "S3 must reject a truncated native report before admitting its challengers");
     }
+    for report in [
+        "Council findings JSON: [\nCouncil score: 9.4/10",
+        "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Unresolved\",\"explanation\":\"Must not be hidden\"}]\nCouncil findings JSON: []\nCouncil score: 9.4/10",
+    ] {
+        store.message(&sessions[0], "assistant", report).unwrap();
+        assert!(council::phase_one_challenge_handoff(&store, &team, 2, None)
+            .unwrap_err().contains("malformed or duplicate structured findings"));
+    }
+    store.message(&sessions[0], "assistant",
+        "Council findings JSON: [ ]\nCouncil score: 9.4/10").unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None).is_ok());
 }
 
 #[test]
@@ -12501,9 +12512,9 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
 }
 
 
-/// An oversized S2 report cannot become a clean callback merely because its
-/// final score fits in the legacy tail window. Test ASCII truncation, UTF-8
-/// byte limits, and recovery of the original native message.
+/// Oversized, malformed or duplicate S2 findings must not become a clean
+/// callback merely because the final score is unchanged. Exercise report
+/// bounds and structured findings validation with recovery of exact proof.
 fn assert_s2_report_bound(
     store: &Store, session_id: &str, mut assert_revoked: impl FnMut(),
 ) {
@@ -12513,11 +12524,17 @@ fn assert_s2_report_bound(
     ).unwrap();
     let hidden_finding = json!([{"severity":"high","category":"security",
         "title":"Omitted critical evidence","explanation":"This finding is outside the legacy score tail"}]);
-    for changed in [
+    let oversized = [
         format!("Council findings JSON: {hidden_finding}\n{}\n{original}", "x".repeat(8192)),
         format!("{}\n{original}", "\u{00e9}".repeat(4200)),
-    ] {
-        assert!(changed.len() > 8192);
+    ];
+    assert!(oversized.iter().all(|report| report.len() > 8192));
+    let ambiguous = [
+        format!("Council findings JSON: [\n{original}"),
+        format!("Council findings JSON: {hidden_finding}\nCouncil findings JSON: []\n{original}"),
+    ];
+    assert!(ambiguous.iter().all(|report| report.len() <= 8192));
+    for changed in oversized.into_iter().chain(ambiguous) {
         store.db.execute("UPDATE messages SET content=?2 WHERE id=?1",
             rusqlite::params![report_id, changed]).unwrap();
         assert_revoked();
@@ -12533,7 +12550,7 @@ fn assert_s2_child_reports_are_bounded(store: &Store, root: &TeamSnapshot) {
         for worker in &child.workers {
             assert_s2_report_bound(store, &worker.session_id, || {
                 assert!(!verified_council_pass(store, root),
-                    "oversized native child report must revoke root approval");
+                    "invalid native child report must revoke root approval");
             });
             assert!(verified_council_pass(store, root),
                 "restoring the original child evidence must revalidate the existing proof");
@@ -14129,11 +14146,11 @@ fn root_m1_m2_m3_native_task_receipts_require_independent_callbacks_for_each_str
                                 if strategy == council::CouncilExecutionStrategy::Escalated {
                                     assert_s2_report_bound(&store, &reviewer.session_id, || {
                                         assert!(!verified_council_pass(&store, &snapshot),
-                                            "{mode}/S2: truncated native report must revoke pass");
+                                            "{mode}/S2: invalid native report must revoke pass");
                                         assert!(council_requests::read_native_terminal(
                                             &store, &sid, &project, "root-matrix-task",
                                             &artifact, &request.request_id,
-                                        ).is_err(), "{mode}/S2: truncated report must revoke receipt");
+                                        ).is_err(), "{mode}/S2: invalid report must revoke receipt");
                                     });
                                 }
                                 assert_eq!(council_requests::read_native_terminal(

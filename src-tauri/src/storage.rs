@@ -1466,8 +1466,13 @@ impl Store {
             .canonicalize()
             .map_err(|e| format!("Worktree folder is unavailable: {e}"))?;
         let changed = self.db.execute(
-            "UPDATE sessions SET worktree_path=?2,worktree_branch=?3,updated_at=?4 WHERE id=?1 AND worktree_path IS NULL AND resume_id IS NULL AND status NOT IN ('running','waiting') AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=?1)",
-            params![sid, path.to_string_lossy(), branch, now()],
+            "UPDATE sessions SET worktree_path=?2,worktree_branch=?3,updated_at=?4
+             WHERE id=?1 AND worktree_path IS NULL AND resume_id IS NULL
+               AND status NOT IN ('running','waiting')
+               AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM sa_assignments WHERE session_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM bot_threads WHERE session_id=?1 AND channel_id=?5)",
+            params![sid, path.to_string_lossy(), branch, now(), crate::superagent::CHANNEL],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err("This conversation already started. Create a new task in a worktree instead.".into());
@@ -1480,6 +1485,11 @@ impl Store {
     }
     /// Whether a task can still be converted in place.
     pub fn worktree_attachable(&self, sid: &str) -> Result<bool> {
+        // The generic task conversion must not create a Git checkout for a
+        // native assignment, even before its first provider message arrives.
+        if crate::superagent::has_task_assignment_history(self, sid)? {
+            return Ok(false);
+        }
         let session = self.session(sid)?;
         if session.worktree_path.is_some() || session.resume_id.is_some() || ["running", "waiting"].contains(&session.status.as_str()) {
             return Ok(false);

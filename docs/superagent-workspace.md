@@ -421,3 +421,13 @@ or changes ordinary bot chats.
 When the original native Coordinator finishes with a complete JSON dependency plan, the Demand inspector can prefill the reviewed-plan editor with that untrusted proposal. Native inspection checks the original assignment and thread, current read-only mandate, Team revision, admitted Worker profiles, ordered dependency keys, route rationale and attempt budget. Invalid, stale, paused or unstructured proposals do not prefill the editor; ordinary advisory evidence remains inspectable. The operator must still review and explicitly save the plan using the existing transactional planning command. This creates no new assignment, permission, external effect or Council verdict. It is not automatic execution or autonomous acceptance.
 
 An array-shaped original Coordinator response (including an invalid JSON array proposal) cannot be dispatched through the original Worker fallback before a plan is explicitly saved. The same native guard applies to desktop dispatch and new headless dispatch requests. After saving, only the selected persisted WorkItem and its accepted parent evidence are forwarded from a structured plan; the original unreviewed array stays in the Coordinator Assignment history. Free-text advisory responses retain their legacy manual read-only dispatch path.
+
+### Native assignment checkout ownership (S1)
+
+Current native Assignments reserve the admitted project root. The ordinary task
+worktree conversion is unavailable for native SuperAgent sessions (including
+settled or detached assignment history). A persisted session worktree or branch
+override invalidates native provider admission and result settlement even when
+the project ID still matches. Ordinary unstarted tasks retain their worktree
+conversion. Explicitly authorized assignment-owned worktrees remain a future
+scoped-write capability; this guard does not enable writes.

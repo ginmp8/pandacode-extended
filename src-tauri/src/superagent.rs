@@ -4022,6 +4022,13 @@ fn admitted_session_matches_profile(
     store: &Store, ticket_id: &str, bot_id: &str, role: &str,
     session: &storage::Session,
 ) -> Result<bool> {
+    // Native Assignments currently reserve the admitted project root, not
+    // arbitrary session-owned worktrees. The generic task worktree API or
+    // a stale database must not silently redirect that scoped authority.
+    // Apply this to legacy read-only tickets as well as versioned profiles.
+    if session.worktree_path.is_some() || session.worktree_branch.is_some() {
+        return Ok(false);
+    }
     let Some(profile) = roster::ticket_profile(store, ticket_id)? else {
         return Ok(true);
     };
@@ -13252,6 +13259,43 @@ mod tests {
     }
 
     #[test]
+    fn native_assignment_checkout_cannot_be_rebound_by_generic_worktree_attach() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-worktree-fence-{}", storage::id()));
+        std::fs::create_dir(&root).unwrap();
+        let team = enabled(&store);
+        let (ticket, started) = admit(&mut store, &team.id, "Inspect admitted project",
+            "native-worktree-fence", false).unwrap();
+        assert!(started);
+        let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &sid).unwrap().is_some());
+        assert!(!store.worktree_attachable(&sid).unwrap());
+        assert!(store.attach_worktree(&sid, &root, "unapproved").is_err());
+        assert!(store.session(&sid).unwrap().worktree_path.is_none());
+
+        // An ordinary unstarted session retains its existing worktree API.
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        assert!(store.worktree_attachable(&ordinary.id).unwrap());
+        assert!(store.attach_worktree(&ordinary.id, &root, "ordinary").is_ok());
+
+        // Even if a legacy or damaged store bypassed the generic attach API,
+        // a matching project ID is not authority for a different checkout.
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2,worktree_branch='unapproved' WHERE id=?1",
+            params![&sid, root.to_string_lossy()],
+        ).unwrap();
+        assert!(read_only_policy(&store, &sid).is_err());
+        assert!(guard_run_admission(&store, &sid, &[]).is_err());
+        assert!(on_run_finished(&store, &sid, true, "Untrusted checkout result").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+        assert!(!on_run_finished(&store, &sid, true, "Late result").unwrap());
+        std::fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
     fn prepared_provider_launch_rechecks_native_authority_and_checkout() {
         let mut store = fixture();
         let root = std::env::temp_dir().join(format!("sa-provider-launch-{}", storage::id()));
@@ -13291,6 +13335,22 @@ mod tests {
         config.cwd = cwd.join("different-checkout");
         assert!(guard_prepared_provider_launch(&store, &config).is_err());
         config.cwd = cwd;
+        // A separately attached worktree can keep the same project ID and
+        // match the prepared cwd while pointing outside the admitted root.
+        let other_root = std::env::temp_dir().join(format!("sa-unapproved-worktree-{}", storage::id()));
+        std::fs::create_dir(&other_root).unwrap();
+        std::fs::write(other_root.join(".git"), "gitdir: unapproved").unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            params![&sid, other_root.to_string_lossy()],
+        ).unwrap();
+        config.cwd = store.workspace_root("project", Some(&sid)).unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err());
+        store.db.execute("UPDATE sessions SET worktree_path=NULL WHERE id=?1",
+            [&sid]).unwrap();
+        config.cwd = store.workspace_root("project", Some(&sid)).unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+        std::fs::remove_dir_all(&other_root).unwrap();
         let model = std::mem::replace(&mut config.model, "different-model".into());
         assert!(guard_prepared_provider_launch(&store, &config).is_err());
         config.model = model;

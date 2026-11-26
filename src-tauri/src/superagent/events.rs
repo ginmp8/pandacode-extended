@@ -3365,7 +3365,7 @@ fn linked_decisions_page_in_tx(
                        JOIN sa_source_repository_identity oi
                          ON oi.source_id=observed.id
                         AND oi.repository_id=li.repository_id
-                       WHERE li.source_id=linked.id
+                       WHERE li.source_id=linked.id AND d.at>=oi.attested_at
                      ))
                  )
              )",
@@ -3378,8 +3378,9 @@ fn linked_decisions_page_in_tx(
         }
     }
     // A same-source legacy receipt remains visible after upgrade. A different
-    // event class needs matching, positive GitHub repository IDs, never a name
-    // match or two NULL identity records.
+    // event class needs matching, positive GitHub repository IDs and a
+    // receipt recorded at or after its own source attestation. Later identity
+    // pins cannot authenticate legacy name-only history retroactively.
     let mut stmt = tx.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
                 d.sequence,d.decision,d.policy_revision,d.at,
@@ -3405,6 +3406,7 @@ fn linked_decisions_page_in_tx(
                    ON observed_identity.source_id=observed.id
                   AND observed_identity.repository_id=linked_identity.repository_id
                  WHERE linked_identity.source_id=linked.id
+                   AND d.at>=observed_identity.attested_at
                ))
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3"
@@ -7525,7 +7527,7 @@ mod tests {
             store.db.execute(
                 "INSERT INTO sa_source_repository_identity
                  (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
-                params![&selected.id,storage::now()],
+                params![&selected.id,1_i64],
             ).unwrap();
         }
         assert_eq!(linked_decisions(&store,"ticket-one",50).unwrap().len(),1);
@@ -8015,7 +8017,7 @@ mod tests {
             store.db.execute(
                 "INSERT INTO sa_source_repository_identity
                  (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
-                params![id,storage::now()],
+                params![id,1_i64],
             ).unwrap();
         }
         unlink_thread(&store, &issue.id, "one", "issue:42").unwrap();
@@ -8412,7 +8414,7 @@ mod tests {
             store.db.execute(
                 "INSERT INTO sa_source_repository_identity
                  (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
-                params![&selected.id,storage::now()],
+                params![&selected.id,1_i64],
             ).unwrap();
         }
         let found = linked_decisions(&store, "ticket-one", 50).unwrap();
@@ -8470,6 +8472,8 @@ mod tests {
             receipt.event_kind = selected.event_kind.clone();
             observe(&store, &receipt).unwrap();
         }
+        // Freeze an unambiguous pre-attestation history instead of relying on clock resolution.
+        store.db.execute("UPDATE sa_event_decisions SET at=1", []).unwrap();
         link_thread(&store, &issue.id, "history-ticket", "issue:42").unwrap();
 
         // A legacy direct link can inspect its own already-stored receipt,
@@ -8491,9 +8495,21 @@ mod tests {
             "One attested ID cannot match an unknown source");
         attest(&comment.id, 101);
         attest(&reused_name.id, 202);
+        let legacy_cursor = LinkedActivityCursor {
+            at: 1, source_id: comment.id.clone(), delivery_id: "same-name-comment".into(),
+        };
+        assert_eq!(linked_decisions(&store, "history-ticket", 20).unwrap().len(), 1,
+            "Later attestation cannot authenticate a historical name-only receipt");
+        assert!(linked_decisions_page(&store, "history-ticket", 20, Some(&legacy_cursor)).is_err());
+        let mut fresh = event("attested-comment", &comment, 2);
+        fresh.event_kind = comment.event_kind.clone();
+        observe(&store, &fresh).unwrap();
         let matched = linked_decisions(&store, "history-ticket", 20).unwrap();
-        assert_eq!(matched.len(), 2, "Only equal attested IDs can correlate source classes");
-        assert!(matched.iter().any(|row| row.delivery_id == "same-name-comment"));
+        assert_eq!(matched.len(), 2, "Only prospectively attested cross-source receipts may correlate");
+        assert!(matched.iter().any(|row| row.delivery_id == "attested-comment"));
+        assert!(matched.iter().all(|row| row.delivery_id != "same-name-comment"));
+        assert_eq!(list_decisions(&store, &comment.id, 20).unwrap().len(), 2,
+            "Historical source receipts are retained");
         assert!(matched.iter().all(|row| row.delivery_id != "reused-name-closure"));
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
             |row| row.get::<_, i64>(0)).unwrap(), 0,
@@ -8503,7 +8519,13 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         let persisted = linked_decisions(&reopened, "history-ticket", 20).unwrap();
         assert_eq!(persisted.len(), 2);
-        assert!(persisted.iter().all(|row| row.delivery_id != "reused-name-closure"));
+        assert!(persisted.iter().all(|row| row.delivery_id != "reused-name-closure"
+            && row.delivery_id != "same-name-comment"));
+        assert!(linked_decisions_page(&reopened, "history-ticket", 20, Some(&legacy_cursor)).is_err());
+        link_thread(&reopened, &comment.id, "history-ticket", "issue:42").unwrap();
+        assert_eq!(linked_decisions(&reopened, "history-ticket", 20).unwrap().len(), 3,
+            "An explicit source link retains its own legacy history");
+        assert!(linked_decisions_page(&reopened, "history-ticket", 20, Some(&legacy_cursor)).is_ok());
     }
 
     #[test]
@@ -8533,7 +8555,8 @@ mod tests {
         observe(&store, &make(&matching_review, "same-repo-review", "pull:88")).unwrap();
         observe(&store, &make(&foreign_review, "reused-name-review", "pull:88")).unwrap();
         link_thread(&store, &issue.id, "identity-ticket", "issue:42").unwrap();
-        let attested_at = storage::now();
+        // Fixture models receipts whose repository identity was already verified.
+        let attested_at = 1_i64;
         for (id, repository_id) in [
             (&issue.id, 101_i64), (&foreign_review.id, 202_i64),
         ] {

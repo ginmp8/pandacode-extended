@@ -179,7 +179,11 @@ hold the same issue/PR number on separate Tickets when a repository name was
 reused. Matching IDs still conflict; a missing identity remains conservative
 rather than permitting an ambiguous historical link.
 Each source's own explicitly linked receipts remain visible without an
-unrelated source's attestation. Operators can explicitly observe eligible
+unrelated source's attestation. Cross-source activity and pagination accept
+only receipts recorded at or after the observing source's repository
+attestation. A later identity pin cannot retroactively authenticate older
+name-only receipts; they remain inspectable under their original source or
+an explicit link to that source. Operators can explicitly observe eligible
 sources to establish prospective identity pins; importing, linking, or reading
 a receipt never issues a grant, infers a GitHub task or starts Auto.
 

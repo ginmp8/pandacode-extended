@@ -1,5 +1,13 @@
 # PandaCode Extended documentation
 
+## 2026-11-26 — upstream 0.3.154 reconciliation
+
+Source: [fork main `e6de802e705d`](https://github.com/ginmp8/pandacode/commit/e6de802e705d53a5ff196266f775a4738dd5d701) (tree `52d7475bca059cb6adf699a3df14c2e7209a9438`); Extended parent: [`e15874afdc58`](https://github.com/ginmp8/pandacode-extended/commit/e15874afdc587833c943490a4c2c747703fb1808). The planned Extended distribution remains **0.12.0 DRAFT**, independent of the inherited application version.
+
+Two source commits change 21 paths: nine source-exact and twelve reconciled. Complete candidate inventory: 2,167 upstream paths, 2,225 Extended paths, 2,082 exact shared, 85 divergent shared, 58 Extended-only, zero missing and zero mode/type mismatches. All 199 original upstream version-note blobs match; all six inherited version fields are 0.3.154. Inherited changes prevent automatic bot queue holds, convert dismissed usage-limit holds to resumable reset holds without automatic sends, prioritize limit continuations before queue drains, and reconcile stale browser stream indicators and background queues after reconnect. Release CLIs resolve real paths for symlinked invocations; preflight SBOM download is best effort while asset verification remains in place. The remote tag guard uses the Extended resolved release tag rather than the inherited app version; manual-only publish authority is unchanged. Existing dependency pins and Extended controls are retained. The existing Extended headless queue-claim regression and new upstream regression tests are retained. Full native On/Off, older semantic divergences and external integrations remain unverified.
+
+Parent CI: [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45807404080) 11/11 successful; [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45807420820) 9/11 successful, two macOS Clippy jobs pending at inspection. No new candidate CI or local test execution is claimed; Git DNS failed and Cargo was unavailable. No release or publishing approval is implied.
+
 ## 2026-11-26 — upstream 0.3.153 reconciliation
 
 Source: [fork main `677c82c482fc`](https://github.com/ginmp8/pandacode/commit/677c82c482fc8c886830c836bc2bfef4c982745f) (tree `5179839c2fd087cf485783f49ca97e28f37a0269`); Extended parent: [`9305d19535d2`](https://github.com/ginmp8/pandacode-extended/commit/9305d19535d222b311bd95bc018b4989de0acda0). The planned Extended distribution remains **0.12.0 DRAFT**, independently of the inherited application version.

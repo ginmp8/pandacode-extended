@@ -461,6 +461,7 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         Some((entry, delivery))
     }));
     if let Some((entry, delivery)) = taken {
+        let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
         super::failover::before_turn(app, &bot, session_id);
         let (context, image_ids) = queued_prompt(&entry.attachments);
         super::failover::remember_images(session_id, &image_ids);

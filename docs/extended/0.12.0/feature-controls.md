@@ -1,5 +1,13 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-26 — upstream 0.3.151 reconciliation candidate
+
+Frozen [fork main](https://github.com/ginmp8/pandacode/commit/52702085784ee5a4d78ef3817f433935ba29d1a8) (tree `4cd3c34798b2f223037b19683be00daf92348dd4`) advances two commits from the previous source pin. The [Extended parent](https://github.com/ginmp8/pandacode-extended/commit/189987ad68fbf5913a814ecce11a750c8b523b6d) remains the single destination parent. All 18 upstream-changed paths are included: seven byte/mode-exact paths and 11 reconciled shared paths. The complete candidate inventory contains 2,163 source paths, 2,221 Extended paths, 2,079 exact shared paths, 84 shared divergences and 58 Extended-only paths, with zero missing paths or mode/type mismatches. All 196 original upstream version-note blobs and the release-dates blob match the source. The six inherited version fields are 0.3.151. Extended 0.12.0 remains DRAFT, not approved for distribution.
+
+Inherited behavior: browser reloads no longer install restart holds on the active host, queue hold reasons synchronize on connect and live changes, stale queue list responses are discarded, and the headless drain uses a per-session guard. Bot queue notifications and shared-channel cancellation refreshes are incorporated; the Extended delivery-start/failure event metadata, error notification and headless hold-before-take regression are preserved. These are source and structural observations, not native runtime acceptance.
+
+No Extended control modules were replaced. Existing Settings controls, authenticated web routing and bot delivery metadata are retained; native On/Off scenarios remain pending.
+
 ## 2026-11-25 — source 0.3.150 reconciliation candidate
 
 The candidate retains the Extended feature-control modules and adapts browser command routing, warm and normal agent launch paths, updates and cloud/VM tools. Static comparison of `providers/warm.rs` and `providers.rs` shows the process-local external-MCP restriction and per-run MCP configuration remain represented. Authenticated web settings commands were added to the source web command allowlist. Native On/Off, Connect/direct routes, bot pause/resume, external MCP, credential transfer, cloud/VM and browser authorization acceptance remain open; static inspection does not establish behavior parity.

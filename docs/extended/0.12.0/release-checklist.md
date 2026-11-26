@@ -1,5 +1,18 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-26 — upstream 0.3.151 reconciliation candidate
+
+Frozen [fork main](https://github.com/ginmp8/pandacode/commit/52702085784ee5a4d78ef3817f433935ba29d1a8) (tree `4cd3c34798b2f223037b19683be00daf92348dd4`) advances two commits from the previous source pin. The [Extended parent](https://github.com/ginmp8/pandacode-extended/commit/189987ad68fbf5913a814ecce11a750c8b523b6d) remains the single destination parent. All 18 upstream-changed paths are included: seven byte/mode-exact paths and 11 reconciled shared paths. The complete candidate inventory contains 2,163 source paths, 2,221 Extended paths, 2,079 exact shared paths, 84 shared divergences and 58 Extended-only paths, with zero missing paths or mode/type mismatches. All 196 original upstream version-note blobs and the release-dates blob match the source. The six inherited version fields are 0.3.151. Extended 0.12.0 remains DRAFT, not approved for distribution.
+
+- [x] Compare all complete pinned inventories and verify the 18-path upstream delta.
+- [x] Verify six app version fields and 196 upstream release-note hashes.
+- [x] Preserve Extended dependency fixes and queue delivery metadata.
+- [ ] Verify the candidate's exact-SHA CI, including intermittent crash-guard regression.
+- [ ] Complete shared-divergence hunk review and native functional acceptance.
+- [ ] Obtain separate release approval.
+
+The exact parent [CI run 45746847862](https://github.com/ginmp8/pandacode-extended/actions/runs/45746847862) and [CI run 45746839556](https://github.com/ginmp8/pandacode-extended/actions/runs/45746839556) showed 19 successful jobs, one failed Linux Rust job and two pending macOS Clippy jobs when inspected. Both RustSec jobs passed, confirming the parent lockfile remediation. The failed [Linux job](https://github.com/ginmp8/pandacode-extended/actions/runs/45746847862/job/139664904025) reports `crash_guard::link::tests::a_line_after_exit_finds_the_guard_gone_quietly`: expected NoGuard, observed Delivered; 3,930 passed, one failed and 106 ignored. The other Linux job passed. The cause of this intermittent result is not established; do not weaken the test. Candidate CI and native queue/Settings/Connect/MCP/cloud/VM/credential acceptance remain unverified. Local checkout failed DNS; Cargo is unavailable. The headless guard-position assertions were checked statically and the full release-note identities checked by Git tree; the Rust and Node suites were not run locally.
+
 ## 2026-11-25 — source 0.3.150 reconciliation candidate
 
 - [x] Retrieve nontruncated source and candidate inventories; zero missing source paths and mode/type differences.

@@ -194,3 +194,5 @@ From an enabled, supported Council-Off Team, open Sources, load an `issues.opene
 ### Overlapping authenticated Observe requests
 
 Desktop, background subscriptions and headless polling share the native receipt transaction. If another request advances the source cursor while a GitHub Events window is in flight, the older window cannot advance beyond that new cursor unless it contains the exact newly committed event identity. A window that cannot establish continuity is rejected without recording receipts or advancing the watermark; fetch a fresh window using the current source cursor. Duplicate or older already-observed deliveries remain idempotent. This is an Observe-only safeguard, not Auto admission or permission to write to GitHub.
+
+Background history-gap diagnostics also bind the Team activation revision at the atomic receipt write. A revoked or Off → On Team cannot be quarantined by a stale in-flight background failure, even if a separate headless connection changes the Team after preflight. Explicit local-operator Observe retains its existing independent recovery behavior. No diagnostic authorizes a task or GitHub write.

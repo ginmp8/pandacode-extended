@@ -989,6 +989,16 @@ fn require_source_cursor_integrity(
 fn record_observe_fetch_failure(
     store: &Store, expected: &EventSource, failure: &str,
 ) -> Result<()> {
+    record_observe_fetch_failure_scoped(store, expected, failure, None)
+}
+
+// A background failure can quarantine a source just like a successful poll
+// can advance its cursor. Recheck the captured Team revision in the same
+// write statement: another connection may revoke it after the HTTP precheck.
+fn record_observe_fetch_failure_scoped(
+    store: &Store, expected: &EventSource, failure: &str,
+    background_team_revision: Option<i64>,
+) -> Result<()> {
     let reason = if failure.starts_with(
         "GitHub Events passed the durable source cursor without its exact identity;"
     ) || failure.starts_with(
@@ -1012,6 +1022,11 @@ fn record_observe_fetch_failure(
          SELECT id,?2,?3,?4,?5,?5,1 FROM sa_event_sources
          WHERE id=?1 AND mode='observe' AND policy_revision=?3
            AND last_sequence=?2 AND event_kind<>'check_run.completed'
+           AND (?6 IS NULL OR EXISTS (
+               SELECT 1 FROM sa_orchestrations o
+               WHERE o.id=sa_event_sources.orchestration_id
+                 AND o.enabled=1 AND o.policy_revision=?6
+           ))
          ON CONFLICT(source_id) DO UPDATE SET
            first_detected_at=CASE
              WHEN sa_source_history_gaps.cursor_sequence=excluded.cursor_sequence
@@ -1030,7 +1045,8 @@ fn record_observe_fetch_failure(
            last_detected_at=excluded.last_detected_at,
            verified_at=NULL,
            verified_sequence=NULL",
-        params![&expected.id,expected.last_sequence,expected.policy_revision,reason,at],
+        params![&expected.id,expected.last_sequence,expected.policy_revision,reason,at,
+                background_team_revision],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -2423,7 +2439,7 @@ async fn poll_source_authenticated(
         )?;
     }
     if let Err(failure) = &fetched {
-        record_observe_fetch_failure(&store, &snapshot, failure)?;
+        record_observe_fetch_failure_scoped(&store, &snapshot, failure, team_revision)?;
     }
     let (signed_in, response, pages_fetched, repository_id, operator_id) = fetched?;
     poll_authenticated_events_with_repository_id_scoped(
@@ -5257,6 +5273,68 @@ mod tests {
         assert_eq!(inspect_source_integrity(&reopened, &disabled.id).unwrap().history_gap_occurrences, 2);
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn revoked_background_failure_cannot_quarantine_source_after_preflight() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let selected = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let initial = serde_json::json!([{
+            "id":"5000000600","created_at":"2026-11-12T08:59:00Z",
+            "type":"IssuesEvent","repo":{"name":"owner/repo"},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        poll_authenticated_events(&store, &selected, 0, &initial).unwrap();
+        let pinned = source(&store, &selected.id).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        let revision = require_background_team_revision(&store, "orch", None).unwrap();
+        let failure = combine_github_pages(
+            &[github_page(5_000_000_602, 2)], 0, pinned.last_sequence,
+        ).unwrap_err();
+        assert!(failure.contains("durable source cursor"));
+
+        // Independent headless connection revokes authority after preflight,
+        // before the background failure receipt reaches its SQL write.
+        let peer = rusqlite::Connection::open(&path).unwrap();
+        peer.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        record_observe_fetch_failure_scoped(&store, &pinned, &failure, Some(revision)).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_cursor, None);
+
+        peer.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        record_observe_fetch_failure_scoped(&store, &pinned, &failure, Some(revision)).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_cursor, None);
+        let fresh = require_background_team_revision(&store, "orch", None).unwrap();
+        record_observe_fetch_failure_scoped(&store, &pinned, &failure, Some(fresh)).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_occurrences, 1);
+
+        peer.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        record_observe_fetch_failure_scoped(&store, &pinned, &failure, Some(fresh)).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_occurrences, 1);
+        // An explicitly requested local observation remains independent of
+        // Team activation, with no grant, provider dispatch or new receipt.
+        record_observe_fetch_failure(&store, &pinned, &failure).unwrap();
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_occurrences, 2);
+        assert_eq!(source(&store, &pinned.id).unwrap().last_sequence, pinned.last_sequence);
+        assert_eq!(list_decisions(&store, &pinned.id, 10).unwrap().len(), 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
     }
 

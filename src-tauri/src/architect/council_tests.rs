@@ -12622,7 +12622,57 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
             .find(|child| child.bot_id == "security-child")
             .unwrap().child_session_id
     };
-    for _ in 0..4 {
+    for index in 0..4 {
+        if index == 2 {
+            // The next scheduling turn first admits Security's fresh S2
+            // wave, then tries to launch Architecture's queued first leaf.
+            // Fail that later persistence step after the grants were issued.
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            let before_child = load(&store, &security_id).unwrap().unwrap();
+            assert_eq!(before_child.workers.len(), 2);
+            assert!(before_child.workers.iter().all(|worker| worker.status == "completed"));
+            let counts = || -> (i64, i64, i64) {
+                store.db.query_row(
+                    "SELECT (SELECT COUNT(*) FROM sessions),
+                            (SELECT COUNT(*) FROM architect_workers),
+                            (SELECT COUNT(*) FROM architect_requests)",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ).unwrap()
+            };
+            let before_counts = counts();
+            let architecture_id = child_council::inspect(&store, &root).unwrap()
+                .into_iter().find(|child| child.bot_id == "architecture-child")
+                .unwrap().child_session_id;
+            let snapshot = |id: &str| -> String {
+                store.db.query_row(
+                    "SELECT content FROM architect_teams WHERE session_id=?1",
+                    [id], |row| row.get(0),
+                ).unwrap()
+            };
+            let before_security = snapshot(&security_id);
+            let before_architecture = snapshot(&architecture_id);
+            store.db.execute_batch(
+                "CREATE TEMP TRIGGER council_test_reject_leaf_launch
+                 BEFORE UPDATE ON architect_teams
+                 WHEN json_extract(OLD.content, '$.workers[0].status') = 'queued'
+                   AND json_extract(NEW.content, '$.workers[0].status') = 'running'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected child launch persistence failure');
+                 END;"
+            ).unwrap();
+            let denial = child_council::next_leaf_launch(
+                &store, &std::collections::HashMap::new(), &root,
+            ).err().expect("injected persistence failure must deny launch");
+            assert!(denial.contains("injected child launch persistence failure"), "{denial}");
+            assert_eq!(counts(), before_counts,
+                "a failed scheduler turn must not retain issued sessions, workers or grants");
+            assert_eq!(snapshot(&security_id), before_security);
+            assert_eq!(snapshot(&architecture_id), before_architecture);
+            store.db.execute_batch("DROP TRIGGER council_test_reject_leaf_launch;").unwrap();
+            // The ordinary loop must still recover, launch the untouched
+            // sibling first wave, and eventually accept the real fresh wave.
+        }
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         let score = if launch.admission.parent == security_id { 8.5 } else { 9.7 };
         {

@@ -2960,6 +2960,11 @@ pub(super) fn next_leaf_launch(
 ) -> Result<Option<Launch>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.nested_bot_reviewers.is_empty() { return Ok(None) }
+    // A scheduler turn can issue an S2 wave for one child and then fail
+    // while validating or saving another child. Keep all grants, sessions,
+    // worker state and the selected launch in one native transaction.
+    // No external provider launch occurs until the transaction commits.
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     // The scheduler must check the persisted root before changing a queued leaf
     // to running. authorize_leaf checks again, but it is called after save.
     // A paused or superseded root must never leave a launch side effect.
@@ -2994,7 +2999,11 @@ pub(super) fn next_leaf_launch(
             super::active(&w.status) || agents.contains_key(&w.session_id)).count();
         children.push(child);
     }
-    if global_running >= 8 { return Ok(None); }
+    if global_running >= 8 {
+        // The freshly admitted wave remains queued when capacity is exhausted.
+        transaction.commit().map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
     // An early S2 trigger may queue a second wave before sibling children
     // finish their first wave. Prefer all eligible first-wave leaves across
     // children, so one slow child cannot be starved by another child's
@@ -3024,9 +3033,11 @@ pub(super) fn next_leaf_launch(
             };
             super::save(store, child)?;
             authorize_leaf(store, &launch.sid, &launch.admission)?;
+            transaction.commit().map_err(|e| e.to_string())?;
             return Ok(Some(launch));
         }
     }
+    transaction.commit().map_err(|e| e.to_string())?;
     Ok(None)
 }
 

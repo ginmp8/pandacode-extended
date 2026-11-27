@@ -490,10 +490,12 @@ pub(crate) fn freeze_for_round(
     freeze_with_scope(library, assigned, harness, optional, checks, Some(scope), false)
 }
 
-/// The native library's prompt-only harnesses can receive a bounded Worker
-/// Skill input without staging files, activating a package or granting tools.
+/// A known native harness can receive bounded Worker Skill reference text.
+/// File-based harnesses can consume the same text without exposing their
+/// native Skill tool or installing anything in a shared checkout. Packages
+/// that cannot fit in this text-only delivery remain unavailable.
 pub(crate) fn supports_worker_prompt(harness: &str) -> bool {
-    adapter::PROMPT_HARNESSES.contains(&harness)
+    adapter::known(harness)
 }
 
 pub(crate) fn worker_prompt(
@@ -604,7 +606,13 @@ fn freeze_with_scope(
                 .map_err(|_| format!("reviewer_skill_unavailable: SKILL.md of {id} is not UTF-8."))?;
             let (_, _, body) = frontmatter(main_text);
             let mut contents = body.to_owned();
-            let mode = if adapter::FILE_HARNESSES.contains(&context.harness) { "isolated_files" } else { "bounded_prompt" };
+            // Worker reference delivery never stages files, even for Claude
+            // and Codex. Council reviewer rounds retain their native file mode.
+            let mode = if !context.worker_prompt && adapter::FILE_HARNESSES.contains(&context.harness) {
+                "isolated_files"
+            } else {
+                "bounded_prompt"
+            };
             let staged_path = if mode == "isolated_files" {
                 Some(stage(library, &meta, &files, &hashes, context.scope)?)
             } else {

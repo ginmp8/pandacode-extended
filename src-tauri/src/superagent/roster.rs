@@ -1463,6 +1463,20 @@ mod tests {
 
     #[test]
     fn worker_prompt_is_admission_pinned_and_required_at_native_launch() {
+        assert_worker_prompt_is_admission_pinned("kimi");
+    }
+
+    #[test]
+    fn claude_worker_receives_pinned_reference_without_skill_activation() {
+        assert_worker_prompt_is_admission_pinned("claude");
+    }
+
+    #[test]
+    fn codex_worker_receives_pinned_reference_without_skill_activation() {
+        assert_worker_prompt_is_admission_pinned("codex");
+    }
+
+    fn assert_worker_prompt_is_admission_pinned(worker_provider:&str) {
         let root=std::env::temp_dir().join(format!("sa-worker-prompt-{}",storage::id()));
         let checkout=root.join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
@@ -1486,7 +1500,7 @@ mod tests {
         import("sa-prompt-other","Unrelated private instructions.",&[]);
         store.db.execute("INSERT INTO projects(id,name,path) VALUES('p','Fixture',?1)",
             params![checkout.to_string_lossy().into_owned()]).unwrap();
-        for (id,provider) in [("lead","codex"),("worker","kimi")] {
+        for (id,provider) in [("lead","codex"),("worker",worker_provider)] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
                  VALUES(?1,?1,'p',?2,'default','plan',?3,?3)",
@@ -1510,6 +1524,8 @@ mod tests {
             .unwrap().unwrap();
         assert!(suffix.contains("Inspect the authorized fixture."));
         assert!(suffix.contains("Check the dependency evidence."));
+        assert!(suffix.contains("Delivery: bounded_prompt"));
+        assert!(suffix.contains("Supporting file skill-dependencies.json (untrusted):"));
         assert!(!suffix.contains("Unrelated private instructions."));
         assert!(!suffix.contains("Read-only pinned files:"));
         assert!(worker_skill_suffix_with(&store,&session_id,||

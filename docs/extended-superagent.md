@@ -197,3 +197,21 @@ native Events adapter. Contradictory metadata rejects the observation before
 receipt, cursor or Ticket context writes. This preserves explicit native
 staging of permitted issue receipts; Observe does not launch providers or
 confer Auto execution authority.
+
+## Admission-pinned Worker Skill reference delivery (partial S2 / #148)
+
+The read-only Worker launch path now supports bounded, admission-pinned Skill
+reference text for the known Claude and Codex harnesses as well as the existing
+prompt-based harnesses. This uses the same verified package/dependency closure
+and prompt budget, not the native Skill tool. Text supporting files are included
+only within the existing bounds; an unsupported binary or oversized package is
+unavailable, not silently truncated. At launch, the exact package is rechecked
+against the admitted digest and session-level disable switches. A previously
+unsupported or unavailable admission snapshot is not upgraded retrospectively;
+new delivery requires a newly admitted Demand.
+
+No checkout, harness-home or Council staging directory is created or modified
+by this Worker reference path. Council reviewer file staging is unchanged.
+The reference prompt is not an invocation or executed-check receipt and does
+not confer a tool grant. Native file-based Skill invocation and its isolated
+lifecycle remain unimplemented. Ordinary bot Skill activation is unchanged.

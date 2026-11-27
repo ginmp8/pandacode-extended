@@ -865,7 +865,7 @@ pub(crate) fn start_observe_subscriptions(app: tauri::AppHandle) {
                     return;
                 }
                 after = Some((created_at, source_id.clone()));
-                if poll_source_authenticated(&state, &source_id, true).await.is_err() {
+                if poll_source_authenticated(&state, &source_id, true, None).await.is_err() {
                     // No GitHub response body, URL, token or provider text in logs.
                     eprintln!("SuperAgent Observe: authenticated source poll failed; inspect source health and GitHub credentials.");
                 }
@@ -2422,21 +2422,34 @@ fn require_background_team_revision(
     Ok(revision)
 }
 
+/// Explicit Team batch selection must not silently acquire a newer source
+/// activation while an earlier source is being fetched. Single-source and
+/// background polling deliberately select the current policy at preflight.
+fn observe_poll_snapshot(
+    store: &Store, source_id: &str, expected_revision: Option<i64>,
+) -> Result<EventSource> {
+    let selected = source(store, source_id)?;
+    if expected_revision.is_some_and(|revision| revision != selected.policy_revision) {
+        return Err("Source policy changed after Team batch selection; retry explicitly.".into());
+    }
+    if selected.mode != "observe" {
+        return Err("Source is Off; authenticated polling is not permitted.".into());
+    }
+    if selected.event_kind == "check_run.completed" {
+        return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
+    }
+    require_observe_preflight(store, &selected)?;
+    Ok(selected)
+}
+
 async fn poll_source_authenticated(
-    state: &AppState, source_id: &str, background: bool,
+    state: &AppState, source_id: &str, background: bool, expected_revision: Option<i64>,
 ) -> Result<AuthenticatedPoll> {
     // Off: no request, no inferred work. Snapshot all policy authority BEFORE
     // making the bounded read-only GitHub request.
     let (snapshot, since, team_revision) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let selected = source(&store, source_id)?;
-        if selected.mode != "observe" {
-            return Err("Source is Off; authenticated polling is not permitted.".into());
-        }
-        if selected.event_kind == "check_run.completed" {
-            return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
-        }
-        require_observe_preflight(&store, &selected)?;
+        let selected = observe_poll_snapshot(&store, source_id, expected_revision)?;
         if background {
             require_background_observe_preflight(&store, &selected)?;
         }
@@ -2488,7 +2501,7 @@ pub async fn superagent_source_poll_authenticated(
     window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
 ) -> Result<AuthenticatedPoll> {
     require_main_window(&window)?;
-    poll_source_authenticated(&state, &source_id, false).await
+    poll_source_authenticated(&state, &source_id, false, None).await
 }
 
 /// Explicit, read-only Team polling shares the per-source authenticated
@@ -2516,7 +2529,7 @@ pub async fn superagent_source_poll_team_authenticated(
             skipped_check_runs += 1;
             continue;
         }
-        match poll_source_authenticated(&state, &selected.id, false).await {
+        match poll_source_authenticated(&state, &selected.id, false, Some(selected.policy_revision)).await {
             Ok(result) => observed.push(result),
             Err(reason) => failures.push(format!("{}: {}", selected.id, reason)),
         }
@@ -7581,6 +7594,33 @@ mod tests {
             event_kind:"issues.opened".into(),subject_key:"issue:42".into(),
             sequence:seq,
         }
+    }
+
+    #[test]
+    fn desktop_team_poll_rejects_reactivated_source_snapshot_after_restart() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let selected = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let peer = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let peer = set_mode(&store, &peer.id, peer.policy_revision, "observe").unwrap();
+        let off = set_mode(&store, &selected.id, selected.policy_revision, "off").unwrap();
+        assert!(observe_poll_snapshot(&store, &selected.id, Some(selected.policy_revision)).is_err());
+        let fresh = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(observe_poll_snapshot(&reopened, &selected.id, Some(selected.policy_revision))
+            .unwrap_err().contains("Source policy changed"));
+        assert_eq!(observe_poll_snapshot(&reopened, &fresh.id, Some(fresh.policy_revision))
+            .unwrap().policy_revision, fresh.policy_revision);
+        assert_eq!(observe_poll_snapshot(&reopened, &fresh.id, None)
+            .unwrap().policy_revision, fresh.policy_revision);
+        assert_eq!(observe_poll_snapshot(&reopened, &peer.id, Some(peer.policy_revision))
+            .unwrap().policy_revision, peer.policy_revision);
+        assert!(list_decisions(&reopened, &fresh.id, 10).unwrap().is_empty());
+        assert_eq!(source(&reopened, &fresh.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&reopened, &peer.id, 10).unwrap().is_empty());
     }
 
     #[test]

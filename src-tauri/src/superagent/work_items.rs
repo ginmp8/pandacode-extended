@@ -871,8 +871,11 @@ mod headless_tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
             [&config.id],
         ).unwrap();
-        let (ticket, launched) = superagent::admit_role_with_staging(
-            &mut store, &config.id, "Inspect checkout", "staged-coordinator-plan", false, true, true,
+        let (ticket, launched) = superagent::admit_role_with_staging_member(
+            &mut store, &config.id, "Inspect checkout", "staged-coordinator-plan", false,
+            superagent::ManualAdmissionOptions {
+                coordinate: true, headless_staging: true, selected_worker_id: Some("worker"),
+            },
         ).unwrap();
         assert!(!launched);
         let id = &ticket.id;

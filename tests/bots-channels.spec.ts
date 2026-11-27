@@ -328,8 +328,10 @@ test.describe('shared bot channels', () => {
       await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption(strategy);
       const immediate = panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' });
       if (strategy === 'escalated') {
-        await expect(immediate).toBeChecked();
+        await expect(immediate).not.toBeChecked();
         await immediate.focus();
+        await page.keyboard.press('Space');
+        await expect(immediate).toBeChecked();
         await page.keyboard.press('Space');
         await expect(immediate).not.toBeChecked();
       } else await expect(immediate).toBeHidden();
@@ -489,6 +491,13 @@ test.describe('shared bot channels', () => {
     await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
     await expect(panel.getByRole('status')).toContainText('2 root seats (1 selected bots + 1 automatic)');
     await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
+    const immediate = panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+    await expect(immediate).not.toBeChecked();
+    await immediate.check();
+    await page.keyboard.press('Escape');
+    await refreshUnchangedChannel(page);
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    await expect(immediate).toBeChecked();
     await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
     await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
     await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
@@ -530,7 +539,10 @@ test.describe('shared bot channels', () => {
     await panel.getByRole('checkbox', { name: 'Writer', exact: true }).check();
     await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
     await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
-    await panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' }).uncheck();
+    const immediate = panel.getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+    await expect(immediate).not.toBeChecked();
+    await immediate.check();
+    await immediate.uncheck();
     await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
     await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
     await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');

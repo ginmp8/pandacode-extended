@@ -1972,7 +1972,7 @@ for (const mode of sourceModes) for (const strategy of ['parallel', 'escalated',
       if (mode.automatic) await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption(String(mode.automatic));
     }
     await panel(page).getByLabel('Review strategy').selectOption(strategy);
-    if (strategy === 'escalated') await panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' }).uncheck();
+    if (strategy === 'escalated') await expect(panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' })).not.toBeChecked();
     expect(await calls(page)).toEqual([]);
     await toggle(page).click();
     await expect.poll(async () => (await calls(page)).length).toBe(1);
@@ -1999,7 +1999,7 @@ test('existing Council modal sends only the explicit native S2 strategy and pres
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   expect((await calls(page))[0]).toMatchObject({
-    strategy: 'escalated', forceEscalation: true, maxRounds: 10, reviewerBotIds: undefined,
+    strategy: 'escalated', forceEscalation: false, maxRounds: 10, reviewerBotIds: undefined,
   });
   await expect(strategy).toHaveValue('escalated');
   await strategy.selectOption('parallel');
@@ -2020,8 +2020,10 @@ test('S2 on-demand trigger policy is task-scoped, keyboard accessible and does n
   const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
   await expect(immediate).toBeHidden();
   await strategy.selectOption('escalated');
-  await expect(immediate).toBeChecked();
+  await expect(immediate).not.toBeChecked();
   await immediate.focus();
+  await page.keyboard.press('Space');
+  await expect(immediate).toBeChecked();
   await page.keyboard.press('Space');
   await expect(immediate).not.toBeChecked();
   expect(await calls(page)).toEqual([]);
@@ -2045,16 +2047,21 @@ test('S2 persisted on-demand selection survives reopening and switches to explic
   await strategy.selectOption('escalated');
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
-  await immediate.uncheck();
+  expect((await calls(page))[0]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
+  await expect(immediate).not.toBeChecked();
+  await immediate.check();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
-  expect((await calls(page))[1]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
+  await immediate.uncheck();
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  expect((await calls(page))[2]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
   await page.keyboard.press('Escape');
   await button(page).click();
   const restored = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
   await expect(restored).not.toBeChecked();
   await restored.check();
-  await expect.poll(async () => (await calls(page)).length).toBe(3);
-  expect((await calls(page))[2]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
+  await expect.poll(async () => (await calls(page)).length).toBe(4);
+  expect((await calls(page))[3]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
 });
 
 test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-accessible modal', async ({ page }) => {
@@ -2076,7 +2083,7 @@ test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-ac
   await toggle(page).click();
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   expect((await calls(page))[0]).toMatchObject({
-    strategy: 'escalated', forceEscalation: true,
+    strategy: 'escalated', forceEscalation: false,
     automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
   });
   const bounds = await panel(page).boundingBox();

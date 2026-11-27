@@ -130,7 +130,7 @@ export function createCouncil(host: CouncilHost) {
     const draft = selection(sessionId), pendingStrategy = strategyDraft.get(sessionId);
     const council = { ...(shownConfig(sessionId) ?? councilDefaults()), ...(pendingStrategy ? {
       strategy: pendingStrategy, forceEscalation: pendingStrategy === 'escalated'
-        ? (escalationDraft.get(sessionId) ?? true) : false,
+        ? (escalationDraft.get(sessionId) ?? false) : false,
     } : {}) };
     if (!draft.selected) return { ...council, automaticReviewers: undefined, reviewerBotIds: undefined, nestedBotReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined };
     const extras = draft.automaticReviewers ?? 0;
@@ -404,9 +404,10 @@ export function createCouncil(host: CouncilHost) {
       option.hidden = effectiveStrategy !== 'escalated';
     }
     const escalationToggle = panel.querySelector<HTMLInputElement>('[data-council-force-escalation]');
-    // Native omits false from persisted S2 policies; only an unsaved S2 draft defaults to immediate escalation.
+    // Native omits false from persisted S2 policies. An unsaved S2 selection is
+    // on-demand; only an explicit user choice may require immediate escalation.
     if (escalationToggle) escalationToggle.checked = escalationDraft.get(sessionId)
-      ?? (strategyDraft.has(sessionId) ? effectiveStrategy === 'escalated' : values.forceEscalation === true);
+      ?? (!strategyDraft.has(sessionId) && values.forceEscalation === true);
     panel.querySelector<HTMLInputElement>('.council-new-threads')!.checked = councilForNewThreads();
     // The switch is busy while an automatic team starts for it.
     const sw = panel.querySelector<HTMLInputElement>('.council-switch')!, starting = pending.has(sessionId) && !host.team(sessionId);
@@ -643,7 +644,7 @@ export function createCouncil(host: CouncilHost) {
         }
         failures.delete(sessionId);
         if (current) void apply(sessionId, { ...current, strategy,
-          forceEscalation: strategy === 'escalated' ? (current.strategy === 'escalated' ? current.forceEscalation === true : true) : false }, remember);
+          forceEscalation: strategy === 'escalated' && current.strategy === 'escalated' && current.forceEscalation === true }, remember);
         else {
           strategyDraft.set(sessionId, strategy);
           escalationDraft.delete(sessionId);

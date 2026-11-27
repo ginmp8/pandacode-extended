@@ -242,7 +242,7 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
         </div>
         <div class="bc-council-advanced">
           <label>Review strategy<select name="councilStrategy" aria-label="Review strategy"><option value="parallel">Parallel</option><option value="escalated">Escalated (on demand / fresh review)</option><option value="two_phase">Two-phase adversarial</option></select></label>
-          <label class="bc-council-s2-trigger" hidden><input type="checkbox" name="councilForceEscalation" checked disabled> Require immediate S2 escalation</label>
+          <label class="bc-council-s2-trigger" hidden><input type="checkbox" name="councilForceEscalation" disabled> Require immediate S2 escalation</label>
           <small class="bc-council-s2-trigger" hidden>Unchecked: escalate only on native score, critical finding, missing evidence or conflict triggers. No extra reviewer sources are enabled.</small>
           <label>Criteria source<select name="councilCriteriaSource" aria-label="Criteria source"><option value="architect">Architect-defined</option><option value="user">User-defined</option><option value="hybrid">Hybrid</option></select></label>
           <div class="bc-council-criterion-fields" hidden>

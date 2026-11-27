@@ -13289,13 +13289,13 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
         "revoking the authenticated second-wave receipt must revoke terminal approval");
 }
 
-fn assert_nested_child_triggered_s2_with_root_sources(mode: &str) {
+fn assert_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: bool) {
     crate::providers::with_test_executable_override("codex", || {
-        run_nested_child_triggered_s2_with_root_sources(mode);
+        run_nested_child_triggered_s2_with_root_sources(mode, root_triggered);
     });
 }
 
-fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
+fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: bool) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -13340,25 +13340,34 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
         ).unwrap();
         (project, artifact, task)
     };
-    let mut assignments = Vec::new();
-    if matches!(mode, "m6" | "m7") {
-        let mut direct = reviewer_assignment("direct-root", "Quality");
-        direct["councilReviewerSource"] = json!("direct_bot");
-        assignments.push(direct);
-    }
-    if matches!(mode, "m5" | "m7") {
-        let mut automatic = reviewer_assignment("root-automatic", "correctness");
-        automatic["councilReviewerSource"] = json!("automatic");
-        assignments.push(automatic);
-    }
+    let assignments = |round: usize| {
+        let mut selected = Vec::new();
+        if matches!(mode, "m6" | "m7") {
+            let mut direct = reviewer_assignment(&format!("direct-root-{round}"), "Quality");
+            direct["councilReviewerSource"] = json!("direct_bot");
+            selected.push(direct);
+        }
+        if matches!(mode, "m5" | "m7") {
+            let mut automatic = reviewer_assignment(&format!("root-automatic-{round}"), "correctness");
+            automatic["councilReviewerSource"] = json!("automatic");
+            selected.push(automatic);
+        }
+        selected
+    };
+    let root_count = assignments(1).len();
     call(&state, &sid, "pandacode_dispatch_workers",
-        json!({"assignments": assignments})).unwrap();
-    for _ in 0..assignments.len() {
+        json!({"assignments": assignments(1)})).unwrap();
+    let mut root_sessions = std::collections::HashSet::new();
+    for _ in 0..root_count {
         let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         let (root_run, _) = claim(&state, action);
         assert!(root_run.config.reviewer_boundary);
-        finish(&state, &root_run,
-            "Clean independent root review.\nCouncil score: 9.7/10", true);
+        assert!(root_sessions.insert(root_run.config.session_id.clone()));
+        finish(&state, &root_run, if root_triggered {
+            "Below-target independent root review.\nCouncil score: 8.5/10"
+        } else {
+            "Clean independent root review.\nCouncil score: 9.7/10"
+        }, true);
     }
     let (pending, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
@@ -13382,12 +13391,19 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
         assert_eq!(child.automatic_escalation_triggers, vec!["below_target"]);
         assert!(child.verified_escalation_receipt.is_none());
         assert!(!verified_council_pass(&store, &root),
-            "a passing root and an admitted child wave are not approval");
+            "an admitted child wave is not approval");
         assert!(authenticated_hierarchical_status(&store, &root).is_none());
         let assignment = format!("{mode}-triggered-s2-native");
         assert!(council_requests::record_native_terminal(
             &store, &sid, &project, &assignment, &artifact, &task.request_id,
         ).is_err(), "a below-target M5/M6/M7 child wave cannot authorize a task result");
+    }
+    if root_triggered {
+        assert!(call(&state, &sid, "pandacode_dispatch_workers",
+            json!({"assignments": assignments(2)})).is_err(),
+            "a pending child escalation cannot authorize a new root wave");
+        assert_eq!(saved(&state, &sid).workers.iter().filter(|worker|
+            worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 0);
     }
     let mut second_wave_sessions = std::collections::HashSet::new();
     for _ in 0..2 {
@@ -13407,17 +13423,48 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
     }
+    if root_triggered {
+        let (pending, _) = dispatch_state(
+            &state, &sid, started.generation, "pandacode_finish_team",
+            json!({"summary":"Wait for independently triggered root wave"}),
+            &std::sync::atomic::AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(pending["completed"], false);
+        {
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            assert!(child_council::verified_triggered_s2_parent_seats(&store, &root)
+                .unwrap().is_some());
+            assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_none());
+            assert!(!verified_council_pass(&store, &root));
+            assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
+                "authenticated child escalation must not strand the independently triggered root wave");
+        }
+        let queued = call(&state, &sid, "pandacode_dispatch_workers",
+            json!({"assignments": assignments(2)})).unwrap();
+        assert_eq!(queued["queued"], true);
+        for _ in 0..root_count {
+            let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+            let (run, _) = claim(&state, action);
+            assert!(run.config.reviewer_boundary);
+            assert!(root_sessions.insert(run.config.session_id.clone()));
+            assert!(!second_wave_sessions.contains(&run.config.session_id));
+            finish(&state, &run,
+                "Fresh independent root S2 callback.\nCouncil score: 9.8/10", true);
+        }
+    }
     let (result, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
-        json!({"summary":"Validate native M5 child escalation evidence"}),
+        json!({"summary":"Validate native mixed-mode child escalation evidence"}),
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     assert_eq!(result["completed"], true,
-        "fresh child callbacks plus the original native root quorum must pass M5 S2");
+        "fresh child callbacks and the required native root wave must pass mixed S2");
     let store = state.store.lock().unwrap();
     let saved = load(&store, &sid).unwrap().unwrap();
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
-    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.7));
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest,
+        Some(if root_triggered { 9.8 } else { 9.7 }));
     assert!(verified_council_pass(&store, &saved));
     let assignment = format!("{mode}-triggered-s2-native");
     let terminal = council_requests::record_native_terminal(
@@ -13426,18 +13473,20 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
     assert_eq!(terminal.outcome, "passed");
     // The terminal records the root review round, not the independent child S2 wave.
     // Fresh child leaves have already been checked above as native round two.
-    assert_eq!(saved.council_status.as_ref().unwrap().round, 1);
-    assert_eq!(terminal.reviewed_round, Some(1));
+    let expected_round = if root_triggered { 2 } else { 1 };
+    assert_eq!(saved.council_status.as_ref().unwrap().round, expected_round);
+    assert_eq!(terminal.reviewed_round, Some(expected_round));
     assert_eq!(council_requests::read_native_terminal(
         &store, &sid, &project, &assignment, &artifact, &task.request_id,
     ).unwrap(), terminal);
     let root_seats = saved.workers.iter().filter(|worker| worker.council.is_some())
         .collect::<Vec<_>>();
-    assert_eq!(root_seats.len(), if mode == "m7" { 2 } else { 1 },
+    assert_eq!(root_seats.len(), root_count * expected_round,
         "no phantom root reviewers may appear in M5/M6/M7");
     assert_eq!(root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
         .and_then(|binding| binding.reviewer_bot_id.as_deref())
-        == Some("quality-direct")).count(), usize::from(matches!(mode, "m6" | "m7")),
+        == Some("quality-direct")).count(),
+        expected_round * usize::from(matches!(mode, "m6" | "m7")),
         "direct reviewer identity must remain bound to the configured bot");
     if matches!(mode, "m6" | "m7") {
         let mut forged = saved.clone();
@@ -13475,17 +13524,24 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
 
 #[test]
 fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_quorum() {
-    assert_nested_child_triggered_s2_with_root_sources("m5");
+    assert_nested_child_triggered_s2_with_root_sources("m5", false);
 }
 
 #[test]
 fn nested_m6_child_triggered_s2_requires_authenticated_direct_and_child_receipts() {
-    assert_nested_child_triggered_s2_with_root_sources("m6");
+    assert_nested_child_triggered_s2_with_root_sources("m6", false);
 }
 
 #[test]
 fn nested_m7_child_triggered_s2_requires_all_three_authenticated_sources() {
-    assert_nested_child_triggered_s2_with_root_sources("m7");
+    assert_nested_child_triggered_s2_with_root_sources("m7", false);
+}
+
+#[test]
+fn nested_s2_independent_root_and_child_triggers_settle_in_mixed_modes() {
+    for mode in ["m5", "m6", "m7"] {
+        assert_nested_child_triggered_s2_with_root_sources(mode, true);
+    }
 }
 
 

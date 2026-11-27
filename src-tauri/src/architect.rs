@@ -961,8 +961,21 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
     // Clearing force_escalation before verifying them changes that policy and
     // wrongly rejects authentic first-wave child callbacks.
     if !council_evidence_is_current(store, team) { return false; }
-    let Some(children) = child_council::verified_parent_seats(store, team).ok().flatten()
-        else { return false };
+    // In unforced S2, a child and a root reviewer can independently trigger
+    // escalation on the same artifact. Once the child has settled through
+    // fresh authenticated callbacks, its composite must be usable for root
+    // admission as well as for the terminal gate. Pending or invalid child
+    // evidence still cannot authorize another root reviewer.
+    let children = if !config.force_escalation {
+        match child_council::verified_triggered_s2_parent_seats(store, team) {
+            Ok(Some(seats)) => Some(seats),
+            Ok(None) => child_council::verified_parent_seats(store, team).ok().flatten(),
+            Err(_) => return false,
+        }
+    } else {
+        child_council::verified_parent_seats(store, team).ok().flatten()
+    };
+    let Some(children) = children else { return false };
     let mut first = team.clone();
     first.workers.retain(|worker| worker.council.as_ref().is_none_or(|seat| seat.round == 1));
     // An authenticated below-target root callback is a genuine unforced S2

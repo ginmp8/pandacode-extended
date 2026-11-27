@@ -1,5 +1,11 @@
 # PandaCode Extended documentation
 
+## 2026-11-26 — Colab transport correction checkpoint
+
+Frozen [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) declares app 0.3.158. This independent code checkpoint copies all three Rust files of [upstream Colab fix `01a0c32effec`](https://github.com/ginmp8/pandacode/commit/01a0c32effec2b4421d7fc9c2c25187c9a89e1f9), including its regression tests, byte-for-byte. The prior Extended app version, source-baseline identity and original release notes remain 0.3.154 pending complete reconciliation; this is not a full upstream snapshot. Extended 0.12.0 remains DRAFT.
+
+See [candidate details](0.12.0/README.md) and [remaining reconciliation](0.12.0/known-issues.md).
+
 ## 2026-11-26 — upstream 0.3.154 reconciliation
 
 Source: [fork main `e6de802e705d`](https://github.com/ginmp8/pandacode/commit/e6de802e705d53a5ff196266f775a4738dd5d701) (tree `52d7475bca059cb6adf699a3df14c2e7209a9438`); Extended parent: [`e15874afdc58`](https://github.com/ginmp8/pandacode-extended/commit/e15874afdc587833c943490a4c2c747703fb1808). The planned Extended distribution remains **0.12.0 DRAFT**, independent of the inherited application version.

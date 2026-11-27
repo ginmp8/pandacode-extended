@@ -1,5 +1,12 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-26 — Colab transport correction checkpoint
+
+- [x] Verify the three Colab fix source blob identities against [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65).
+- [x] Verify parent `e32fc1666c6d0a84b71691aed2583ae4f4029ab9` CI (22/22 successful jobs on [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45895785582) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45895797103)).
+- [ ] Verify candidate exact-SHA CI, especially Rust cloud HTTP/Colab regression tests and RustSec.
+- [ ] Complete the remaining 79-path delta and synchronize inherited version, source baseline, historical notes, release dates and Extended controls in a consistent candidate. Native acceptance and release approval remain pending.
+
 ## 2026-11-26 — verified 0.3.154 CI and pending storage reconciliation
 
 The published code checkpoint [`73c2434ca652`](https://github.com/ginmp8/pandacode-extended/commit/73c2434ca652483c8763e066ad3fc722b1d3365b) has **22/22 successful CI jobs** (11 each on [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45816387755) and [pull request](https://github.com/ginmp8/pandacode-extended/actions/runs/45816403874)), all job head SHAs verified against that commit. This includes Linux Rust checks/tests, five Clippy targets per run, Node/typecheck/website, mobile/Expo, npm and RustSec audits, and macOS ONNX parity. It does not validate the pending upstream changes. The planned distribution remains **0.12.0 DRAFT**.

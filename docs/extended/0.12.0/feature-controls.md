@@ -1,5 +1,9 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-26 — Colab transport correction checkpoint
+
+The source-exact Colab patch from [upstream Colab fix `01a0c32effec`](https://github.com/ginmp8/pandacode/commit/01a0c32effec2b4421d7fc9c2c25187c9a89e1f9) leaves Extended Settings, credential-transfer authorization, VM permissions and Connect/bot/MCP gates unchanged. No native On/Off or live Colab acceptance is claimed. Full 0.3.158 reconciliation remains pending.
+
 ## 2026-11-26 — upstream 0.3.154 reconciliation
 
 Source: [fork main `e6de802e705d`](https://github.com/ginmp8/pandacode/commit/e6de802e705d53a5ff196266f775a4738dd5d701) (tree `52d7475bca059cb6adf699a3df14c2e7209a9438`); Extended parent: [`e15874afdc58`](https://github.com/ginmp8/pandacode-extended/commit/e15874afdc587833c943490a4c2c747703fb1808). The planned Extended distribution remains **0.12.0 DRAFT**, independent of the inherited application version.

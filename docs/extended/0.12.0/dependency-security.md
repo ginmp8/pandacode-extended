@@ -1,5 +1,9 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-26 — Colab transport correction checkpoint
+
+The Colab correction retains the Extended manifest and lockfile (reqwest 0.13.5, rustls 0.23.46, Tokio 1.53.3). The source code distinguishes unclean connection EOF from real handshake, certificate, protocol and fatal-alert errors; the trusted root helper is test-only. No new vulnerability remediation is claimed. Parent CI [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45895785582) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45895797103) passed both npm and RustSec jobs; candidate audits and runtime tests remain unverified.
+
 ## 2026-11-26 — upstream 0.3.154 reconciliation
 
 Source: [fork main `e6de802e705d`](https://github.com/ginmp8/pandacode/commit/e6de802e705d53a5ff196266f775a4738dd5d701) (tree `52d7475bca059cb6adf699a3df14c2e7209a9438`); Extended parent: [`e15874afdc58`](https://github.com/ginmp8/pandacode-extended/commit/e15874afdc587833c943490a4c2c747703fb1808). The planned Extended distribution remains **0.12.0 DRAFT**, independent of the inherited application version.

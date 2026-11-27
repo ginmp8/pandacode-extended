@@ -44,15 +44,29 @@ test('application identity matches pinned upstream source release', async () => 
 
 test('historical release notes and dates retain original upstream Git blobs', async () => {
   const source = await json('docs/extended/upstream/source-baseline.json');
+  // History-only imports do not advance the fully reconciled application baseline.
+  const history = source.release_history ?? source;
+  assert.match(history.version, semver);
+  assert.match(history.release_sha, /^[a-f0-9]{40}$/);
+  assert.match(history.tree_sha, /^[a-f0-9]{40}$/);
+  assert.ok(cmp(history.version, source.version) >= 0, 'history must not precede the application baseline');
+  if (history.version === source.version) {
+    assert.equal(history.release_sha, source.release_sha);
+    assert.equal(history.tree_sha, source.tree_sha);
+    assert.deepEqual(history.release_notes, source.release_notes);
+    assert.equal(history.release_dates_sha, source.release_dates_sha);
+  }
   const releases = (await readdir(resolve(root, 'releases'))).filter(x => x.endsWith('.md') && semver.test(x.slice(0, -3))).map(x => x.slice(0, -3)).sort(cmp);
-  assert.equal(releases.at(-1), source.version, 'latest historical release should match imported upstream source version');
-  for (const [version, hash] of Object.entries(source.release_notes)) {
+  assert.equal(releases.at(-1), history.version, 'latest historical release should match the pinned history version');
+  assert.deepEqual(releases, Object.keys(history.release_notes).sort(cmp), 'every historical note must be pinned, with no extra or missing files');
+  for (const version of Object.keys(source.release_notes)) assert.ok(Object.hasOwn(history.release_notes, version), `history must retain release ${version}`);
+  for (const [version, hash] of Object.entries(history.release_notes)) {
     assert.match(hash, /^[a-f0-9]{40}$/);
     const note = await read(`releases/${version}.md`);
     assert.ok(note.trim());
     assert.equal(gitSha(note), hash, `release notes ${version} must match pinned original`);
   }
   const dates = await read('website/src/data/release-dates.json');
-  assert.match(JSON.parse(dates)[source.version], /^\d{4}-\d{2}-\d{2}$/);
-  assert.equal(gitSha(dates), source.release_dates_sha, 'release dates must match pinned original');
+  assert.match(JSON.parse(dates)[history.version], /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(gitSha(dates), history.release_dates_sha, 'release dates must match pinned original');
 });

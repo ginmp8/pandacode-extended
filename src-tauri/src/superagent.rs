@@ -4466,6 +4466,11 @@ pub(crate) fn guard_prepared_provider_launch(
     {
         return Err("policy_unsupported: prepared SuperAgent provider or checkout changed.".into());
     }
+    if roster::worker_skill_suffix(store,&config.session_id)?
+        .is_some_and(|suffix|!config.prompt.contains(suffix.as_str()))
+    {
+        return Err("policy_unsupported: prepared Worker Skill prompt differs from admitted package.".into());
+    }
     // Provider resume IDs select actual harness conversations. Match the
     // prepared value to the live session, then require exclusive native
     // attribution before letting an existing thread enter this task. Usage

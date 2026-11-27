@@ -83,6 +83,7 @@ interface AdmittedMemberProfile {
   role: string; position: number; botId: string; projectId: string;
   provider: string; model: string; mode: string; reasoningEffort: string;
   assignedSkillIds: string[];
+  workerSkillPrompt?: {status:'ready'|'unavailable'|'unsupported';sha256?:string};
 }
 interface AdmittedTeamProfile {
   policyRevision: number; capturedAt: number; members: AdmittedMemberProfile[];
@@ -705,7 +706,14 @@ let demandArchived = false;
               ' · Mode ' + safe(member.mode) +
               ' · Reasoning ' + safe(member.reasoningEffort || 'not specified') +
               ' · Assigned Skills (not invocation evidence): ' +
-              safe(member.assignedSkillIds?.join(', ') || 'none') + '</li>').join('') + '</ol>'
+              safe(member.assignedSkillIds?.join(', ') || 'none') +
+              (member.workerSkillPrompt?.status === 'ready'
+                ? ' · Assigned Skill prompt package pinned (delivery and invocation not verified)'
+                : member.workerSkillPrompt?.status === 'unavailable'
+                  ? ' · Assigned Skill prompt unavailable at admission'
+                  : member.workerSkillPrompt?.status === 'unsupported'
+                    ? ' · Assigned Skill prompt delivery unsupported for this harness'
+                    : '') + '</li>').join('') + '</ol>'
           : '<p>Legacy or inconsistent admission snapshot unavailable; no role, model or Skill provenance inferred.</p>') +
         '</section>' +
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +

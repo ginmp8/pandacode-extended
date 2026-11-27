@@ -4190,7 +4190,7 @@ test('Demand inspector preserves native admitted Team identity across revisions 
             assignedSkillIds:[],projectPath:'/private/hidden-coordinator'},
           {role:'worker',position:0,botId:'former-worker',projectId:'project-old',
             provider:'claude',model:'original-worker-model',mode:'plan',reasoningEffort:'medium',
-            assignedSkillIds:['verification'],projectPath:'/private/hidden-worker'},
+            assignedSkillIds:['verification'],workerSkillPrompt:{status:'unsupported'},projectPath:'/private/hidden-worker'},
         ]},
         finalizationGate:'not_pending',unresolvedExternalEffects:0,
       } as never;
@@ -4207,6 +4207,7 @@ test('Demand inspector preserves native admitted Team identity across revisions 
   await expect(pane).toContainText('Bot ID former-worker');
   await expect(pane).toContainText('Model original-worker-model');
   await expect(pane).toContainText('Assigned Skills (not invocation evidence): verification');
+  await expect(pane).toContainText('Assigned Skill prompt delivery unsupported for this harness');
   await expect(pane).not.toContainText('Replacement Worker');
   await expect(host).not.toContainText('/private/hidden-worker');
   await expect(host).not.toContainText('/private/hidden-coordinator');

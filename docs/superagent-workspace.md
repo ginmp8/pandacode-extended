@@ -253,6 +253,22 @@ grants. Keyboard users and screen readers receive a semantic ordered
 list; a non-SVG layout keeps narrow and high-contrast modes legible.
 
 
+## Admission-pinned Worker Skill prompt delivery (partial S2 / AC-10)
+
+For native prompt-based harnesses, new Worker profiles can pin the digest of
+their assigned, trusted Skills and complete required dependency closure during
+Demand admission. The native provider preparation supplies those exact bounded
+reference instructions, and the final launch guard rejects missing, changed,
+disabled or differently composed pinned inputs. The package is never installed,
+activated or copied to the checkout; no extra tool permission is issued.
+Historical snapshots, missing/untrusted packages and file-based harnesses
+(Claude/Codex) do not silently acquire new inputs. The admitted configuration
+reports pinned, unavailable or unsupported prompt delivery separately from
+actual invocation or execution evidence. The conventional application database
+and adjacent Skills Library must be available; arbitrary detached database copies
+do not guess a library location. This is not a native Skill invocation receipt
+and does not satisfy task-owned file staging, autonomous writes or Council review.
+
 ## Effective Team policy and Skills inspection (partial S2 / AC-10)
 
 From **Configure Team roles**, load the existing native roster and select **Inspect

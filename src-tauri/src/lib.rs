@@ -1775,6 +1775,7 @@ fn prepare_task_run_in_project(
     } else {
         context_recovery::prepare(&store, &session, &prompt)?
     };
+    let worker_skill_suffix=superagent::roster::worker_skill_suffix(&store,&session_id)?;
     let turn_started = std::time::Instant::now();
     let turn_message_id = if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
@@ -1817,7 +1818,8 @@ fn prepare_task_run_in_project(
         }
         error
     };
-    let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    let mut prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    if let Some(suffix)=worker_skill_suffix { prompt.push_str(&suffix); }
     let superagent_policy = superagent::read_only_policy(&store, &session_id).map_err(restore)?;
     let superagent_session = superagent_policy.is_some();
     let reviewer_policy = match superagent_policy {

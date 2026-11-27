@@ -126,6 +126,16 @@ pub struct TeamRoster {
     pub strategy:String,
     pub execution_ready:bool,
 }
+/// A bounded prompt package pinned at admission, not proof of execution.
+/// Old Tickets without this field preserve their existing no-provisioning behavior.
+#[derive(Debug,Clone,Serialize,Deserialize,PartialEq,Eq)]
+#[serde(tag="status",rename_all="snake_case",deny_unknown_fields)]
+pub enum WorkerSkillPromptPin {
+    Ready { sha256:String },
+    Unavailable,
+    Unsupported,
+}
+
 /// A bounded, configuration-only snapshot of actual Team member profiles.
 #[derive(Debug,Clone,Serialize,Deserialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase")]
@@ -149,6 +159,8 @@ pub struct AdmittedMemberProfile {
     pub mode:String,
     pub reasoning_effort:String,
     pub assigned_skill_ids:Vec<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub worker_skill_prompt:Option<WorkerSkillPromptPin>,
     /// Length-framed digest of the original bot role and instructions. Raw prompt text stays private.
     /// Legacy read-only Tickets may omit this field; absence never authorizes tools.
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -232,9 +244,73 @@ fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<
         provider:bot.provider.clone(),model:bot.model.clone(),mode:bot.mode.clone(),
         reasoning_effort:bot.reasoning_effort.clone(),
         assigned_skill_ids:bot.skills.clone(),
+        worker_skill_prompt:None,
         prompt_identity_sha256:Some(prompt_identity(bot)),
         brief_name_sha256:Some(brief_name_identity(bot)),
     })
+}
+
+/// The actual desktop database and Skills Library share the application data
+/// directory. Do not guess a library for an arbitrary detached database copy.
+fn worker_skill_library(store:&Store)->Result<crate::skills::Library> {
+    let root=store.path.parent().filter(|p|p.is_absolute())
+        .ok_or("Worker Skill Library location is unavailable.")?;
+    if store.path.file_name().and_then(|name|name.to_str())!=Some("kingcode.sqlite3") {
+        return Err("Worker Skill Library is unavailable for a nonstandard database path.".into());
+    }
+    Ok(crate::skills::Library::new(root.join("skills"),root.to_path_buf()))
+}
+
+fn capture_worker_skill_prompt(store:&Store,member:&AdmittedMemberProfile)->Option<WorkerSkillPromptPin> {
+    if member.role!="worker" || member.assigned_skill_ids.is_empty() {
+        return None;
+    }
+    if !crate::skills::reviewer::supports_worker_prompt(&member.provider) {
+        return Some(WorkerSkillPromptPin::Unsupported);
+    }
+    let result=worker_skill_library(store).and_then(|library|
+        crate::skills::reviewer::worker_prompt(
+            &library,&member.assigned_skill_ids,&member.provider,&Default::default(),
+        )
+    );
+    Some(match result {
+        Ok((sha256,_))=>WorkerSkillPromptPin::Ready{sha256},
+        Err(_)=>WorkerSkillPromptPin::Unavailable,
+    })
+}
+
+/// Re-resolve only the active native Worker and its exact admission package.
+/// Never upgrade an unsupported/unavailable or historical snapshot using live
+/// library state. The native provider receives a reference prompt, not a skill
+/// invocation receipt; scripts, activation and additional tools remain forbidden.
+pub(crate) fn worker_skill_suffix(store:&Store,session_id:&str)->Result<Option<String>> {
+    worker_skill_suffix_with(store,session_id,||crate::skill_manager::disabled_for(session_id))
+}
+
+fn worker_skill_suffix_with(
+    store:&Store,session_id:&str,disabled:impl FnOnce()->std::collections::BTreeSet<String>,
+)->Result<Option<String>> {
+    let assignment:Option<(String,String)>=store.db.query_row(
+        "SELECT ticket_id,bot_id FROM sa_assignments WHERE session_id=?1",
+        [session_id],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((ticket_id,bot_id))=assignment else {return Ok(None);};
+    let Some(profile)=ticket_profile(store,&ticket_id)? else {return Ok(None);};
+    let Some(member)=profile.members.iter().find(|m|m.role=="worker" && m.bot_id==bot_id)
+        else {return Ok(None);};
+    let Some(WorkerSkillPromptPin::Ready{sha256})=member.worker_skill_prompt.as_ref()
+        else {return Ok(None);};
+    if super::read_only_policy(store,session_id)?.is_none() {
+        return Err("Worker Skill prompt has no active native authority.".into());
+    }
+    let library=worker_skill_library(store)?;
+    let (actual,suffix)=crate::skills::reviewer::worker_prompt(
+        &library,&member.assigned_skill_ids,&member.provider,&disabled(),
+    )?;
+    if &actual!=sha256 {
+        return Err("Admitted Worker Skill package changed; create a newly authorized Demand.".into());
+    }
+    Ok(Some(suffix))
 }
 
 /// Called inside the same native SQLite transaction that creates the Ticket,
@@ -250,7 +326,9 @@ pub(super) fn capture_ticket_profile(
     let coordinator=bots::get(store,&roster.coordinator_bot_id)?;
     profiles.push(member_profile(store,&coordinator,"coordinator",0)?);
     for (position,id) in roster.worker_bot_ids.iter().enumerate() {
-        profiles.push(member_profile(store,&bots::get(store,id)?,"worker",position)?);
+        let mut profile=member_profile(store,&bots::get(store,id)?,"worker",position)?;
+        profile.worker_skill_prompt=capture_worker_skill_prompt(store,&profile);
+        profiles.push(profile);
     }
     for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
         profiles.push(member_profile(store,&bots::get(store,id)?,"reviewer",position)?);
@@ -328,6 +406,14 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
                 digest.len()!=64 || !digest.bytes().all(|b| matches!(b,b'0'..=b'9'|b'a'..=b'f'))
             }) {
                 return Err("Invalid persisted task-effective bot brief name identity.".into());
+            }
+            if member.worker_skill_prompt.as_ref().is_some_and(|pin|
+                member.role!="worker" || member.assigned_skill_ids.is_empty()
+                || matches!(pin,WorkerSkillPromptPin::Ready{sha256} if
+                    !crate::skills::reviewer::supports_worker_prompt(&member.provider)
+                    || sha256.len()!=64 || !sha256.bytes().all(|b|matches!(b,b'0'..=b'9'|b'a'..=b'f')))
+            ) {
+                return Err("Invalid persisted Worker Skill prompt admission identity.".into());
             }
             if member.checkout_existed_at_admission.is_some_and(|existed|
                 existed != member.resolved_project_path.is_some()
@@ -415,6 +501,9 @@ pub(super) fn require_current_profile(
     // Older admitted snapshots did not pin display names. Keep their historical
     // admission semantics; never reinterpret a missing digest as a new grant.
     if recorded.brief_name_sha256.is_none() {current.brief_name_sha256=None;}
+    // The immutable package is checked at the real provider boundary, not
+    // regenerated by a reusable-profile comparison.
+    current.worker_skill_prompt=recorded.worker_skill_prompt.clone();
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
     }
@@ -1370,6 +1459,93 @@ mod tests {
         assert_eq!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members,original);
         let reopened=Store::open_read_only(&path).unwrap();
         assert_eq!(ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,original);
+    }
+
+    #[test]
+    fn worker_prompt_is_admission_pinned_and_required_at_native_launch() {
+        let root=std::env::temp_dir().join(format!("sa-worker-prompt-{}",storage::id()));
+        let checkout=root.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let path=root.join("kingcode.sqlite3");
+        let mut store=Store::open(&path).unwrap();
+        let library=crate::skills::Library::new(root.join("skills"),root.clone());
+        let source=|| crate::skills::Source {
+            kind:"folder".into(),location:"fixture".into(),git_ref:None,commit:None,
+        };
+        let import=|name:&str,body:&str,dependencies:&[&str]| {
+            let mut files=vec![("SKILL.md".to_owned(),
+                format!("---\nname: {name}\n---\n{body}").into_bytes())];
+            if !dependencies.is_empty() {
+                files.push(("skill-dependencies.json".into(),
+                    serde_json::to_vec(&serde_json::json!({"requiredSkills":dependencies})).unwrap()));
+            }
+            library.import(crate::skills::Kind::Skill,files,name,source()).unwrap();
+        };
+        import("sa-prompt-dep","Check the dependency evidence.",&[]);
+        import("sa-prompt-root","Inspect the authorized fixture.",&["sa-prompt-dep"]);
+        import("sa-prompt-other","Unrelated private instructions.",&[]);
+        store.db.execute("INSERT INTO projects(id,name,path) VALUES('p','Fixture',?1)",
+            [checkout.to_string_lossy().as_ref()]).unwrap();
+        for (id,provider) in [("lead","codex"),("worker","kimi")] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p',?2,'default','plan',?3,?3)",
+                params![id,provider,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute("UPDATE bots SET skills='[\"sa-prompt-root\"]' WHERE id='worker'",[]).unwrap();
+        let team=super::super::create_configuration(&store,NewOrchestration {
+            name:"Prompt fixture".into(),coordinator_bot_id:"lead".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        super::super::change_enabled(&store,&team.id,team.policy_revision,true).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&team.id,"Inspect the fixture","worker-prompt",false,
+        ).unwrap();
+        assert!(started);
+        let session_id=super::super::assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let original=ticket_profile(&store,&ticket.id).unwrap().unwrap().members;
+        assert!(original[0].worker_skill_prompt.is_none());
+        assert!(matches!(original[1].worker_skill_prompt.as_ref(),Some(WorkerSkillPromptPin::Ready{..})));
+        let suffix=worker_skill_suffix_with(&store,&session_id,std::collections::BTreeSet::new)
+            .unwrap().unwrap();
+        assert!(suffix.contains("Inspect the authorized fixture."));
+        assert!(suffix.contains("Check the dependency evidence."));
+        assert!(!suffix.contains("Unrelated private instructions."));
+        assert!(!suffix.contains("Read-only pinned files:"));
+        assert!(worker_skill_suffix_with(&store,&session_id,||
+            std::collections::BTreeSet::from(["sa-prompt-dep".to_owned()])).is_err());
+
+        let session=store.session(&session_id).unwrap();
+        let mut config=crate::providers::RunConfig {
+            session_id:session_id.clone(),provider:session.provider,model:session.model,
+            reasoning_effort:session.reasoning_effort,mode:"plan".into(),reviewer_boundary:true,
+            reviewer_policy:super::super::read_only_policy(&store,&session_id).unwrap(),
+            cwd:store.workspace_root("p",Some(&session_id)).unwrap(),resume_id:None,
+            prompt:"Inspect".into(),instructions:String::new(),skill:None,goal:None,
+            codex_settings:None,images:Vec::new(),
+        };
+        assert!(super::super::guard_prepared_provider_launch(&store,&config).is_err(),
+            "a prepared native launch must carry the exact pinned prompt");
+        config.prompt.push_str(&suffix);
+        // The native launch path can append application/title instructions after
+        // preparing the Worker input; the complete pinned block must still exist.
+        config.prompt.push_str("\nApplication instructions.");
+        assert!(super::super::guard_prepared_provider_launch(&store,&config).is_ok());
+        assert!(config.skill.is_none(),"prompt delivery is not a native invocation receipt");
+        let ordinary=store.create_session("p","kimi","default","ask").unwrap();
+        assert!(worker_skill_suffix_with(&store,&ordinary.id,std::collections::BTreeSet::new)
+            .unwrap().is_none());
+        assert_eq!(std::fs::read_dir(&checkout).unwrap().count(),0);
+        assert!(!root.join("skills/.council-reviewer-snapshots").exists());
+        import("sa-prompt-dep","A newly imported dependency revision.",&[]);
+        assert!(worker_skill_suffix_with(&store,&session_id,std::collections::BTreeSet::new).is_err());
+        assert!(super::super::guard_prepared_provider_launch(&store,&config).is_err());
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,original);
+        assert!(worker_skill_suffix_with(&reopened,&session_id,std::collections::BTreeSet::new).is_err());
+        drop(reopened);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

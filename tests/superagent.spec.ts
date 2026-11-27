@@ -3112,6 +3112,45 @@ test('native operator WorkItem cancellation is confirmed, revision-bound and non
     /submit|dispatch|approve|grant|stop|enable|reserve/.test(command))).toBe(false);
 });
 
+test('pending native Coordinator keeps WorkItem planning unavailable', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-pending-coordinator-plan-test';document.body.appendChild(host);
+    const ticket={id:'ticket',orchestrationId:'team',objective:'Wait for Coordinator',
+      state:'blocked',revision:3,evidence:null};
+    const calls:string[]=[];
+    (window as unknown as {pendingCoordinatorCalls:string[]}).pendingCoordinatorCalls=calls;
+    mountSuperagent(host,async command => {
+      calls.push(command);
+      if(command==='bots_list') return [{id:'lead',name:'Lead',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list') return [{id:'team',name:'Plan Team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets') return [ticket] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {ticket,
+        mandate:{actor:'local-user',authorizationId:'native-user-issued',policyRevision:1,
+          projectId:'project',expiresAt:1900000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],workItems:[],truncatedWorkItems:false,
+        initialCoordinatorPending:true,coordinatorPlanReviewRequired:false} as never;
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-pending-coordinator-plan-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const plans=host.getByRole('region',{name:'Operator-planned WorkItems'});
+  await expect(plans).toContainText('Wait for successful native Coordinator evidence');
+  await expect(plans.getByLabel('New planned work item')).toHaveCount(0);
+  await expect(plans.getByLabel('Reviewed dependency plan (JSON)')).toHaveCount(0);
+  await expect(plans.getByRole('button',{name:'Authorize sequential plan dispatch'})).toHaveCount(0);
+  expect(await page.evaluate(()=>(window as unknown as {pendingCoordinatorCalls:string[]})
+    .pendingCoordinatorCalls.filter(command=>command.includes('plan_work_item')))).toEqual([]);
+});
+
 test('reviewed dependency plan sends one revision-bound native batch', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

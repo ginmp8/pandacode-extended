@@ -711,6 +711,9 @@ let demandArchived = false;
         '<section class="sa-work-item-plan" role="region" aria-label="Operator-planned WorkItems">' +
         '<h5>Planned WorkItems</h5><p>Manual dispatch selects one dependency-ready item. Accept its evidence before dispatching the next; ' +
         'the Demand stays open while items remain. No permission grant or Council result is inferred.</p>' +
+        (ticketDetails.initialCoordinatorPending === true
+          ? '<p role="status">Wait for successful native Coordinator evidence before planning WorkItems. ' +
+            'Use the native Coordinator dispatch or recovery action first.</p>' : '') +
         (ticketDetails.coordinatorPlanReviewRequired === true
           ? '<p id="sa-plan-review-required" role="status">Worker dispatch requires a reviewed dependency plan. ' +
             'Choose an explicit Worker and routing rationale for every item, then save the plan before dispatch. Unsupported response formats are not imported automatically.</p>' : '') +
@@ -720,7 +723,8 @@ let demandArchived = false;
             safe(ticketDetails.pendingDispatch.kind) + ' · Authorized revision ' +
             safe(ticketDetails.pendingDispatch.expectedRevision) + '</p>' +
             '<button type="button" data-sa-cancel-dispatch>Cancel pending dispatch</button></section>' : '') +
-        (validWorkItems && !ticketDetails.pendingDispatch && ['queued','blocked'].includes(ticketDetails.ticket.state) && !ticketDetails.truncatedWorkItems &&
+        (validWorkItems && ticketDetails.initialCoordinatorPending !== true &&
+          !ticketDetails.pendingDispatch && ['queued','blocked'].includes(ticketDetails.ticket.state) && !ticketDetails.truncatedWorkItems &&
           plannedWorkItems.some(item=>item.state==='planned' && (!item.assignmentId || ticketDetails?.ticket.state==='blocked'))
           ? '<button type="button" data-sa-dispatch-reviewed-plan>Authorize sequential plan dispatch</button>' +
             '<p>Read-only Workers only. A new explicit authorization may retry a blocked item; subsequent items advance only after human acceptance.</p>' : '') +
@@ -741,7 +745,8 @@ let demandArchived = false;
           '</li>').join('') || '<li>No operator-planned WorkItems.</li>') + '</ol>' :
           '<p>WorkItem snapshot inconsistent; reload before planning.</p>') +
         (ticketDetails.truncatedWorkItems ? '<p>Only the first 100 plans are shown.</p>' : '') +
-        (validWorkItems && ['blocked','queued'].includes(ticketDetails.ticket.state)
+        (validWorkItems && ticketDetails.initialCoordinatorPending !== true &&
+          ['blocked','queued'].includes(ticketDetails.ticket.state)
           ? (ticketDetails.coordinatorPlanReviewRequired === true ? '' :
             '<form data-sa-form="plan-work-item"><label>New planned work item' +
             '<input type="text" name="summary" maxlength="1000" required ' +

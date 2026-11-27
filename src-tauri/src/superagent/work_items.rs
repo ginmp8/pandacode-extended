@@ -349,6 +349,26 @@ fn plan_in_transaction(
     if ticket.revision != expected_revision {
         return Err("Demand revision changed; planning denied.".into());
     }
+    // A staged or failed Coordinator must settle its original native
+    // attempt before an operator can add a WorkItem. Initial Coordinator
+    // admission explicitly requires an empty plan; an early insert would
+    // otherwise strand its recovery and invalidate pending dispatch receipts.
+    // Existing identical request-key replays remain read-only above.
+    let coordinated: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1
+           AND (kind='coordinator_staged' OR
+                (kind='admitted' AND detail='manual readonly coordinator reserved')))",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if coordinated {
+        let config = super::configuration(store, &ticket.orchestration_id)?;
+        let coordinator = crate::bots::get(store, &config.coordinator_bot_id)?;
+        if !super::coordinator_plan_current(
+            store, ticket_id, &coordinator.id, &coordinator.project_id,
+        )? {
+            return Err("Wait for successful native Coordinator evidence before planning WorkItems.".into());
+        }
+    }
     // An unreviewed structured Coordinator plan cannot be resolved by an
     // implicit default Worker, including the single-item planning endpoint.
     // Identical historical request-key replays already returned above.
@@ -825,6 +845,68 @@ mod headless_tests {
         let plans=list(&reopened,&ticket.id,100).unwrap().0;
         assert_eq!(plans.len(),2);
         assert!(plans.iter().all(|item|item.state=="cancelled"));
+    }
+
+    #[test]
+    fn pending_coordinator_cannot_be_stranded_by_premature_work_item_planning() {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-coordinator-plan-fence-{}.sqlite3", storage::id(),
+        ));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/coordinator-plan-fence')", [],
+        ).unwrap();
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config = superagent::create_configuration(&store, NewOrchestration {
+            name: "Coordinator plan fence".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&config.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit_role_with_staging(
+            &mut store, &config.id, "Inspect checkout", "staged-coordinator-plan", false, true, true,
+        ).unwrap();
+        assert!(!launched);
+        let id = &ticket.id;
+        let plan = decode_plan(r#"[{"requestKey":"root","summary":"Inspect","workerBotId":"worker","routingReason":"Admitted Worker"}]"#).unwrap();
+        let assert_denied = |store: &Store, revision: i64| {
+            assert!(headless_plan(&path, id, revision, "early", "Premature plan", None)
+                .unwrap_err().contains("Coordinator evidence"));
+            assert!(plan_batch(store, id, revision, &plan)
+                .unwrap_err().contains("Coordinator evidence"));
+            assert!(list(store, id, 100).unwrap().0.is_empty());
+            assert_eq!(superagent::get_ticket(store, id).unwrap().revision, revision);
+            assert!(superagent::initial_coordinator_pending(store, id).unwrap());
+        };
+        assert_denied(&store, ticket.revision);
+        let (running, _, _) = superagent::prepare_initial_coordinator_at_revision(
+            &mut store, id, ticket.revision, false, None,
+        ).unwrap();
+        superagent::fail_launch(&store, &running, "Gateway launch failed").unwrap();
+        let blocked = superagent::get_ticket(&store, id).unwrap();
+        assert_denied(&store, blocked.revision);
+        let (_, _, _) = superagent::prepare_initial_coordinator_at_revision(
+            &mut store, id, blocked.revision, false, None,
+        ).unwrap();
+        let session = superagent::assignment_session(&store, id).unwrap().unwrap();
+        assert!(superagent::on_run_finished(&store, &session, true,
+            r#"[{"requestKey":"root","summary":"Inspect","workerBotId":"worker","routingReason":"Admitted Worker"}]"#,
+        ).unwrap());
+        let queued = superagent::get_ticket(&store, id).unwrap();
+        let saved = plan_batch(&store, id, queued.revision, &plan).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].worker_bot_id.as_deref(), Some("worker"));
+        assert_eq!(superagent::assignments(&store, id, 100).unwrap().len(), 2);
+        assert!(!superagent::mandate(&store, id).unwrap().allowed_side_effects);
+        assert_eq!(plan_batch(&store, id, queued.revision, &plan).unwrap()[0].id, saved[0].id);
     }
 
     #[test]

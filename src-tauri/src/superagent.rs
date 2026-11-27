@@ -1599,7 +1599,9 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // Contain that native execution before acting on uncertain remote
         // effects; reconciliation cannot race an unrevoked provider.
         "investigate_native_assignment_state"
-    } else if running > 0 {
+    } else if running > 0 || pending > 0 {
+        // A pending receipt is not evidence that its provider has stopped,
+        // even when no native Assignment remains running.
         // A still-running provider may be executing the reserved effect.
         // Contain or verify that native execution before considering a remote
         // outcome for reconciliation; never infer that it has stopped.
@@ -10166,6 +10168,62 @@ mod tests {
     }
 
     #[test]
+    fn headless_recovery_checks_live_host_before_reconciling_pending_effect() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect pending outcome",
+            "pending-effect-without-running-assignment", false,
+        ).unwrap();
+        assert!(launched);
+        store.db.execute(
+            "UPDATE sa_assignments SET state='interrupted' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',active_assignment_id=NULL,
+             revision=revision+1 WHERE id=?1", [&ticket.id],
+        ).unwrap();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'pending-remote',?2,'pending',?3,?3)",
+            params![&ticket.id, "a".repeat(64), now],
+        ).unwrap();
+        let path = store.path.clone();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let audit_before = history(&store, &ticket.id, 30).unwrap().len();
+        let before: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        let recovery = &before["items"][0]["recovery"];
+        assert_eq!(recovery["assignmentStateConsistent"], true);
+        assert_eq!(recovery["activeNativeAssignments"], 0);
+        assert_eq!(recovery["requiresLiveHostVerification"], true);
+        assert_eq!(recovery["nextOperatorAction"],
+            "verify_live_serve_provider_before_intervention");
+        assert_eq!(history(&store, &ticket.id, 30).unwrap().len(), audit_before);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 1)
+            .unwrap()[0].state, "pending");
+
+        let result: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_pending_effect(
+                &path, &ticket.id, revision, "pending-remote", &"a".repeat(64),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(result["remoteResultVerified"], false);
+        assert_eq!(result["externalEffectReplayAllowed"], false);
+        let after: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(after["items"][0]["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+    }
+
+    #[test]
     fn unresolved_effect_views_require_live_verification_for_unsettled_assignment_pointer() {
         let mut store = fixture();
         let cfg = enabled(&store);
@@ -17605,6 +17663,32 @@ mod tests {
         assert!(headless_cancelled_assignments_with_pause(&store, std::slice::from_ref(&second), false).unwrap().is_empty());
         assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
         assert!(!on_run_finished(&store, &first, true, "Late root result").unwrap());
+        // A routed secondary Worker still has no production write grant.
+        let key = "github:peer-fixture";
+        let payload = b"disposable receipt fixture";
+        assert!(effects::reserve(&store, &ticket.id, key, payload).is_err());
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 0);
+        // Exercise only the receipt primitive under a test-only simulated grant.
+        // No provider dispatch or production permission is introduced.
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert_eq!(effects::reserve(&store, &ticket.id, key, payload).unwrap(),
+            effects::Reservation::Reserved);
+        assert_eq!(effects::reserve(&store, &ticket.id, key, payload).unwrap(),
+            effects::Reservation::AlreadyPending);
+        assert!(effects::reserve(&store, &ticket.id, key, b"changed").is_err());
+        effects::mark_uncertain(&store, &ticket.id, key).unwrap();
+        assert_eq!(effects::reserve(&store, &ticket.id, key, payload).unwrap(),
+            effects::Reservation::RequiresReconciliation);
+        // Simulate authoritative settlement inside this isolated storage fixture.
+        effects::acknowledge_applied(&store, &ticket.id, key, payload).unwrap();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 0);
         assert!(on_run_finished(&store, &second, true, "Frontend evidence").unwrap());
         let waiting = get_ticket(&store, &ticket.id).unwrap();
         assert!(accept(&store, &ticket.id, running.revision).is_err());

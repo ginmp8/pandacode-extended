@@ -68,7 +68,8 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          JOIN sa_assignments a ON a.id=t.active_assignment_id
            AND a.ticket_id=t.id AND a.state='running'
-           AND a.bot_id=t.worker_bot_id
+         JOIN sa_assignment_worker_authority authority ON authority.assignment_id=a.id
+           AND authority.worker_bot_id=a.bot_id
          JOIN sessions s ON s.id=a.session_id AND s.project_id=t.project_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.state='running' AND m.revoked=0

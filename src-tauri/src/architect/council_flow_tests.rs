@@ -897,3 +897,46 @@ fn raising_the_limit_on_a_resting_team_wakes_the_lead_once() {
     let team = council::set(&state, &sid, Some(on(9.0, 2, 0))).unwrap();
     assert_eq!((team.status.as_str(), team.pending_turn.is_none()), ("paused", true));
 }
+
+#[test]
+fn forced_s2_conflict_requires_correction_before_new_round_and_terminal_pass() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    let mut first = seat("conflicted-a", 1, Some(9.8), SINCE + 1);
+    first.council.as_mut().unwrap().reported_conflict = true;
+    let mut team = team_with(config.clone(), vec![
+        first,
+        seat("conflicted-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "fixing");
+    assert!(council::round_for(&team, &config, None).is_err(),
+        "a forced escalation does not authorize another wave over an unresolved conflict");
+    assert!(finish_refusal(&team).unwrap().contains("conflict"));
+
+    // Restored snapshots can already contain later clean waves. They do not
+    // erase the earlier conflict if no correction was observed.
+    for round in 2..=3 {
+        let mut a = seat(&format!("fresh-a-{round}"), round, Some(9.8), SINCE + round as i64 * 2 + 1);
+        a.council.as_mut().unwrap().lens = "lens conflicted-a".into();
+        let mut b = seat(&format!("fresh-b-{round}"), round, Some(9.9), SINCE + round as i64 * 2 + 2);
+        b.council.as_mut().unwrap().lens = "lens conflicted-b".into();
+        team.workers.extend([a, b]);
+    }
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_some());
+    assert!(council::round_for(&team, &config, None).is_err());
+    let mut exhausted = team.clone();
+    exhausted.config.council.as_mut().unwrap().max_rounds = 3;
+    assert_eq!(council::status(&exhausted).unwrap().state, "limit");
+    assert!(finish_refusal(&exhausted).is_some());
+
+    // Only a correction after the conflict and before both fresh rounds can
+    // permit their clean scores to satisfy the existing forced S2 gate.
+    team.changed_at = SINCE + 3;
+    let mut corrected_first_round = team.clone();
+    corrected_first_round.workers.truncate(2);
+    assert_eq!(council::round_for(&corrected_first_round, &config, None).unwrap(), 2);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+}

@@ -1474,6 +1474,15 @@ fn latest_conflict_report(team: &TeamSnapshot, through_round: usize) -> Option<i
         .max()
 }
 
+/// A forced flat S2 review is still bound by observed conflict correction.
+/// Merely obtaining two later high scores cannot erase the earlier report.
+fn unresolved_forced_s2_conflict(team: &TeamSnapshot, config: &CouncilConfig, through_round: usize) -> bool {
+    config.strategy == CouncilExecutionStrategy::Escalated && config.force_escalation
+        && config.nested_bot_reviewers.is_empty()
+        && latest_conflict_report(team, through_round)
+            .is_some_and(|reported_at| !written_since(team, reported_at))
+}
+
 fn latest_severe_report(team: &TeamSnapshot, through_round: usize) -> Option<i64> {
     (1..=through_round)
         .flat_map(|round| in_round(team, round))
@@ -1975,6 +1984,9 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if current && room && (replaced || !done) {
         return Ok(latest);
     }
+    if unresolved_forced_s2_conflict(team, config, latest) {
+        return Err("S2 forced escalation requires an observed artifact correction after a conflicting report before a fresh Council round.".into());
+    }
     if config.strategy == CouncilExecutionStrategy::TwoPhase {
         // S3 uses exactly two native phases for this initial executable path.
         // A second phase may not precede a complete, fresh first phase; an
@@ -2183,10 +2195,11 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     if view.latest > config.max_rounds || !m3_rounds_match(team, config, view.latest) {
         return false;
     }
-    // Forced escalation is not an exception to severe-finding correction.
-    // Scored severe rounds cannot count as either of the two clean passes.
+    // Forced escalation is not an exception to severe-finding or conflict correction.
+    // Later clean rounds cannot erase an unresolved earlier report.
     if latest_severe_report(team, view.latest)
         .is_some_and(|reported_at| !written_since(team, reported_at))
+        || unresolved_forced_s2_conflict(team, config, view.latest)
     {
         return false;
     }
@@ -2672,6 +2685,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
         return Some(("Council critical/high findings require an observed correction and fresh independent review before approval.".into(), true));
     }
     if low >= config.target {
+        if unresolved_forced_s2_conflict(team, config, round) {
+            return Some(("S2 forced escalation requires an observed artifact correction after a conflicting report before fresh independent review.".into(), true));
+        }
         if !forced_escalation_satisfied(team, config, view) {
             return Some(("S2 forced escalation requires a fresh second native Council round from the same enabled reviewer sources; earlier or stale scores are not approval.".into(), false));
         }
@@ -3309,6 +3325,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         || round != 1 || m3_source_counts(team, config, 1).is_some()))
         || (config.strategy == CouncilExecutionStrategy::Escalated
             && config.force_escalation && !forced_escalation_satisfied(team, config, view)
+            && !unresolved_forced_s2_conflict(team, config, round)
             && low.is_some_and(|score| score >= config.target) && !stale)
         || (config.strategy == CouncilExecutionStrategy::Escalated
             && !config.force_escalation && config.nested_bot_reviewers.is_empty()

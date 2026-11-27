@@ -1061,7 +1061,14 @@ test.describe('shared bot channels', () => {
     await expect.poll(() => page.evaluate(() => (window as any).__acceptanceCalls)).toEqual([
       { deliveryId: 'delivery-one', acceptanceRevision: revision, reason: 'Accept this reviewed result.' },
     ]);
-    await acceptance.locator('form').evaluate(form => form.dispatchEvent(new Event('submit', { cancelable: true })));
+    await expect(acceptance.getByRole('button', { name: 'Accept with reason' })).toBeDisabled();
+    await acceptance.locator('form').evaluate(form => form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })));
+    expect(await page.evaluate(() => (window as any).__acceptanceCalls.length)).toBe(1);
+    await acceptance.getByRole('button', { name: 'Cancel' }).click();
+    // Reopening the same delivery must not admit another native request.
+    await page.locator('.bc-assigned').getByRole('button', { name: 'Accept with reason' }).click();
+    await acceptance.getByRole('textbox', { name: 'Acceptance reason' }).fill('Accept this reviewed result again.');
+    await acceptance.getByRole('button', { name: 'Accept with reason' }).click();
     expect(await page.evaluate(() => (window as any).__acceptanceCalls.length)).toBe(1);
     await acceptance.getByRole('button', { name: 'Cancel' }).click();
     await page.getByRole('button', { name: 'Channel settings' }).click();

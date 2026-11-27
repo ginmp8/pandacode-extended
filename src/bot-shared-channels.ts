@@ -478,6 +478,9 @@ export async function openSharedChannelSettings(channelId: string, options: Shar
 }
 
 
+// A pending native acceptance belongs to its delivery, not to a particular modal.
+const pendingCouncilAcceptances = new Set<string>();
+
 /** This is a local user action, not a model instruction or a bot tool. */
 export function openSharedChannelCouncilAcceptance(deliveryId: string, acceptanceRevision: string, options: SharedChannelUiOptions): void {
   const dialog = options.modal('Accept Council exception', `<form class="bc-council-accept-form">
@@ -490,16 +493,27 @@ export function openSharedChannelCouncilAcceptance(deliveryId: string, acceptanc
   const form = dialog.querySelector<HTMLFormElement>('.bc-council-accept-form')!;
   form.addEventListener('submit', event => {
     event.preventDefault();
+    // The document-level generic submit handler must not re-enable this button
+    // while the native acceptance is pending.
+    event.stopPropagation();
     const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (!dialog.open || !form.isConnected || submit?.disabled) return;
+    if (pendingCouncilAcceptances.has(deliveryId)) {
+      options.notify('An acceptance request for this delivery is already in progress.');
+      return;
+    }
     const reason = String(new FormData(form).get('reason') ?? '').trim();
     if (reason.length < 8 || reason.length > 1024) { options.notify('Enter an acceptance reason (8–1024 characters).'); return; }
+    pendingCouncilAcceptances.add(deliveryId);
     if (submit) submit.disabled = true;
     void options.call('bot_shared_channel_council_accept', { deliveryId, acceptanceRevision, reason }).then(async () => {
       if (dialog.open && form.isConnected) options.closeModal();
       await options.changed();
     }).catch(error => options.notify(error instanceof Error ? error.message : String(error)))
-      .finally(() => { if (submit?.isConnected) submit.disabled = false; });
+      .finally(() => {
+        pendingCouncilAcceptances.delete(deliveryId);
+        if (submit?.isConnected) submit.disabled = false;
+      });
   });
   dialog.querySelector('[data-shared-action="accept-cancel"]')?.addEventListener('click', options.closeModal);
 }

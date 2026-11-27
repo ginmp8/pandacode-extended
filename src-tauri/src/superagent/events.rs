@@ -2948,7 +2948,9 @@ fn authenticated_linked_pr_checks(
         }
         let status = run.get("status").and_then(serde_json::Value::as_str)
             .ok_or("Check Run has no status.")?;
-        if matches!(status, "queued" | "in_progress") {
+        // GitHub Actions also reports waiting, requested and pending runs.
+        // These are unfinished observations, never completed CI evidence.
+        if matches!(status, "queued" | "in_progress" | "waiting" | "requested" | "pending") {
             pending += 1;
             continue;
         }
@@ -6732,10 +6734,34 @@ mod tests {
             "SELECT COUNT(*) FROM sa_source_actor_identity WHERE source_id=?1",
             [&active.id], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
-        let complete = serde_json::json!({"total_count":1,"check_runs":[run]});
-        assert_eq!(commit_authenticated_linked_pr_checks(
-            &store, &context, &pull, &complete, "local-operator", 900,
-        ).unwrap()["observed"], 1);
+        // A legitimate GitHub Actions status must not discard completed
+        // sibling runs from the same authenticated PR snapshot.
+        let mut mixed_runs = vec![run];
+        for (index, status) in ["queued", "in_progress", "waiting", "requested", "pending"]
+            .iter().enumerate()
+        {
+            let mut unfinished = pending.clone();
+            unfinished["id"] = serde_json::json!(100 + index);
+            unfinished["status"] = serde_json::json!(status);
+            mixed_runs.push(unfinished);
+        }
+        let mixed = serde_json::json!({"total_count":mixed_runs.len(),"check_runs":mixed_runs});
+        let mut unknown = mixed.clone();
+        unknown["check_runs"][5]["status"] = serde_json::json!("unknown_status");
+        assert!(commit_authenticated_linked_pr_checks(
+            &store, &context, &pull, &unknown, "local-operator", 900,
+        ).is_err());
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 0);
+        assert!(linked_decisions(&store, "pending-check-ticket", 10).unwrap().is_empty());
+        let observed = commit_authenticated_linked_pr_checks(
+            &store, &context, &pull, &mixed, "local-operator", 900,
+        ).unwrap();
+        assert_eq!(observed["observed"], 1);
+        assert_eq!(observed["pendingSkipped"], 5);
+        assert_eq!(observed["authorizationIssued"], false);
+        assert_eq!(observed["councilApproved"], false);
+        assert_eq!(source(&store, &active.id).unwrap().last_sequence, 1);
+        assert_eq!(linked_decisions(&store, "pending-check-ticket", 10).unwrap().len(), 1);
         drop(store);
         let reopened = Store::open(&path).unwrap();
         let context = linked_pr_check_context(

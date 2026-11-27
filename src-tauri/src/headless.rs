@@ -1345,27 +1345,25 @@ fn start_services(app: tauri::AppHandle) {
                     continue;
                 }
             };
-            let cancellations = match state.store.lock() {
-                Ok(store) => crate::superagent::watchdog_expired_assignments(
-                    &store, crate::storage::now(),
-                ).and_then(|expired| {
-                    let revoked = crate::superagent::headless_cancelled_assignments(
-                        &store, &running_sessions,
-                    )?;
-                    Ok(expired.into_iter().chain(revoked).collect::<BTreeSet<_>>())
-                }),
-                Err(error) => Err(error.to_string()),
+            let (cancellations, errors) = match state.store.lock() {
+                Ok(store) => crate::superagent::headless_watchdog_tick(
+                    &store, &running_sessions, crate::storage::now(),
+                ),
+                Err(error) => {
+                    eprintln!("serve: SuperAgent watchdog store lock failed: {error}");
+                    continue;
+                }
             };
-            match cancellations {
-                Ok(sessions) => for session_id in sessions {
-                    println!("serve: stopping revoked or expired SuperAgent assignment {session_id}");
-                    if let Err(error) = crate::stop_session(
-                        watchdog.clone(), watchdog.state::<AppState>(), session_id,
-                    ).await {
-                        eprintln!("serve: SuperAgent session stop failed: {error}");
-                    }
-                },
-                Err(error) => eprintln!("serve: SuperAgent watchdog failed: {error}"),
+            for error in errors {
+                eprintln!("serve: SuperAgent watchdog failed: {error}");
+            }
+            for session_id in cancellations {
+                println!("serve: stopping revoked or expired SuperAgent assignment {session_id}");
+                if let Err(error) = crate::stop_session(
+                    watchdog.clone(), watchdog.state::<AppState>(), session_id,
+                ).await {
+                    eprintln!("serve: SuperAgent session stop failed: {error}");
+                }
             }
         }
     });

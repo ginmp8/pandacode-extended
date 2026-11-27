@@ -3227,6 +3227,26 @@ fn headless_cancelled_assignments_with_pause(
     Ok(cancelled)
 }
 
+/// Durable settlement and live-provider containment are independent. A
+/// failed audit transaction must remain failed, but must not suppress the
+/// read-only cancellation scan for revoked or otherwise invalid task handles.
+/// Likewise, a failed scan must not discard already settled session IDs.
+pub(crate) fn headless_watchdog_tick(
+    store: &Store, active_sessions: &[String], now: i64,
+) -> (std::collections::BTreeSet<String>, Vec<String>) {
+    let mut sessions = std::collections::BTreeSet::new();
+    let mut errors = Vec::new();
+    match watchdog_expired_assignments(store, now) {
+        Ok(expired) => sessions.extend(expired),
+        Err(error) => errors.push(format!("durable settlement: {error}")),
+    }
+    match headless_cancelled_assignments(store, active_sessions) {
+        Ok(revoked) => sessions.extend(revoked),
+        Err(error) => errors.push(format!("live authority inspection: {error}")),
+    }
+    (sessions, errors)
+}
+
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
     // Only the owning serve process calls this. Inspect every live assignment:
     // limiting the SQL page before filtering healthy entries could starve a
@@ -11731,6 +11751,49 @@ mod tests {
                 &store, &ordinary,
             ).is_ok(), "ordinary bot paths must not inherit task revocation: {scenario}");
         }
+    }
+
+    #[test]
+    fn headless_watchdog_fences_revoked_live_handle_when_durable_audit_fails() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Contain revoked provider", "watchdog-audit-fence", false,
+        ).unwrap();
+        assert!(admitted);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let ordinary = store.create_session("project", "codex", "default", "ask")
+            .unwrap().id;
+        let handles = vec![ordinary.clone(), session.clone(), session.clone()];
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket.id],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_watchdog_handle_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_interrupted'
+             BEGIN SELECT RAISE(ABORT,'injected watchdog audit failure'); END;",
+        ).unwrap();
+
+        let (cancel, errors) = headless_watchdog_tick(&store, &handles, storage::now());
+        assert_eq!(cancel.into_iter().collect::<Vec<_>>(), vec![session.clone()]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("injected watchdog audit failure"));
+        // Cancellation is independent of durable settlement: do not fabricate
+        // an interrupted Ticket or audit record when that transaction failed.
+        let unchanged = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(unchanged.state, "running");
+        assert_eq!(unchanged.revision, ticket.revision);
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        assert!(!has_task_assignment_history(&store, &ordinary).unwrap());
+
+        store.db.execute_batch("DROP TRIGGER fail_watchdog_handle_audit").unwrap();
+        let (cancel, errors) = headless_watchdog_tick(&store, &handles, storage::now());
+        assert!(errors.is_empty());
+        assert_eq!(cancel.into_iter().collect::<Vec<_>>(), vec![session]);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
     }
 
     #[test]

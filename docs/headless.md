@@ -87,6 +87,13 @@ An interrupted Ticket remains durable and cannot be restarted by an inferred
 source event. On restart, existing `pending` external-effect receipts become
 `uncertain`; they require independent provider reconciliation before any
 future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
+
+Durable watchdog settlement and live-provider cancellation are independent:
+if an audit transaction fails, it rolls back without claiming a settled Ticket,
+but the owning host still inspects current native authority and attempts to
+stop invalid task handles. A failed authority scan likewise does not discard
+successfully settled session IDs. Both failures remain visible in host logs;
+ordinary bot sessions are not selected by the task cancellation scan.
 The read-only `--list-unresolved-effects` command pages exact pending/uncertain
 receipt keys, payload SHA-256 digests, Ticket and Team IDs across all Tickets.
 For a single reusable Team, use `pandacode serve --list-team-unresolved-effects <team-id>`

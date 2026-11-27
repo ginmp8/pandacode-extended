@@ -87,7 +87,7 @@ enum Command {
     DispatchPlan { ticket_id: String, expected_revision: i64, request_key: String },
     CancelDispatchTicket { ticket_id: String, expected_revision: i64, request_key: String },
     QueueObservedIssue { orchestration_id: String, worker_bot_id: String,
-        request_key: String, objective_file: PathBuf,
+        request_key: String, objective_file: PathBuf, coordinated: bool,
         selection: crate::superagent::events::ObservedIssueSelection },
     PlanWorkItem { ticket_id: String, expected_revision: i64, request_key: String,
         summary_file: PathBuf, parent_id: Option<String> },
@@ -923,14 +923,14 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::QueueObservedIssue {
-                orchestration_id, worker_bot_id, request_key, objective_file, selection,
+                orchestration_id, worker_bot_id, request_key, objective_file, selection, coordinated,
             } = &command {
                 let result = (|| -> Result<String, String> {
                     let objective = read_bounded_objective(objective_file)?;
                     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
                     crate::superagent::headless_queue_observed_issue(
                         &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id,
-                        &objective, request_key, selection,
+                        &objective, request_key, selection, *coordinated,
                     )
                 })();
                 match result {
@@ -2126,9 +2126,10 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
-            "--queue-observed-issue" => {
+            "--queue-observed-issue" | "--queue-coordinated-observed-issue" => {
+                let coordinated = args[index] == "--queue-coordinated-observed-issue";
                 let arg = |offset: usize| args.get(index + offset)
-                    .ok_or("--queue-observed-issue needs Team, Worker, source, source revision, delivery, Team revision, request key and objective file.");
+                    .ok_or("Observed issue staging needs Team, Worker, source, source revision, delivery, Team revision, request key and objective file.");
                 let orchestration_id = arg(1)?;
                 validate_orchestration_id(orchestration_id)?;
                 let worker_bot_id = arg(2)?;
@@ -2147,7 +2148,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 }
                 command = Command::QueueObservedIssue {
                     orchestration_id: orchestration_id.clone(), worker_bot_id: worker_bot_id.clone(),
-                    request_key: request_key.clone(), objective_file: PathBuf::from(path),
+                    request_key: request_key.clone(), objective_file: PathBuf::from(path), coordinated,
                     selection: crate::superagent::events::ObservedIssueSelection {
                         source_id: source_id.clone(), delivery_id: delivery_id.clone(),
                         source_revision, team_revision,
@@ -3030,6 +3031,7 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          PR head, store deduplicated Observe receipts and skip pending runs.
                          Incomplete/ambiguous windows fail; this never approves work.
   --queue-observed-issue <team-id> <worker-id> <source-id> <source-revision> <delivery-id> <team-revision> <key> <objective-file>
+  --queue-coordinated-observed-issue <team-id> <worker-id> <source-id> <source-revision> <delivery-id> <team-revision> <key> <objective-file>
                          Explicitly stage a read-only Demand from an attested Observe
                          issue-opened receipt and a local objective. No automatic launch.
   --queue-demand <team-id> <request-key> <objective-file>
@@ -3831,12 +3833,25 @@ mod tests {
             Ok(Command::QueueObservedIssue {
                 orchestration_id:"team".into(), worker_bot_id:"worker".into(),
                 request_key:"key".into(), objective_file:PathBuf::from("/tmp/objective.txt"),
+                coordinated:false,
+                selection:crate::superagent::events::ObservedIssueSelection {
+                    source_id:"source".into(), delivery_id:"12345".into(),
+                    source_revision:2, team_revision:3,
+                },
+            }));
+        assert_eq!(parsed("--queue-coordinated-observed-issue team worker source 2 12345 3 key /tmp/objective.txt"),
+            Ok(Command::QueueObservedIssue {
+                orchestration_id:"team".into(), worker_bot_id:"worker".into(),
+                request_key:"key".into(), objective_file:PathBuf::from("/tmp/objective.txt"),
+                coordinated:true,
                 selection:crate::superagent::events::ObservedIssueSelection {
                     source_id:"source".into(), delivery_id:"12345".into(),
                     source_revision:2, team_revision:3,
                 },
             }));
         for invalid in [
+            "--queue-coordinated-observed-issue team worker source 2 12345 3 key",
+            "--queue-coordinated-observed-issue team worker source 2 12345 0 key /tmp/objective.txt",
             "--queue-observed-issue team worker source 2 12345 3 key",
             "--queue-observed-issue team worker source 0 12345 3 key /tmp/objective.txt",
             "--queue-observed-issue team worker source 2 ../other 3 key /tmp/objective.txt",

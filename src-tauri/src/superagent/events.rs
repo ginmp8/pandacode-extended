@@ -3667,6 +3667,103 @@ mod tests {
 
 
     #[test]
+    fn observed_issue_coordinator_staging_requires_explicit_native_dispatch() {
+        let (mut store, path) = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('issue-project','Disposable','/tmp/sa-coordinated-issue')",
+            [],
+        ).unwrap();
+        for (id,name) in [("issue-router","Router"),("issue-worker","Worker")] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?2,'issue-project','codex','default','plan',?3,?3)",
+                params![id,name,storage::now()],
+            ).unwrap();
+        }
+        let team = super::super::create_configuration(&store, super::super::NewOrchestration {
+            name:"Coordinated issue Team".into(),
+            coordinator_bot_id:"issue-router".into(),
+            worker_bot_id:"issue-worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let off = create_source(&store, &team.id, "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let raw = serde_json::json!([
+            {"id":"5000099102","type":"IssuesEvent","created_at":"2026-11-12T09:02:00Z",
+             "actor":{"login":"trusted-bot","id":123},"repo":{"name":"owner/repo","id":456},
+             "payload":{"action":"opened","issue":{"number":44,"body":"Untrusted issue text"}}},
+            {"id":"5000099101","type":"IssuesEvent","created_at":"2026-11-12T09:01:00Z",
+             "actor":{"login":"trusted-bot","id":123},"repo":{"name":"owner/repo","id":456},
+             "payload":{"action":"opened","issue":{"number":43}}}
+        ]);
+        let result = poll_authenticated_events_with_repository_id_scoped(
+            &store, &on, 0, &raw, "operator", 1,
+            ObserveFeedContext { repository_id:456, operator_id:Some(999), background_team_revision:None },
+        ).unwrap();
+        assert_eq!(result.recorded, 2);
+        let count = |store: &Store| store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(&store), 0);
+        let selection = ObservedIssueSelection {
+            source_id:on.id.clone(), delivery_id:"5000099102".into(),
+            source_revision:on.policy_revision, team_revision:team.policy_revision+1,
+        };
+        let stage = |key: &str, selected: &ObservedIssueSelection, coordinated: bool| {
+            super::super::headless_queue_observed_issue(
+                &path, &team.id, "issue-worker", "Inspect checkout", key, selected, coordinated,
+            )
+        };
+        let stale = ObservedIssueSelection {
+            source_revision:off.policy_revision, ..selection.clone()
+        };
+        assert!(stage("stale", &stale, true).is_err());
+        assert_eq!(count(&store), 0);
+        let raw_receipt = stage("coordinated", &selection, true).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&raw_receipt).unwrap();
+        let id = receipt["ticketId"].as_str().unwrap();
+        let revision = receipt["revision"].as_i64().unwrap();
+        assert_eq!(receipt["initialRole"], "coordinator");
+        assert_eq!(receipt["state"], "blocked");
+        assert_eq!(receipt["providerDispatchedByCommand"], false);
+        assert_eq!(receipt["allowedSideEffects"], false);
+        assert_eq!(count(&store), 1);
+        assert_eq!(list_thread_links(&store,id).unwrap()[0].subject_key, "issue:44");
+        assert_eq!(stage("coordinated", &selection, true).unwrap(), raw_receipt);
+        assert!(stage("coordinated", &selection, false).is_err());
+        assert!(stage("duplicate-issue", &selection, true).is_err());
+        assert!(super::super::assignment_session(&store,id).unwrap().is_none());
+        assert!(super::super::retry_blocked_at_revision(&mut store,id,revision,false).is_err());
+        let request = super::super::headless_dispatch::enqueue(&store,id,revision,"start-coordinator").unwrap();
+        let (running,recipient,packet) = super::super::prepare_initial_coordinator(
+            &mut store,&request,false,
+        ).unwrap();
+        assert_eq!(running.state,"running");
+        assert_eq!(recipient,"issue-router");
+        assert!(packet.contains("Admitted Team capability inventory"));
+        assert!(!packet.contains("Untrusted issue text"));
+        assert!(super::super::guard_gateway_inbound(&store,&recipient,id,"local-user",true).is_ok());
+        assert!(super::super::guard_gateway_inbound(&store,"issue-worker",id,"local-user",true).is_err());
+        assert!(super::super::prepare_initial_coordinator(&mut store,&request,false).is_err());
+        let session = super::super::assignment_session(&store,id).unwrap().unwrap();
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
+        set_mode(&store,&on.id,on.policy_revision,"off").unwrap();
+        let other = ObservedIssueSelection { delivery_id:"5000099101".into(), ..selection.clone() };
+        assert!(stage("revoked-source",&other,true).is_err());
+        assert_eq!(count(&store),1);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(count(&reopened),1);
+        assert_eq!(list_thread_links(&reopened,id).unwrap()[0].subject_key,"issue:44");
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments",[],
+            |row| row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_effect_receipts",[],
+            |row| row.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
     fn explicit_observed_issue_staging_is_atomic_idempotent_and_read_only() {
         let (mut store, path) = fixture();
         store.db.execute(
@@ -3734,7 +3831,7 @@ mod tests {
         };
         let stage = |key: &str, selection: &ObservedIssueSelection| {
             super::super::headless_queue_observed_issue(
-                &path, &team.id, "issue-worker", "Inspect local checkout", key, selection,
+                &path, &team.id, "issue-worker", "Inspect local checkout", key, selection, false,
             )
         };
         let invalid = ObservedIssueSelection { delivery_id:"unknown".into(), ..selected.clone() };
@@ -3777,7 +3874,7 @@ mod tests {
         // Stage through the live desktop store, then replay through the detached
         // CLI. Both must preserve the same native Ticket and source identity.
         let staged = super::super::stage_observed_issue(
-            &mut store, &team.id, "issue-worker", "Inspect local checkout", "atomic", &selected,
+            &mut store, &team.id, "issue-worker", "Inspect local checkout", "atomic", &selected, false,
         ).unwrap();
         assert_eq!(staged.state, "blocked");
         let receipt: serde_json::Value = serde_json::from_str(&stage("atomic", &selected).unwrap()).unwrap();

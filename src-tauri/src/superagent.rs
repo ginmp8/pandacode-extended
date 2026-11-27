@@ -2450,11 +2450,12 @@ pub(crate) fn headless_queue_coordinated_demand(
 fn stage_observed_issue(
     store: &mut Store, orchestration_id: &str, worker_bot_id: &str,
     objective: &str, request_key: &str, selection: &events::ObservedIssueSelection,
+    coordinated: bool,
 ) -> Result<Ticket> {
     let (ticket, launched) = admit_role_with_observed_issue(
         store, orchestration_id, objective, request_key, true,
         ManualAdmissionOptions {
-            coordinate: false, headless_staging: true, selected_worker_id: Some(worker_bot_id),
+            coordinate: coordinated, headless_staging: true, selected_worker_id: Some(worker_bot_id),
         },
         Some(selection),
     )?;
@@ -2466,15 +2467,17 @@ fn stage_observed_issue(
 pub(crate) fn headless_queue_observed_issue(
     database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
     objective: &str, request_key: &str, selection: &events::ObservedIssueSelection,
+    coordinated: bool,
 ) -> Result<String> {
     let mut store = open_headless_transition_store(database_path)?;
     let ticket = stage_observed_issue(
-        &mut store, orchestration_id, worker_bot_id, objective, request_key, selection,
+        &mut store, orchestration_id, worker_bot_id, objective, request_key, selection, coordinated,
     )?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket.id,
         "state": ticket.state,
         "revision": ticket.revision,
+        "initialRole": if coordinated { "coordinator" } else { "worker" },
         "providerDispatchedByCommand": false,
         "requiresExplicitNativeDispatch": ticket.state == "blocked",
         "allowedTools": [],
@@ -3820,8 +3823,8 @@ fn admit_role_with_observed_issue(
     selection: Option<&events::ObservedIssueSelection>,
 ) -> Result<(Ticket, bool)> {
     let ManualAdmissionOptions { coordinate, headless_staging, selected_worker_id } = options;
-    if selection.is_some() && (coordinate || !headless_staging || selected_worker_id.is_none()) {
-        return Err("Observed issues require explicit staged Worker admission.".into());
+    if selection.is_some() && (!headless_staging || selected_worker_id.is_none()) {
+        return Err("Observed issues require explicit staging with a selected Worker.".into());
     }
     if coordinate && headless_staging && selected_worker_id.is_none() {
         return Err("Staged coordination requires an explicitly selected Worker.".into());
@@ -5984,7 +5987,7 @@ pub async fn superagent_stage_observed_issue(
     };
     stage_observed_issue(
         &mut store, &input.orchestration_id, &input.worker_bot_id,
-        &input.objective, &input.request_key, &selection,
+        &input.objective, &input.request_key, &selection, false,
     )
 }
 

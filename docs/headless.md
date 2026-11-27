@@ -1276,6 +1276,14 @@ pandacode serve --queue-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVE
 The objective is the operator's bounded UTF-8 file, not GitHub issue text. The source must currently be in Observe and both revisions must match. The native transaction creates a blocked manual Ticket, its read-only Mandate, exact issue link and immutable receipt provenance together. A repeated key with identical inputs returns the existing Ticket; different selections or repeated admission of the same attested issue in the same Team are rejected even after unlinking. Observe polling itself never stages work. This command does not grant tools, start a provider, approve a Council review or enable Auto. Native explicit dispatch must still revalidate authority. Historical name-only receipts are not eligible; no remote repository write is performed.
 
 
+To stage the same attested issue with Coordinator-first planning, explicitly choose:
+
+```sh
+pandacode serve --queue-coordinated-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVERY_ID TEAM_REVISION REQUEST_KEY objective.txt
+```
+
+This uses the same receipt, source/Team revision and issue-identity checks. The resulting manual Demand has `initialRole: "coordinator"`. A live serve host must consume a separate explicit `--dispatch-ticket` intent before any Coordinator session exists; Worker admission and plan dispatch cannot bypass this initial step. Replaying the request key cannot switch the initial role, and the same attested issue cannot create another Demand by switching modes. Native Coordinator planning remains read-only, and any Worker plan still requires explicit review. Revoking the source prevents fresh source-linked staging; previously staged manual Demands have their own local-user Mandate and must be stopped or revoked independently. Observe alone never launches or stages work. This is **not** GitHub Auto and does not authorize external effects.
+
 ### Explicit live headless Worker dispatch (schema v57)
 
 After staging a manual Demand and optionally planning WorkItems, inspect the exact Ticket revision. On the same local installation as a running `pandacode serve` host, submit:

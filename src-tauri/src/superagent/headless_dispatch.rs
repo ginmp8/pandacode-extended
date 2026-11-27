@@ -372,9 +372,19 @@ fn enqueue_in_transaction(
     }
     let cfg = configuration(store, &ticket.orchestration_id)?;
     let grant = mandate(store, ticket_id)?;
+    // A fresh intent must belong to the original admitted Ticket scope, not
+    // just to a Mandate that matches today's Team. Check the persisted
+    // Ticket fields in the same immediate transaction as queue insertion.
+    let ticket_scope_current: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets
+         WHERE id=?1 AND policy_revision=?2 AND project_id=?3)",
+        params![ticket_id, grant.policy_revision, &grant.project_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
     if !cfg.enabled || grant.revoked || grant.expires_at <= now
         || grant.actor != ticket.actor || grant.policy_revision != cfg.policy_revision
         || grant.project_id != cfg.project_id || !grant.allowed_tools.is_empty()
+        || grant.authorization_id.trim().is_empty() || !ticket_scope_current
         || grant.allowed_side_effects || effects::unresolved_count(store, ticket_id)? != 0
     {
         return Err("Demand no longer has a current read-only native mandate.".into());
@@ -693,6 +703,79 @@ fn settle_pending(
 #[cfg(test)]
 mod stale_capacity_tests {
     use super::*;
+
+    #[test]
+    fn new_dispatch_denies_drifted_ticket_scope_or_blank_mandate_issuer() {
+        let path = std::env::temp_dir().join(format!("sa-dispatch-scope-{}.sqlite3", storage::id()));
+        let store = Store::open(&path).unwrap();
+        for (id, checkout) in [("project", "/tmp/sa-dispatch-scope"), ("other", "/tmp/sa-dispatch-other")] {
+            store.db.execute(
+                "INSERT INTO projects(id,name,path) VALUES(?1,?1,?2)",
+                params![id,checkout],
+            ).unwrap();
+        }
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg = super::super::create_configuration(&store, super::super::NewOrchestration {
+            name: "Dispatch scope".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&cfg.id],
+        ).unwrap();
+        for (case, mutation) in [
+            ("ticket-policy", "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1"),
+            ("ticket-project", "UPDATE sa_tickets SET project_id='other' WHERE id=?1"),
+            ("missing-issuer", "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1"),
+            ("blank-issuer", "UPDATE sa_mandates SET authorization_id='  ' WHERE ticket_id=?1"),
+        ] {
+            let raw = super::super::headless_queue_demand(
+                &path, &cfg.id, "Inspect source", case,
+            ).unwrap();
+            let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let id = view["ticketId"].as_str().unwrap();
+            let revision = view["revision"].as_i64().unwrap();
+            store.db.execute(mutation, [id]).unwrap();
+            let audit_before: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+                [id], |row| row.get(0),
+            ).unwrap();
+            assert!(enqueue(&store, id, revision, "denied").is_err(), "{case}");
+            assert!(by_key(&store, id, "denied").unwrap().is_none(), "{case}");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+                [id], |row| row.get::<_, i64>(0),
+            ).unwrap(), audit_before, "{case}");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+                [id], |row| row.get::<_, i64>(0),
+            ).unwrap(), 0, "{case}");
+            assert_eq!(get_ticket(&store, id).unwrap().revision, revision);
+        }
+
+        let raw = super::super::headless_queue_demand(
+            &path, &cfg.id, "Inspect source", "valid-scope",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = view["revision"].as_i64().unwrap();
+        let request = enqueue(&store, id, revision, "current").unwrap();
+        assert_eq!(request.state, "pending");
+        // Idempotent inspection of an existing key is not a new grant,
+        // even if the scope subsequently becomes invalid.
+        store.db.execute(
+            "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1", [id],
+        ).unwrap();
+        assert_eq!(enqueue(&store, id, revision, "current").unwrap().id, request.id);
+        assert!(enqueue(&store, id, revision, "another").is_err());
+        assert_eq!(pending_batch(&store).unwrap().len(), 1);
+    }
 
     #[test]
     fn new_dispatch_retires_unrelated_stale_intents_without_touching_current_requests() {

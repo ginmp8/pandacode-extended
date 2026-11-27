@@ -190,6 +190,62 @@ test('Council inspector refreshes an approved native snapshot without promoting 
   await expect(refresh).toBeEnabled();
 });
 
+test('direct Council inspector follows acknowledged enable and disable without reopening the panel', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true, verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 7, round: 1, lowest: 9.5 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector).toHaveCount(0);
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_set_council = new Promise<void>(resolve => { state.__releaseInspectorEnable = resolve; });
+  });
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  await expect(inspector).toHaveCount(0);
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseInspectorEnable();
+    delete state.__hold.architect_set_council;
+  });
+  await expect(inspector).toHaveCount(1);
+  await inspector.locator('summary').first().click();
+  await expect(inspector).toContainText('Verified native pass');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__removedCouncilInspection = document.querySelector('.council-inspection');
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => { state.__releaseInspectorRead = resolve; });
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  await expect(inspector).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as any).__removedCouncilInspection.querySelector('.council-inspection-body').textContent)).toBe('');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseInspectorRead();
+    delete state.__hold.architect_council_inspect;
+  });
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  await expect(inspector).toHaveCount(1);
+  await expect(inspector).not.toHaveAttribute('open', '');
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, teamRevision: 8, status: { ...inspection.status, stale: true }, verifiedPass: false, verifiedCompletion: null,
+  });
+  await inspector.locator('summary').first().click();
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await expect.poll(() => page.evaluate(() => (window as any).__removedCouncilInspection.querySelector('.council-inspection-body').textContent)).toBe('');
+});
+
 test('direct-chat native Council updates invalidate displayed approval without affecting unrelated tasks', async ({ page }) => {
   const current = {
     sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,

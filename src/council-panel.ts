@@ -242,6 +242,26 @@ export function createCouncil(host: CouncilHost) {
     return `<div class="council-strip-slot" data-session-id="${escape(sessionId)}">${html}</div>`;
   }
 
+  /** The inspector follows acknowledged native Council state, not an optimistic switch. */
+  function syncInspection(sessionId: string, team: TeamSnapshot | null): void {
+    if (!panel || panel.dataset.compact) return;
+    const current = panel.querySelector<HTMLElement>('.council-inspection');
+    if (!team?.config.council || team.sessionId !== sessionId) {
+      if (current) {
+        const restoreFocus = current.contains(document.activeElement);
+        current.remove();
+        // Disconnect before invalidating: fence pending reads and erase old evidence.
+        current.dispatchEvent(new Event('council-evidence-invalidated'));
+        if (restoreFocus) panel.querySelector<HTMLElement>('.council-switch')?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (current) return;
+    const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }), sessionId);
+    panel.querySelector<HTMLElement>('.council-recovery, .council-foot')!.before(inspection);
+    inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
+  }
+
   function paint(sessionId: string): void {
     if (!panel || panelSession !== sessionId) return;
     const shown = shownConfig(sessionId), values = shown ?? councilDefaults();
@@ -250,6 +270,7 @@ export function createCouncil(host: CouncilHost) {
     if (aboutLine.textContent !== about) aboutLine.textContent = about;
     // Council on, the team resting, and no round yet: say so quietly.
     const team = host.team(sessionId), idle = Boolean(shown && team && !teamActive(team) && !councilProgress(team)?.rounds.length);
+    syncInspection(sessionId, team);
     const idleLine = panel.querySelector<HTMLElement>('.council-idle')!;
     if (idleLine.hidden === idle) idleLine.hidden = !idle;
     // Raise max rounds: how many this cycle has used, under its title.
@@ -554,11 +575,6 @@ export function createCouncil(host: CouncilHost) {
         reason => selectedError(sessionId, reason),
       );
       panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
-      if (shownConfig(sessionId)) {
-        const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }), sessionId);
-        panel!.querySelector<HTMLElement>('.council-foot')!.before(inspection);
-        inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
-      }
       // This is an explicit, narrow native recovery action for a resting root,
       // not a shortcut around the interrupted reviewer/leaf authority gates.
       const recovery = document.createElement('section');

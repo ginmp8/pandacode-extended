@@ -1,5 +1,9 @@
 # PandaCode Extended documentation
 
+## 2026-11-27 — atomic queue holds and offline reconnect checkpoint
+
+Six runtime paths from [fork fix `9ce231eedbfc`](https://github.com/ginmp8/pandacode/commit/9ce231eedbfc59970f8712f6974f44afb68e047d) are reconciled against [source `9803f6e6b245`](https://github.com/ginmp8/pandacode/commit/9803f6e6b24510842ab816fb447f839a9fb792b1) (0.3.160). Two exact, four adapted, 14 upstream hunks verified forward and inverse. Queue holds transition under one mutex; reconnect clears stale run endings, Send now state and deleted idle sessions. Original regression tests and Extended headless queue guard retained. No Settings, dependency, workflow or version changes. Fully imported baseline 0.3.154; 0.12.0 DRAFT. Parent CI [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45931851529) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45931858202) 11/11 each. Candidate Rust, Node, Playwright and native acceptance unexecuted locally (DNS failure, Cargo unavailable); candidate CI unverified. Storage, changelog and version synchronization pending; no full parity claim.
+
 ## 2026-11-27 — Connect limit dismissal and browser reconnect checkpoint
 
 Connect limit dismissal and reconnect fixes incorporated from [fork main `ea1fe3ad1d08`](https://github.com/ginmp8/pandacode/commit/ea1fe3ad1d0852e93a94efe992fc067236420321); the inherited baseline remains 0.3.154. The planned distribution remains 0.12.0 DRAFT. [Candidate details](0.12.0/README.md).

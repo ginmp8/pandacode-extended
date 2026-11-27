@@ -169,50 +169,101 @@ fn trusted_package(library: &Library, meta: &Meta) -> Result<(super::Files, BTre
     Ok((files, hashes))
 }
 
-/// Inspect explicitly assigned packages using the native Council package verifier.
-/// This is a diagnostic snapshot only: no recovery, activation, staging, dependency
-/// closure, harness eligibility, invocation or execution authorization is inferred.
+/// Bound read-side dependency inspection even for malformed or unusually large
+/// graphs. This is not a limit on the configured bot roster or Council execution.
+const MAX_TEAM_SKILL_CLOSURE: usize = 64;
+
+type InspectedPackage = (&'static str, Vec<String>);
+
+fn inspect_team_skill_package(library: &Library, id: &str) -> Option<InspectedPackage> {
+    if !super::valid_id(id) { return None; }
+    let metadata = match fs::symlink_metadata(library.meta_path(id)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(("unavailable", Vec::new())),
+    };
+    let mut dependencies = Vec::new();
+    let status = if !metadata.is_file() || metadata.file_type().is_symlink() {
+        "integrity_mismatch"
+    } else {
+        match library.load(id) {
+            Err(_) => "integrity_mismatch",
+            Ok(meta) if meta.id != id => "integrity_mismatch",
+            Ok(meta) if meta.kind != Kind::Skill => return None,
+            Ok(meta) if !matches!(meta.source.kind.as_str(), "folder" | "github") => "review_required",
+            Ok(meta) => match trusted_package(library, &meta) {
+                Ok((files, _)) => {
+                    dependencies = meta.required_skills;
+                    if files.iter().any(|(path, bytes)|
+                        !super::safety::scan(path, &String::from_utf8_lossy(bytes)).is_empty())
+                    {
+                        "findings_acknowledged"
+                    } else {
+                        "clean"
+                    }
+                }
+                Err(reason) if reason.starts_with("reviewer_skill_drift:") => "integrity_mismatch",
+                Err(reason) if reason.starts_with("reviewer_skill_untrusted:") => "review_required",
+                Err(reason) if reason.starts_with("reviewer_skill_source_unpinned:") => "source_unpinned",
+                Err(_) => "unavailable",
+            },
+        }
+    };
+    Some((status, dependencies))
+}
+
+fn verify_team_skill_dependencies(
+    library: &Library,
+    id: &str,
+    cache: &mut std::collections::HashMap<String, Option<InspectedPackage>>,
+    visiting: &mut HashSet<String>,
+    resolved: &mut HashSet<String>,
+) -> Result<(), &'static str> {
+    if resolved.contains(id) { return Ok(()); }
+    if visiting.contains(id) { return Err("dependency_cycle"); }
+    if visiting.len() + resolved.len() >= MAX_TEAM_SKILL_CLOSURE {
+        return Err("dependency_limit");
+    }
+    let (status, dependencies) = cache.entry(id.to_owned())
+        .or_insert_with(|| inspect_team_skill_package(library, id))
+        .clone().ok_or("dependency_unavailable")?;
+    if !matches!(status, "clean" | "findings_acknowledged") {
+        return Err("dependency_unavailable");
+    }
+    if dependencies.len() >= MAX_TEAM_SKILL_CLOSURE {
+        return Err("dependency_limit");
+    }
+    visiting.insert(id.to_owned());
+    for dependency in &dependencies {
+        verify_team_skill_dependencies(library, dependency, cache, visiting, resolved)?;
+    }
+    visiting.remove(id);
+    resolved.insert(id.to_owned());
+    Ok(())
+}
+
+/// Inspect explicitly assigned packages and their required closure using the
+/// native Council package verifier. This remains diagnostic: dependencies
+/// are not bot assignments, no staging or activation occurs, and no harness
+/// eligibility, invocation or execution authorization is inferred.
 pub(crate) fn inspect_team_skills(
     library: &Library,
     ids: &HashSet<String>,
 ) -> Result<std::collections::HashMap<String, &'static str>, String> {
     let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
     let mut result = std::collections::HashMap::new();
+    let mut cache = std::collections::HashMap::new();
     for id in ids {
-        if !super::valid_id(id) { continue; }
-        let metadata = match fs::symlink_metadata(library.meta_path(id)) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => {
-                result.insert(id.clone(), "unavailable");
-                continue;
+        let Some((mut status, _)) = cache.entry(id.clone())
+            .or_insert_with(|| inspect_team_skill_package(library, id)).clone()
+        else { continue; };
+        if matches!(status, "clean" | "findings_acknowledged") {
+            if let Err(reason) = verify_team_skill_dependencies(
+                library, id, &mut cache, &mut HashSet::new(), &mut HashSet::new(),
+            ) {
+                status = reason;
             }
-        };
-        let status = if !metadata.is_file() || metadata.file_type().is_symlink() {
-            "integrity_mismatch"
-        } else {
-            match library.load(id) {
-                Err(_) => "integrity_mismatch",
-                Ok(meta) if meta.id != *id => "integrity_mismatch",
-                Ok(meta) if meta.kind != Kind::Skill => continue,
-                Ok(meta) if !matches!(meta.source.kind.as_str(), "folder" | "github") => "review_required",
-                Ok(meta) => match trusted_package(library, &meta) {
-                    Ok((files, _)) => {
-                        if files.iter().any(|(path, bytes)|
-                            !super::safety::scan(path, &String::from_utf8_lossy(bytes)).is_empty())
-                        {
-                            "findings_acknowledged"
-                        } else {
-                            "clean"
-                        }
-                    }
-                    Err(reason) if reason.starts_with("reviewer_skill_drift:") => "integrity_mismatch",
-                    Err(reason) if reason.starts_with("reviewer_skill_untrusted:") => "review_required",
-                    Err(reason) if reason.starts_with("reviewer_skill_source_unpinned:") => "source_unpinned",
-                    Err(_) => "unavailable",
-                },
-            }
-        };
+        }
         result.insert(id.clone(), status);
     }
     Ok(result)
@@ -633,6 +684,51 @@ mod tests {
             Some(&"integrity_mismatch"));
         fs::write(&meta_path, original).unwrap();
         assert_eq!(inspect_team_skills(&library, &ids).unwrap().get("assigned"), Some(&"clean"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn team_skill_inventory_checks_transitive_dependencies_without_staging() {
+        let (library, root) = fixture();
+        add(&library, "assigned", "Inspect the task.", &["dependency"]);
+        add(&library, "dependency", "Check the inputs.", &["leaf"]);
+        add(&library, "cycle-a", "Check the task.", &["cycle-b"]);
+        add(&library, "cycle-b", "Check the task.", &["cycle-a"]);
+        add(&library, "independent", "Check evidence.", &[]);
+        let ids = HashSet::from([
+            "assigned".to_owned(), "cycle-a".to_owned(), "independent".to_owned(),
+        ]);
+        let initial = inspect_team_skills(&library, &ids).unwrap();
+        assert_eq!(initial.get("assigned"), Some(&"dependency_unavailable"));
+        assert_eq!(initial.get("cycle-a"), Some(&"dependency_cycle"));
+        assert_eq!(initial.get("independent"), Some(&"clean"));
+        assert_eq!(initial.len(), ids.len(), "dependencies are not bot assignments");
+        add(&library, "leaf", "Check the leaf.", &[]);
+        assert_eq!(inspect_team_skills(&library, &ids).unwrap().get("assigned"), Some(&"clean"));
+        let meta_path = library.dir.join("leaf.json");
+        let original = fs::read(&meta_path).unwrap();
+        fs::write(library.dir.join("leaf/SKILL.md"), "Changed content").unwrap();
+        assert_eq!(inspect_team_skills(&library, &ids).unwrap().get("assigned"),
+            Some(&"dependency_unavailable"));
+        assert_eq!(fs::read(meta_path).unwrap(), original);
+        assert!(!library.dir.join(STAGE_ROOT).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn team_skill_inventory_bounds_dependency_closure() {
+        let (library, root) = fixture();
+        for index in 0..=MAX_TEAM_SKILL_CLOSURE {
+            let id = format!("skill-{index}");
+            let next = format!("skill-{}", index + 1);
+            let required = if index == MAX_TEAM_SKILL_CLOSURE { vec![] } else { vec![next.as_str()] };
+            add(&library, &id, "Check evidence.", &required);
+        }
+        let ids = HashSet::from(["skill-0".to_owned(), "skill-1".to_owned()]);
+        let result = inspect_team_skills(&library, &ids).unwrap();
+        assert_eq!(result.get("skill-0"), Some(&"dependency_limit"));
+        assert_eq!(result.get("skill-1"), Some(&"clean"));
+        assert!(!library.dir.join(STAGE_ROOT).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

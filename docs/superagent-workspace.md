@@ -270,7 +270,14 @@ The command inspects the **existing PandaCode Skills Library** and each bot's
 assigned skill IDs without importing, installing, activating, executing or granting
 anything. It reports library presence and native package-scan safety state
 (`clean`, `findings_acknowledged` or `review_required`) separately. Missing
-assigned IDs remain visible. A native, per-member local configuration check
+assigned IDs remain visible. The native verifier also checks each assigned
+package's required transitive dependencies without staging or activating
+them. It reports `dependency_unavailable` for a missing, unsafe, or changed
+dependency, `dependency_cycle` for a cycle, and `dependency_limit` when the
+read-side closure exceeds 64 distinct packages (including the assigned root).
+These states are actionable configuration findings; dependencies are not added
+to the bot's assignments, and a successful inspection does not supply a
+Skill to any task or prove its invocation. A native, per-member local configuration check
 reports paused bots, missing assigned Skills and unresolved Skill safety findings
 with actionable remediation in the existing Bots / Skills Manager screens.
 It also detects Workers whose project changed after Team configuration; a

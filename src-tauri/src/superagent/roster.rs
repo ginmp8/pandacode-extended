@@ -626,6 +626,12 @@ fn effective_team(
                 configuration_issues.push(format!(
                     "Assigned Skill {} package integrity differs from the library metadata: review or reimport it in Skills Manager.",skill.id,
                 ));
+            } else if matches!(skill.safety_status.as_str(),
+                "dependency_unavailable" | "dependency_cycle" | "dependency_limit") {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} has an unresolved required dependency closure ({}): review it in Skills Manager.",
+                    skill.id,skill.safety_status,
+                ));
             } else if matches!(skill.safety_status.as_str(),"source_unpinned" | "unavailable") {
                 configuration_issues.push(format!(
                     "Assigned Skill {} has an unavailable or unpinned package: review it in Skills Manager.",skill.id,
@@ -1496,6 +1502,17 @@ mod tests {
         assert!(changed.members[1].configuration_issues.iter().any(|issue|
             issue.contains("package integrity")));
         assert!(!changed.grants_issued);
+        for status in ["dependency_unavailable", "dependency_cycle", "dependency_limit"] {
+            let unresolved = HashMap::from([("known".to_string(), LibraryStatus { safety: status })]);
+            let report = effective_team(&store, &cfg.id, &unresolved).unwrap();
+            let member = &report.members[1];
+            assert_eq!(member.skills[0].library_status, "installed");
+            assert_eq!(member.skills[0].safety_status, status);
+            assert_eq!(member.skills[0].invocation_evidence, "not_verified");
+            assert!(member.configuration_issues.iter().any(|issue|
+                issue.contains("unresolved required dependency closure") && issue.contains(status)));
+            assert!(!report.grants_issued);
+        }
         assert_eq!(view.policy_revision,roster.policy_revision);
         assert_eq!(view.members.iter().map(|m|m.role.as_str()).collect::<Vec<_>>(),
             vec!["coordinator","worker","worker","reviewer"]);

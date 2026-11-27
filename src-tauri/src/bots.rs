@@ -726,6 +726,9 @@ pub(crate) fn reset(store: &Store, id: &str) -> Result<Bot> {
 
 /// Deletes the bot and its records. Its workspace folder stays on disk.
 pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
+    // The bot, its native sessions, and SuperAgent revocation receipts must
+    // either disappear/settle together or remain unchanged on SQL failure.
+    let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     crate::superagent::invalidate_bot(store, id, true)?;
     let open = shared_channels::open_posts(store, id)?;
     store.db.execute("DELETE FROM sessions WHERE id IN (SELECT session_id FROM bot_threads WHERE bot_id=?1)", [id]).map_err(|e| e.to_string())?;
@@ -734,11 +737,14 @@ pub(crate) fn delete(store: &Store, id: &str) -> Result<()> {
         let rows = statement.query_map([id], |r| r.get(0)).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?
     };
+    store.db.execute("DELETE FROM bots WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+    shared_channels::settle_posts(store, &open)?;
+    transaction.commit().map_err(|e| e.to_string())?;
+    // The external credential cleanup is best-effort and cannot be rolled
+    // back by SQLite. Do not remove a live bot's credentials on failed deletion.
     for channel in channels {
         secrets::remove_all(&channel);
     }
-    store.db.execute("DELETE FROM bots WHERE id=?1", [id]).map_err(|e| e.to_string())?;
-    shared_channels::settle_posts(store, &open)?;
     Ok(())
 }
 

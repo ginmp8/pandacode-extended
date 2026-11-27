@@ -5244,6 +5244,9 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
              WHERE ticket_id=?1 AND state='pending'",
             params![ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        // Retire the exact stale intent in the caller's reset/delete transaction.
+        // An offline host must not display revoked work as pending.
+        headless_dispatch::reject_stale_pending(&store.db, &ticket_id, now)?;
         record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
             "Native bot session unavailable; mandate revoked without replay")?;
     }
@@ -16933,6 +16936,52 @@ mod tests {
         assert_eq!(get_ticket(&store, &queued.id).unwrap().state, "blocked");
         assert!(!on_run_finished(&store, &next_session, true, "stale").unwrap());
         assert_eq!(history(&store, &next.id, 100).unwrap()[0].kind, "bot_reset");
+    }
+
+    #[test]
+    fn bot_invalidation_retires_pending_dispatch_and_rolls_back_failed_delete() {
+        for remove in [false, true] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(&mut store, &cfg.id,
+                "Pending native dispatch", "bot-invalidation-pending", true).unwrap();
+            assert!(!launched);
+            let request = headless_dispatch::enqueue(
+                &store, &ticket.id, ticket.revision, "pending-before-invalidation",
+            ).unwrap();
+            if remove {
+                store.db.execute_batch(
+                    "CREATE TEMP TRIGGER reject_worker_delete BEFORE DELETE ON bots
+                     WHEN OLD.id='worker' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END;"
+                ).unwrap();
+                assert!(bots::delete(&store, "worker").is_err());
+                assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, ticket.revision);
+                assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+                assert_eq!(headless_dispatch::next_pending(&store).unwrap().unwrap().id, request.id);
+                assert!(configuration(&store, &cfg.id).unwrap().enabled);
+                assert!(bots::get(&store, "worker").is_ok());
+                store.db.execute_batch("DROP TRIGGER reject_worker_delete").unwrap();
+                bots::delete(&store, "worker").unwrap();
+            } else {
+                bots::reset(&store, "worker").unwrap();
+            }
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+            let receipt = headless_dispatch::enqueue(
+                &store, &ticket.id, ticket.revision, "pending-before-invalidation",
+            ).unwrap();
+            assert_eq!(receipt.id, request.id);
+            let receipt = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(receipt["state"], "rejected");
+            assert_eq!(receipt["rejection"], "Ticket revision changed");
+            assert!(assignments(&store, &ticket.id, 10).unwrap().is_empty());
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert!(headless_dispatch::next_pending(&reopened).unwrap().is_none());
+            assert!(history(&reopened, &ticket.id, 100).unwrap().iter()
+                .any(|entry| entry.kind == "headless_dispatch_rejected"));
+        }
     }
 
     #[test]

@@ -142,7 +142,7 @@ fn expire_pending(tx: &Transaction<'_>, now: i64) -> Result<()> {
 /// The caller owns the transaction: plan edits and their revocation audit
 /// must commit together. Admitted requests are immutable native receipts.
 pub(super) fn reject_stale_pending(
-    tx: &Transaction<'_>, ticket_id: &str, now: i64,
+    tx: &rusqlite::Connection, ticket_id: &str, now: i64,
 ) -> Result<()> {
     retire_stale_pending(tx, Some(ticket_id), now)
 }
@@ -152,7 +152,7 @@ pub(super) fn reject_stale_pending(
 /// This only rejects pending requests whose recorded revision no longer matches;
 /// it cannot admit, replay or modify a current or already admitted request.
 fn retire_stale_pending(
-    tx: &Transaction<'_>, ticket_id: Option<&str>, now: i64,
+    tx: &rusqlite::Connection, ticket_id: Option<&str>, now: i64,
 ) -> Result<()> {
     let predicate = "(?1 IS NULL OR ticket_id=?1) AND state='pending' AND EXISTS(
         SELECT 1 FROM sa_tickets t WHERE t.id=sa_headless_dispatch_requests.ticket_id

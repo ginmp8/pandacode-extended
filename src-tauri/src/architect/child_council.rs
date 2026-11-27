@@ -113,6 +113,20 @@ fn require_independent_coordinator(store: &Store, root_id: &str, bot_id: &str) -
     Ok(())
 }
 
+// A task-owned native child or leaf cannot also be a persistent bot's
+// ordinary conversation or assigned task, even before it has a transcript.
+fn require_no_ordinary_bot_owner(store: &Store, session_id: &str) -> Result<()> {
+    let owned: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bot_threads WHERE session_id=?1
+                       UNION ALL SELECT 1 FROM bot_tasks WHERE session_id=?1)",
+        [session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if owned {
+        return Err("child_council_revoked: native child review session has ordinary bot ownership.".into());
+    }
+    Ok(())
+}
+
 fn frozen(
     store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer,
     session_id: &str, child_config: &TeamConfig,
@@ -130,6 +144,7 @@ fn frozen_with_recovery_status(
     require_independent_coordinator(store, &root.session_id, &child.bot_id)?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
+    require_no_ordinary_bot_owner(store, session_id)?;
     // The task-owned coordinator is a native scheduling reservation, not a
     // provider conversation. A foreign resume token or active provider means
     // that this context is no longer isolated, even without any chat messages.
@@ -1144,10 +1159,20 @@ fn validate_admitted(
         // An unstarted native reviewer must begin with its own fresh provider
         // context. Do not silently resume an unrelated provider thread merely
         // because the queued session still belongs to the correct child.
-        if leaf.council.as_ref().is_some_and(|seat| seat.started_at == 0)
-            && session.resume_id.is_some()
-        {
-            return Err("child_council_stale: unstarted native leaf has a provider resume context.".into());
+        require_no_ordinary_bot_owner(store, &leaf.session_id)?;
+        if leaf.council.as_ref().is_some_and(|seat| seat.started_at == 0) {
+            if session.resume_id.is_some() {
+                return Err("child_council_stale: unstarted native leaf has a provider resume context.".into());
+            }
+            // Native issuance creates an empty session. A prior transcript is
+            // foreign evidence even if the provider resume token is absent.
+            let has_history: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1)",
+                [&leaf.session_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if has_history {
+                return Err("child_council_stale: unstarted native leaf contains unrelated chat history.".into());
+            }
         }
         // Parent ownership alone cannot authenticate a leaf's identity: two
         // sibling sessions might be swapped in the mutable TeamSnapshot while

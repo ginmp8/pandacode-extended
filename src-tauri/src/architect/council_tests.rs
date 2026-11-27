@@ -8847,6 +8847,52 @@ fn queued_native_child_reviewer_cannot_relaunch_a_live_or_completed_session() {
     );
     assert_eq!(store.session(&leaf_sid).unwrap().resume_id.as_deref(), Some("foreign-provider-context"));
     store.db.execute("UPDATE sessions SET resume_id=NULL WHERE id=?1", [&leaf_sid]).unwrap();
+    // A fresh provider context alone does not establish a fresh native transcript.
+    // A prior assistant score or ordinary chat must not become this leaf's evidence.
+    let foreign_message: i64 = store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at)
+         VALUES(?1,'assistant','Foreign task report. Council score: 10/10',?2) RETURNING id",
+        rusqlite::params![&leaf_sid, storage::now()], |row| row.get(0),
+    ).unwrap();
+    let denied = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).err().expect("an unstarted leaf cannot inherit an ordinary transcript");
+    assert!(denied.contains("unstarted native leaf contains unrelated chat history"), "{denied}");
+    assert_eq!(serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+        child_before, "denied history must not consume a queued seat");
+    assert_eq!(store.db.query_row(
+        "SELECT COUNT(*) FROM messages WHERE id=?1", [foreign_message], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1, "review admission must not delete unrelated history");
+    store.db.execute("DELETE FROM messages WHERE id=?1", [foreign_message]).unwrap();
+
+    // Neither an empty persistent bot conversation nor a bot task is a
+    // task-owned native reviewer. Check both leaf and coordinator ownership.
+    for native_sid in [&leaf_sid, &child_id] {
+        store.db.execute(
+            "INSERT INTO bot_tasks(session_id,bot_id) VALUES(?1,'queued-live-security')",
+            [native_sid],
+        ).unwrap();
+        let denied = child_council::next_leaf_launch(
+            &store, &std::collections::HashMap::new(), &root,
+        ).err().expect("a bot task cannot also be a native child review session");
+        assert!(denied.contains("native child review session has ordinary bot ownership"), "{denied}");
+        assert_eq!(serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+            child_before, "denied bot task ownership must not consume a queued seat");
+        store.db.execute("DELETE FROM bot_tasks WHERE session_id=?1", [native_sid]).unwrap();
+
+        store.db.execute(
+            "INSERT INTO bot_threads(bot_id,channel_id,external_id,session_id,updated_at)
+             VALUES('queued-live-security','direct','foreign-child-thread',?1,?2)",
+            rusqlite::params![native_sid, storage::now()],
+        ).unwrap();
+        let denied = child_council::next_leaf_launch(
+            &store, &std::collections::HashMap::new(), &root,
+        ).err().expect("a bot conversation cannot also be a native child review session");
+        assert!(denied.contains("native child review session has ordinary bot ownership"), "{denied}");
+        assert_eq!(serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+            child_before, "denied bot conversation ownership must not consume a queued seat");
+        store.db.execute("DELETE FROM bot_threads WHERE session_id=?1", [native_sid]).unwrap();
+    }
     for native_status in ["running", "waiting", "completed"] {
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",

@@ -2867,6 +2867,7 @@ pub(crate) fn headless_quarantine_orphan_running_ticket(
            'Running Ticket lost its Team, Mandate or unique active Assignment; revoked without provider or effect replay',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     tx.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId":ticket_id,"state":"interrupted","revision":expected_revision+1,
@@ -2940,6 +2941,7 @@ pub(crate) fn headless_quarantine_detached_ticket(
            'Missing native session; revoked without provider or effect replay',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     tx.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId":ticket_id,"state":"interrupted","revision":revision+1,
@@ -3017,6 +3019,7 @@ pub(crate) fn headless_quarantine_expired_ticket(
            'Expired or invalid-clock native assignment revoked; verify live provider and external effects before retry',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     tx.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId":ticket_id, "state":"interrupted", "revision":revision+1,
@@ -3107,6 +3110,7 @@ fn quarantine_nonrunning_orphan(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
         params![ticket_id,kind,detail,now],
     ).map_err(|e| e.to_string())?;
+    headless_dispatch::reject_stale_pending(&tx, ticket_id, now)?;
     tx.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket_id, "state": next_state, "revision": revision + 1,
@@ -3331,6 +3335,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              VALUES(?1,'watchdog_interrupted',?2,?3)",
             params![ticket_id,reason,now],
         ).map_err(|e| e.to_string())?;
+        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
         tx.commit().map_err(|e| e.to_string())?;
         sessions.push(session_id);
     }
@@ -3409,6 +3414,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                'Running Ticket lost its Team or unique active Assignment; all task authority revoked without replay',?2)",
             params![&ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
         tx.commit().map_err(|e| e.to_string())?;
         for session_id in provider_sessions {
             if !sessions.contains(&session_id) {
@@ -3486,6 +3492,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
             "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
             params![&ticket_id,kind,detail,now],
         ).map_err(|e| e.to_string())?;
+        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
         tx.commit().map_err(|e| e.to_string())?;
         for session_id in provider_sessions {
             if !sessions.contains(&session_id) {
@@ -9829,6 +9836,102 @@ mod tests {
         assert_eq!(again["mandateCorrupt"], true);
         assert_eq!(again["recovery"]["nextOperatorAction"],
             "investigate_invalid_native_mandate_before_retry");
+    }
+
+    #[test]
+    fn native_recovery_retires_pending_dispatches_atomically_without_replay() {
+        for live_watchdog in [false, true] {
+            for fault in ["expired", "detached", "unlinked", "terminal", "inactive"] {
+                let mut store = fixture();
+                let cfg = enabled(&store);
+                let (ticket, started) = admit(&mut store, &cfg.id, "Recovery test",
+                    "recovery-dispatch-fence", false).unwrap();
+                assert!(started);
+                match fault {
+                    "expired" => store.db.execute(
+                        "UPDATE sa_assignments SET created_at=1 WHERE ticket_id=?1",
+                        [&ticket.id]),
+                    "detached" => store.db.execute(
+                        "UPDATE sa_assignments SET session_id='missing-native-session'
+                         WHERE ticket_id=?1", [&ticket.id]),
+                    "unlinked" => store.db.execute(
+                        "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                        [&ticket.id]),
+                    "terminal" => store.db.execute(
+                        "UPDATE sa_tickets SET state='completed' WHERE id=?1",
+                        [&ticket.id]),
+                    "inactive" => store.db.execute(
+                        "UPDATE sa_tickets SET state='waiting_approval' WHERE id=?1",
+                        [&ticket.id]),
+                    _ => unreachable!(),
+                }.unwrap();
+                let before = get_ticket(&store, &ticket.id).unwrap();
+                let now = storage::now();
+                // Legacy/interrupted storage may retain an unconsumed intent
+                // even when its Assignment has already become inconsistent.
+                store.db.execute(
+                    "INSERT INTO sa_headless_dispatch_requests
+                     (id,ticket_id,request_key,expected_revision,kind,state,created_at,updated_at)
+                     VALUES('legacy-pending',?1,'legacy-request',?2,'retry','pending',?3,?3)",
+                    params![&ticket.id,before.revision,now],
+                ).unwrap();
+                store.db.execute(
+                    "INSERT INTO sa_effect_receipts
+                     (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                     VALUES(?1,'remote-pending',?2,'pending',?3,?3)",
+                    params![&ticket.id,"a".repeat(64),now],
+                ).unwrap();
+                let recover = || -> Result<()> {
+                    if live_watchdog {
+                        watchdog_expired_assignments(&store, now)?;
+                    } else {
+                        match fault {
+                            "expired" => headless_quarantine_expired_ticket(&store.path,&ticket.id,before.revision),
+                            "detached" => headless_quarantine_detached_ticket(&store.path,&ticket.id,before.revision),
+                            "unlinked" => headless_quarantine_orphan_running_ticket(&store.path,&ticket.id,before.revision),
+                            "terminal" => headless_quarantine_terminal_orphan(&store.path,&ticket.id,before.revision),
+                            "inactive" => headless_quarantine_inactive_orphan(&store.path,&ticket.id,before.revision),
+                            _ => unreachable!(),
+                        }?;
+                    }
+                    Ok(())
+                };
+                let request_state = || -> String {
+                    store.db.query_row(
+                        "SELECT state FROM sa_headless_dispatch_requests WHERE id='legacy-pending'",
+                        [], |row| row.get(0),
+                    ).unwrap()
+                };
+                store.db.execute_batch(
+                    "CREATE TRIGGER deny_recovery_dispatch_audit BEFORE INSERT ON sa_audit
+                     WHEN NEW.kind='headless_dispatch_rejected'
+                     BEGIN SELECT RAISE(ABORT,'injected dispatch audit failure'); END;",
+                ).unwrap();
+                assert!(recover().is_err(), "{fault}, watchdog={live_watchdog}: audit is mandatory");
+                assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,before.revision);
+                assert_eq!(request_state(),"pending");
+                assert_eq!(effects::receipt_history(&store,&ticket.id,1).unwrap()[0].state,"pending");
+                assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+                store.db.execute_batch("DROP TRIGGER deny_recovery_dispatch_audit").unwrap();
+                recover().unwrap();
+                let after = get_ticket(&store,&ticket.id).unwrap();
+                assert_eq!(after.revision,before.revision+1);
+                assert_eq!(after.state,if fault=="terminal" {"completed"} else {"interrupted"});
+                assert!(after.active_assignment_id.is_none());
+                assert!(mandate(&store,&ticket.id).unwrap().revoked);
+                assert_eq!(request_state(),"rejected");
+                assert_eq!(effects::receipt_history(&store,&ticket.id,1).unwrap()[0].state,"uncertain");
+                assert!(headless_dispatch::pending_for_ticket(&store,&ticket.id).unwrap().is_none());
+                let path = store.path.clone();
+                drop(store);
+                let reopened = Store::open_read_only(&path).unwrap();
+                assert_eq!(reopened.db.query_row(
+                    "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+                    [&ticket.id], |row| row.get::<_,i64>(0),
+                ).unwrap(),1);
+                assert!(headless_dispatch::pending_for_ticket(&reopened,&ticket.id).unwrap().is_none());
+            }
+        }
     }
 
     #[test]

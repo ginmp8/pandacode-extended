@@ -2794,6 +2794,46 @@ fn unforced_s2_rejects_untriggered_and_replayed_clean_waves() {
 }
 
 #[test]
+fn unforced_s2_later_numeric_trigger_cannot_erase_historical_findings() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    for conflict in [false, true] {
+        let mut first = seat("original-a", 1, Some(9.8), SINCE + 1);
+        let report = first.council.as_mut().unwrap();
+        report.reported_conflict = conflict;
+        report.reported_severe_finding = !conflict;
+        let mut second_a = seat("second-a", 2, Some(8.2), SINCE + 4);
+        second_a.council.as_mut().unwrap().lens = "lens original-a".into();
+        let mut second_b = seat("second-b", 2, Some(9.8), SINCE + 5);
+        second_b.council.as_mut().unwrap().lens = "lens original-b".into();
+        let mut team = team_with(config.clone(), vec![
+            first, seat("original-b", 1, Some(9.8), SINCE + 2), second_a, second_b,
+        ]);
+        assert_eq!(council::status(&team).unwrap().state, "fixing");
+        assert!(council::round_for(&team, &config, None).is_err(),
+            "a later numeric trigger cannot authorize another wave while a historical finding remains uncorrected");
+
+        let mut third_a = seat("third-a", 3, Some(9.8), SINCE + 6);
+        third_a.council.as_mut().unwrap().lens = "lens original-a".into();
+        let mut third_b = seat("third-b", 3, Some(9.8), SINCE + 7);
+        third_b.council.as_mut().unwrap().lens = "lens original-b".into();
+        team.workers.extend([third_a, third_b]);
+        assert_ne!(council::status(&team).unwrap().state, "passed");
+        assert!(finish_refusal(&team).is_some());
+        let mut limited = team.clone();
+        limited.config.council.as_mut().unwrap().max_rounds = 3;
+        assert!(finish_refusal(&limited).is_some(),
+            "the round ceiling cannot authorize unresolved findings");
+
+        // A real correction before the fresh second and third waves permits
+        // the numeric trigger to be resolved by the independent third wave.
+        team.changed_at = SINCE + 3;
+        assert_eq!(council::status(&team).unwrap().state, "passed");
+        assert!(finish_refusal(&team).is_none());
+    }
+}
+
+#[test]
 fn automatic_s2_clean_wave_rejects_scored_reviewer_file_changes() {
     let mut config = on(9.0, 3, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;

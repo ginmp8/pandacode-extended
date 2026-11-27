@@ -1920,6 +1920,9 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if !flat_s2_history_has_triggers(team, config, &view) {
         return Err("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into());
     }
+    if unresolved_unforced_s2_history(team, config, latest.saturating_sub(1)) {
+        return Err("S2 automatic escalation requires an observed artifact correction after a historical critical/high finding or conflict.".into());
+    }
     // A corrupted M3 source roster cannot mint another native reviewer seat.
     // A valid but incomplete roster can still dispatch its missing reviewers.
     if matches!(config.mode(), "m3" | "m5" | "m6" | "m7")
@@ -2236,6 +2239,17 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     passing_rounds >= 2
 }
 
+/// A restored flat S2 history must not erase a severe finding or conflict
+/// merely because a later wave has a different (for example, numeric) trigger.
+fn unresolved_unforced_s2_history(team: &TeamSnapshot, config: &CouncilConfig, through_round: usize) -> bool {
+    config.strategy == CouncilExecutionStrategy::Escalated && !config.force_escalation
+        && config.nested_bot_reviewers.is_empty()
+        && (latest_severe_report(team, through_round)
+            .is_some_and(|reported_at| !written_since(team, reported_at))
+            || latest_conflict_report(team, through_round)
+                .is_some_and(|reported_at| !written_since(team, reported_at)))
+}
+
 /// An additional native S2 wave requires an observed on-demand trigger.
 /// Conflicting or severe reports require an observed correction before more
 /// reviewers consume the same artifact. Every permitted wave stays bounded.
@@ -2311,9 +2325,9 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     // A severe scored finding requires an observed correction after that
     // reviewer's report. Fresh seats alone cannot convert an unresolved
     // finding into approval, including after a persisted round is restored.
-    if latest_severe_report(team, trigger_round)
+    if latest_severe_report(team, view.latest)
         .is_some_and(|reported_at| !written_since(team, reported_at))
-        || latest_conflict_report(team, trigger_round)
+        || latest_conflict_report(team, view.latest)
             .is_some_and(|reported_at| !written_since(team, reported_at))
     {
         return false;
@@ -2604,6 +2618,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     }
     if !flat_s2_history_has_triggers(team, config, view) {
         return Some(("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into(), false));
+    }
+    if unresolved_unforced_s2_history(team, config, round.saturating_sub(1)) {
+        return Some(("S2 automatic escalation requires an observed artifact correction after a historical critical/high finding or conflict.".into(), true));
     }
     // Unlike legacy M1/M2, a composed root cannot finish at its round limit
     // with a forged/duplicate/missing seat. Limit is not a passing verdict.
@@ -3312,6 +3329,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
     } else if (config.mode() == "m3"
         && (1..=round).any(|r| m3_source_counts(team, config, r).is_none()))
         || !flat_s2_history_has_triggers(team, config, view)
+        || unresolved_unforced_s2_history(team, config, round.saturating_sub(1))
     {
         "fixing"
     } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && !severe_findings(team, round) && low.is_some_and(|low| low >= config.target)

@@ -532,3 +532,24 @@ test('architect preview round-trips only admitted native Council strategies with
   assert.equal(parallel.config.council.strategy, undefined);
   assert.equal(parallel.config.council.forceEscalation, undefined);
 });
+
+test('preview preserves inactive nested escalation preferences and denies unsupported preliminary review', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const child = { botId: 'a', childReviewers: 2, childTarget: 9, childMaxRounds: 3 };
+  const base = { target: 9, maxRounds: 3, reviewers: 0, automaticReviewers: 1, nestedBotReviewers: [child] };
+  const policy = escalationPolicy => ({ ...base, nestedBotReviewers: [{ ...child, escalationPolicy }] });
+  assert.deepEqual(api.setCouncil('parent', policy('always_nested')).config.council.nestedBotReviewers, [child]);
+  for (const strategy of ['parallel', 'two_phase']) {
+    const configured = api.setCouncil('parent', { ...policy('on_trigger'), strategy });
+    assert.equal(configured.councilStatus.state, 'waiting');
+    assert.equal(configured.config.council.nestedBotReviewers[0].escalationPolicy, 'on_trigger');
+    assert.equal(createPreviewArchitect(host).get('parent').config.council.nestedBotReviewers[0].escalationPolicy, 'on_trigger');
+  }
+  assert.throws(() => api.setCouncil('parent', { ...policy('on_trigger'), strategy: 'escalated' }), /on-trigger preliminary review/);
+  assert.throws(() => api.setCouncil('parent', policy('invalid')), /Unknown nested Council escalation policy/);
+  assert.throws(() => api.setCouncil('parent', { ...base, strategy: 'escalated', maxRounds: 1 }), /at least two/);
+  for (const strategy of ['escalated', 'two_phase']) {
+    assert.throws(() => api.setCouncil('parent', { ...base, strategy, nestedBotReviewers: [{ ...child, childMaxRounds: 1 }] }), /at least two/);
+  }
+});

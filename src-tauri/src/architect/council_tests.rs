@@ -163,6 +163,7 @@ fn unbound_selected_and_composed_reviewers_cannot_expose_foreign_session_finding
         let mut config = on(9.0, 3, 0);
         config.reviewer_bot_ids = (0..direct).map(|i| format!("direct-{i}")).collect();
         config.nested_bot_reviewers = (0..nested).map(|i| council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: format!("child-{i}"), child_reviewers: 2,
             child_target: 9.0, child_max_rounds: 2,
         }).collect();
@@ -2974,6 +2975,7 @@ fn automatic_council_rejects_explicit_single_seat_in_all_strategies() {
 #[test]
 fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dispatch() {
     let nested = |id: &str| council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,
     };
     for (mode, direct, children, automatic) in [
@@ -3077,6 +3079,7 @@ fn all_21_modes_and_strategies_create_frozen_native_task_reservations_without_a_
                     .map(|i| format!("direct-{i}")).collect();
                 config.nested_bot_reviewers = (0..child_count)
                     .map(|i| council::CouncilNestedReviewer {
+                        escalation_policy: Default::default(),
                         bot_id: format!("child-{i}"), child_reviewers: 2,
                         child_target: 9.0, child_max_rounds: 2,
                     }).collect();
@@ -3260,6 +3263,7 @@ fn m7_partial_root_roster_rejects_foreign_and_duplicate_sources_before_new_dispa
         let mut config = on(9.0, 3, 0);
         config.reviewer_bot_ids = vec!["selected-reviewer".into()];
         config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "child-reviewer".into(), child_reviewers: 2,
             child_target: 9.0, child_max_rounds: 3,
         }];
@@ -3369,6 +3373,7 @@ fn nested_m5_m6_root_source_integrity_gates_all_strategies() {
             let mode = if direct_source { "m6" } else { "m5" };
             let mut config = on(9.0, 3, 0);
             config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: "child-reviewer".into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 3,
             }];
@@ -3475,6 +3480,7 @@ fn nested_m5_m6_root_source_integrity_gates_all_strategies() {
 #[test]
 fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
     let nested = |bot: &str| council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
     };
     for (mode, direct, children, automatic) in [
@@ -3511,6 +3517,7 @@ fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
 #[test]
 fn nested_parallel_root_admits_only_enabled_native_sources_with_separate_quotas() {
     let child = council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: "child".into(), child_reviewers: 2,
         child_target: 9.0, child_max_rounds: 2,
     };
@@ -3571,6 +3578,7 @@ fn nested_parallel_root_admits_only_enabled_native_sources_with_separate_quotas(
 #[test]
 fn nested_source_preflight_rejects_identity_aliasing_quorum_and_unsafe_child_limits() {
     let nested = |id: &str| council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,
     };
     let mut config = on(9.0, 3, 0);
@@ -3600,6 +3608,7 @@ fn nested_council_bounds_total_leaf_attempts_before_any_child_admission() {
     let mut config = on(9.0, 3, 0);
     config.nested_bot_reviewers = ["security-child", "architecture-child"].into_iter()
         .map(|id| council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: id.into(), child_reviewers: 8, child_target: 9.0, child_max_rounds: 16,
         }).collect();
     assert_eq!(config.mode(), "m4");
@@ -3617,6 +3626,7 @@ fn nested_council_bounds_total_leaf_attempts_before_any_child_admission() {
 #[test]
 fn composed_council_bounds_root_and_child_rounds_without_changing_legacy_modes() {
     let child = |id: &str| council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 10,
     };
     let mut config = on(9.0, 24, 0);
@@ -3681,6 +3691,7 @@ fn composed_runtime_budget_counts_actual_child_and_root_attempts() {
     let mut config = on(9.0, 3, 0);
     config.nested_bot_reviewers = ["security-child", "architecture-child"]
         .into_iter().map(|bot_id| council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: bot_id.into(), child_reviewers: 2,
             child_target: 9.0, child_max_rounds: 2,
         }).collect();
@@ -5766,6 +5777,7 @@ fn nested_council_roster_is_editable_before_cycle_and_frozen_after_start() {
     assert_eq!(team.council_since, 0);
     let mut config = on(9.0, 3, 0);
     config.nested_bot_reviewers = ["child-a", "child-b"].iter().map(|id| council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: (*id).into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
     }).collect();
     config.validate().unwrap();
@@ -5783,6 +5795,7 @@ fn nested_council_roster_is_editable_before_cycle_and_frozen_after_start() {
 fn initial_nested_council_has_a_cycle_identity_without_restarting_blocked_reviews() {
     let mut config = on(9.0, 3, 0);
     config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: "child-security".into(), child_reviewers: 2,
         child_target: 9.5, child_max_rounds: 2,
     }];
@@ -5808,6 +5821,7 @@ fn failed_hierarchical_start_preserves_previous_objective_and_request_keys() {
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["atomic-first", "atomic-missing"]
             .into_iter().map(|id| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: id.into(), child_reviewers: 2, child_target: 9.0,
                 child_max_rounds: 2,
             }).collect();
@@ -5896,6 +5910,7 @@ fn native_child_coordinator_cannot_be_a_current_root_executor() {
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["child-security", "child-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0,
                 child_max_rounds: 2,
             }).collect();
@@ -5960,6 +5975,7 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
         let mut root_team = load(&store, &sid).unwrap().unwrap();
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = children.iter().map(|id| council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: id.clone(), child_reviewers: 2, child_target: 9.5,
             child_max_rounds: 2,
         }).collect();
@@ -6236,6 +6252,7 @@ fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["recovery-security", "recovery-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -6509,6 +6526,7 @@ fn nested_recovery_and_resume_deny_live_native_root_workers_before_replacing_chi
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["root-worker-security", "root-worker-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -6622,6 +6640,7 @@ fn user_accepted_root_council_cannot_recover_interrupted_child_reservations() {
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["accepted-security", "accepted-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -6687,6 +6706,7 @@ fn failed_unstarted_child_requires_explicit_recovery_and_new_native_session() {
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["failed-child-security", "failed-child-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(config);
@@ -6738,6 +6758,7 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["queued-security", "queued-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -6938,6 +6959,7 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["resumed-security", "resumed-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -7268,6 +7290,7 @@ fn interrupted_root_recovery_requires_native_crash_and_revokes_started_leaf_gran
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["crashed-security", "crashed-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -7434,6 +7457,7 @@ fn explicit_native_child_recovery_rejects_foreign_work_and_preserves_old_authori
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["tamper-security", "tamper-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(policy);
@@ -7482,6 +7506,7 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
         let mut council = on(9.0, 3, 0);
         council.nested_bot_reviewers = ["paused-security", "paused-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
             }).collect();
         root.config.council = Some(council);
@@ -7740,6 +7765,7 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["grant-security", "grant-architecture"]
             .iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -7885,6 +7911,7 @@ fn interrupted_root_preflight_rejects_extra_native_child_reservations() {
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["roster-security", "roster-architecture"]
             .into_iter().map(|id| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: id.into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -8012,6 +8039,7 @@ fn physical_sqlite_restart_recovers_multiple_child_reservations(score_one_leaf: 
         let mut council = on(9.0, 3, 0);
         council.nested_bot_reviewers = ["restart-security", "restart-architecture"]
             .iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -8370,6 +8398,7 @@ fn assert_physical_sqlite_restart_fresh_cycle(force_s2: bool) {
         let mut council = on(9.0, 3, 0);
         council.nested_bot_reviewers = ["restart-security", "restart-architecture"]
             .iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -8804,6 +8833,7 @@ fn queued_native_child_reviewer_cannot_relaunch_a_live_or_completed_session() {
         let mut council = on(9.0, 3, 0);
         council.nested_bot_reviewers = ["queued-live-security", "queued-live-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -8935,6 +8965,7 @@ fn native_child_launch_and_callback_require_the_original_root_artifact_pin() {
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["artifact-pin-security", "artifact-pin-architecture"]
             .into_iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: bot.into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -9031,6 +9062,7 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -9244,6 +9276,7 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["child-security", "child-architecture"].iter()
             .map(|id| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*id).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -10314,6 +10347,7 @@ fn native_child_progress_callbacks_require_live_grants_and_allow_waiting_complet
         let mut policy = on(9.0, 3, 0);
         policy.nested_bot_reviewers = ["activity-security", "activity-architecture"]
             .iter().map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.0, child_max_rounds: 2,
             }).collect();
@@ -10411,6 +10445,7 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter().map(|bot|
             council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -10786,6 +10821,7 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter().map(|bot|
             council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -11173,6 +11209,7 @@ fn nested_child_required_file_evidence_uses_live_native_host_receipts() {
         }];
         config.nested_bot_reviewers = ["file-security-child", "file-architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -11327,6 +11364,7 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
         });
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -11459,6 +11497,7 @@ fn nested_child_required_criteria_take_priority_over_optional_suggestions() {
         ];
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -11534,6 +11573,7 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
         let mut config = on(9.0, 3, 0);
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -11675,6 +11715,7 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
         config.strategy = strategy;
         config.automatic_reviewers = 1;
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -11859,6 +11900,7 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
         config.strategy = council::CouncilExecutionStrategy::TwoPhase;
         config.automatic_reviewers = 1;
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -12221,6 +12263,7 @@ fn run_nested_mixed_root_callbacks(
         config.automatic_reviewers = usize::from(include_automatic);
         config.strategy = strategy;
         config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(),
             child_reviewers: 2, child_target: 9.5, child_max_rounds: 2,
         }];
@@ -12427,6 +12470,7 @@ fn hierarchical_s2_root_worker_and_session_identities_are_unique_across_waves() 
     config.force_escalation = true;
     config.automatic_reviewers = 1;
     config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: "security-child".into(), child_reviewers: 2,
         child_target: 9.0, child_max_rounds: 2,
     });
@@ -12523,6 +12567,7 @@ fn run_nested_forced_s2_root_callbacks(mode: &str) {
             config.reviewer_bot_ids = vec!["quality-direct".into()];
         }
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -12891,6 +12936,7 @@ fn nested_m4_parallel_task_receipt_requires_both_child_council_callbacks() {
         config.strategy = council::CouncilExecutionStrategy::Parallel;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -13027,6 +13073,7 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         config.strategy = council::CouncilExecutionStrategy::TwoPhase;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -13370,6 +13417,7 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
         config.force_escalation = true;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -13487,6 +13535,7 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -13641,6 +13690,7 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: b
             config.reviewer_bot_ids = vec!["quality-direct".into()];
         }
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -13931,6 +13981,7 @@ fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
             config.reviewer_bot_ids = vec!["quality-direct".into()];
             config.automatic_reviewers = usize::from(include_automatic);
             config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: "security-child".into(),
                 child_reviewers: 2, child_target: 9.5, child_max_rounds: 2,
             }];
@@ -14133,6 +14184,7 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -14294,6 +14346,7 @@ fn nested_m5_unforced_s2_severe_root_report_triggers_native_review_without_false
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.automatic_reviewers = 1;
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "severity-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -14409,6 +14462,7 @@ fn nested_s2_root_conflict_claim_triggers_without_an_automatic_source_switch() {
     config.strategy = council::CouncilExecutionStrategy::Escalated;
     config.automatic_reviewers = 1;
     config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+        escalation_policy: Default::default(),
         bot_id: "security-child".into(), child_reviewers: 2,
         child_target: 9.5, child_max_rounds: 2,
     });
@@ -14446,6 +14500,7 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.automatic_reviewers = 1;
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -14615,6 +14670,7 @@ fn nested_m5_unforced_s2_respects_stricter_required_criterion_with_native_termin
             evidence_required: false, native_evidence: None,
         });
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            escalation_policy: Default::default(),
             bot_id: "criterion-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
@@ -14745,6 +14801,7 @@ fn nested_m4_triggered_s2_requires_authenticated_evidence_before_terminal_pass()
         config.strategy = council::CouncilExecutionStrategy::Escalated;
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
                 bot_id: (*bot).into(), child_reviewers: 2,
                 child_target: 9.5, child_max_rounds: 2,
             }).collect();
@@ -15195,4 +15252,52 @@ fn child_s2_criterion_trigger_uses_the_native_normalized_lens_and_target() {
     assert!(child_council::missing_required_first_wave_criterion(
         &[&reviewer], &config,
     ), "a high score for an unrelated lens is never equivalent evidence");
+}
+
+#[test]
+fn nested_escalation_policy_is_compatible_and_unavailable_preliminary_admission_fails_closed() {
+    use council::{CouncilExecutionStrategy, CouncilNestedEscalationPolicy, CouncilNestedReviewer};
+    let legacy = r#"{"botId":"child-a","childReviewers":2,"childTarget":9.0,"childMaxRounds":3}"#;
+    let choice: CouncilNestedReviewer = serde_json::from_str(legacy).unwrap();
+    assert_eq!(choice.escalation_policy, CouncilNestedEscalationPolicy::AlwaysNested);
+    assert_eq!(serde_json::to_string(&choice).unwrap(), legacy);
+    let mut explicit = serde_json::to_value(&choice).unwrap();
+    explicit["escalationPolicy"] = json!("always_nested");
+    let explicit: CouncilNestedReviewer = serde_json::from_value(explicit).unwrap();
+    assert_eq!(explicit, choice);
+    assert_eq!(serde_json::to_string(&explicit).unwrap(), legacy);
+    let mut invalid = serde_json::to_value(&choice).unwrap();
+    invalid["escalationPolicy"] = json!("untrusted");
+    assert!(serde_json::from_value::<CouncilNestedReviewer>(invalid).is_err());
+
+    let mut config = on(9.0, 3, 0);
+    config.automatic_reviewers = 1;
+    config.nested_bot_reviewers = vec![choice];
+    config.strategy = CouncilExecutionStrategy::Escalated;
+    config.validate().unwrap();
+    let mut unsupported = config.clone();
+    unsupported.nested_bot_reviewers[0].escalation_policy = CouncilNestedEscalationPolicy::OnTrigger;
+    assert!(unsupported.validate().unwrap_err().contains("on-trigger preliminary review"));
+    unsupported.force_escalation = true;
+    assert!(unsupported.validate().is_err());
+    unsupported.force_escalation = false;
+    for strategy in [CouncilExecutionStrategy::Parallel, CouncilExecutionStrategy::TwoPhase] {
+        unsupported.strategy = strategy;
+        unsupported.validate().unwrap();
+        let roundtrip: CouncilConfig = serde_json::from_str(&serde_json::to_string(&unsupported).unwrap()).unwrap();
+        assert_eq!(roundtrip.nested_bot_reviewers[0].escalation_policy, CouncilNestedEscalationPolicy::OnTrigger);
+    }
+    unsupported.strategy = CouncilExecutionStrategy::Escalated;
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &sid).unwrap().unwrap();
+    root.config.council = Some(unsupported);
+    let count = || store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1",
+        [&sid], |row| row.get::<_, i64>(0),
+    ).unwrap();
+    let before = count();
+    assert!(child_council::reserve(&store, &root).unwrap_err().contains("on-trigger preliminary review"));
+    assert!(child_council::admit_leaves(&store, &root).unwrap_err().contains("on-trigger preliminary review"));
+    assert_eq!(count(), before, "unsupported preliminary review must not mint reservations or authority");
 }

@@ -141,6 +141,7 @@ fn frozen_with_recovery_status(
     session_id: &str, child_config: &TeamConfig, allow_revoked_for_recovery: bool,
 ) -> Result<FrozenChildReservation> {
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
+    council.require_supported_nested_escalation()?;
     require_independent_coordinator(store, &root.session_id, &child.bot_id)?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
@@ -2738,6 +2739,7 @@ fn eligible_s3_child_challenge(store: &Store, root: &TeamSnapshot) -> Result<boo
 pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
     let Some(config) = root.config.council.as_ref() else { return Ok(false) };
     if config.nested_bot_reviewers.is_empty() { return Ok(false) }
+    config.require_supported_nested_escalation()?;
     if root.council_since <= 0 || root.objective.trim().is_empty()
         || !super::active(&root.status)
         || root.workers.iter().any(|w| !w.read_only && super::unsettled(&w.status))

@@ -15,6 +15,8 @@ export type CouncilExecutionStrategy = 'parallel' | 'escalated' | 'two_phase';
 /** Frozen child plan only; native admission rejects it until task-owned child sessions exist. */
 export interface CouncilNestedReviewer {
   botId: string; childReviewers: number; childTarget: number; childMaxRounds: number;
+  /** Omission preserves AlwaysNested. OnTrigger requires native preliminary admission in S2. */
+  escalationPolicy?: 'always_nested' | 'on_trigger';
 }
 export type CouncilCriterionNativeEvidence =
   | { kind: 'pinned_input_integrity'; skillId: string }

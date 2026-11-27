@@ -62,8 +62,8 @@ export function createPreviewArchitect(host: PreviewHost) {
       throw new Error('S3 two-phase Council requires at least two review rounds.');
     if (council.forceEscalation && strategy !== 'escalated')
       throw new Error('Forced escalation requires the escalated Council strategy.');
-    if (council.forceEscalation && council.maxRounds < 2)
-      throw new Error('Forced Council escalation requires at least two review rounds.');
+    if (strategy === 'escalated' && council.maxRounds < 2)
+      throw new Error('S2 escalation requires at least two review rounds.');
     const ids = council.reviewerBotIds ?? [];
     const nested = council.nestedBotReviewers ?? [];
     if (!Array.isArray(nested)) throw new Error('Nested Council reviewers must be a list.');
@@ -94,6 +94,12 @@ export function createPreviewArchitect(host: PreviewHost) {
         if (typeof child.childTarget !== 'number' || !Number.isFinite(child.childTarget) || child.childTarget < 1 || child.childTarget > 10)
           throw new Error('Child Council target must be between 1 and 10.');
         integer(child.childMaxRounds, 1, 100, 'Child Council rounds');
+        if (child.escalationPolicy !== undefined && child.escalationPolicy !== 'always_nested' && child.escalationPolicy !== 'on_trigger')
+          throw new Error('Unknown nested Council escalation policy.');
+        if (strategy === 'escalated' && child.escalationPolicy === 'on_trigger')
+          throw new Error('child_council_unavailable: on-trigger preliminary review is not available.');
+        if (strategy !== 'parallel' && child.childMaxRounds < 2)
+          throw new Error('Nested S2/S3 requires at least two child Council rounds.');
       }
     }
     // Preview must reject configurations the native task admission rejects;
@@ -143,7 +149,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       throw new Error('Each child Council must cover every required user criterion.');
     return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers,
       ...(ids.length ? { reviewerBotIds: [...ids] } : {}),
-      ...(nested.length ? { nestedBotReviewers: nested.map(child => ({ ...child })) } : {}),
+      ...(nested.length ? { nestedBotReviewers: nested.map(({ escalationPolicy, ...child }) => ({ ...child, ...(escalationPolicy === 'on_trigger' ? { escalationPolicy } : {}) })) } : {}),
       ...(extras ? { automaticReviewers: extras } : {}),
       ...(strategy !== 'parallel' ? { strategy } : {}),
       ...(council.forceEscalation ? { forceEscalation: true } : {}),

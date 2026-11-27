@@ -94,6 +94,16 @@ pub(super) enum CouncilReviewerSource {
 }
 /// Task-owned child Council configuration, not a grant to launch a bot chat.
 /// Admission stays fail-closed until the native child lifecycle is wired up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilNestedEscalationPolicy {
+    #[default]
+    AlwaysNested,
+    OnTrigger,
+}
+fn always_nested_policy(policy: &CouncilNestedEscalationPolicy) -> bool {
+    *policy == CouncilNestedEscalationPolicy::AlwaysNested
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CouncilNestedReviewer {
@@ -101,6 +111,8 @@ pub struct CouncilNestedReviewer {
     pub child_reviewers: usize,
     pub child_target: f64,
     pub child_max_rounds: usize,
+    #[serde(default, skip_serializing_if = "always_nested_policy")]
+    pub escalation_policy: CouncilNestedEscalationPolicy,
 }
 fn no_extra_reviewers(count: &usize) -> bool {
     *count == 0
@@ -194,7 +206,20 @@ impl Default for CouncilConfig {
     }
 }
 impl CouncilConfig {
+    // S2 preliminary reviewers need their own authenticated native admission
+    // and same-seat settlement before they may start or replace a child review.
+    // Until that boundary exists, never silently launch an AlwaysNested child.
+    pub(super) fn require_supported_nested_escalation(&self) -> Result<()> {
+        if self.strategy == CouncilExecutionStrategy::Escalated
+            && self.nested_bot_reviewers.iter().any(|child|
+                child.escalation_policy == CouncilNestedEscalationPolicy::OnTrigger)
+        {
+            return Err("child_council_unavailable: on-trigger preliminary review is not available.".into());
+        }
+        Ok(())
+    }
     pub(super) fn validate(&self) -> Result<()> {
+        self.require_supported_nested_escalation()?;
         if !self.target.is_finite() || !(1.0..=10.0).contains(&self.target) {
             return Err("The Council target must be between 1 and 10.".into());
         }

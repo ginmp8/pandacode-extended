@@ -1,7 +1,7 @@
 import { escape, icon, isImeKey, morph } from './dom';
 import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
-import { teamActive, type CouncilConfig, type TeamSnapshot } from './architect-types';
+import { teamActive, type CouncilConfig, type CouncilNestedReviewer, type TeamSnapshot } from './architect-types';
 import type { ProviderId } from './types';
 import { createCouncilCriteriaEditor } from './council-criteria-editor';
 import { createCouncilInspector } from './council-inspector';
@@ -33,7 +33,7 @@ export type CouncilHost = {
 
 type Field = 'target' | 'maxRounds' | 'reviewers';
 type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean; skills?: string[]; available?: boolean; reason?: string | null };
-type ChildSettings = { childReviewers: number; childTarget: number; childMaxRounds: number };
+type ChildSettings = Omit<CouncilNestedReviewer, 'botId'>;
 type ReviewerSelection = { selected: boolean; ids: string[]; nested: Record<string, ChildSettings>; idsEdited?: boolean; automaticReviewers?: number; optionalSkills?: string[]; checkSkills?: string[]; scoped?: boolean; fileScope?: string; authorizationId?: string };
 const FIELDS: readonly { key: Field; label: string; options: readonly number[]; name(value: number): string }[] = [
   { key: 'target', label: 'Target score', options: COUNCIL_TARGETS, name: formatScore },
@@ -102,7 +102,7 @@ export function createCouncil(host: CouncilHost) {
     // empty reviewer roster after native restoration, or override manual ID edits.
     if (draft?.selected && !draft.idsEdited && draft.ids.length === 0 && (persisted?.reviewerBotIds?.length || persisted?.nestedBotReviewers?.length)) {
       draft = { ...draft, ids: [...(persisted.reviewerBotIds ?? []), ...(persisted.nestedBotReviewers ?? []).map(child => child.botId)],
-        nested: Object.fromEntries((persisted.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds }])),
+        nested: Object.fromEntries((persisted.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds, ...(child.escalationPolicy ? { escalationPolicy: child.escalationPolicy } : {}) }])),
         automaticReviewers: persisted.automaticReviewers ?? draft.automaticReviewers ?? 0,
         optionalSkills: [...(persisted.optionalSkillIds ?? [])],
         checkSkills: [...(persisted.requiredCheckSkillIds ?? [])] };
@@ -111,7 +111,7 @@ export function createCouncil(host: CouncilHost) {
     return draft ?? {
       selected: Boolean(persisted?.reviewerBotIds?.length || persisted?.nestedBotReviewers?.length),
       ids: [...(persisted?.reviewerBotIds ?? []), ...(persisted?.nestedBotReviewers ?? []).map(child => child.botId)],
-      nested: Object.fromEntries((persisted?.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds }])),
+      nested: Object.fromEntries((persisted?.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds, ...(child.escalationPolicy ? { escalationPolicy: child.escalationPolicy } : {}) }])),
       automaticReviewers: persisted?.automaticReviewers ?? 0,
       optionalSkills: [...(persisted?.optionalSkillIds ?? [])],
       checkSkills: [...(persisted?.requiredCheckSkillIds ?? [])],

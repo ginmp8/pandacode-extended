@@ -1485,7 +1485,7 @@ mod tests {
         import("sa-prompt-root","Inspect the authorized fixture.",&["sa-prompt-dep"]);
         import("sa-prompt-other","Unrelated private instructions.",&[]);
         store.db.execute("INSERT INTO projects(id,name,path) VALUES('p','Fixture',?1)",
-            [checkout.to_string_lossy().as_ref()]).unwrap();
+            params![checkout.to_string_lossy().into_owned()]).unwrap();
         for (id,provider) in [("lead","codex"),("worker","kimi")] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)

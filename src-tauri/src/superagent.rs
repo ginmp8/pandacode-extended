@@ -15522,6 +15522,7 @@ mod tests {
             checkout_existed_at_admission: None, // Historical read-only snapshot.
             provider: bot.provider, model: bot.model, mode: bot.mode,
             reasoning_effort: bot.reasoning_effort, assigned_skill_ids: bot.skills,
+            worker_skill_prompt: None, // Historical snapshot without a Worker Skill prompt pin.
             prompt_identity_sha256: None, // Historical snapshot without a prompt digest.
             brief_name_sha256: None, // Historical snapshot without the later brief-name digest.
         });

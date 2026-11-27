@@ -13617,11 +13617,11 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
 
 fn assert_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: bool) {
     crate::providers::with_test_executable_override("codex", || {
-        run_nested_child_triggered_s2_with_root_sources(mode, root_triggered);
+        run_nested_child_triggered_s2_with_root_sources(mode, root_triggered, false);
     });
 }
 
-fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: bool) {
+fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: bool, child_conflict: bool) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -13705,8 +13705,12 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: b
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
             let store = state.store.lock().unwrap();
-            store.message(&launch.sid, "assistant",
-                "Below-target first-wave child report.\nCouncil score: 8.5/10").unwrap();
+            let report = if child_conflict {
+                "Council findings JSON: [{\"severity\":\"medium\",\"category\":\"conflict\",\"title\":\"Conflicting verdict\",\"explanation\":\"The required criterion has contradictory evidence.\"}]\nCouncil score: 8.5/10"
+            } else {
+                "Below-target first-wave child report.\nCouncil score: 8.5/10"
+            };
+            store.message(&launch.sid, "assistant", report).unwrap();
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
     }
@@ -13714,7 +13718,11 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: b
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
         let child = child_council::inspect(&store, &root).unwrap().pop().unwrap();
-        assert_eq!(child.automatic_escalation_triggers, vec!["below_target"]);
+        assert_eq!(child.automatic_escalation_triggers, if child_conflict {
+            vec!["below_target", "conflicting_verdict"]
+        } else {
+            vec!["below_target"]
+        });
         assert!(child.verified_escalation_receipt.is_none());
         assert!(!verified_council_pass(&store, &root),
             "an admitted child wave is not approval");
@@ -13748,6 +13756,27 @@ fn run_nested_child_triggered_s2_with_root_sources(mode: &str, root_triggered: b
                 "Fresh independent child S2 callback.\nCouncil score: 9.8/10").unwrap();
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    if child_conflict {
+        let result = dispatch_state(
+            &state, &sid, started.generation, "pandacode_finish_team",
+            json!({"summary":"Attempt to finish with an unresolved child conflict"}),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        if let Ok((response, _)) = result {
+            assert_ne!(response["completed"], true);
+        }
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let child = child_council::inspect(&store, &root).unwrap().pop().unwrap();
+        assert!(child.verified_escalation_receipt.is_none(),
+            "fresh clean leaves cannot erase an authenticated conflict on an unchanged artifact");
+        assert!(!verified_council_pass(&store, &root));
+        let assignment = format!("{mode}-triggered-s2-native");
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, &assignment, &artifact, &task.request_id,
+        ).is_err(), "an unresolved child conflict must block the native terminal receipt");
+        return;
     }
     if root_triggered {
         let (pending, _) = dispatch_state(
@@ -13861,6 +13890,15 @@ fn nested_m6_child_triggered_s2_requires_authenticated_direct_and_child_receipts
 #[test]
 fn nested_m7_child_triggered_s2_requires_all_three_authenticated_sources() {
     assert_nested_child_triggered_s2_with_root_sources("m7", false);
+}
+
+#[test]
+fn nested_s2_fresh_child_scores_cannot_erase_unresolved_conflicting_verdict() {
+    for mode in ["m5", "m6", "m7"] {
+        crate::providers::with_test_executable_override("codex", || {
+            run_nested_child_triggered_s2_with_root_sources(mode, false, true);
+        });
+    }
 }
 
 #[test]

@@ -1601,9 +1601,11 @@ fn escalation_receipt(
         let triggers = authenticated_first_wave_s2_triggers(
             store, root, record, child, choice,
         )?;
-        // A new read-only review does not correct an unresolved high-severity
-        // artifact defect. Do not issue a pass-equivalent receipt for it.
-        if triggers.is_empty() || triggers.contains(&"high_severity_finding") {
+        // A new read-only review cannot resolve an unchanged artifact's
+        // high-severity finding or conflicting verdict. A fresh artifact
+        // revision must invalidate the original pin before any new approval.
+        if triggers.is_empty() || triggers.contains(&"high_severity_finding")
+            || triggers.contains(&"conflicting_verdict") {
             return Ok(None);
         }
         None
@@ -2201,13 +2203,15 @@ pub(super) fn verified_triggered_s2_parent_seats(
             clean_count += 1;
             (seat, choice.child_reviewers)
         } else {
-            // A new read-only review cannot correct a high-severity defect in
-            // the unchanged artifact. Every other triggered case needs actual
-            // independently authenticated second-wave callbacks.
+            // A new read-only review cannot correct a high-severity defect or
+            // conflicting verdict in the unchanged artifact. Other triggers
+            // need actual independently authenticated second-wave callbacks.
             if first.is_some() {
                 return Err("child_council_stale: triggered S2 child has a conflicting first-wave composite.".into());
             }
-            if triggers.contains(&"high_severity_finding") {
+            if triggers.contains(&"high_severity_finding")
+                || triggers.contains(&"conflicting_verdict")
+            {
                 ready = false;
                 continue;
             }

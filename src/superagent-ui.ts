@@ -103,6 +103,7 @@ interface PendingDispatch {
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   archived?: boolean;
+  initialCoordinatorPending?: boolean;
   pendingDispatch?: PendingDispatch | null;
   admittedProfile?: AdmittedTeamProfile | null;
   admittedStrategy?: {policyRevision:number;purpose:string;strategy:string;capturedAt:number} | null;
@@ -2603,17 +2604,24 @@ let demandArchived = false;
         const unchanged = (ticket:Ticket) =>
           ticket.id === demand.id && ticket.orchestrationId === demand.orchestrationId &&
           ticket.revision === demand.revision && ticket.state === 'blocked';
-        if (!unchanged(snapshot.ticket)) {
+        if (!unchanged(snapshot.ticket) || snapshot.archived === true) {
           throw new Error('Demand changed since the native page was loaded; refresh before retrying.');
         }
+        // Never infer the initial role from the list, roster or absence of a
+        // paginated Assignment. Older snapshots may omit the projection.
+        const pendingRole = snapshot.initialCoordinatorPending;
+        const attemptLabel = pendingRole === true ? 'read-only Coordinator attempt'
+          : pendingRole === false ? 'read-only Worker attempt'
+          : 'read-only Coordinator or Worker attempt';
         ask('Retry blocked Demand ' + demand.id + ' at revision ' + demand.revision +
           '? Native admission rechecks the original role, mandate, project and attempt budget. ' +
-          'This explicitly starts the next authorized read-only Coordinator or Worker attempt, not an approval.', async () => {
+          'This explicitly requests the next authorized ' + attemptLabel + ', not an approval.', async () => {
           // Confirmation can remain open while another session changes the Ticket.
           // Native retry itself also rechecks role, mandate, project and lease.
           const fresh = await call<TicketDetails>('superagent_snapshot',
             {ticketId:demand.id,limit:1});
-          if (!unchanged(fresh.ticket)) {
+          if (!unchanged(fresh.ticket) || fresh.archived === true ||
+              fresh.initialCoordinatorPending !== pendingRole) {
             throw new Error('Demand changed before confirmation; refresh before retrying.');
           }
           let retried:Ticket;

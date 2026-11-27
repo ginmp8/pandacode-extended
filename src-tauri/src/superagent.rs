@@ -1014,6 +1014,9 @@ pub struct TaskSnapshot {
     pub ticket: Ticket,
     /// Reversible visibility from the same native snapshot as Ticket revision.
     pub archived: bool,
+    /// True only for an unarchived blocked Ticket whose initial Coordinator
+    /// reservation has not happened. Read-side role projection, not authority.
+    pub initial_coordinator_pending: bool,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
     pub attempt_insights: Vec<AssignmentInsight>,
@@ -1159,6 +1162,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     ).map_err(|e| e.to_string())?;
     let result = TaskSnapshot {
         archived,
+        initial_coordinator_pending: !archived && ticket.state == "blocked"
+            && initial_coordinator_pending(store,ticket_id)?,
         current_team_policy_revision,
         team_policy_changed_since_admission,
         finalization_gate: finalization_gate.to_owned(),
@@ -8109,6 +8114,9 @@ mod tests {
         let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let ticket_id = view["ticketId"].as_str().unwrap();
         let native_thread = format!("{ticket_id}:attempt:1");
+        let snapshot = ticket_snapshot(&store,ticket_id,1).unwrap();
+        assert!(!snapshot.initial_coordinator_pending);
+        assert!(snapshot.assignments.is_empty());
 
         // Staging is not dispatch. A forged inbound message has no assignment
         // and must be denied before the gateway can create a conversation.
@@ -8208,6 +8216,11 @@ mod tests {
         let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let id = view["ticketId"].as_str().unwrap();
         let revision = view["revision"].as_i64().unwrap();
+        let snapshot = ticket_snapshot(&store,id,1).unwrap();
+        assert!(snapshot.initial_coordinator_pending);
+        assert!(snapshot.assignments.is_empty());
+        assert_eq!(snapshot.ticket.revision,revision);
+        assert_eq!(serde_json::to_value(&snapshot).unwrap()["initialCoordinatorPending"],true);
         assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision+1,false,None).is_err());
         assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision,true,None).is_err());
         let request = headless_dispatch::enqueue(&store,id,revision,"cli-pending").unwrap();
@@ -8222,6 +8235,7 @@ mod tests {
         assert_eq!(running.state,"running");
         assert_eq!(recipient,"router");
         assert!(packet.contains("Admitted Team capability inventory"));
+        assert!(!ticket_snapshot(&store,id,1).unwrap().initial_coordinator_pending);
         assert!(guard_gateway_inbound(&store,&recipient,id,"local-user",true).is_ok());
         assert!(guard_gateway_inbound(&store,"worker",id,"local-user",true).is_err());
         let session = assignment_session(&store,id).unwrap().unwrap();
@@ -8231,6 +8245,7 @@ mod tests {
         let queued = get_ticket(&store,id).unwrap();
         assert_eq!(queued.state,"queued");
         let mut reopened = Store::open(&store.path).unwrap();
+        assert!(!ticket_snapshot(&reopened,id,1).unwrap().initial_coordinator_pending);
         assert!(prepare_initial_coordinator_at_revision(&mut reopened,id,revision,false,None).is_err());
         let (_,_,worker,_) = prepare_coordinated_worker_at_revision(
             &mut reopened,id,queued.revision,false).unwrap();

@@ -2040,14 +2040,15 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   await expect(global).toContainText('stopped');
 });
 
-test('cross-Team blocked Demand retry requires current native identity, confirmation and bounded admission', async ({page}) => {
+for (const initialCoordinatorPending of [false,true]) {
+test(`cross-Team blocked Demand retry requires current native identity, confirmation and bounded admission (${initialCoordinatorPending?'Coordinator':'Worker'})`, async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
-  await page.evaluate(async () => {
+  await page.evaluate(async (initialCoordinatorPending) => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');
     const host = document.createElement('div'); host.id = 'sa-global-retry-fixture';
     document.body.appendChild(host);
-    type Mode = 'stale-first' | 'stale-confirm' | 'native-denied' | 'valid';
+    type Mode = 'stale-first' | 'stale-confirm' | 'role-changed' | 'archived-confirm' | 'native-denied' | 'valid';
     type Trace = {command:string;args?:Record<string,unknown>};
     let mode:Mode = 'stale-first', reads = 0, enabled = true;
     const trace:Trace[] = [];
@@ -2078,6 +2079,9 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
         reads++;
         const stale = mode==='stale-first' || (mode==='stale-confirm' && reads>1);
         return {ticket:{...demand,revision:demand.revision+(stale?1:0)},
+          initialCoordinatorPending:mode==='role-changed' && reads>1
+            ? !initialCoordinatorPending : initialCoordinatorPending,
+          archived:mode==='archived-confirm' && reads>1,
           mandate:{actor:'local-user',authorizationId:'native',projectId:'project-b',
             policyRevision:3,expiresAt:1800000000000,revoked:false,
             allowedTools:[],allowedSideEffects:false},
@@ -2092,7 +2096,7 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
       }
       throw Error('Unexpected native operation: '+command);
     });
-  });
+  },initialCoordinatorPending);
   const host=page.locator('#sa-global-retry-fixture');
   const global=host.getByRole('region',{name:'All Demands across Teams'});
   await host.getByRole('button',{name:'Demands / Runs'}).click();
@@ -2107,10 +2111,23 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
   await retry.click();
   const confirm=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
   await expect(confirm).toContainText('revision 7');
-  await expect(confirm).toContainText('read-only Worker attempt');
+  await expect(confirm).toContainText(initialCoordinatorPending
+    ? 'read-only Coordinator attempt' : 'read-only Worker attempt');
+  await expect(confirm).not.toContainText(initialCoordinatorPending
+    ? 'read-only Worker attempt' : 'read-only Coordinator attempt');
   await confirm.getByRole('button',{name:'Confirm'}).click();
   await expect(host.getByRole('alert')).toContainText('Demand changed before confirmation');
   let calls=await page.evaluate(()=>
+    (window as unknown as {saRetryTrace:{command:string;args?:Record<string,unknown>}[]}).saRetryTrace);
+  expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(0);
+  for (const changed of ['role-changed','archived-confirm']) {
+    await page.evaluate(mode=>(window as unknown as {saRetryMode:(v:string)=>void})
+      .saRetryMode(mode),changed);
+    await retry.click();
+    await confirm.getByRole('button',{name:'Confirm'}).click();
+    await expect(host.getByRole('alert')).toContainText('Demand changed before confirmation');
+  }
+  calls=await page.evaluate(()=>
     (window as unknown as {saRetryTrace:{command:string;args?:Record<string,unknown>}[]}).saRetryTrace);
   expect(calls.filter(call=>call.command==='superagent_retry')).toHaveLength(0);
   await page.evaluate(()=>(window as unknown as {saRetryMode:(v:string)=>void})
@@ -2135,6 +2152,7 @@ test('cross-Team blocked Demand retry requires current native identity, confirma
   expect(calls.some(call=>/grant|accept|effect_reserve|council_pass/.test(call.command)))
     .toBe(false);
 });
+}
 
 test('cross-Team native Demand pages load older Tickets without inferring new work', async ({page}) => {
   test.setTimeout(60_000);

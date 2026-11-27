@@ -6425,6 +6425,8 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
  * conversations deliver queued messages natively, so the window never sends them twice. */
 let sidebarBots: import('./bots').Bot[] = [];
 let sidebarChannels: SharedChannelSummary[] = [];
+let channelListRequest = 0;
+let channelListApplied = 0;
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
 const botSwitches = new Map<string, BotActivity[]>();
@@ -6435,12 +6437,17 @@ const botThreadMetaLoaded = new Set<string>();
 const botThreadMetaRequests = new Map<string, number>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
+  const channelRequest = ++channelListRequest;
   const [nextBots, nextChannels] = await Promise.all([
     call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
     call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
   ]);
   sidebarBots = nextBots;
-  sidebarChannels = nextChannels;
+  // A delayed pre-archive response must not replace a newer Channel list.
+  if (channelRequest > channelListApplied) {
+    sidebarChannels = nextChannels;
+    channelListApplied = channelRequest;
+  }
   botsLoaded = true;
   botProjects = new Set(sidebarBots.map(bot => bot.projectId));
   taskBots = new Map(Object.entries(await call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots))));

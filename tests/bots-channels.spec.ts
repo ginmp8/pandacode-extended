@@ -1401,6 +1401,39 @@ test.describe('shared bot channels', () => {
     await expect(page.getByRole('dialog', { name: 'Channel settings' })).toBeVisible();
   });
 
+  test('late Channel list cannot undo a newer archive in the sidebar', async ({ page }) => {
+    await page.route('**/src/preview-bots.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(/(case\s+['"]bot_shared_channels['"]\s*:[\s\S]*?)(\bbreak\s*;)/, (_match, listCase, end) =>
+        listCase + ' if (window.__holdNextChannelList) { window.__holdNextChannelList = false; ' +
+        'await new Promise(resolve => { window.__releaseStaleChannelList = resolve; }); } ' + end);
+      if (body === source) throw new Error('Delayed Channel list interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    const row = sidebar(page).getByRole('button', { name: '#launch' });
+    await expect(row).toBeVisible();
+    await page.evaluate(() => {
+      (window as any).__holdNextChannelList = true;
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
+    });
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseStaleChannelList)).toBe('function');
+    await row.click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Delete' }).click();
+    const deleted = sidebar(page).getByRole('group', { name: 'Deleted channels' });
+    await expect(deleted).toContainText('#launch');
+    // The old response captured the active Channel before the archive.
+    // Let its continuation and resulting render finish before checking the list.
+    await page.evaluate(async () => {
+      (window as any).__releaseStaleChannelList();
+      await new Promise<number>(requestAnimationFrame);
+      await new Promise<number>(requestAnimationFrame);
+    });
+    await expect(deleted).toContainText('#launch');
+    await expect(sidebar(page).getByRole('group', { name: 'Channels', exact: true }).getByRole('button', { name: '#launch' })).toHaveCount(0);
+  });
+
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
     await showBots(page);
     await sidebar(page).getByRole('button', { name: 'Bot actions', exact: true }).click();

@@ -220,6 +220,8 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
       '<label>Child reviewers<input name="councilChildReviewers" data-bot-id="' + escape(bot.id) + '" type="number" min="2" max="8" step="1" value="2"></label>' +
       '<label>Child target<input name="councilChildTarget" data-bot-id="' + escape(bot.id) + '" type="number" min="1" max="10" step="0.5" value="9"></label>' +
       '<label>Child max rounds<input name="councilChildMaxRounds" data-bot-id="' + escape(bot.id) + '" type="number" min="1" max="100" step="1" value="10"></label>' +
+      '<label>Escalation policy<select name="councilChildEscalation" data-bot-id="' + escape(bot.id) + '" aria-label="Escalation policy for ' + escape(bot.name) + '"><option value="always_nested">Always nested</option><option value="on_trigger">On trigger (S2 unavailable)</option></select></label>' +
+      '<small>On-trigger is an inactive preference outside S2; native preliminary review is not available yet.</small>' +
     '</div></div>').join('');
   return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
     <div class="composer-toolbar"><button type="button" class="bc-council-trigger composer-council-button" data-action="channel-council" aria-label="Council: off" aria-haspopup="dialog" aria-expanded="false" aria-controls="bc-council-panel" title="Council settings"><span class="council-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg></span></button><span class="bc-composer-spacer"></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div>
@@ -290,6 +292,7 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
     const selected = panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected';
     const selectedBots = [...panel.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')];
+    const escalated = panel.querySelector<HTMLSelectElement>('select[name="councilStrategy"]')?.value === 'escalated';
     for (const row of panel.querySelectorAll<HTMLElement>('.bc-council-reviewer')) {
       const checked = row.querySelector<HTMLInputElement>('input[name="councilReviewer"]')?.checked ?? false;
       const role = row.querySelector<HTMLSelectElement>('select[name="councilReviewerRole"]')?.value;
@@ -300,11 +303,12 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
       childSettings.hidden = !roleVisible || role !== 'nested';
       // Hidden controls still participate in HTML constraint validation unless
       // disabled. Preserve drafts without validating or submitting inactive seats.
-      for (const input of childSettings.querySelectorAll<HTMLInputElement>('input')) {
+      for (const input of childSettings.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select')) {
         input.disabled = childSettings.hidden;
       }
+      const policy = childSettings.querySelector<HTMLSelectElement>('select[name="councilChildEscalation"]');
+      if (policy) policy.options[1].disabled = escalated;
     }
-    const escalated = panel.querySelector<HTMLSelectElement>('select[name="councilStrategy"]')?.value === 'escalated';
     for (const control of panel.querySelectorAll<HTMLElement>('.bc-council-s2-trigger')) control.hidden = !escalated;
     panel.querySelector<HTMLInputElement>('input[name="councilForceEscalation"]')!.disabled = !escalated;
     const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;

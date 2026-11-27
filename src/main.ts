@@ -120,7 +120,7 @@ import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
 import { isMac, isWindows, shortcut } from './platform';
 import { createGoalBanner, showGoalDialog, showCommandCenter, type GoalState, type GoalAction, type CommandPanel } from './command-center';
-import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamSnapshot, type TeamEvent, type TeamLibrary, type TeamConfig, type WorkerProfile } from './architect-types';
+import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamSnapshot, type TeamEvent, type TeamLibrary, type TeamConfig, type WorkerProfile, type CouncilNestedReviewer } from './architect-types';
 import type { ArchitectView } from './architect';
 import { syncOverlayContext } from './overlay-client';
 import { initializeAgentUpdates } from './agent-updates';
@@ -7512,7 +7512,7 @@ document.addEventListener('submit', event => {
     const selectedBotIds = isSelected
       ? [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value)
       : [];
-    const directBotIds: string[] = [], nestedBotReviewers: { botId: string; childReviewers: number; childTarget: number; childMaxRounds: number }[] = [];
+    const directBotIds: string[] = [], nestedBotReviewers: CouncilNestedReviewer[] = [];
     const roles = [...form.querySelectorAll<HTMLSelectElement>('select[name=councilReviewerRole]')];
     const childValue = (name: string, botId: string): number => Number(
       [...form.querySelectorAll<HTMLInputElement>('input[name=' + name + ']')].find(input => input.dataset.botId === botId)?.value ?? NaN
@@ -7521,16 +7521,25 @@ document.addEventListener('submit', event => {
     for (const id of selectedBotIds) {
       const role = roles.find(select => select.dataset.botId === id)?.value;
       if (role === 'direct') directBotIds.push(id);
-      else if (role === 'nested') nestedBotReviewers.push({
-        botId: id, childReviewers: childValue('councilChildReviewers', id),
-        childTarget: childValue('councilChildTarget', id), childMaxRounds: childValue('councilChildMaxRounds', id),
-      });
-      else rolesValid = false;
+      else if (role === 'nested') {
+        const policy = [...form.querySelectorAll<HTMLSelectElement>('select[name="councilChildEscalation"]')]
+          .find(select => select.dataset.botId === id)?.value;
+        if (policy !== 'always_nested' && policy !== 'on_trigger') rolesValid = false;
+        nestedBotReviewers.push({
+          botId: id, childReviewers: childValue('councilChildReviewers', id),
+          childTarget: childValue('councilChildTarget', id), childMaxRounds: childValue('councilChildMaxRounds', id),
+          ...(policy === 'on_trigger' ? { escalationPolicy: policy } : {}),
+        });
+      } else rolesValid = false;
     }
     const automaticReviewers = isSelected ? Number(data.get('councilAutomaticReviewers')) : 0;
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
     const strategy = String(data.get('councilStrategy') ?? 'parallel');
+    if (councilEnabled && strategy === 'escalated' && nestedBotReviewers.some(child => child.escalationPolicy === 'on_trigger')) {
+      showCouncilError('On-trigger preliminary review is not available in S2. Choose Always nested or another strategy.');
+      return;
+    }
     const forceEscalation = strategy === 'escalated' && data.get('councilForceEscalation') === 'on';
     const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
     const criteria = [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => ({

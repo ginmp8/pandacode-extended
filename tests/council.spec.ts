@@ -2422,8 +2422,20 @@ test('M4 and M7 task child roles preserve native configuration and require authe
     { botId: 'reviewer-beta', childReviewers: 2, childTarget: 9, childMaxRounds: 10 },
   ]);
   await expect(panel(page).getByLabel('Review role for Alpha')).toHaveValue('nested');
+  const policy = panel(page).getByLabel('Escalation policy for Alpha');
+  await policy.selectOption('on_trigger');
+  await expect.poll(async () => (await calls(page)).at(-1)?.nestedBotReviewers?.[0]?.escalationPolicy).toBe('on_trigger');
+  await expect(policy).toHaveValue('on_trigger');
+  const beforeBlocked = (await calls(page)).length;
+  await panel(page).getByLabel('Review strategy').selectOption('escalated');
+  await expect(panel(page).getByRole('alert')).toContainText('On-trigger preliminary review is not available in S2');
+  expect((await calls(page)).length).toBe(beforeBlocked);
+  await expect(panel(page).getByLabel('Review strategy')).toHaveValue('parallel');
+  await policy.selectOption('always_nested');
+  await expect.poll(async () => (await calls(page)).length).toBe(beforeBlocked + 1);
+  expect((await calls(page)).at(-1).nestedBotReviewers[0].escalationPolicy).toBeUndefined();
   await panel(page).getByLabel('Review role for Beta').selectOption('direct');
-  await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(2);
+  await expect.poll(async () => (await calls(page)).length).toBe(beforeBlocked + 2);
   await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
   await expect.poll(async () => (await calls(page)).at(-1)?.automaticReviewers).toBe(1);
   const m7 = (await calls(page)).at(-1);

@@ -296,14 +296,14 @@ export function createCouncil(host: CouncilHost) {
         const checked = draft.ids.includes(bot.id), disabled = unavailable && !checked;
         const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : bot.available === false ? (bot.reason || 'Unavailable') : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
         const child = draft.nested[bot.id];
-        const role = checked ? `<div class="council-child-settings"><label>Review role for ${escape(bot.name)}<select data-council-bot-role data-council-bot-id="${escape(bot.id)}" aria-label="Review role for ${escape(bot.name)}"><option value="direct">Direct reviewer</option><option value="nested"${child ? ' selected' : ''}>Own Council (task-isolated)</option></select></label>${child ? `<label>Child reviewers for ${escape(bot.name)}<input data-council-child-reviewers data-council-bot-id="${escape(bot.id)}" aria-label="Child reviewers for ${escape(bot.name)}" type="number" min="2" max="8" step="1" value="${child.childReviewers}"></label><label>Child target for ${escape(bot.name)}<input data-council-child-target data-council-bot-id="${escape(bot.id)}" aria-label="Child target for ${escape(bot.name)}" type="number" min="1" max="10" step="0.5" value="${child.childTarget}"></label><label>Child max rounds for ${escape(bot.name)}<input data-council-child-rounds data-council-bot-id="${escape(bot.id)}" aria-label="Child max rounds for ${escape(bot.name)}" type="number" min="1" max="100" step="1" value="${child.childMaxRounds}"></label><small>Child reviewers run in isolated read-only native sessions. Completion requires independently authenticated callbacks.</small>` : ''}</div>` : '';
+        const role = checked ? `<div class="council-child-settings"><label>Review role for ${escape(bot.name)}<select data-council-bot-role data-council-bot-id="${escape(bot.id)}" aria-label="Review role for ${escape(bot.name)}"><option value="direct">Direct reviewer</option><option value="nested"${child ? ' selected' : ''}>Own Council (task-isolated)</option></select></label>${child ? `<label>Child reviewers for ${escape(bot.name)}<input data-council-child-reviewers data-council-bot-id="${escape(bot.id)}" aria-label="Child reviewers for ${escape(bot.name)}" type="number" min="2" max="8" step="1" value="${child.childReviewers}"></label><label>Child target for ${escape(bot.name)}<input data-council-child-target data-council-bot-id="${escape(bot.id)}" aria-label="Child target for ${escape(bot.name)}" type="number" min="1" max="10" step="0.5" value="${child.childTarget}"></label><label>Child max rounds for ${escape(bot.name)}<input data-council-child-rounds data-council-bot-id="${escape(bot.id)}" aria-label="Child max rounds for ${escape(bot.name)}" type="number" min="1" max="100" step="1" value="${child.childMaxRounds}"></label><label>Escalation policy for ${escape(bot.name)}<select data-council-child-escalation data-council-bot-id="${escape(bot.id)}" aria-label="Escalation policy for ${escape(bot.name)}"><option value="always_nested">Always nested</option><option value="on_trigger"${child.escalationPolicy === 'on_trigger' ? ' selected' : ''}${(strategyDraft.get(sessionId) ?? shown?.strategy) === 'escalated' ? ' disabled' : ''}>On trigger (S2 unavailable)</option></select></label><small>On-trigger is an inactive preference outside S2; native preliminary review is not available yet.</small><small>Child reviewers run in isolated read-only native sessions. Completion requires independently authenticated callbacks.</small>` : ''}</div>` : '';
         return `<label class="council-bot-choice${unavailable ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${escape(reason)}</span></label>${role}`;
       }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}${missing}<p class="council-bot-hint">${draft.ids.length} of ${minBots}–8 reviewers selected${draft.ids.length < minBots ? ` · select at least ${minBots} to apply` : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.filter(id => bots.some(bot => bot.id === id)).length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}<div class="council-review-permissions" role="group" aria-label="Optional reviewer skills"><small>Optional skills (unavailable items are reported; required skills always block)</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-optional-skill="${escape(id)}" ${draft.optionalSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills in selected bots.</small>'}</div><div class="council-review-permissions" role="group" aria-label="Required native skill checks"><small>Require a native pinned-input integrity check before Council can pass. This is not a project test.</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-required-check="${escape(id)}" ${draft.checkSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills.</small>'}</div><div class="council-review-permissions"><label><input type="checkbox" data-council-scoped ${draft.scoped ? 'checked' : ''}> Allow one exact native host action (file inspector)</label>${draft.scoped ? `<label>Relative file path<input type="text" data-council-path maxlength="240" autocomplete="off" placeholder="src/example.ts" value="${escape(draft.fileScope ?? '')}" aria-label="Allowed reviewer file path"></label>` : ''}<small>Read-only by default; this per-task action never grants shell or checkout writes.</small></div>` : '';
       const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;
       const activeField = document.activeElement as HTMLElement | null;
       const focusedAutomatic = activeField?.hasAttribute('data-council-automatic') ?? false;
       const focusedChild = activeField?.dataset.councilBotId;
-      const focusedChildKind = ['data-council-bot-role', 'data-council-child-reviewers', 'data-council-child-target', 'data-council-child-rounds'].find(attribute => activeField?.hasAttribute(attribute));
+      const focusedChildKind = ['data-council-bot-role', 'data-council-child-reviewers', 'data-council-child-target', 'data-council-child-rounds', 'data-council-child-escalation'].find(attribute => activeField?.hasAttribute(attribute));
       const focusedPolicyKind = ['data-council-optional-skill', 'data-council-required-check', 'data-council-scoped', 'data-council-path'].find(attribute => activeField?.hasAttribute(attribute));
       const focusedPolicySkill = focusedPolicyKind === 'data-council-optional-skill' ? activeField?.dataset.councilOptionalSkill
         : focusedPolicyKind === 'data-council-required-check' ? activeField?.dataset.councilRequiredCheck : undefined;
@@ -468,6 +468,10 @@ export function createCouncil(host: CouncilHost) {
   /** Native answers in the order asked; what stays shown is the newest request, then native's answer. */
   /** `remember`: save as the default for new threads (the composer panel), not when opened from an asking card. */
   function apply(sessionId: string, next: CouncilConfig | null, remember = true): Promise<void> {
+    if (next?.strategy === 'escalated' && next.nestedBotReviewers?.some(child => child.escalationPolicy === 'on_trigger')) {
+      selectedError(sessionId, 'On-trigger preliminary review is not available in S2. Choose Always nested or another strategy.');
+      return Promise.resolve();
+    }
     const entry = pending.get(sessionId) ?? { tail: Promise.resolve(), count: 0, asked: next };
     entry.count++; entry.asked = next;
     pending.set(sessionId, entry); failures.delete(sessionId);
@@ -662,7 +666,8 @@ export function createCouncil(host: CouncilHost) {
         return;
       }
       if (input.hasAttribute('data-council-bot-role') || input.hasAttribute('data-council-child-reviewers')
-        || input.hasAttribute('data-council-child-target') || input.hasAttribute('data-council-child-rounds')) {
+        || input.hasAttribute('data-council-child-target') || input.hasAttribute('data-council-child-rounds')
+        || input.hasAttribute('data-council-child-escalation')) {
         const draft = selection(sessionId), id = input.dataset.councilBotId!;
         if (!draft.ids.includes(id)) { selectedError(sessionId, 'Select this bot before assigning its Council role.'); return; }
         const nested = { ...draft.nested };
@@ -675,14 +680,23 @@ export function createCouncil(host: CouncilHost) {
         } else {
           const current = nested[id];
           if (!current) { selectedError(sessionId, 'This bot is not configured as a child Council.'); return; }
-          const value = Number(input.value);
-          const field = input.hasAttribute('data-council-child-reviewers') ? 'childReviewers'
-            : input.hasAttribute('data-council-child-target') ? 'childTarget' : 'childMaxRounds';
-          const bounded = Number.isFinite(value) && value >= (field === 'childReviewers' ? 2 : 1)
-            && value <= (field === 'childReviewers' ? 8 : field === 'childTarget' ? 10 : 100)
-            && (field === 'childTarget' || Number.isInteger(value));
-          if (!bounded || !input.value) { selectedError(sessionId, 'Child Council counts and targets must be within their native limits.'); return; }
-          nested[id] = { ...current, [field]: value };
+          if (input.hasAttribute('data-council-child-escalation')) {
+            if (input.value !== 'always_nested' && input.value !== 'on_trigger') {
+              selectedError(sessionId, 'Choose a valid child escalation policy.'); return;
+            }
+            nested[id] = { ...current };
+            if (input.value === 'on_trigger') nested[id].escalationPolicy = 'on_trigger';
+            else delete nested[id].escalationPolicy;
+          } else {
+            const value = Number(input.value);
+            const field = input.hasAttribute('data-council-child-reviewers') ? 'childReviewers'
+              : input.hasAttribute('data-council-child-target') ? 'childTarget' : 'childMaxRounds';
+            const bounded = Number.isFinite(value) && value >= (field === 'childReviewers' ? 2 : 1)
+              && value <= (field === 'childReviewers' ? 8 : field === 'childTarget' ? 10 : 100)
+              && (field === 'childTarget' || Number.isInteger(value));
+            if (!bounded || !input.value) { selectedError(sessionId, 'Child Council counts and targets must be within their native limits.'); return; }
+            nested[id] = { ...current, [field]: value };
+          }
         }
         reviewerDraft.set(sessionId, { ...draft, nested });
         failures.delete(sessionId);

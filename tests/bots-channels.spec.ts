@@ -405,6 +405,16 @@ test.describe('shared bot channels', () => {
         await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
       }
       await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review this task.');
+      if (mode.mode === 'M5' && strategy === 'parallel') {
+        const policy = panel.locator('select[name="councilChildEscalation"]').nth(1);
+        await policy.selectOption('on_trigger');
+        await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
+        await expect(policy).toHaveValue('on_trigger');
+        await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+        expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+        await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('parallel');
+        await expect(policy).toHaveValue('on_trigger');
+      }
       if (mode.mode === 'M7' && strategy === 'escalated') {
         // A native trigger may need a second round even with immediate escalation off.
         const rounds = panel.getByRole('spinbutton', { name: 'Custom max rounds' });
@@ -443,7 +453,8 @@ test.describe('shared bot channels', () => {
       expect(posted.reviewers).toBe(0);
       expect(posted.reviewerBotIds ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'direct' ? [selectedIds[index]] : []));
       expect(posted.nestedBotReviewers ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'nested'
-        ? [{ botId: selectedIds[index], childReviewers: 2, childTarget: 9, childMaxRounds: 10 }] : []));
+        ? [{ botId: selectedIds[index], childReviewers: 2, childTarget: 9, childMaxRounds: 10,
+          ...(mode.mode === 'M5' && strategy === 'parallel' ? { escalationPolicy: 'on_trigger' } : {}) }] : []));
       expect(posted.criteriaSource ?? 'architect').toBe(origin);
       expect(posted.criteria ?? []).toEqual(origin === 'architect' ? [] : [
         { id: 'security', lens: 'Permission boundary', target: 9, required: true, evidenceRequired: true },

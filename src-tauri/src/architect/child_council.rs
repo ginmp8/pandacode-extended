@@ -1375,6 +1375,15 @@ fn root_artifact_revision(
     Ok(true)
 }
 
+/// A missing pin after admission is a revocation, never permission to
+/// attach an existing reviewer to a new artifact revision.
+fn require_pinned_root_artifact(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    if !root_artifact_revision(store, root, false)? {
+        return Err("child_council_stale: original root artifact revision is missing.".into());
+    }
+    Ok(())
+}
+
 /// Construct child evidence only from settled, freshly scored native leaves.
 /// The root Council remains blocked until its separate composite-seat gate exists.
 fn verified_receipt(
@@ -2688,7 +2697,12 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
     require_live_root_session(store, &root.session_id)?;
     require_current_child_reservation_roster(store, root, config.nested_bot_reviewers.len())?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
-    root_artifact_revision(store, root, true)?;
+    if !root_artifact_revision(store, root, false)? {
+        // Only a completely unstarted reservation roster may establish the
+        // first pin. Reentrant finish cannot rebind already admitted leaves.
+        require_unstarted_child_review(store, root)?;
+        root_artifact_revision(store, root, true)?;
+    }
     let mut created = false;
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?
@@ -3009,6 +3023,7 @@ pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) ->
     {
         return Err("child_council_revoked: native leaf run is no longer scheduled.".into());
     }
+    require_pinned_root_artifact(store, &root)?;
     Ok(())
 }
 
@@ -3058,6 +3073,9 @@ pub(super) fn next_leaf_launch(
         global_running += child.workers.iter().filter(|w|
             super::active(&w.status) || agents.contains_key(&w.session_id)).count();
         children.push(child);
+    }
+    if children.iter().any(|child| child.status == "running") {
+        require_pinned_root_artifact(store, root)?;
     }
     if global_running >= 8 {
         // The freshly admitted wave remains queued when capacity is exhausted.

@@ -8699,6 +8699,102 @@ fn queued_native_child_reviewer_cannot_relaunch_a_live_or_completed_session() {
 }
 
 #[test]
+fn native_child_launch_and_callback_require_the_original_root_artifact_pin() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["artifact-pin-security", "artifact-pin-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["artifact-pin-security", "artifact-pin-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review the frozen artifact", None, None).unwrap();
+    dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Begin child review."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let launch = child_council::next_leaf_launch(&store, &Default::default(), &root)
+        .unwrap().unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+    let before = serde_json::to_value(
+        load(&store, &launch.admission.parent).unwrap().unwrap(),
+    ).unwrap();
+    let pin_key = child_council::root_artifact_revision_key(&root);
+    let pin: (String, String, String) = store.db.query_row(
+        "SELECT kind,content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, pin_key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+
+    // Removing the original pin must revoke even an already admitted callback.
+    // Reentrant finish must not silently pin a new revision onto old sessions.
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, pin_key],
+    ).unwrap();
+    let assert_denied = || {
+        assert!(child_council::authorize_leaf(&store, &launch.sid, &launch.admission).is_err());
+        assert!(child_council::next_leaf_launch(&store, &Default::default(), &root).is_err());
+        assert!(child_council::admit_leaves(&store, &root).is_err());
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap(),
+        ).unwrap(), before, "stale artifact admission must not consume queued seats");
+    };
+    assert_denied();
+    let count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, pin_key], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0, "reentrant admission must not replace a missing pin");
+    store.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id) VALUES(?1,?2,?3,?4,?5)",
+        rusqlite::params![sid, pin_key, pin.0, pin.1, pin.2],
+    ).unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+
+    // A later attributed root write must also revoke dispatch and callbacks,
+    // before a child score or composite receipt can be recorded.
+    let edited_at = storage::now().max(root.council_since) + 10;
+    let message_id: i64 = store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at)
+         VALUES(?1,'changes','new root revision',?2) RETURNING id",
+        rusqlite::params![sid, edited_at], |row| row.get(0),
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes)
+         VALUES(?1,?2,?3,?4,?5,0)",
+        rusqlite::params!["child-dispatch-root-edit", sid, message_id,
+            json!({"attributed":true,"ownFiles":1,
+                "files":[{"path":"src/changed.rs","status":"modified"}]}).to_string(),
+            edited_at],
+    ).unwrap();
+    assert_denied();
+    store.db.execute("DELETE FROM turn_changes WHERE id=?1", ["child-dispatch-root-edit"]).unwrap();
+    store.db.execute("DELETE FROM messages WHERE id=?1", [message_id]).unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+    let sibling = child_council::next_leaf_launch(&store, &Default::default(), &root)
+        .unwrap().unwrap();
+    assert_ne!(sibling.sid, launch.sid, "valid original revision still allows independent queued work");
+}
+
+#[test]
 fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admission() {
     let (state, sid) = state_fixture();
     {

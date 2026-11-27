@@ -10354,11 +10354,11 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
     {
         let store = state.store.lock().unwrap();
         let project = store.session(&sid).unwrap().project_id;
-        for bot in ["security-child", "architecture-child"] {
+        for (bot, role) in [("security-child", "Security analysis"), ("architecture-child", "Architecture review")] {
             store.db.execute(
-                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
-                rusqlite::params![bot, project, storage::now()],
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at,role,instructions)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3,?4,'private bot instruction marker')",
+                rusqlite::params![bot, project, storage::now(), role],
             ).unwrap();
         }
         let mut root = load(&store, &sid).unwrap().unwrap();
@@ -10408,7 +10408,17 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
             && w.council.as_ref().is_some_and(|seat| seat.round == 1)
             && w.reviewer_binding.as_ref().is_some_and(|binding|
                 reviewer_security::validate_recorded_authority(&store, &child.session_id, binding).is_ok())));
+        let (specialty, other) = if view.bot_id == "security-child" {
+            ("Security analysis", "Architecture review")
+        } else {
+            assert_eq!(view.bot_id, "architecture-child");
+            ("Architecture review", "Security analysis")
+        };
         for worker in &child.workers {
+            assert!(worker.assignment.contains(&format!("Selected bot review specialty: \"{specialty}\"")));
+            assert!(!worker.assignment.contains(other));
+            assert!(!worker.assignment.contains("private bot instruction marker"));
+            assert_eq!(store.session(&worker.session_id).unwrap().task_description, worker.assignment);
             assert!(distinct.insert(worker.session_id.clone()));
             assert_eq!(parent_of(&store, &worker.session_id).unwrap().as_deref(),
                 Some(child.session_id.as_str()));

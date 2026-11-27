@@ -38,9 +38,10 @@ Replays return the original receipt; changed identity/head/PR correlation
 is rejected rather than silently reassigned. The decision and counter are
 committed together in SQLite.
 
-This capability does not create a webhook, background poller, inferred
-Demand, provider run, Council review, grant, GitHub write or Auto mode.
-Ordinary bot and channel traffic is unaffected when SuperAgent is Off.
+This explicit Check Run lookup does not create a webhook, inferred Demand,
+provider run, Council review, grant, GitHub write or Auto mode. Periodic
+linked PR observation is described below. Ordinary bot and channel traffic
+is unaffected when SuperAgent is Off.
 
 Verification: native tests
 `superagent::events::tests::check_run_observe_requires_explicit_enable_and_never_admits_work`
@@ -118,3 +119,29 @@ a v62 database, so downgrade requires restoring the matching backup.
 
 Native regression:
 `superagent::events::tests::check_run_v62_upgrade_preserves_receipts_and_accepts_native_failure_outcomes`.
+
+## Periodic linked PR observation
+
+An enabled Team with a Check Run Observe source and an explicitly linked PR
+is eligible for periodic read-only Checks observation in desktop and live
+serve. The existing Observe scheduler rotates over the native source/PR
+link keys, selecting at most one link per interval independently of its
+GitHub Events batch. It does not scan arbitrary repositories or discover
+unlinked PRs. Failed links advance the in-memory rotation; after restart
+selection starts from durable links and immutable receipts deduplicate
+previous observations. This is a bounded best-effort read, not a gap-free
+subscription or a guarantee about PRs outside the current head window.
+
+The periodic path freezes the current enabled Team policy revision along
+with the source and Ticket/link fence before calling the authenticated
+adapter. Team disable/re-enable, source revocation, link changes or Ticket
+revision changes during the request prevent receipt admission. Off sources,
+disabled Teams and unlinked PRs do not initiate a periodic Checks request.
+Explicit operator commands retain their existing behavior on disabled Teams.
+No native grants, assignments, Council decisions or GitHub writes are issued.
+
+Native regression:
+`superagent::events::tests::background_linked_pr_checks_rotate_and_fence_team_activation`.
+The regression covers selection, Team activation ABA, source revocation and
+duplicate durable receipts after restart; real authenticated transport
+verification remains separate.

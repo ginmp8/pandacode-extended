@@ -981,10 +981,14 @@ let demandArchived = false;
               ? 'Cursor is consistent with stored receipts.'
               : 'Cursor behind durable receipts — new observations denied until reconciled.') +
             ' Native next action: ' + safe(sourceIntegrity.nextAction) + '</p>' +
-            '<p role="status">Periodic GitHub Events Observe: ' +
+            '<p role="status">' +
+            (sourceIntegrity.cursorKind === 'local_check_run_observation_count'
+              ? 'Periodic linked PR Checks Observe: ' : 'Periodic GitHub Events Observe: ') +
             (sourceIntegrity.backgroundSelected === true
               ? 'selected for this enabled Team (no guarantee of complete delivery)'
-              : 'not selected; enable the Team and its Events source for periodic polling') +
+              : sourceIntegrity.cursorKind === 'local_check_run_observation_count'
+                ? 'not selected; enable the Team and Observe source, then explicitly link a PR'
+                : 'not selected; enable the Team and its Events source for periodic polling') +
             '. Explicit authenticated inspection never grants tools or starts Demands.</p>' +
             (sourceIntegrity.historyGapCursor
               ? (sourceIntegrity.historyGapVerifiedAt

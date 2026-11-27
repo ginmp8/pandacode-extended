@@ -812,8 +812,8 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
 /*
  * Activated Observe sources are the ONLY candidates for local background
  * GitHub reads for enabled Teams only. A stable keyset bounds each pass
- * without starving later Teams, and excludes Check Runs, which require
- * an exact operator-supplied ID.
+ * without starving later Teams, and excludes Check Runs, which use the
+ * separate bounded explicit-PR-link rotation below.
  * This is not an Auto grant or a gap-free GitHub event subscription.
  */
 fn next_observe_subscription_sources(
@@ -844,6 +844,37 @@ fn next_observe_subscription_sources(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+type LinkedPrCheckKey = (String, String, String);
+
+/// Select at most one explicit PR link per interval independently of the
+/// Events feed cursor. Source ID + subject key is the native link primary
+/// key; a failing link cannot starve other sources or later PRs.
+fn next_background_linked_pr_check(
+    store: &Store, after: Option<(&str, &str)>,
+) -> Result<Option<LinkedPrCheckKey>> {
+    let (after_source, after_key) = after.map_or((None, None),
+        |(source_id, key)| (Some(source_id), Some(key)));
+    store.db.query_row(
+        "SELECT s.id,l.subject_key,l.ticket_id
+         FROM sa_event_sources s
+         JOIN sa_orchestrations o ON o.id=s.orchestration_id
+         JOIN sa_source_thread_links l ON l.source_id=s.id
+         JOIN sa_tickets t ON t.id=l.ticket_id AND t.orchestration_id=o.id
+         WHERE o.enabled=1 AND s.mode='observe'
+           AND s.event_kind='check_run.completed'
+           AND l.subject_key LIKE 'pull:%'
+           AND NOT EXISTS (
+               SELECT 1 FROM sa_source_history_gaps g
+               WHERE g.source_id=s.id AND g.cursor_sequence=s.last_sequence
+                 AND g.verified_at IS NULL
+           )
+           AND (?1 IS NULL OR s.id>?1 OR (s.id=?1 AND l.subject_key>?2))
+         ORDER BY s.id,l.subject_key LIMIT 1",
+        params![after_source,after_key],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())
+}
+
 /// One bounded, explicitly enabled Observe pass per interval, shared by
 /// desktop and live serve. The current native policy and authenticated GitHub
 /// identity are checked again at every source request and receipt transaction.
@@ -852,6 +883,7 @@ fn next_observe_subscription_sources(
 pub(crate) fn start_observe_subscriptions(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut after: Option<(i64, String)> = None;
+        let mut after_check: Option<(String, String)> = None;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(
                 AUTO_OBSERVE_INTERVAL_SECS,
@@ -859,6 +891,33 @@ pub(crate) fn start_observe_subscriptions(app: tauri::AppHandle) {
             let state = app.state::<AppState>();
             if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 break;
+            }
+            // Checks use their own bounded rotation so a large Events feed
+            // cannot starve explicitly linked PR observations.
+            let next_check = (|| -> Result<Option<LinkedPrCheckKey>> {
+                let store = state.store.lock().map_err(|e| e.to_string())?;
+                let next = next_background_linked_pr_check(&store,
+                    after_check.as_ref().map(|(id,key)| (id.as_str(),key.as_str())))?;
+                if next.is_none() && after_check.is_some() {
+                    next_background_linked_pr_check(&store, None)
+                } else {
+                    Ok(next)
+                }
+            })();
+            match next_check {
+                Ok(Some((source_id, pull_key, ticket_id))) => {
+                    after_check = Some((source_id.clone(), pull_key.clone()));
+                    if poll_background_linked_pr_checks(
+                        &state, &source_id, &ticket_id, &pull_key,
+                    ).await.is_err() {
+                        eprintln!("SuperAgent Observe: linked PR Checks poll failed; inspect source health and GitHub credentials.");
+                    }
+                }
+                Ok(None) => after_check = None,
+                Err(_) => eprintln!("SuperAgent Observe: linked PR selection failed; retry on next interval."),
+            }
+            if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                return;
             }
             let read_batch = |after: Option<(i64, &str)>| -> Result<Vec<(i64, String)>> {
                 let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -968,8 +1027,18 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
     // authenticated operator poll may still verify the exact cursor.
     let gap_needs_operator = history_gap_cursor == Some(selected.last_sequence)
         && history_gap_verified_at.is_none();
+    let is_check_source = selected.event_kind == "check_run.completed";
+    let has_pr_link = if is_check_source {
+        store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_source_thread_links l
+             JOIN sa_tickets t ON t.id=l.ticket_id
+             WHERE l.source_id=?1 AND l.subject_key LIKE 'pull:%'
+               AND t.orchestration_id=?2)",
+            params![source_id,&selected.orchestration_id], |row| row.get::<_, bool>(0),
+        ).map_err(|e| e.to_string())?
+    } else { false };
     let background_selected = team_enabled == 1 && selected.mode == "observe"
-        && selected.event_kind != "check_run.completed" && !gap_needs_operator;
+        && (!is_check_source || has_pr_link) && !gap_needs_operator;
     let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
     let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
     let next_action = if !cursor_consistent {
@@ -980,8 +1049,9 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "investigate_unverified_github_history"
     } else if selected.mode == "off" {
         "source_off_no_poll"
-    } else if selected.event_kind == "check_run.completed" {
-        "explicit_check_run_id_required"
+    } else if is_check_source {
+        if has_pr_link { "linked_pr_checks_available" }
+        else { "explicit_check_run_id_required" }
     } else { "explicit_observe_available" };
     Ok(SourceIntegrity {
         source_id:selected.id, repository:selected.repository, repository_id, actor_id,
@@ -2870,18 +2940,29 @@ struct LinkedPrCheckContext {
     ticket_id: String,
     pull_key: String,
     revision_and_links: (i64, i64),
+    background_team_revision: Option<i64>,
 }
 
 fn linked_pr_check_context(store: &Store, source_id: &str, ticket_id: &str,
     pull_key: &str) -> Result<LinkedPrCheckContext>
 {
+    linked_pr_check_context_scoped(store, source_id, ticket_id, pull_key, false)
+}
+
+fn linked_pr_check_context_scoped(store: &Store, source_id: &str, ticket_id: &str,
+    pull_key: &str, background: bool) -> Result<LinkedPrCheckContext>
+{
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let source = linked_pr_check_source(store, source_id, ticket_id, pull_key)?;
     let revision_and_links = issue_pull_context_fence(store, ticket_id)?;
+    let background_team_revision = if background {
+        require_background_observe_preflight(store, &source)?;
+        Some(require_background_team_revision(store, &source.orchestration_id, None)?)
+    } else { None };
     tx.commit().map_err(|e| e.to_string())?;
     Ok(LinkedPrCheckContext {
         source, ticket_id: ticket_id.into(), pull_key: pull_key.into(),
-        revision_and_links,
+        revision_and_links, background_team_revision,
     })
 }
 
@@ -3077,6 +3158,12 @@ fn observe_linked_pr_check_batch(
     if issue_pull_context_fence(store, &context.ticket_id)? != context.revision_and_links {
         return Err("Ticket revision or source links changed during authenticated Check fetch.".into());
     }
+    if let Some(revision) = context.background_team_revision {
+        // The same receipt transaction checks Team disable/re-enable ABA,
+        // including pending-only batches with no per-run receipt writes.
+        require_background_team_revision(store, &current.orchestration_id, Some(revision))?;
+        require_background_observe_preflight(store, &current)?;
+    }
     // A pending-only or empty batch never enters the per-run receipt path.
     // Validate repository identity here as well, without creating a receipt
     // or pinning a previously unattested source merely for an empty window.
@@ -3183,6 +3270,33 @@ fn commit_authenticated_linked_pr_checks(
         "bounded":true, "observationalOnly":true,
         "authorizationIssued":false, "councilApproved":false,
     }))
+}
+
+/// Background polling reuses the exact same authenticated read and native
+/// receipt commit as the operator command, never the generic Events feed.
+async fn poll_background_linked_pr_checks(
+    state: &AppState, source_id: &str, ticket_id: &str, pull_key: &str,
+) -> Result<()> {
+    let context = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        linked_pr_check_context_scoped(&store, source_id, ticket_id, pull_key, true)?
+    };
+    if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return Err("SuperAgent is shutting down; background Checks observation cancelled.".into());
+    }
+    let repository = context.source.repository.clone();
+    let key = context.pull_key.clone();
+    let (signed_in, pull, listing, repository_id) = tokio::task::spawn_blocking(move || {
+        fetch_authenticated_linked_pr_checks(&repository, &key)
+    }).await.map_err(|e| e.to_string())??;
+    if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return Err("SuperAgent is shutting down; background Checks observation cancelled.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    commit_authenticated_linked_pr_checks(
+        &store, &context, &pull, &listing, &signed_in, repository_id,
+    )?;
+    Ok(())
 }
 
 /// Desktop parity for the explicit, bounded linked PR Checks operation.
@@ -7071,6 +7185,93 @@ mod tests {
             |row| row.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
             |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn background_linked_pr_checks_rotate_and_fence_team_activation() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "check-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        link_thread(&store, &off.id, "check-ticket", "pull:42").unwrap();
+        link_thread(&store, &off.id, "check-ticket", "pull:43").unwrap();
+        assert!(next_background_linked_pr_check(&store, None).unwrap().is_none());
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        assert!(next_background_linked_pr_check(&store, None).unwrap().is_none());
+        assert!(linked_pr_check_context_scoped(
+            &store, &active.id, "check-ticket", "pull:42", true,
+        ).is_err());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        let first = next_background_linked_pr_check(&store, None).unwrap().unwrap();
+        assert_eq!(first, (active.id.clone(), "pull:42".to_owned(), "check-ticket".to_owned()));
+        let second = next_background_linked_pr_check(
+            &store, Some((first.0.as_str(),first.1.as_str())),
+        ).unwrap().unwrap();
+        assert_eq!(second, (active.id.clone(), "pull:43".to_owned(), "check-ticket".to_owned()));
+        assert!(next_background_linked_pr_check(
+            &store, Some((second.0.as_str(),second.1.as_str())),
+        ).unwrap().is_none());
+        assert!(inspect_source_integrity(&store, &active.id).unwrap().background_selected);
+        let context = linked_pr_check_context_scoped(
+            &store, &active.id, "check-ticket", "pull:42", true,
+        ).unwrap();
+        let raw = serde_json::json!({
+            "id":7710, "status":"completed", "conclusion":"success",
+            "head_sha":"0123456789012345678901234567890123456789",
+            "completed_at":(chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "app":{"slug":"trusted-bot","id":44},
+            "pull_requests":[{"number":42,"head":{"sha":"0123456789012345678901234567890123456789"},
+                "base":{"repo":{"id":900,
+                    "url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        let runs = vec![(7710, raw)];
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        assert!(next_background_linked_pr_check(&store, None).unwrap().is_none());
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900, None,
+        ).is_err());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &[], "local-operator", 900, None,
+        ).is_err());
+        assert!(observe_linked_pr_check_batch(
+            &store, &context, &runs, "local-operator", 900, None,
+        ).is_err());
+        assert!(list_decisions(&store, &active.id, 10).unwrap().is_empty());
+        let fresh = linked_pr_check_context_scoped(
+            &store, &active.id, "check-ticket", "pull:42", true,
+        ).unwrap();
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &fresh, &runs, "local-operator", 900, None,
+        ).unwrap(), (1,0,0));
+        assert_eq!(observe_linked_pr_check_batch(
+            &store, &fresh, &runs, "local-operator", 900, None,
+        ).unwrap(), (0,1,0));
+        let revoked = set_mode(&store, &active.id, active.policy_revision, "off").unwrap();
+        assert!(observe_linked_pr_check_batch(
+            &store, &fresh, &runs, "local-operator", 900, None,
+        ).is_err());
+        assert!(next_background_linked_pr_check(&store, None).unwrap().is_none());
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert!(next_background_linked_pr_check(&reopened, None).unwrap().is_none());
+        assert_eq!(source(&reopened, &revoked.id).unwrap().last_sequence, 1);
+        assert_eq!(linked_decisions(&reopened, "check-ticket", 10).unwrap().len(), 1);
+        for table in ["sa_mandates", "sa_assignments"] {
+            let count: i64 = reopened.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0);
+        }
     }
 
     #[test]

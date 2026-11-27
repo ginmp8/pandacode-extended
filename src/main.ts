@@ -2808,7 +2808,7 @@ const settleUnfolded = (element: HTMLElement): void => settleIn(element, 4, { re
 const STEER_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a3 3 0 0 0 3 3h10m-4-4 4 4-4 4"/></svg>';
 const GAUGE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13 3.5-4"/></svg>';
 // Cache generated markup, not the live per-message draft or open menus.
-const sharedChannelComposerMarkup = new WeakMap<HTMLFormElement, string>();
+const sharedChannelComposerMarkup = new WeakMap<HTMLFormElement, { form: string; actions: string }>();
 function renderComposer(): void {
   refreshTeamProgress();
   syncProgressPip();
@@ -2837,15 +2837,31 @@ function renderComposer(): void {
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
     const composerArea = $('#composer-area');
     const posting = state.sharedChannelPosting.has(state.sharedChannelId);
-    const nextMarkup = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
-    // A history refresh with unchanged controls must not destroy a live pointer
-    // or keyboard target. Changed rosters/actions, posting and rejected drafts
-    // still rebuild through the normal validation and restoration path.
+    const actionsMarkup = channel ? sharedChannelActionsHtml(channel, sidebarBots) : '';
+    const formMarkup = channel ? sharedChannelComposerHtml(channel, sidebarBots) : '';
+    const nextMarkup = actionsMarkup + formMarkup;
+    const restoreReassignMenu = (): void => {
+      const menu = reassign ? composerArea.querySelector<HTMLElement>(`.bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
+      if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
+    };
+    const previousMarkup = oldChannelComposer && sharedChannelComposerMarkup.get(oldChannelComposer);
+    // A history or activity refresh must not destroy a live Council control
+    // when its own form is unchanged. Refresh the sibling activity controls
+    // separately; changed rosters, posting and rejected drafts still rebuild
+    // through the existing validation and restoration path.
     if (oldChannelComposer && oldChannelComposer.parentElement === composerArea
       && oldChannelComposer.dataset.channelId === state.sharedChannelId
-      && sharedChannelComposerMarkup.get(oldChannelComposer) === nextMarkup
+      && previousMarkup && previousMarkup.form === formMarkup
       && !posting && !state.failedChannelCouncilDrafts.has(state.sharedChannelId)
-      && oldChannelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.disabled === false) return;
+      && oldChannelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.disabled === false) {
+      if (previousMarkup.actions !== actionsMarkup) {
+        composerArea.querySelector(':scope > .bc-channel-actions')?.remove();
+        oldChannelComposer.insertAdjacentHTML('beforebegin', actionsMarkup);
+        restoreReassignMenu();
+        sharedChannelComposerMarkup.set(oldChannelComposer, { form: formMarkup, actions: actionsMarkup });
+      }
+      return;
+    }
     // Channel events redraw the composer while Council settings may be open.
     // Capture its live keyboard/scroll state before removing the old popover.
     const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
@@ -2875,7 +2891,7 @@ function renderComposer(): void {
       } : null;
     composerArea.innerHTML = nextMarkup;
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    if (channelComposer) sharedChannelComposerMarkup.set(channelComposer, nextMarkup);
+    if (channelComposer) sharedChannelComposerMarkup.set(channelComposer, { form: formMarkup, actions: actionsMarkup });
     if (!posting && channelComposer) {
       const failedDraft = state.failedChannelCouncilDrafts.get(state.sharedChannelId);
       restoreSharedChannelCouncilInputs(failedDraft ?? oldChannelComposer, channelComposer);
@@ -2902,8 +2918,7 @@ function renderComposer(): void {
         nextPanel.scrollTop = councilScrollTop;
       }
     }
-    const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
-    if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
+    restoreReassignMenu();
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
     if (prompt) {
       prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? '';

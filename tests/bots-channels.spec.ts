@@ -232,6 +232,58 @@ test.describe('shared bot channels', () => {
     await expect(restored.getByRole('button', { name: 'Council: on' })).toBeFocused();
   });
 
+  test('Channel activity changes do not replace an open Council criterion or its pointer targets', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview-bots.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /(\.\.\.structuredClone\(channel\),\s*)(messages:\s*structuredClone\(channel\.messages\.slice\(-limit\)\))/,
+        (_match, before, messages) => before +
+          "activeBotIds: window.__channelCouncilActivity && channel.id === 'sample-launch' ? [channel.memberIds[0]] : channel.activeBotIds, " +
+          messages,
+      );
+      if (body === source) throw new Error('Channel activity fixture was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    const lens = panel.getByRole('textbox', { name: 'Review lens' });
+    await lens.fill('Permission boundary');
+    await lens.focus();
+    await lens.evaluate(element => (element as HTMLInputElement).setSelectionRange(2, 7));
+    const oldLens = await lens.elementHandle();
+    expect(oldLens).not.toBeNull();
+    const actions = page.locator('#composer-area .bc-channel-actions');
+    await expect(actions).toHaveCount(0);
+
+    // Native detail changes only the activity sibling, not the membership or
+    // the Council configuration. The same live field must survive both edges.
+    await page.evaluate(() => { (window as any).__channelCouncilActivity = true; });
+    await refreshUnchangedChannel(page, 'sample-launch');
+    await expect(actions.getByRole('button', { name: /^Stop / })).toBeVisible();
+    await expect(panel).toBeVisible();
+    await expect(lens).toBeFocused();
+    expect(await page.evaluate(old => document.activeElement === old, oldLens)).toBe(true);
+    await expect(lens).toHaveValue('Permission boundary');
+
+    await page.evaluate(() => { (window as any).__channelCouncilActivity = false; });
+    await refreshUnchangedChannel(page, 'sample-launch');
+    await expect(actions).toHaveCount(0);
+    await expect(lens).toBeFocused();
+    expect(await lens.evaluate(element => {
+      const field = element as HTMLInputElement;
+      return [field.selectionStart, field.selectionEnd];
+    })).toEqual([2, 7]);
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
     test.setTimeout(60_000);

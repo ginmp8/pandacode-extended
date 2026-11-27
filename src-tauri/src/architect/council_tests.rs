@@ -8791,6 +8791,22 @@ fn queued_native_child_reviewer_cannot_relaunch_a_live_or_completed_session() {
         .session_id.clone();
     let previous_status = store.session(&leaf_sid).unwrap().status;
     assert!(!matches!(previous_status.as_str(), "running" | "waiting" | "completed"));
+    // An unused task-scoped leaf must not adopt a provider thread from a
+    // different task, even if the native session still appears idle.
+    store.db.execute(
+        "UPDATE sessions SET resume_id='foreign-provider-context' WHERE id=?1",
+        [&leaf_sid],
+    ).unwrap();
+    let denied = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).err().expect("an unstarted leaf cannot reuse an existing provider context");
+    assert!(denied.contains("unstarted native leaf has a provider resume context"), "{denied}");
+    assert_eq!(
+        serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+        child_before, "denied foreign context must not consume a queued seat",
+    );
+    assert_eq!(store.session(&leaf_sid).unwrap().resume_id.as_deref(), Some("foreign-provider-context"));
+    store.db.execute("UPDATE sessions SET resume_id=NULL WHERE id=?1", [&leaf_sid]).unwrap();
     for native_status in ["running", "waiting", "completed"] {
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",

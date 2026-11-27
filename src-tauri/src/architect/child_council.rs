@@ -1141,6 +1141,14 @@ fn validate_admitted(
     for (index, leaf) in team.workers.iter().enumerate() {
         let expected_round = if index < choice.child_reviewers { 1 } else { 2 };
         let session = store.session(&leaf.session_id)?;
+        // An unstarted native reviewer must begin with its own fresh provider
+        // context. Do not silently resume an unrelated provider thread merely
+        // because the queued session still belongs to the correct child.
+        if leaf.council.as_ref().is_some_and(|seat| seat.started_at == 0)
+            && session.resume_id.is_some()
+        {
+            return Err("child_council_stale: unstarted native leaf has a provider resume context.".into());
+        }
         // Parent ownership alone cannot authenticate a leaf's identity: two
         // sibling sessions might be swapped in the mutable TeamSnapshot while
         // both still belong to this child and carry individually valid grants.

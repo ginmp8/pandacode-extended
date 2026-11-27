@@ -1108,6 +1108,7 @@ test(`explicit ${eventKind} staging confirms exact native source and Worker with
   await expect(issues.locator('option')).toHaveCount(2);
   await issues.selectOption('5');
   await host.getByRole('combobox',{name:'Issue Worker'}).selectOption('worker');
+  await host.getByRole('combobox',{name:'Initial role'}).selectOption(eventKind==='issues.reopened'?'coordinator':'worker');
   await host.getByRole('textbox',{name:'Issue Demand objective'}).fill('Inspect issue');
   await host.getByRole('button',{name:'Review issue Demand'}).click();
   await expect(host.getByText('Stage owner/repo issue:42',{exact:false})).toBeVisible();
@@ -1116,6 +1117,7 @@ test(`explicit ${eventKind} staging confirms exact native source and Worker with
   await expect(host.getByText('Native issue Demand native-issue-demand recorded',{exact:false})).toBeVisible();
   const requests=JSON.parse((await host.getAttribute('data-requests'))!);
   expect(requests).toEqual([{orchestrationId:'team',workerBotId:'worker',objective:'Inspect issue',
+    coordinated:eventKind==='issues.reopened',
     sourceId:'source',deliveryId:'5',sourceRevision:2,teamRevision:3,requestKey:expect.any(String)}]);
 });
 }

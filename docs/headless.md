@@ -1276,7 +1276,7 @@ pandacode serve --queue-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVE
 The objective is the operator's bounded UTF-8 file, not GitHub issue text. The source must currently be in Observe and both revisions must match. The native transaction creates a blocked manual Ticket, its read-only Mandate, exact issue link and immutable receipt provenance together. A repeated key with identical inputs returns the existing Ticket; different selections or repeated admission of the same attested issue in the same Team are rejected even after unlinking. Observe polling itself never stages work. This command does not grant tools, start a provider, approve a Council review or enable Auto. Native explicit dispatch must still revalidate authority. Historical name-only receipts are not eligible; no remote repository write is performed.
 
 
-To stage the same attested issue with Coordinator-first planning, explicitly choose:
+To stage the same attested issue with Coordinator-first planning, explicitly choose the Coordinator-first initial role in the Desktop Sources form, or use the equivalent CLI command below. Staging does not start a provider. Desktop Retry at the exact Ticket revision admits the original Coordinator through the same native read-only reservation as serve; an existing live CLI dispatch request must be cancelled or consumed first. Worker execution still requires review of the Coordinator plan.
 
 ```sh
 pandacode serve --queue-coordinated-observed-issue TEAM WORKER SOURCE SOURCE_REVISION DELIVERY_ID TEAM_REVISION REQUEST_KEY objective.txt

@@ -920,6 +920,8 @@ let demandArchived = false;
         '<label>Issue Worker<select name="workerBotId" required><option value="">Select a Worker</option>' +
         issueIntake.workers.map(id => '<option value="' + safe(id) + '">' +
           safe(botName(id)) + '</option>').join('') + '</select></label>' +
+        '<label>Initial role<select name="initialRole"><option value="worker">Worker directly</option>' +
+        '<option value="coordinator">Coordinator first (review plan before Worker)</option></select></label>' +
         '<label>Issue Demand objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
         '<button type="submit">Review issue Demand</button></form>' : '';
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
@@ -2605,8 +2607,8 @@ let demandArchived = false;
           throw new Error('Demand changed since the native page was loaded; refresh before retrying.');
         }
         ask('Retry blocked Demand ' + demand.id + ' at revision ' + demand.revision +
-          '? Native admission rechecks the original worker, mandate, project and attempt budget. ' +
-          'This explicitly starts another read-only Worker attempt, not an approval.', async () => {
+          '? Native admission rechecks the original role, mandate, project and attempt budget. ' +
+          'This explicitly starts the next authorized read-only Coordinator or Worker attempt, not an approval.', async () => {
           // Confirmation can remain open while another session changes the Ticket.
           // Native retry itself also rechecks role, mandate, project and lease.
           const fresh = await call<TicketDetails>('superagent_snapshot',
@@ -2636,7 +2638,7 @@ let demandArchived = false;
             throw new Error('Native retry returned an inconsistent Ticket; inspect its latest state.');
           }
           feedback = 'Native retry admitted for Demand ' + demand.id +
-            '. Inspect the Worker attempt and evidence; completion is not implied.';
+            '. Inspect the native attempt and evidence; completion is not implied.';
         });
       });
       return;
@@ -3828,14 +3830,16 @@ let demandArchived = false;
       const deliveryId = String(data.get('deliveryId') ?? '');
       const workerBotId = String(data.get('workerBotId') ?? '');
       const objective = String(data.get('objective') ?? '').trim();
+      const initialRole = String(data.get('initialRole') ?? '');
       const receipt = intake?.receipts.find(d => d.deliveryId === deliveryId);
-      if (!intake || !receipt || !intake.workers.includes(workerBotId) || !objective ||
+      if (!['worker','coordinator'].includes(initialRole) || !intake || !receipt || !intake.workers.includes(workerBotId) || !objective ||
           new TextEncoder().encode(objective).length > 16 * 1024 || objective.includes('\0')) {
         error = 'Select a current permitted issue and configured Worker, and provide a bounded objective.';
         render(); return;
       }
       const input = {
         orchestrationId:intake.team.id, workerBotId, objective,
+        coordinated:initialRole === 'coordinator',
         sourceId:intake.source.id, deliveryId,
         sourceRevision:intake.source.policyRevision, teamRevision:intake.team.policyRevision,
       };
@@ -3846,6 +3850,7 @@ let demandArchived = false;
       const request = pendingObservedIssue;
       ask('Stage ' + intake.source.repository + ' ' + receipt.subjectKey +
         ' for Team ' + intake.team.name + ' and Worker ' + botName(workerBotId) +
+        (input.coordinated ? ' with Coordinator-first planning' : ' with direct Worker execution') +
         ' at Team revision ' + input.teamRevision + ' and source revision ' + input.sourceRevision +
         '? This creates a manual read-only Demand without starting a provider or granting writes.', async () => {
         const fresh = observedIssueIntake();

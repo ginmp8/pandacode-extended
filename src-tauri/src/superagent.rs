@@ -5971,6 +5971,8 @@ pub struct ObservedIssueDemandInput {
     delivery_id: String,
     source_revision: i64,
     team_revision: i64,
+    #[serde(default)]
+    coordinated: bool,
 }
 
 /// Stage only: no provider session, external effect or implicit Auto grant.
@@ -5987,7 +5989,7 @@ pub async fn superagent_stage_observed_issue(
     };
     stage_observed_issue(
         &mut store, &input.orchestration_id, &input.worker_bot_id,
-        &input.objective, &input.request_key, &selection, false,
+        &input.objective, &input.request_key, &selection, input.coordinated,
     )
 }
 
@@ -6733,21 +6735,34 @@ async fn dispatch_worker_native(
 
 const INITIAL_COORDINATOR_OCCUPIED: &str = "Coordinator is occupied; staged Demand stays blocked.";
 
+#[cfg(test)]
 fn prepare_initial_coordinator(
     store: &mut Store, request: &headless_dispatch::DispatchRequest, busy: bool,
+) -> Result<(Ticket, String, String)> {
+    prepare_initial_coordinator_at_revision(
+        store, &request.ticket_id, request.expected_revision, busy, Some(request),
+    )
+}
+
+fn prepare_initial_coordinator_at_revision(
+    store: &mut Store, id: &str, expected_revision: i64, busy: bool,
+    request: Option<&headless_dispatch::DispatchRequest>,
 ) -> Result<(Ticket, String, String)> {
     let tx = rusqlite::Transaction::new_unchecked(
         &store.db, rusqlite::TransactionBehavior::Immediate,
     ).map_err(|e| e.to_string())?;
-    let id = &request.ticket_id;
     let ticket = get_ticket(store, id)?;
     let now = storage::now();
-    if ticket.state != "blocked" || ticket.revision != request.expected_revision
+    if ticket.state != "blocked" || ticket.revision != expected_revision
         || ticket.active_assignment_id.is_some() || ticket.actor != "local-user"
-        || request.kind != "retry" || !headless_dispatch::is_current(request, now)
+        || request.is_some_and(|r| r.ticket_id != id || r.kind != "retry"
+            || r.expected_revision != expected_revision || !headless_dispatch::is_current(r, now))
         || !initial_coordinator_pending(store, id)?
     {
         return Err("Initial Coordinator dispatch intent is stale or no longer pending.".into());
+    }
+    if request.is_none() {
+        headless_dispatch::require_no_live_pending(store, &ticket)?;
     }
     let config = configuration(store, &ticket.orchestration_id)?;
     let grant = mandate(store, id)?;
@@ -6802,7 +6817,11 @@ fn prepare_initial_coordinator(
          VALUES(?1,'admitted','manual readonly coordinator reserved',?2)",
         params![id,now],
     ).map_err(|e| e.to_string())?;
-    headless_dispatch::consume(&tx,request,&ticket,&assignment_id,now)?;
+    if let Some(request) = request {
+        headless_dispatch::consume(&tx,request,&ticket,&assignment_id,now)?;
+    } else {
+        headless_dispatch::reject_stale_pending(&tx,id,now)?;
+    }
     if read_only_policy(store,&session_id)?.is_none() {
         return Err("Initial Coordinator has no native read-only admission.".into());
     }
@@ -6811,18 +6830,19 @@ fn prepare_initial_coordinator(
 }
 
 async fn dispatch_initial_coordinator(
-    app: &tauri::AppHandle, state: &AppState, request: &headless_dispatch::DispatchRequest,
+    app: &tauri::AppHandle, state: &AppState, ticket_id: &str, expected_revision: i64,
+    request: Option<&headless_dispatch::DispatchRequest>,
 ) -> Result<Ticket> {
     let (ticket, coordinator_id, packet) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let ticket = get_ticket(&store,&request.ticket_id)?;
+        let ticket = get_ticket(&store,ticket_id)?;
         let config = configuration(&store,&ticket.orchestration_id)?;
         let coordinator = bots::get(&store,&config.coordinator_bot_id)?;
         let busy = active_manual_conflict(&store,&active,&coordinator.id,&config.project_id)?
             || active_manual_conflict(&store,&active,&coordinator.id,&coordinator.project_id)?;
-        prepare_initial_coordinator(&mut store,request,busy)?
+        prepare_initial_coordinator_at_revision(&mut store,ticket_id,expected_revision,busy,request)?
     };
     let delivered = bots::gateway::deliver(app,bots::gateway::Inbound {
         bot_id: coordinator_id, channel_id: CHANNEL.into(), thread: ticket.id.clone(),
@@ -6866,7 +6886,8 @@ async fn dispatch_pending_local(app: &tauri::AppHandle, desktop_only: bool) -> R
             initial_coordinator_pending(&store, &request.ticket_id)?
         };
         let result = if initial {
-            dispatch_initial_coordinator(app, &state, &request).await
+            dispatch_initial_coordinator(app, &state, &request.ticket_id,
+                request.expected_revision, Some(&request)).await
         } else {
             dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
                 request.kind == "coordinated", Some(&request)).await
@@ -6941,7 +6962,15 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
     expected_revision: i64,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    dispatch_worker_native(&app, &state, &ticket_id, expected_revision, false, None).await
+    let initial = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        initial_coordinator_pending(&store, &ticket_id)?
+    };
+    if initial {
+        dispatch_initial_coordinator(&app, &state, &ticket_id, expected_revision, None).await
+    } else {
+        dispatch_worker_native(&app, &state, &ticket_id, expected_revision, false, None).await
+    }
 }
 
 #[tauri::command]
@@ -8168,6 +8197,44 @@ mod tests {
             &mut reopened,id,queued.revision,false).unwrap();
         assert_eq!(recipient,"worker");
         assert_eq!(worker.state,"running");
+    }
+
+    #[test]
+    fn desktop_staged_coordinator_retry_respects_revision_pending_intent_and_native_role() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_coordinated_demand(&store.path,&cfg.id,"worker",
+            "Inspect checkout","desktop-coordinator-stage").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = view["revision"].as_i64().unwrap();
+        assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision+1,false,None).is_err());
+        assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision,true,None).is_err());
+        let request = headless_dispatch::enqueue(&store,id,revision,"cli-pending").unwrap();
+        assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision,false,None).is_err());
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        headless_dispatch::cancel(&store,id,revision,"cli-pending").unwrap();
+        assert!(prepare_initial_coordinator(&mut store,&request,false).is_err());
+        assert!(assignment_session(&store,id).unwrap().is_none());
+
+        let (running,recipient,packet) = prepare_initial_coordinator_at_revision(
+            &mut store,id,revision,false,None).unwrap();
+        assert_eq!(running.state,"running");
+        assert_eq!(recipient,"router");
+        assert!(packet.contains("Admitted Team capability inventory"));
+        assert!(guard_gateway_inbound(&store,&recipient,id,"local-user",true).is_ok());
+        assert!(guard_gateway_inbound(&store,"worker",id,"local-user",true).is_err());
+        let session = assignment_session(&store,id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+        assert!(prepare_initial_coordinator_at_revision(&mut store,id,revision,false,None).is_err());
+        assert!(on_run_finished(&store,&session,true,"Inspect the checkout").unwrap());
+        let queued = get_ticket(&store,id).unwrap();
+        assert_eq!(queued.state,"queued");
+        let mut reopened = Store::open(&store.path).unwrap();
+        assert!(prepare_initial_coordinator_at_revision(&mut reopened,id,revision,false,None).is_err());
+        let (_,_,worker,_) = prepare_coordinated_worker_at_revision(
+            &mut reopened,id,queued.revision,false).unwrap();
+        assert_eq!(worker,"worker");
     }
 
     #[test]

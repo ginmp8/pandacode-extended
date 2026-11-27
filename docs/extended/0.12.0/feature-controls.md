@@ -1,5 +1,9 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-27 — Connect limit dismissal and browser reconnect checkpoint
+
+The Connect/browser correction preserves the existing Extended master and direct-route controls in `src/main.ts`; upstream queue dismissal is delegated to the existing native helper and reconnect does not add new access levels. Runtime On/Off paths still require validation. [fork main `ea1fe3ad1d08`](https://github.com/ginmp8/pandacode/commit/ea1fe3ad1d0852e93a94efe992fc067236420321).
+
 ## 2026-11-26 — updater signature version-binding checkpoint
 
 Frozen [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) declares app 0.3.158. This independent checkpoint reconciles six release-script and test paths: four source-exact, two adapted, all 12 upstream hunks verified by forward reconstruction and inverse application. Linux AppImage re-signing binds the inherited app version; the publish verifier checks the cryptographically verified trusted comment for exactly one matching version token. Signed install notes no longer promise local macOS signing. Existing Extended manifest URLs continue to use the separate validated distribution tag, and the regression test for this distinction is retained. No workflow, manifest, dependency, Settings or publication permission changes are included. The last fully imported app/source baseline remains 0.3.154; Extended 0.12.0 remains DRAFT.

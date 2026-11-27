@@ -1,5 +1,11 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-27 — Connect limit dismissal and browser reconnect checkpoint
+
+Parent [`dda779f069f4`](https://github.com/ginmp8/pandacode-extended/commit/dda779f069f4df2aa1baa90ff147bfeeee3d51f5): [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45926182157) 11/11 passed, [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45926191159) 9/11 passed, two macOS Clippy jobs pending at inspection. Candidate native and browser tests were not run locally: GitHub DNS and Cargo unavailable; the authenticated API supplied full file/tree data. Candidate CI and native Settings acceptance are unverified. Source inventory 2193; target 2225; 2055 exact, 112 shared divergent, 26 missing, 58 target-only, 0 mode/type mismatches. Pending source delta: 53 exact-copy and 14 concurrent paths. Storage modularization and schema compatibility remain the principal integration dependency. No full parity claimed.
+
+Run `npm run build`, `npm test`, `npx playwright test tests/usage-limit.spec.ts tests/web-bridge.spec.ts` and the locked Rust library tests when the candidate is available; retain the full source reconciliation and release-identity gates.
+
 ## 2026-11-26 — updater signature version-binding checkpoint
 
 Frozen [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) declares app 0.3.158. This independent checkpoint reconciles six release-script and test paths: four source-exact, two adapted, all 12 upstream hunks verified by forward reconstruction and inverse application. Linux AppImage re-signing binds the inherited app version; the publish verifier checks the cryptographically verified trusted comment for exactly one matching version token. Signed install notes no longer promise local macOS signing. Existing Extended manifest URLs continue to use the separate validated distribution tag, and the regression test for this distinction is retained. No workflow, manifest, dependency, Settings or publication permission changes are included. The last fully imported app/source baseline remains 0.3.154; Extended 0.12.0 remains DRAFT.

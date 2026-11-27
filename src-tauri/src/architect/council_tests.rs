@@ -4677,6 +4677,66 @@ fn selected_round_freezes_all_profiles_before_split_dispatch_and_replacement() {
 }
 
 #[test]
+fn frozen_selected_roster_cannot_admit_removed_or_duplicate_direct_seats() {
+    let (store, mut team) = fixture();
+    let project = store.session(&team.session_id).unwrap().project_id;
+    for id in ["bot-a", "bot-b", "bot-c"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES(?1,?1,?2,'codex','frozen-model','plan',1,1)",
+            params![id, project],
+        ).unwrap();
+    }
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    let first = bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap().unwrap();
+    assert_eq!(first.id, "bot-a");
+    let key = format!("native-reviewer-round:{}:1", team.council_since);
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        params![team.session_id, key], |row| row.get(0),
+    ).unwrap();
+
+    // An old persisted round must not resurrect a deselected bot.
+    team.config.council.as_mut().unwrap().reviewer_bot_ids = vec!["bot-b".into(), "bot-c".into()];
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap_err().contains("frozen reviewer roster"));
+    team.config.council.as_mut().unwrap().reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+
+    // A duplicate or mismatched roster inside the frozen record must fail closed.
+    let mut corrupted: serde_json::Value = serde_json::from_str(&original).unwrap();
+    corrupted[1]["id"] = serde_json::json!("bot-a");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        params![team.session_id, key, corrupted.to_string()],
+    ).unwrap();
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap_err().contains("frozen reviewer roster"));
+    let mut corrupted: serde_json::Value = serde_json::from_str(&original).unwrap();
+    corrupted[0]["roster_bot_ids"] = serde_json::json!(["bot-a", "bot-c"]);
+    let corrupted = corrupted.to_string();
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        params![team.session_id, key, corrupted],
+    ).unwrap();
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap_err().contains("frozen reviewer roster"));
+    let retained: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        params![team.session_id, key], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(retained, corrupted, "denied admission must not rewrite the frozen round");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
+        params![team.session_id, key, original],
+    ).unwrap();
+    assert_eq!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap().unwrap(), first);
+}
+
+#[test]
 fn selected_reviewer_skills_are_frozen_with_native_round_without_global_activation() {
     use crate::skills::{Kind, Library, Source};
     let (store, mut team) = fixture();

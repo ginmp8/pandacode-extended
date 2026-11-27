@@ -197,6 +197,8 @@ pub(super) struct SelectedReviewer {
 }
 
 fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Vec<SelectedReviewer>> {
+    let config = team.config.council.as_ref().ok_or("Council is off.")?;
+    config.validate()?;
     let key = format!("native-reviewer-round:{}:{round}", team.council_since);
     let saved: Option<String> = store.db.query_row(
         "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
@@ -205,6 +207,13 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     if let Some(raw) = saved {
         let frozen: Vec<SelectedReviewer> = serde_json::from_str(&raw)
             .map_err(|_| "reviewer_session_mismatch: invalid frozen reviewer round.".to_string())?;
+        // A persisted round is evidence of the originally selected direct seats, not
+        // authority to admit a bot outside the current task's selected roster.
+        if !frozen.iter().map(|r| r.id.as_str()).eq(config.reviewer_bot_ids.iter().map(String::as_str))
+            || frozen.iter().any(|r| r.roster_bot_ids != config.reviewer_bot_ids)
+        {
+            return Err("reviewer_session_mismatch: frozen reviewer roster differs from the selected round.".into());
+        }
         if check_executable && frozen.iter().any(|r| !r.context.skill_ids.is_empty() && r.skills.is_none()) {
             return Err("reviewer_skill_unavailable: legacy round has assigned skills without immutable pins; start a new round.".into());
         }
@@ -218,8 +227,6 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.as_ref().is_some_and(|s| s.round == round)) {
         return Err("reviewer_session_mismatch: this legacy round has no frozen roster. Stop its reviewers and change the selected roster to start a new round.".into());
     }
-    let config = team.config.council.as_ref().ok_or("Council is off.")?;
-    config.validate()?;
     let executors = executors(store, &team.session_id)?;
     let mut reviewers = Vec::new();
     for id in &config.reviewer_bot_ids {

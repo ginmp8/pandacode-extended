@@ -732,3 +732,9 @@ Both Unicode source/test blobs were verified locally and passed eight Node 22.16
 Independent UI checkpoint evidence only: twelve exact source paths, four adapted paths, 19 contextual hunks/unique substitutions verified in reverse, eight focused Node tests on exact reading-width bytes with mocked motion and DOM dependencies, and isolated strict TypeScript compilation. Full build, native Settings acceptance, original Playwright tests and candidate CI remain unchecked. Extended 0.12.0 remains DRAFT; no release or distribution approval.
 
 Source: [`f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). See the [candidate details](README.md).
+
+## 2026-11-27 — upstream changelog checkpoint
+
+All 207 upstream release-note blobs and date coverage, and six bundled-version mappings, were structurally checked. Node changelog tests, Astro build, candidate CI and native tests remain unverified. The application baseline remains 0.3.154; Extended 0.12.0 remains DRAFT, not approved for distribution.
+
+Source: [fork main `f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). Parent: [`a9bb8e006979`](https://github.com/ginmp8/pandacode-extended/commit/a9bb8e006979f01e483f48bc6e2328ad74f5c1fe). See [candidate details](README.md).

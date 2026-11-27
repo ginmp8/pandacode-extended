@@ -448,3 +448,9 @@ Both Unicode source/test blobs were verified locally and passed eight Node 22.16
 The frozen fork main declares 0.3.162; full inherited app identity remains 0.3.154. Storage modularization and rollback compatibility, other source changes, original release notes and changelog synchronization remain pending. The browser and native tests for this checkpoint have not run. Local Git/archive DNS and Cargo are unavailable. No full parity claim.
 
 Source: [`f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). See the [candidate details](README.md).
+
+## 2026-11-27 — upstream changelog checkpoint
+
+Original upstream release notes and release dates are restored; the changelog distinguishes unpublished versions bundled into later published releases. The remaining 30 missing and 141 shared divergent paths are not resolved by this checkpoint. SQLite schema compatibility, runtime integration and inherited version metadata remain outstanding.
+
+Source: [fork main `f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). Parent: [`a9bb8e006979`](https://github.com/ginmp8/pandacode-extended/commit/a9bb8e006979f01e483f48bc6e2328ad74f5c1fe). See [candidate details](README.md).

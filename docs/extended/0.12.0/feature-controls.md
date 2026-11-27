@@ -308,3 +308,9 @@ Both Unicode source/test blobs were verified locally and passed eight Node 22.16
 The independent UI checkpoint imports upstream Comfortable/Wide reading width (local rendering preference), stable native-point inset gaps under interface zoom, the project picker's existing confirmed remove action, and preview appearance dependency injection. Existing Extended feature controls remain in place. No control default, permission or dependency was changed. Native On/Off acceptance has not been executed.
 
 Source: [`f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). See the [candidate details](README.md).
+
+## 2026-11-27 — upstream changelog checkpoint
+
+No runtime control, default or authorization boundary changes in this checkpoint. Native Settings On/Off acceptance remains unverified.
+
+Source: [fork main `f8ec7a8a5b9e`](https://github.com/ginmp8/pandacode/commit/f8ec7a8a5b9ef8d3e9de11217c148ccd136eca52). Parent: [`a9bb8e006979`](https://github.com/ginmp8/pandacode-extended/commit/a9bb8e006979f01e483f48bc6e2328ad74f5c1fe). See [candidate details](README.md).

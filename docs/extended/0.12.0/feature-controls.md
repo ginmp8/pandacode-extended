@@ -1,5 +1,9 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-26 — OpenCode discovery and Windows launcher checkpoint
+
+The checkpoint retains the two existing Extended external MCP checks in `providers.rs`, and does not modify Settings, credential-transfer, VM, Connect or bot controls. Native On/Off acceptance remains unverified.
+
 ## 2026-11-26 — Colab transport correction checkpoint
 
 The source-exact Colab patch from [upstream Colab fix `01a0c32effec`](https://github.com/ginmp8/pandacode/commit/01a0c32effec2b4421d7fc9c2c25187c9a89e1f9) leaves Extended Settings, credential-transfer authorization, VM permissions and Connect/bot/MCP gates unchanged. No native On/Off or live Colab acceptance is claimed. Full 0.3.158 reconciliation remains pending.

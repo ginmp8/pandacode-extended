@@ -1,5 +1,9 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-26 — OpenCode discovery and Windows launcher checkpoint
+
+Full inventory before this checkpoint: 2,192 upstream paths, 2,225 Extended paths, 2,045 exact shared, 122 shared divergent, 25 missing, 58 Extended-only, no mode/type mismatch. After the two exact copies and one adaptation: 2,047 exact, 120 divergent, 25 missing, 58 Extended-only. Of the prior 79 source-delta paths, three are now represented by this checkpoint (60 exact-copy paths and 16 concurrent paths remain). The modular SQLite migration, rollback coverage, schedule provenance, release signature integration and remaining source/version metadata must still be reconciled. No full structural or functional parity is claimed.
+
 ## 2026-11-26 — Colab transport correction checkpoint
 
 The latest [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) advances 13 commits from the last integrated 0.3.154 source. The full 82-path delta comprises 65 source-exact eligible paths and 17 concurrent paths; this independent Colab checkpoint accounts for three of the exact paths, leaving 79 pending (62 exact and 17 concurrent), including the original release notes, version metadata and corrected historical 0.3.153 note. Of the 15 concurrent files with API diff hunks, 12 apply textually; `bots.rs`, `schedules/tests.rs` and `verify-publish.mjs` require manual adaptation; `storage.rs` and `main.ts` lack complete API patches. The storage split and additive tracker repair must preserve Extended schema 38, the distinct v37 layouts, schedule provenance, mandatory bot/cloud compatibility and rollback coverage. A provenance column alone does not distinguish every legacy layout. Local Git DNS and Cargo are unavailable; native migration and end-to-end tests remain unexecuted.

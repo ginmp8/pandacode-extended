@@ -1,5 +1,13 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-26 — OpenCode discovery and Windows launcher checkpoint
+
+- [x] Verify all three source changes and the inverse patch preservation of Extended code.
+- [ ] Run the OpenCode discovery, fallback, URL validation and Windows launcher regressions on the exact candidate SHA.
+- [ ] Complete the remaining 76-path source delta and release identity reconciliation, then verify native Settings behavior.
+
+Parent [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914264518) 11/11 successful; [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914271530) 10/11 successful, macOS x86_64 Clippy pending at inspection. Both refer to `bef7b7d3149fa3c92cc0ed250aacf10fd937fef5`. No local Rust compilation or runtime test was possible: Git DNS failed and Cargo is unavailable. New-SHA CI and native Settings acceptance are unverified.
+
 ## 2026-11-26 — Colab transport correction checkpoint
 
 - [x] Verify the three Colab fix source blob identities against [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65).

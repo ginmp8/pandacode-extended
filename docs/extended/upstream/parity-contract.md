@@ -1,5 +1,13 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## 2026-11-26 — OpenCode discovery and Windows launcher checkpoint
+
+Frozen [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) declares application 0.3.158. This independent checkpoint imports the complete three-file [OpenCode fix `49444bed601c`](https://github.com/ginmp8/pandacode/commit/49444bed601c208ed62d3cb8caaa16a1a2a8ebe3): 18 upstream hunks reconstruct the source exactly from the last upstream pin and apply uniquely to the current Extended files, with inverse application restoring the original Extended content. Two files are source-exact; `providers.rs` retains its existing Extended MCP controls. The application manifests, source-baseline identity and historical release notes remain 0.3.154 pending the complete reconciliation. Extended 0.12.0 remains DRAFT.
+
+Full inventory before this checkpoint: 2,192 upstream paths, 2,225 Extended paths, 2,045 exact shared, 122 shared divergent, 25 missing, 58 Extended-only, no mode/type mismatch. After the two exact copies and one adaptation: 2,047 exact, 120 divergent, 25 missing, 58 Extended-only. Of the prior 79 source-delta paths, three are now represented by this checkpoint (60 exact-copy paths and 16 concurrent paths remain). The modular SQLite migration, rollback coverage, schedule provenance, release signature integration and remaining source/version metadata must still be reconciled. No full structural or functional parity is claimed.
+
+Parent [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914264518) 11/11 successful; [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914271530) 10/11 successful, macOS x86_64 Clippy pending at inspection. Both refer to `bef7b7d3149fa3c92cc0ed250aacf10fd937fef5`. No local Rust compilation or runtime test was possible: Git DNS failed and Cargo is unavailable. New-SHA CI and native Settings acceptance are unverified.
+
 ## 2026-11-26 — Colab transport correction checkpoint
 
 Frozen [fork main `bea3df855ba5`](https://github.com/ginmp8/pandacode/commit/bea3df855ba5add4531c0e7362a683436ab72c65) declares app 0.3.158. This independent code checkpoint copies all three Rust files of [upstream Colab fix `01a0c32effec`](https://github.com/ginmp8/pandacode/commit/01a0c32effec2b4421d7fc9c2c25187c9a89e1f9), including regression tests, byte-for-byte. The prior Extended app version, source-baseline identity and original release notes remain 0.3.154 pending complete reconciliation; this is not a full upstream snapshot. Extended 0.12.0 remains DRAFT.

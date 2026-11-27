@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-26 — OpenCode discovery and Windows launcher checkpoint
+
+No manifests or lockfiles changed. The source uses the existing reqwest, rustls, Tokio, base64 and UUID dependencies; compile compatibility and candidate audit outcomes remain unverified. The source discovery uses a bounded private loopback server, no HTTP redirects/proxy, per-call credentials and non-loopback URL rejection. No new vulnerability remediation is claimed.
+
+Parent [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914264518) 11/11 successful; [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/45914271530) 10/11 successful, macOS x86_64 Clippy pending at inspection. Both refer to `bef7b7d3149fa3c92cc0ed250aacf10fd937fef5`. No local Rust compilation or runtime test was possible: Git DNS failed and Cargo is unavailable. New-SHA CI and native Settings acceptance are unverified.
+
 ## 2026-11-26 — Colab transport correction checkpoint
 
 The Colab correction retains the Extended manifest and lockfile (reqwest 0.13.5, rustls 0.23.46, Tokio 1.53.3). The source code distinguishes unclean connection EOF from real handshake, certificate, protocol and fatal-alert errors; the trusted root helper is test-only. No new vulnerability remediation is claimed. Parent CI [push](https://github.com/ginmp8/pandacode-extended/actions/runs/45895785582) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/45895797103) passed both npm and RustSec jobs; candidate audits and runtime tests remain unverified.

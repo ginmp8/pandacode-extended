@@ -102,7 +102,10 @@ test.describe('bot collaboration', () => {
               followupStatus: 'succeeded', followupUrl: 'https://github.com/owner/repo/issues/42' } },
           { id: 'limit', kind: 'assigned', authorBotId: 'executor', text: 'At limit', status: 'In progress', createdAt: 4,
             council: { cycleId: 'limit-one', sessionId: 'limit-session', state: 'Limit reached', round: 1, target: 9, lowest: 7,
-              artifactRevision: '1:4', reviewers: [] } },
+              artifactRevision: '1:4', acceptanceRevision: 'limit-one:limit-session:4', reviewers: [] } },
+          { id: 'limit-unbound', kind: 'assigned', authorBotId: 'executor', text: 'At limit without current revision', status: 'In progress', createdAt: 5,
+            council: { cycleId: 'limit-unbound-one', sessionId: 'limit-unbound-session', state: 'Limit reached', round: 1, target: 9, lowest: 7,
+              artifactRevision: '1:5', reviewers: [] } },
         ],
       } as any;
       const root = document.createElement('div');
@@ -128,6 +131,9 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('.bc-assigned[data-message-id="exception"] a[href="https://github.com/owner/repo/issues/42"]')).toHaveCount(1);
     await expect(fixture.locator('.bc-assigned[data-message-id="exception"] [data-action="channel-council-accept"]')).toHaveCount(0);
     await expect(fixture.locator('.bc-assigned[data-message-id="limit"] [data-action="channel-council-accept"]')).toHaveAttribute('data-delivery-id', 'limit');
+    await expect(fixture.locator('.bc-assigned[data-message-id="limit"] [data-action="channel-council-accept"]')).toHaveAttribute('data-acceptance-revision', 'limit-one:limit-session:4');
+    await expect(fixture.locator('.bc-assigned[data-message-id="limit-unbound"]')).toContainText('Council: Limit reached');
+    await expect(fixture.locator('.bc-assigned[data-message-id="limit-unbound"] [data-action="channel-council-accept"]')).toHaveCount(0);
     await fixture.locator('input[name="councilEnabled"]').check();
     await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('9');

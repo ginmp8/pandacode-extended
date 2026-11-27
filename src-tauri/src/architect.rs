@@ -734,7 +734,12 @@ fn native_reviewer_authority_rounds(
 fn native_root_reviewer_session_is_current(
     store: &Store, parent_session_id: &str, worker: &Worker,
 ) -> bool {
-    if worker.id.is_empty() || worker.session_id.is_empty() {
+    if worker.id.is_empty() || worker.session_id.is_empty()
+        || worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.as_deref())
+            .is_some_and(|bot_id| bot_reviewers::require_independent_reviewer(
+                store, parent_session_id, bot_id,
+            ).is_err())
+    {
         return false;
     }
     let owners: i64 = store.db.query_row(

@@ -8,19 +8,24 @@ use std::collections::HashSet;
 
 /// Only a direct bot conversation or explicitly assigned bot task establishes
 /// executor identity. Sharing a project does not identify an executing bot.
-fn executor(store: &Store, session_id: &str) -> Result<Option<String>> {
-    let linked: Option<String> = store.db.query_row(
-        "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION ALL SELECT bot_id FROM bot_tasks WHERE session_id=?1 LIMIT 1",
-        [session_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if linked.is_some() { return Ok(linked); }
-    // Project membership is not executor identity: several bots may share a project.
-    // Only explicit bot task/thread ownership proves who is executing this session.
-    Ok(None)
+fn executors(store: &Store, session_id: &str) -> Result<HashSet<String>> {
+    let mut stmt = store.db.prepare(
+        "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION SELECT bot_id FROM bot_tasks WHERE session_id=?1",
+    ).map_err(|e| e.to_string())?;
+    let ids = stmt.query_map([session_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    ids.collect::<rusqlite::Result<HashSet<_>>>().map_err(|e| e.to_string())
 }
 
-fn valid_bot(bot: &bots::Bot, executor: Option<&str>, check_executable: bool) -> Result<()> {
-    if executor == Some(bot.id.as_str()) {
+pub(super) fn require_independent_reviewer(store: &Store, session_id: &str, bot_id: &str) -> Result<()> {
+    if executors(store, session_id)?.contains(bot_id) {
+        return Err("reviewer_unavailable: a bot cannot review its own task.".into());
+    }
+    Ok(())
+}
+
+fn valid_bot(bot: &bots::Bot, executors: &HashSet<String>, check_executable: bool) -> Result<()> {
+    if executors.contains(&bot.id) {
         return Err("reviewer_unavailable: a bot cannot review its own task.".into());
     }
     if bot.paused {
@@ -46,6 +51,9 @@ pub(super) fn validate_frozen_seat(
     store: &Store, binding: &super::reviewer_security::ReviewerBinding, check_executable: bool,
 ) -> Result<()> {
     let Some(bot_id) = binding.reviewer_bot_id.as_deref() else { return Ok(()) };
+    let (session_id, _) = binding.council_cycle_id.rsplit_once(':')
+        .ok_or("reviewer_session_mismatch: invalid native Council cycle.")?;
+    require_independent_reviewer(store, session_id, bot_id)?;
     let current = bots::get(store, bot_id)
         .map_err(|_| format!("reviewer_unavailable: selected bot {bot_id} was removed."))?;
     if current.paused {
@@ -67,10 +75,10 @@ pub(super) fn validate_frozen_seat(
 /// Return the same server-side eligibility rules used for actual dispatch, including
 /// executable installation and model health. A UI can never authorize a bot itself.
 pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json::Value>> {
-    let executor = executor(store, session_id)?;
+    let executors = executors(store, session_id)?;
     let mut result = Vec::new();
     for bot in bots::list(store)? {
-        let reason = valid_bot(&bot, executor.as_deref(), true).err()
+        let reason = valid_bot(&bot, &executors, true).err()
             .map(|e| e.trim_start_matches("reviewer_unavailable: ").to_string());
         result.push(serde_json::json!({
             "id": bot.id, "name": bot.name, "role": bot.role,
@@ -126,7 +134,7 @@ pub(super) fn review_policy(
 pub(super) fn validate_roster(store: &Store, session_id: &str, council: &CouncilConfig) -> Result<()> {
     council.validate()?;
     if council.reviewer_bot_ids.is_empty() && council.nested_bot_reviewers.is_empty() { return Ok(()); }
-    let executor = executor(store, session_id)?;
+    let executors = executors(store, session_id)?;
     let project_id = store.session(session_id)?.project_id;
     let mut used = HashSet::new();
     let mut available_skills = HashSet::new();
@@ -142,7 +150,7 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
         {
             return Err("child_council_denied: selected nested bot belongs to another project.".into());
         }
-        valid_bot(&bot, executor.as_deref(), true)?;
+        valid_bot(&bot, &executors, true)?;
         if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id) {
             if bot.provider == "zcode" {
                 return Err("child_council_unavailable: the selected bot harness cannot host a native child Architect.".into());
@@ -212,11 +220,11 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     }
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
     config.validate()?;
-    let executor = executor(store, &team.session_id)?;
+    let executors = executors(store, &team.session_id)?;
     let mut reviewers = Vec::new();
     for id in &config.reviewer_bot_ids {
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
-        valid_bot(&bot, executor.as_deref(), check_executable)?;
+        valid_bot(&bot, &executors, check_executable)?;
         let tool_policy = config.review_permissions.as_ref().map(|permissions| review_policy(&bot, permissions)).transpose()?.unwrap_or(super::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         let skills = if bot.skills.is_empty() { None } else if let Some(library) = library {
             let optional = config.optional_skill_ids.iter()
@@ -295,7 +303,7 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
     available.provider = frozen.profile.provider.clone();
     available.model = frozen.profile.model.clone();
     available.reasoning_effort = frozen.context.reasoning_effort.clone();
-    valid_bot(&available, executor(store, &team.session_id)?.as_deref(), check_executable)?;
+    valid_bot(&available, &executors(store, &team.session_id)?, check_executable)?;
     if let Some(binding) = old.and_then(|w| w.reviewer_binding.as_ref()) {
         super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
         if binding.round == round && (binding.snapshot.provider != frozen.profile.provider || binding.snapshot.model != frozen.profile.model
@@ -389,8 +397,8 @@ mod tests {
             backup_models: vec![], fallback_mode: "ask".into(), notify: true, while_working: "queue".into(),
             show_plan: false, skills: vec![], mcp: vec![],
         };
-        assert!(valid_bot(&bot, Some("reviewer-one"), false).unwrap_err().contains("own task"));
-        assert!(valid_bot(&bots::Bot { paused: true, ..bot.clone() }, None, false).unwrap_err().contains("paused"));
+        assert!(valid_bot(&bot, &HashSet::from(["reviewer-one".into()]), false).unwrap_err().contains("own task"));
+        assert!(valid_bot(&bots::Bot { paused: true, ..bot.clone() }, &HashSet::new(), false).unwrap_err().contains("paused"));
 
         let grant = super::super::reviewer_security::ReviewerCapabilityGrant {
             tool: "pandacode_open_file".into(), action: "call".into(),

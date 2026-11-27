@@ -4523,6 +4523,64 @@ fn resumed_selected_seat_fails_closed_if_bot_was_paused_or_removed() {
 }
 
 #[test]
+fn selected_reviewer_cannot_be_either_current_root_executor() {
+    let (store, mut team) = fixture();
+    let project = store.session(&team.session_id).unwrap().project_id;
+    for id in ["thread-owner", "task-owner", "independent"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES(?1,?1,?2,'codex','frozen-model','plan',1,1)",
+            params![id, project],
+        ).unwrap();
+    }
+    store.db.execute(
+        "INSERT INTO bot_threads(bot_id,channel_id,external_id,session_id,updated_at)
+         VALUES('thread-owner','direct','review-root',?1,1)",
+        [&team.session_id],
+    ).unwrap();
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["task-owner".into(), "independent".into()];
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+
+    // Freeze a legitimate independent reviewer before task ownership changes.
+    let first = bot_reviewers::seat_bot_inner(&store, &team, 1, None, false).unwrap().unwrap();
+    assert_eq!(first.id, "task-owner");
+    let mut worker = seat("selected-review", 1, Some(9.5), SINCE + 1);
+    worker.provider = first.profile.provider.clone();
+    worker.model = first.profile.model.clone();
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &worker.id, worker.created_at, &worker.provider,
+        &worker.model, worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some(first.id);
+    binding.snapshot.bot_context = Some(first.context);
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false).is_ok());
+
+    store.db.execute(
+        "INSERT INTO bot_tasks(session_id,bot_id) VALUES(?1,'task-owner')",
+        [&team.session_id],
+    ).unwrap();
+    // The first thread owner must not mask the second explicit task owner.
+    for id in ["thread-owner", "task-owner"] {
+        assert!(bot_reviewers::require_independent_reviewer(&store, &team.session_id, id)
+            .unwrap_err().contains("own task"));
+    }
+    assert!(bot_reviewers::require_independent_reviewer(&store, &team.session_id, "independent").is_ok());
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap_err().contains("own task"), "frozen roster must recheck ownership");
+    assert!(bot_reviewers::seat_bot_inner(&store, &team, 2, None, false)
+        .unwrap_err().contains("own task"), "fresh roster must recheck ownership");
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false)
+        .unwrap_err().contains("own task"), "a previous grant must not authorize self-review");
+
+    store.db.execute("DELETE FROM bot_tasks WHERE session_id=?1", [&team.session_id]).unwrap();
+    assert!(bot_reviewers::validate_frozen_seat(&store, &binding, false).is_ok());
+    assert_eq!(bot_reviewers::seat_bot_inner(&store, &team, 1, None, false)
+        .unwrap().unwrap().id, "task-owner");
+}
+
+#[test]
 fn selected_council_failover_never_changes_its_frozen_provider_or_permissions() {
     let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline"]);
     let store = state.store.lock().unwrap();

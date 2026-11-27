@@ -104,3 +104,17 @@ separately, not recorded, and cannot pin a source or advance its cursor. Already
 recorded IDs still use immutable replay validation. The individual Check Run
 command still rejects unseen pre-activation results. A malformed or conflicting
 identity remains a batch failure, including for historical-only windows.
+
+## Additional completed outcomes (v62)
+
+GitHub-generated `stale` and `startup_failure` conclusions are preserved as
+observed, non-authorizing outcomes rather than rejecting an otherwise valid
+linked PR window. The v62 migration transaction copies every existing sidecar
+row into a widened CHECK constraint, replaces the sidecar, and retains the
+same primary and foreign keys. Legacy unknown receipts remain unknown.
+Unknown conclusions still fail closed; replay cannot rewrite an outcome.
+Keep a pre-upgrade database backup; older application versions cannot open
+a v62 database, so downgrade requires restoring the matching backup.
+
+Native regression:
+`superagent::events::tests::check_run_v62_upgrade_preserves_receipts_and_accepts_native_failure_outcomes`.

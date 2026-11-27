@@ -73,6 +73,29 @@ CREATE TABLE IF NOT EXISTS sa_check_run_results (
 );
 "#;
 
+/// v62 widens the result-only constraint for GitHub-generated conclusions.
+/// SQLite cannot alter a CHECK constraint in place. The storage migration's
+/// enclosing transaction copies every existing row before replacing the sidecar.
+pub(crate) const CHECK_RESULT_V62_SCHEMA: &str = r#"
+CREATE TABLE sa_check_run_results_v62 (
+  source_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  conclusion TEXT NOT NULL CHECK(conclusion IN (
+    'success','failure','neutral','cancelled','skipped','timed_out','action_required',
+    'stale','startup_failure'
+  )),
+  head_sha TEXT NOT NULL CHECK(length(head_sha)=40),
+  completed_at INTEGER NOT NULL CHECK(completed_at>0),
+  PRIMARY KEY(source_id,delivery_id),
+  FOREIGN KEY(source_id,delivery_id)
+    REFERENCES sa_event_decisions(source_id,delivery_id) ON DELETE RESTRICT
+);
+INSERT INTO sa_check_run_results_v62(source_id,delivery_id,conclusion,head_sha,completed_at)
+SELECT source_id,delivery_id,conclusion,head_sha,completed_at FROM sa_check_run_results;
+DROP TABLE sa_check_run_results;
+ALTER TABLE sa_check_run_results_v62 RENAME TO sa_check_run_results;
+"#;
+
 /// Source ownership is bound to the immutable GitHub repository identity, not
 /// just an owner/name which may later be deleted and reused by another repo.
 pub(crate) const REPOSITORY_ID_SCHEMA: &str = r#"
@@ -2642,7 +2665,7 @@ fn authenticated_check_run(
     let conclusion = raw.get("conclusion").and_then(serde_json::Value::as_str)
         .ok_or("Completed Check Run has no conclusion.")?;
     if !["success", "failure", "neutral", "cancelled", "skipped",
-          "timed_out", "action_required"].contains(&conclusion) {
+          "timed_out", "action_required", "stale", "startup_failure"].contains(&conclusion) {
         return Err("Unsupported Check Run conclusion.".into());
     }
     let actor = raw.pointer("/app/slug").and_then(serde_json::Value::as_str)
@@ -7402,6 +7425,73 @@ mod tests {
         let restarted = Store::open(&path).unwrap();
         assert_eq!(list_decisions(&restarted, &on.id, 10).unwrap()[0]
             .check_conclusion.as_deref(), Some("failure"));
+    }
+
+    #[test]
+    fn check_run_v62_upgrade_preserves_receipts_and_accepts_native_failure_outcomes() {
+        let (store, path) = fixture();
+        // Exercise a populated, actual v61 sidecar rather than a fresh v62 table.
+        store.db.execute_batch("DROP TABLE sa_check_run_results;").unwrap();
+        store.db.execute_batch(CHECK_RESULT_SCHEMA).unwrap();
+        store.db.pragma_update(None, "user_version", 61).unwrap();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 701, "status": "completed", "conclusion": "failure",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot", "id": 44},
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
+        });
+        observe_authenticated_check_run(&store, &on, 701, &run, "operator").unwrap();
+        let before = list_decisions(&store, &on.id, 10).unwrap().remove(0);
+        for (id, conclusion) in [(702, "stale"), (703, "startup_failure")] {
+            let mut next = run.clone();
+            next["id"] = serde_json::json!(id);
+            next["conclusion"] = serde_json::json!(conclusion);
+            assert!(observe_authenticated_check_run(&store, &on, id, &next, "operator").is_err());
+        }
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 1);
+        drop(store);
+        let upgraded = Store::open(&path).unwrap();
+        assert_eq!(upgraded.db.pragma_query_value(None, "user_version",
+            |r| r.get::<_, i64>(0)).unwrap(), storage::SCHEMA_VERSION);
+        for (id, conclusion) in [(702, "stale"), (703, "startup_failure")] {
+            let mut next = run.clone();
+            next["id"] = serde_json::json!(id);
+            next["conclusion"] = serde_json::json!(conclusion);
+            let first = observe_authenticated_check_run(&upgraded, &on, id, &next, "operator").unwrap();
+            assert_eq!(first.decision, "observed_permitted");
+            assert!(!first.duplicate);
+            assert!(observe_authenticated_check_run(&upgraded, &on, id, &next, "operator")
+                .unwrap().duplicate);
+            next["conclusion"] = serde_json::json!("success");
+            assert!(observe_authenticated_check_run(&upgraded, &on, id, &next, "operator").is_err());
+        }
+        let mut unknown = run.clone();
+        unknown["id"] = serde_json::json!(704);
+        unknown["conclusion"] = serde_json::json!("unknown");
+        assert!(observe_authenticated_check_run(&upgraded, &on, 704, &unknown, "operator").is_err());
+        assert_eq!(source(&upgraded, &on.id).unwrap().last_sequence, 3);
+        drop(upgraded);
+        let reopened = Store::open(&path).unwrap();
+        let records = list_decisions(&reopened, &on.id, 10).unwrap();
+        assert_eq!(records.len(), 3);
+        for (id, conclusion) in [("checkrun_701", "failure"), ("checkrun_702", "stale"),
+            ("checkrun_703", "startup_failure")] {
+            let record = records.iter().find(|record| record.delivery_id == id).unwrap();
+            assert_eq!(record.check_conclusion.as_deref(), Some(conclusion));
+            assert_eq!(record.check_head_sha.as_deref(), Some(sha));
+            assert!(record.check_completed_at.unwrap() > 0);
+        }
+        let preserved = records.iter().find(|record| record.delivery_id == before.delivery_id).unwrap();
+        assert_eq!(preserved.sequence, before.sequence);
+        assert_eq!(preserved.policy_revision, before.policy_revision);
+        assert_eq!(preserved.check_completed_at, before.check_completed_at);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

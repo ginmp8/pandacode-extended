@@ -1303,6 +1303,14 @@ fn accepted(team: &TeamSnapshot) -> bool {
 /// The user accepts this cycle's scores: the gate lets the lead finish, Council stays on, and the next
 /// cycle reviews as usual. An idle team's lead is woken once to finish.
 pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot> {
+    accept_at_revision(state, session_id, None)
+}
+
+/// Channel acceptance must match the snapshot shown to the user, including
+/// the locked native state immediately before any reviewer is stopped.
+pub(super) fn accept_at_revision(
+    state: &AppState, session_id: &str, expected_revision: Option<u64>,
+) -> Result<TeamSnapshot> {
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     super::refuse_mirror(&store, session_id)?;
@@ -1312,6 +1320,14 @@ pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot>
     let mut team = super::load(&store, session_id)?.ok_or("This task has no team.")?;
     if team.config.council.is_none() {
         return Err("Council is off for this team.".into());
+    }
+    if let Some(expected_revision) = expected_revision {
+        if team.revision != expected_revision {
+            return Err("Council review changed; inspect the current result before accepting.".into());
+        }
+        if !super::council_evidence_is_current(&store, &team) {
+            return Err("Council evidence changed after the last native review.".into());
+        }
     }
     let refusal = finish_refusal(&team);
     // A real user's explicit acceptance is a distinct exceptional result, not

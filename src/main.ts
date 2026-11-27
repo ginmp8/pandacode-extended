@@ -7276,9 +7276,13 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'channel-council': toggleSharedChannelCouncil(element); break;
     case 'channel-council-accept': {
       const deliveryId = element.dataset.deliveryId;
-      if (deliveryId) {
+      const acceptanceRevision = element.dataset.acceptanceRevision;
+      const channelId = state.sharedChannelId;
+      if (deliveryId && acceptanceRevision && channelId) {
         const { openSharedChannelCouncilAcceptance } = await import('./bot-shared-channels');
-        openSharedChannelCouncilAcceptance(deliveryId, sharedChannelUi());
+        if (state.sharedChannelId === channelId) {
+          openSharedChannelCouncilAcceptance(deliveryId, acceptanceRevision, sharedChannelUi());
+        }
       }
       break;
     }

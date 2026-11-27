@@ -29,6 +29,7 @@ export interface ChannelCouncilView {
   target: number;
   lowest: number | null;
   artifactRevision: string;
+  acceptanceRevision?: string;
   notice?: string | null;
   reviewers: {
     botId: string | null; name: string; lens: string; round: number; score: number | null;
@@ -125,7 +126,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
         : '';
       return `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}${skillNote}`;
     }).join(' · ') ?? '';
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button><button type="button" class="secondary-button bc-council-report" data-action="channel-council-inspect" data-delivery-id="${escape(message.id)}">Inspect Council evidence</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button><button type="button" class="secondary-button bc-council-report" data-action="channel-council-inspect" data-delivery-id="${escape(message.id)}">Inspect Council evidence</button>` : ''}${council.acceptanceRevision && council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}" data-acceptance-revision="${escape(council.acceptanceRevision)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -478,7 +479,7 @@ export async function openSharedChannelSettings(channelId: string, options: Shar
 
 
 /** This is a local user action, not a model instruction or a bot tool. */
-export function openSharedChannelCouncilAcceptance(deliveryId: string, options: SharedChannelUiOptions): void {
+export function openSharedChannelCouncilAcceptance(deliveryId: string, acceptanceRevision: string, options: SharedChannelUiOptions): void {
   const dialog = options.modal('Accept Council exception', `<form class="bc-council-accept-form">
     <p class="dialog-description">The Council has not passed. Accept this review as a user exception only with an explicit reason. The result will be attributed to the local user.</p>
     <label for="bc-council-accept-reason">Acceptance reason</label>
@@ -489,12 +490,13 @@ export function openSharedChannelCouncilAcceptance(deliveryId: string, options: 
   const form = dialog.querySelector<HTMLFormElement>('.bc-council-accept-form')!;
   form.addEventListener('submit', event => {
     event.preventDefault();
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (!dialog.open || !form.isConnected || submit?.disabled) return;
     const reason = String(new FormData(form).get('reason') ?? '').trim();
     if (reason.length < 8 || reason.length > 1024) { options.notify('Enter an acceptance reason (8–1024 characters).'); return; }
-    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (submit) submit.disabled = true;
-    void options.call('bot_shared_channel_council_accept', { deliveryId, reason }).then(async () => {
-      options.closeModal();
+    void options.call('bot_shared_channel_council_accept', { deliveryId, acceptanceRevision, reason }).then(async () => {
+      if (dialog.open && form.isConnected) options.closeModal();
       await options.changed();
     }).catch(error => options.notify(error instanceof Error ? error.message : String(error)))
       .finally(() => { if (submit?.isConnected) submit.disabled = false; });

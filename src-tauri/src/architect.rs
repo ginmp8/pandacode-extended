@@ -1659,9 +1659,9 @@ pub async fn architect_council_accept(app: tauri::AppHandle, state: State<'_, Ap
 /// Complete an explicitly reasoned Shared Channel acceptance through the same
 /// native Council state transition used by direct tasks.
 pub(crate) fn accept_channel_delivery(
-    app: &tauri::AppHandle, state: &AppState, session_id: &str,
+    app: &tauri::AppHandle, state: &AppState, session_id: &str, expected_revision: u64,
 ) -> Result<TeamSnapshot> {
-    let team = council::accept(state, session_id)?;
+    let team = council::accept_at_revision(state, session_id, Some(expected_revision))?;
     emit(app, &team);
     // The originating command must persist the user-acceptance audit record
     // before waking the lead, or a fast finish could outrun authorization.

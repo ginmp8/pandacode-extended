@@ -26,11 +26,11 @@ async function showBots(page: Page): Promise<void> {
 
 // Seed the real preview Channel, not a detached DOM-only assignment: native
 // reads and Channel refresh notifications must use the same delivery identity.
-async function seedCouncilDelivery(page: Page, state: 'Passed' | 'Reviewing', lowest: number | null): Promise<void> {
+async function seedCouncilDelivery(page: Page, state: 'Passed' | 'Reviewing' | 'Needs correction', lowest: number | null, acceptanceRevision?: string): Promise<void> {
   const delivery = {
-    id: 'delivery-one', kind: 'assigned', authorBotId: null, text: '', status: 'Completed', createdAt: 1,
+    id: 'delivery-one', kind: 'assigned', authorBotId: null, text: '', status: state === 'Needs correction' ? 'In progress' : 'Completed', createdAt: 1,
     council: { cycleId: 'cycle-one', sessionId: 'channel-root', state,
-      round: 1, target: 9, lowest, artifactRevision: 'artifact', reviewers: [] },
+      round: 1, target: 9, lowest, artifactRevision: 'artifact', acceptanceRevision, reviewers: [] },
   };
   await page.route('**/src/preview-bots.ts*', async route => {
     const response = await route.fetch();
@@ -1030,6 +1030,48 @@ test.describe('shared bot channels', () => {
     await expect(settings).toBeVisible();
     await expect(name).toHaveValue('New unsaved draft');
     await settings.getByRole('button', { name: 'Cancel' }).click();
+  });
+
+  test('Channel exception binds the displayed review and cannot close a newer dialog', async ({ page }) => {
+    test.setTimeout(60_000);
+    const revision = 'cycle-one:channel-root:17';
+    await seedCouncilDelivery(page, 'Needs correction', 8, revision);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        match => `if (command === 'bot_shared_channel_council_accept') {
+          (window.__acceptanceCalls ??= []).push(args);
+          await new Promise(resolve => { window.__releaseAcceptance = resolve; });
+          window.__acceptanceReturned = true;
+          return;
+        }
+        ${match}`,
+      );
+      if (body === source) throw new Error('Channel acceptance interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.locator('.bc-assigned').getByRole('button', { name: 'Accept with reason' }).click();
+    const acceptance = page.getByRole('dialog', { name: 'Accept Council exception' });
+    await acceptance.getByRole('textbox', { name: 'Acceptance reason' }).fill('Accept this reviewed result.');
+    await acceptance.getByRole('button', { name: 'Accept with reason' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__acceptanceCalls)).toEqual([
+      { deliveryId: 'delivery-one', acceptanceRevision: revision, reason: 'Accept this reviewed result.' },
+    ]);
+    await acceptance.locator('form').evaluate(form => form.dispatchEvent(new Event('submit', { cancelable: true })));
+    expect(await page.evaluate(() => (window as any).__acceptanceCalls.length)).toBe(1);
+    await acceptance.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('button', { name: 'Channel settings' }).click();
+    const settings = page.getByRole('dialog', { name: 'Channel settings' });
+    const name = settings.getByRole('textbox', { name: 'Name', exact: true });
+    await name.fill('Keep this unsaved draft');
+    await page.evaluate(() => (window as any).__releaseAcceptance());
+    await expect.poll(() => page.evaluate(() => (window as any).__acceptanceReturned)).toBe(true);
+    await expect(settings).toBeVisible();
+    await expect(name).toHaveValue('Keep this unsaved draft');
   });
 
   test('Channel native inspection never replaces its bound delivery with a foreign root result', async ({ page }) => {

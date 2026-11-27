@@ -6429,6 +6429,25 @@ fn nested_recovery_and_resume_deny_live_native_root_workers_before_replacing_chi
 }
 
 #[test]
+fn channel_acceptance_rejects_superseded_native_snapshot_before_mutation() {
+    let (state, sid) = state_fixture();
+    let mut team = saved(&state, &sid);
+    team.config.council = Some(on(9.0, 3, 2));
+    team.council_since = storage::now();
+    store_team(&state, &mut team);
+    let displayed = saved(&state, &sid).revision;
+    let mut updated = saved(&state, &sid);
+    store_team(&state, &mut updated);
+    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    let denied = council::accept_at_revision(&state, &sid, Some(displayed)).unwrap_err();
+    assert!(denied.contains("review changed"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    // Existing direct-task user acceptance remains a separate native path.
+    let accepted = council::accept(&state, &sid).unwrap();
+    assert_eq!(accepted.council_accepted, Some(accepted.council_since));
+}
+
+#[test]
 fn user_accepted_root_council_cannot_recover_interrupted_child_reservations() {
     let (state, sid) = state_fixture();
     {

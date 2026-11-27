@@ -50,6 +50,9 @@ pub struct ChannelCouncilView {
     pub target: f64,
     pub lowest: Option<f64>,
     pub artifact_revision: String,
+    /// Displayed native snapshot identity, not an approval grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_revision: Option<String>,
     pub notice: Option<String>,
     pub reviewers: Vec<ChannelCouncilReviewer>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -366,6 +369,10 @@ pub(super) fn skipped_skill_status(reason: &str) -> &'static str {
     else { "skipped" }
 }
 
+fn review_acceptance_revision(cycle_id: &str, team: &crate::architect::TeamSnapshot) -> String {
+    format!("{cycle_id}:{}:{}", team.session_id, team.revision)
+}
+
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String, String)> = store.db.query_row(
         "SELECT c.cycle_id,c.artifact_revision,c.source_message_id
@@ -391,6 +398,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         params![delivery_id,cycle_id],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
+    let mut acceptance_revision = None;
     let (state, round, target, lowest, revision, notice, reviewers, acceptance_reason) = if let Some(team) = team {
         let status = team.council_status.as_ref();
         let original_matches = request_current
@@ -440,6 +448,13 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             },
             }
         };
+        if original_matches && delivery_status == "in_progress"
+            && matches!(state, "Limit reached" | "Needs correction" | "Inconclusive")
+            && matches!(team.status.as_str(), "running" | "waiting" | "ready" | "completed")
+            && status.is_some_and(|s| s.round > 0 && s.lowest.is_some() && !s.stale)
+        {
+            acceptance_revision = Some(review_acceptance_revision(&cycle_id, &team));
+        }
         let reviewers: Vec<ChannelCouncilReviewer> = team.workers.iter().filter_map(|worker| {
             worker.council.as_ref().map(|seat| {
                 let mut skills_out = Vec::new();
@@ -529,7 +544,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         Some("Council delivery ended without approval. Review the report before retrying.".into())
     } else { notice };
     let accepted_by = acceptance_reason.as_ref().map(|_| "local_user".to_string());
-    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, acceptance_revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
 }
 
 /// Read one channel-owned Council projection through its durable delivery identity.
@@ -1317,12 +1332,13 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
 #[tauri::command]
 pub async fn bot_shared_channel_council_accept(
     app: tauri::AppHandle, state: State<'_,AppState>, delivery_id: String, reason: String,
+    acceptance_revision: String,
 ) -> Result<()> {
     let reason = reason.trim();
     if !(8..=1024).contains(&reason.chars().count()) || reason.chars().any(char::is_control) {
         return Err("Enter an acceptance reason between 8 and 1024 printable characters.".into());
     }
-    let (channel_id, session_id, cycle_id, expected_since, expected_dispatch, expected_changed) = {
+    let (channel_id, session_id, cycle_id, expected_since, expected_dispatch, expected_changed, expected_revision) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let (channel_id, session_id, cycle_id): (String, String, String) = store.db.query_row(
             "SELECT c.channel_id,d.session_id,c.cycle_id
@@ -1346,9 +1362,12 @@ pub async fn bot_shared_channel_council_accept(
         {
             return Err("A current Council review with recorded scores is required before exceptional acceptance.".into());
         }
-        (channel_id, session_id, cycle_id, team.council_since, team.dispatch_revision, team.changed_at)
+        if acceptance_revision != review_acceptance_revision(&cycle_id, &team) {
+            return Err("Council review changed; inspect the current result before accepting.".into());
+        }
+        (channel_id, session_id, cycle_id, team.council_since, team.dispatch_revision, team.changed_at, team.revision)
     };
-    let team = crate::architect::accept_channel_delivery(&app, &state, &session_id)?;
+    let team = crate::architect::accept_channel_delivery(&app, &state, &session_id, expected_revision)?;
     // Do not let a concurrent reassignment, stop or newer reviewer revision
     // rebind a local user's approval to a different delivery.
     {
@@ -1360,7 +1379,10 @@ pub async fn bot_shared_channel_council_accept(
              WHERE d.id=?1 AND d.session_id=?2 AND d.status='in_progress'",
             params![delivery_id,session_id], |r| r.get(0),
         ).map_err(|_| "Council delivery changed during acceptance.".to_string())?;
-        if !crate::architect::council_evidence_is_current(&store, &team)
+        let persisted = crate::architect::load(&store, &session_id)?
+            .ok_or("Council delivery has no native team.")?;
+        if persisted.revision != team.revision
+            || !crate::architect::council_evidence_is_current(&store, &team)
             || current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
             || team.council_since != expected_since || team.dispatch_revision != expected_dispatch
             || team.changed_at != expected_changed

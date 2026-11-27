@@ -868,7 +868,18 @@ mod tests {
         assert!(restore.contains("hold_queue(&app, &session_id, \"failed\")"));
         let hold = source.split_once("pub(crate) fn hold_queue(").unwrap().1;
         let hold = hold.split_once("\n}\n").unwrap().0;
-        assert!(hold.find("message_queue::set_queue_hold_state(").unwrap() < hold.find("app.emit(").unwrap());
+        // The upstream atomic-hold refactor moved the actual event into a helper.
+        // Keep the Extended ordering guard across both functions, not just a textual
+        // search for an emit in the old function body.
+        assert!(hold.find("message_queue::set_queue_hold_state(").unwrap()
+            < hold.find("emit_queue_hold(app, session_id, reason)").unwrap());
+        assert!(!hold.contains("app.emit("));
+        let notify = source.split_once("pub(crate) fn emit_queue_hold(").unwrap().1;
+        let notify = notify.split_once("\n}\n").unwrap().0;
+        assert!(notify.contains("app.emit(\"queue-changed\""));
+        assert!(notify.contains("\"sessionId\": session_id"));
+        assert!(notify.contains("\"held\": true"));
+        assert!(notify.contains("\"reason\": reason"));
     }
 
     #[test]

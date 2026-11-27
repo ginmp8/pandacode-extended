@@ -38,7 +38,7 @@ passing exact-HEAD CI run before the slice is considered verified.
 
 ## Serial native WorkItem attempts (partial S2)
 
-An operator can plan individual WorkItems on a blocked or queued manual Demand.
+An operator can plan individual WorkItems on a blocked or queued manual Demand with a current, unexpired, non-revoked native read-only Mandate and matching enabled Team policy. New single-item and batch planning checks this inside the same SQLite write transaction as the revision change. Disabling and re-enabling a Team cannot authorize new plans for the original Demand. Identical historical request-key replays remain read-only; existing plan evidence and cancellation controls are preserved.
 The **Reviewed dependency plan (JSON)** form also applies an operator-reviewed
 array of up to 16 items atomically, using the same native transition as
 `--plan-work-items`. Supply stable `requestKey` and `summary` fields and an

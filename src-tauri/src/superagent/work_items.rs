@@ -369,6 +369,27 @@ fn plan_in_transaction(
             return Err("Wait for successful native Coordinator evidence before planning WorkItems.".into());
         }
     }
+    // Adding new executable planning intent requires the original live
+    // Mandate, even when an operator supplies the latest Ticket revision.
+    // Off -> On must not reactivate a historical Demand. The immediate
+    // transaction serializes this check with policy revocation and the plan
+    // mutation; identical request-key replays above remain read-only.
+    let authorized: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_mandates m
+            JOIN sa_tickets t ON t.id=m.ticket_id
+            JOIN sa_orchestrations o ON o.id=t.orchestration_id
+            WHERE t.id=?1 AND m.revoked=0 AND m.expires_at>?2
+              AND m.policy_revision=t.policy_revision AND t.policy_revision=o.policy_revision
+              AND m.project_id=t.project_id AND t.project_id=o.project_id
+              AND m.actor=t.actor AND trim(m.authorization_id)<>''
+              AND m.allowed_side_effects=0 AND m.allowed_tools='[]' AND o.enabled=1
+         )",
+        params![ticket_id,storage::now()], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !authorized {
+        return Err("Original Demand mandate expired, was revoked or differs from current Team policy; new WorkItem planning denied.".into());
+    }
     // An unreviewed structured Coordinator plan cannot be resolved by an
     // implicit default Worker, including the single-item planning endpoint.
     // Identical historical request-key replays already returned above.
@@ -910,6 +931,59 @@ mod headless_tests {
         assert_eq!(superagent::assignments(&store, id, 100).unwrap().len(), 2);
         assert!(!superagent::mandate(&store, id).unwrap().allowed_side_effects);
         assert_eq!(plan_batch(&store, id, queued.revision, &plan).unwrap()[0].id, saved[0].id);
+    }
+
+    #[test]
+    fn revoked_or_expired_mandate_cannot_extend_work_item_plan() {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-plan-mandate-{}.sqlite3", storage::id(),
+        ));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/plan-mandate')", [],
+        ).unwrap();
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config = superagent::create_configuration(&store, NewOrchestration {
+            name: "Plan mandate".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let enabled = superagent::change_enabled(&store, &config.id, config.policy_revision, true).unwrap();
+        let (ticket, launched) = superagent::admit_role_with_staging(
+            &mut store, &config.id, "Inspect authorized scope", "mandate-plan", false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        let id = &ticket.id;
+        let root = plan(&store, id, ticket.revision, "root", "Inspect root", None).unwrap();
+        let revision = superagent::get_ticket(&store, id).unwrap().revision;
+        let next = decode_plan(r#"[{"requestKey":"another","summary":"Inspect another item"}]"#).unwrap();
+        let expiry = superagent::mandate(&store, id).unwrap().expires_at;
+        store.db.execute("UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+            params![id, storage::now()-1]).unwrap();
+        assert!(plan_batch(&store, id, revision, &next).unwrap_err().contains("mandate expired"));
+        assert_eq!(superagent::get_ticket(&store, id).unwrap().revision, revision);
+        store.db.execute("UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+            params![id, expiry]).unwrap();
+        let disabled = superagent::change_enabled(&store, &config.id, enabled.policy_revision, false).unwrap();
+        let revoked = superagent::get_ticket(&store, id).unwrap();
+        assert!(superagent::mandate(&store, id).unwrap().revoked);
+        assert!(plan(&store, id, revoked.revision, "new", "Denied after Off", None)
+            .unwrap_err().contains("mandate expired"));
+        assert_eq!(plan(&store, id, ticket.revision, "root", "Inspect root", None).unwrap().id, root.id);
+        superagent::change_enabled(&store, &config.id, disabled.policy_revision, true).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(headless_plan_batch(&path, id, revoked.revision, &next)
+            .unwrap_err().contains("mandate expired"));
+        assert_eq!(superagent::get_ticket(&reopened, id).unwrap().revision, revoked.revision);
+        assert_eq!(list(&reopened, id, 100).unwrap().0.len(), 1);
+        assert!(superagent::assignments(&reopened, id, 100).unwrap().is_empty());
+        assert!(superagent::mandate(&reopened, id).unwrap().revoked);
     }
 
     #[test]

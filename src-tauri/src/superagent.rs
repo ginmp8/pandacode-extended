@@ -2420,6 +2420,32 @@ pub(crate) fn headless_queue_selected_worker_demand(
     )
 }
 
+/// Stage a Coordinator-first Demand without reserving a native session.
+pub(crate) fn headless_queue_coordinated_demand(
+    database_path: &std::path::Path, orchestration_id: &str, worker_bot_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    let mut store = open_headless_transition_store(database_path)?;
+    let (ticket, launched) = admit_role_with_staging_member(
+        &mut store, orchestration_id, objective, request_key, true,
+        ManualAdmissionOptions {
+            coordinate: true, headless_staging: true, selected_worker_id: Some(worker_bot_id),
+        },
+    )?;
+    debug_assert!(!launched);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "initialRole": "coordinator",
+        "providerDispatchedByCommand": false,
+        "requiresExplicitNativeDispatch": initial_coordinator_pending(&store, &ticket.id)?
+            && ticket.state == "blocked",
+        "allowedTools": [],
+        "allowedSideEffects": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Shared explicit staging operation for local desktop and detached CLI.
 fn stage_observed_issue(
     store: &mut Store, orchestration_id: &str, worker_bot_id: &str,
@@ -3797,8 +3823,8 @@ fn admit_role_with_observed_issue(
     if selection.is_some() && (coordinate || !headless_staging || selected_worker_id.is_none()) {
         return Err("Observed issues require explicit staged Worker admission.".into());
     }
-    if coordinate && headless_staging {
-        return Err("A staged Demand cannot bypass native Coordinator admission.".into());
+    if coordinate && headless_staging && selected_worker_id.is_none() {
+        return Err("Staged coordination requires an explicitly selected Worker.".into());
     }
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
@@ -3844,6 +3870,15 @@ fn admit_role_with_observed_issue(
             if ticket_worker(store,&ticket.id)?!=config.worker_bot_id {
                 return Err("Manual request key already belongs to a selected Worker.".into());
             }
+        }
+        // A staged Coordinator has its own durable intent. Replaying it
+        // must never switch to direct Worker dispatch or reserve another turn.
+        if coordinator_staged(store, &ticket.id)? {
+            if !coordinate || !headless_staging {
+                return Err("Request key already belongs to explicit headless Coordinator staging.".into());
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok((ticket, false));
         }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
@@ -3913,7 +3948,7 @@ fn admit_role_with_observed_issue(
     let occupied = manual_candidate_occupied(store, &candidate.id, &config.project_id, &candidate.project_id)?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
-    if coordinate && (busy || occupied) {
+    if coordinate && !headless_staging && (busy || occupied) {
         return Err("Coordinator is busy; retry this explicit manual request later.".into());
     }
     if selected_worker_id.is_some() && !headless_staging && (busy || occupied) {
@@ -3950,8 +3985,10 @@ fn admit_role_with_observed_issue(
         ).map_err(|e| e.to_string())?;
     }
     tx.execute(
-        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'admitted',?2,?3)",
-        params![ticket_id, if headless_staging { "blocked: explicit headless staging" }
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+        params![ticket_id, if coordinate && headless_staging { "coordinator_staged" } else { "admitted" },
+             if coordinate && headless_staging { "blocked: explicit headless Coordinator staging" }
+             else if headless_staging { "blocked: explicit headless staging" }
              else if blocked { "blocked: worker occupied" }
              else if coordinate { "manual readonly coordinator reserved" }
              else { "manual readonly worker reserved" },now],
@@ -3968,6 +4005,25 @@ fn admit_role_with_observed_issue(
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((ticket, !blocked))
+}
+
+// Unlike a direct staged Worker, a staged Coordinator has no 'admitted'
+// audit until the live host actually reserves attempt one. Existing native
+// role and plan checks consequently deny every premature Worker dispatch.
+fn coordinator_staged(store: &Store, ticket_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='coordinator_staged')",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+fn initial_coordinator_pending(store: &Store, ticket_id: &str) -> Result<bool> {
+    if !coordinator_staged(store, ticket_id)? { return Ok(false); }
+    store.db.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='admitted')
+          AND NOT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1)",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())
 }
 
 /// A recorded coordinator plan is not a transferable authorization. Its
@@ -6672,6 +6728,112 @@ async fn dispatch_worker_native(
     get_ticket(&store, &ticket.id)
 }
 
+const INITIAL_COORDINATOR_OCCUPIED: &str = "Coordinator is occupied; staged Demand stays blocked.";
+
+fn prepare_initial_coordinator(
+    store: &mut Store, request: &headless_dispatch::DispatchRequest, busy: bool,
+) -> Result<(Ticket, String, String)> {
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.db, rusqlite::TransactionBehavior::Immediate,
+    ).map_err(|e| e.to_string())?;
+    let id = &request.ticket_id;
+    let ticket = get_ticket(store, id)?;
+    let now = storage::now();
+    if ticket.state != "blocked" || ticket.revision != request.expected_revision
+        || ticket.active_assignment_id.is_some() || ticket.actor != "local-user"
+        || request.kind != "retry" || !headless_dispatch::is_current(request, now)
+        || !initial_coordinator_pending(store, id)?
+    {
+        return Err("Initial Coordinator dispatch intent is stale or no longer pending.".into());
+    }
+    let config = configuration(store, &ticket.orchestration_id)?;
+    let grant = mandate(store, id)?;
+    let current_scope: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1 AND project_id=?2 AND policy_revision=?3)
+          AND NOT EXISTS(SELECT 1 FROM sa_demand_archives WHERE ticket_id=?1)
+          AND NOT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1)",
+        params![id,config.project_id,config.policy_revision], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !current_scope || !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused)
+        || grant.revoked || grant.expires_at <= now || grant.actor != ticket.actor
+        || grant.authorization_id.trim().is_empty() || grant.policy_revision != config.policy_revision
+        || grant.project_id != config.project_id || grant.allowed_side_effects
+        || !grant.allowed_tools.is_empty() || effects::unresolved_count(store,id)? != 0
+    {
+        return Err("Initial Coordinator mandate or Demand scope is stale, revoked or unavailable.".into());
+    }
+    // Validate the same selected Worker and immutable Coordinator profile
+    // used by Desktop, then revalidate the complete admitted planning packet.
+    let worker_id = ticket_worker(store,id)?;
+    direct_team_member(store,&config,&worker_id)?;
+    let coordinator = bots::get(store,&config.coordinator_bot_id)?;
+    if coordinator.paused {
+        return Err("Admitted Coordinator is paused.".into());
+    }
+    if let Some(issue) = roster::member_execution_issue(&coordinator) {
+        return Err(issue.into());
+    }
+    roster::require_current_profile(store,id,"coordinator",&coordinator.id)?;
+    let packet = coordinator_capability_packet(store,&ticket)?;
+    if busy || manual_candidate_occupied(store,&coordinator.id,&config.project_id,&coordinator.project_id)? {
+        return Err(INITIAL_COORDINATOR_OCCUPIED.into());
+    }
+    let assignment_id = storage::id();
+    let session_id = bots::thread_session(store,&coordinator,CHANNEL,id,"SuperAgent · Coordinator")?.0;
+    tx.execute(
+        "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,'running',1,?5,?5)",
+        params![assignment_id,id,coordinator.id,session_id,now],
+    ).map_err(|e| e.to_string())?;
+    let changed = tx.execute(
+        "UPDATE sa_tickets SET state='running',active_assignment_id=?2,revision=revision+1,updated_at=?3
+         WHERE id=?1 AND state='blocked' AND revision=?4 AND active_assignment_id IS NULL",
+        params![id,assignment_id,now,ticket.revision],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 { return Err("Initial Coordinator Ticket changed before admission.".into()); }
+    // Record admission only when the real native session and Assignment exist.
+    // All existing Coordinator role, gateway, watchdog and plan checks reuse
+    // this exact receipt; no second role authorization or provider is added.
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'admitted','manual readonly coordinator reserved',?2)",
+        params![id,now],
+    ).map_err(|e| e.to_string())?;
+    headless_dispatch::consume(&tx,request,&ticket,&assignment_id,now)?;
+    if read_only_policy(store,&session_id)?.is_none() {
+        return Err("Initial Coordinator has no native read-only admission.".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((get_ticket(store,id)?,coordinator.id,packet))
+}
+
+async fn dispatch_initial_coordinator(
+    app: &tauri::AppHandle, state: &AppState, request: &headless_dispatch::DispatchRequest,
+) -> Result<Ticket> {
+    let (ticket, coordinator_id, packet) = {
+        let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
+            .keys().cloned().collect();
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let ticket = get_ticket(&store,&request.ticket_id)?;
+        let config = configuration(&store,&ticket.orchestration_id)?;
+        let coordinator = bots::get(&store,&config.coordinator_bot_id)?;
+        let busy = active_manual_conflict(&store,&active,&coordinator.id,&config.project_id)?
+            || active_manual_conflict(&store,&active,&coordinator.id,&coordinator.project_id)?;
+        prepare_initial_coordinator(&mut store,request,busy)?
+    };
+    let delivered = bots::gateway::deliver(app,bots::gateway::Inbound {
+        bot_id: coordinator_id, channel_id: CHANNEL.into(), thread: ticket.id.clone(),
+        sender_id: "local-user".into(), sender_name: "Manual coordination".into(),
+        text: packet, trusted: true, image_ids: None, moodboard_ids: None,
+    }).await;
+    if let Err(error) = delivered {
+        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket,&error); }
+        return Err(format!("Coordinator dispatch failed; ticket {} retained: {error}",ticket.id));
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    get_ticket(&store,&ticket.id)
+}
+
 /// Poll only explicit local-operator intents. Pending requests expire; an
 /// admitted request never launches again, even after host restart. Ordinary
 /// queue drains, GitHub events and provider text cannot create these intents.
@@ -6696,9 +6858,17 @@ async fn dispatch_pending_local(app: &tauri::AppHandle, desktop_only: bool) -> R
             }
             continue;
         }
-        match dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
-            request.kind == "coordinated", Some(&request)).await
-        {
+        let initial = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            initial_coordinator_pending(&store, &request.ticket_id)?
+        };
+        let result = if initial {
+            dispatch_initial_coordinator(app, &state, &request).await
+        } else {
+            dispatch_worker_native(app, &state, &request.ticket_id, request.expected_revision,
+                request.kind == "coordinated", Some(&request)).await
+        };
+        match result {
             Ok(_) => break,
             Err(error) => {
                 let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -7937,6 +8107,86 @@ mod tests {
         assert!(guard_gateway_inbound(
             &store, &worker, &thread, "local-user", true,
         ).is_err());
+    }
+
+    #[test]
+    fn staged_coordinator_dispatch_requires_native_admission_before_worker() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_coordinated_demand(&store.path,&cfg.id,"worker",
+            "Inspect checkout", "coordinator-stage").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = view["revision"].as_i64().unwrap();
+        assert_eq!(view["initialRole"],"coordinator");
+        assert_eq!(view["providerDispatchedByCommand"],false);
+        assert_eq!(view["state"],"blocked");
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        assert_eq!(raw,headless_queue_coordinated_demand(&store.path,&cfg.id,"worker",
+            "Inspect checkout","coordinator-stage").unwrap());
+        assert!(headless_queue_selected_worker_demand(&store.path,&cfg.id,"worker",
+            "Inspect checkout","coordinator-stage").is_err());
+        assert!(!coordinator_plan_current(&store,id,"router",&cfg.project_id).unwrap());
+        assert!(retry_blocked_at_revision(&mut store,id,revision,false).is_err());
+        assert!(headless_dispatch::enqueue_plan(&store,id,revision,"plan-before-coordinator").is_err());
+        let request = headless_dispatch::enqueue(&store,id,revision,"launch-coordinator").unwrap();
+        assert!(headless_dispatch::pending_for_host(&store,true).unwrap().is_empty());
+        assert!(prepare_initial_coordinator(&mut store,&request,true).is_err());
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_initial_consume BEFORE UPDATE ON sa_headless_dispatch_requests
+             WHEN NEW.state='admitted' BEGIN SELECT RAISE(ABORT,'test consume failure'); END;"
+        ).unwrap();
+        assert!(prepare_initial_coordinator(&mut store,&request,false).is_err());
+        assert!(initial_coordinator_pending(&store,id).unwrap());
+        assert_eq!(get_ticket(&store,id).unwrap().revision,revision);
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        store.db.execute_batch("DROP TRIGGER deny_initial_consume;").unwrap();
+        let (running,recipient,packet) = prepare_initial_coordinator(&mut store,&request,false).unwrap();
+        assert_eq!(recipient,"router");
+        assert_eq!(running.state,"running");
+        assert!(packet.contains("Admitted Team capability inventory"));
+        assert!(guard_gateway_inbound(&store,&recipient,id,"local-user",true).is_ok());
+        assert!(guard_gateway_inbound(&store,"worker",id,"local-user",true).is_err());
+        assert!(prepare_initial_coordinator(&mut store,&request,false).is_err());
+        assert!(headless_dispatch::next_pending(&store).unwrap().is_none());
+        let session = assignment_session(&store,id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+        assert!(on_run_finished(&store,&session,true,"Inspect the checkout").unwrap());
+        let queued = get_ticket(&store,id).unwrap();
+        assert_eq!(queued.state,"queued");
+        assert!(coordinator_plan_current(&store,id,"router",&cfg.project_id).unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let mut reopened = Store::open(&path).unwrap();
+        assert!(headless_dispatch::next_pending(&reopened).unwrap().is_none());
+        assert!(prepare_initial_coordinator(&mut reopened,&request,false).is_err());
+        let (worker,_,recipient,_) = prepare_coordinated_worker_at_revision(
+            &mut reopened,id,queued.revision,false).unwrap();
+        assert_eq!(recipient,"worker");
+        assert_eq!(worker.state,"running");
+    }
+
+    #[test]
+    fn staged_coordinator_dispatch_rejects_expired_or_revoked_intent() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let raw = headless_queue_coordinated_demand(&store.path,&cfg.id,"worker",
+            "Inspect checkout","coordinator-expiry").unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        let revision = view["revision"].as_i64().unwrap();
+        let request = headless_dispatch::enqueue(&store,id,revision,"expire-coordinator").unwrap();
+        store.db.execute("UPDATE sa_headless_dispatch_requests SET created_at=1 WHERE id=?1",
+            [&request.id]).unwrap();
+        let expired = headless_dispatch::next_pending(&store).unwrap().unwrap();
+        assert!(prepare_initial_coordinator(&mut store,&expired,false).is_err());
+        headless_dispatch::reject_pending(&store,&expired,"expired").unwrap();
+        let request = headless_dispatch::enqueue(&store,id,revision,"revoked-coordinator").unwrap();
+        store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[id]).unwrap();
+        assert!(prepare_initial_coordinator(&mut store,&request,false).is_err());
+        assert!(assignment_session(&store,id).unwrap().is_none());
+        assert!(retry_blocked_at_revision(&mut store,id,revision,false).is_err());
     }
 
     #[test]

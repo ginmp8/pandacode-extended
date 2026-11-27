@@ -94,7 +94,7 @@ enum Command {
     PlanWorkItemBatch { ticket_id: String, expected_revision: i64, plan_file: PathBuf },
     CancelPlannedWorkItem { ticket_id: String, expected_revision: i64,
         item_id: String, request_key: String },
-    QueueSelectedWorkerDemand { orchestration_id: String, worker_bot_id: String, request_key: String, objective_file: PathBuf },
+    QueueSelectedWorkerDemand { orchestration_id: String, worker_bot_id: String, request_key: String, objective_file: PathBuf, coordinated: bool },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
@@ -960,17 +960,24 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::QueueSelectedWorkerDemand {
-                orchestration_id, worker_bot_id, request_key, objective_file,
+                orchestration_id, worker_bot_id, request_key, objective_file, coordinated,
             } = &command {
                 // A named secondary Worker is pinned by native Ticket admission,
                 // but this detached command must never start a provider session.
                 let result = (|| -> Result<String, String> {
                     let objective = read_bounded_objective(objective_file)?;
                     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-                    crate::superagent::headless_queue_selected_worker_demand(
-                        &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id,
-                        &objective, request_key,
-                    )
+                    if *coordinated {
+                        crate::superagent::headless_queue_coordinated_demand(
+                            &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id,
+                            &objective, request_key,
+                        )
+                    } else {
+                        crate::superagent::headless_queue_selected_worker_demand(
+                            &dir.join("kingcode.sqlite3"), orchestration_id, worker_bot_id,
+                            &objective, request_key,
+                        )
+                    }
                 })();
                 match result {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
@@ -2149,7 +2156,8 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 8;
             }
-            "--queue-worker-demand" => {
+            "--queue-worker-demand" | "--queue-coordinated-demand" => {
+                let coordinated = args[index] == "--queue-coordinated-demand";
                 let orchestration_id = args.get(index + 1)
                     .ok_or("--queue-worker-demand needs a Team ID, Worker ID, request key and objective file.")?;
                 validate_orchestration_id(orchestration_id)?;
@@ -2173,6 +2181,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     orchestration_id: orchestration_id.clone(),
                     worker_bot_id: worker_bot_id.clone(),
                     request_key: request_key.clone(), objective_file: PathBuf::from(path),
+                    coordinated,
                 };
                 ops += 1;
                 index += 4;
@@ -2902,7 +2911,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-coordinator-plan <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --quarantine-inactive-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> <review-digest> | --export-orchestrations <file>] [--create-orchestration <json-file> | --inspect-orchestrations | --list-tickets | --list-tickets-page [--before <created-ms> <ticket-id>] | --list-ticket-activity <id> [--before <audit-id>] | --list-team-member-activity <team-id> <bot-id> [--before <created-ms> <assignment-id>] [--demand <ticket-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-team-review-inbox <team-id> [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --preflight-worker-demand <team-id> <worker-bot-id> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --set-source-mode <id> <revision> <off|observe> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --observe-linked-pr-checks <source-id> <ticket-id> <pull:123> | --queue-demand <team-id> <request-key> <objective-file> | --queue-worker-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --queue-coordinated-demand <team-id> <worker-bot-id> <request-key> <objective-file> | --dispatch-ticket <id> <revision> <request-key> | --dispatch-plan <id> <revision> <request-key> | --cancel-dispatch-ticket <id> <request-revision> <request-key> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-coordinator-plan <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --verify-link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --plan-work-item <ticket-id> <revision> <key> <summary-file> [--parent-work-item <item-id>] | --plan-work-items <ticket-id> <revision> <plan-file> | --cancel-planned-work-item <ticket-id> <revision> <item-id> <key> | --archive-demand <id> <revision> | --restore-demand <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --quarantine-inactive-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --duplicate-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -3030,6 +3039,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Stage a named configured Team Worker without choosing the
                          first Worker implicitly. No provider/tool grant or launch;
                          native Desktop retry independently rechecks the Ticket.
+  --queue-coordinated-demand <team-id> <worker-bot-id> <request-key> <objective-file>
+                         Stage an initial read-only Coordinator Demand with a selected
+                         Worker. Confirm with --dispatch-ticket at the staged revision;
+                         only the live serve host may admit the Coordinator.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --inspect-coordinator-plan <id>
                          Inspect the exact validated pending Coordinator proposal without dispatch or recovery.
@@ -3852,8 +3865,20 @@ mod tests {
                 worker_bot_id: "secondary-worker".into(),
                 request_key: "request.2".into(),
                 objective_file: PathBuf::from("/tmp/objective.txt"),
+                coordinated: false,
+            }));
+        assert_eq!(parsed("--queue-coordinated-demand team_123 secondary-worker request.2 /tmp/objective.txt"),
+            Ok(Command::QueueSelectedWorkerDemand {
+                orchestration_id: "team_123".into(),
+                worker_bot_id: "secondary-worker".into(),
+                request_key: "request.2".into(),
+                objective_file: PathBuf::from("/tmp/objective.txt"),
+                coordinated: true,
             }));
         for invalid in [
+            "--queue-coordinated-demand team_123 worker key",
+            "--queue-coordinated-demand team_123 ../worker key /tmp/objective.txt",
+            "--queue-coordinated-demand team_123 worker key /tmp/objective.txt --stop-ticket ticket",
             "--queue-worker-demand",
             "--queue-worker-demand team_123",
             "--queue-worker-demand team_123 worker",

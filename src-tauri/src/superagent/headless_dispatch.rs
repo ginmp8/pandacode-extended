@@ -332,6 +332,9 @@ fn enqueue_mode(
             return Err("Dispatch request key is bound to another progression mode or operator surface.".into());
         }
     } else if plan {
+        if super::initial_coordinator_pending(store,ticket_id)? {
+            return Err("Dispatch the initial Coordinator before authorizing a reviewed plan.".into());
+        }
         let item=super::next_work_item_with_preference(store,ticket_id,true)?
             .ok_or("Plan progression requires a blocked or queued Demand and a ready WorkItem.")?;
         if item.assignment_id.is_some() && request.kind!="retry" {
@@ -626,7 +629,8 @@ pub(super) fn settle_poll_failure(
     store: &Store, request: &DispatchRequest, reason: &str,
 ) -> Result<bool> {
     let busy = reason == super::RETRY_WORKER_OCCUPIED
-        || reason == super::COORDINATED_WORKER_OCCUPIED;
+        || reason == super::COORDINATED_WORKER_OCCUPIED
+        || reason == super::INITIAL_COORDINATOR_OCCUPIED;
     let rejection = if busy {
         "Explicit headless dispatch request expired; inspect the Demand and confirm a new request."
     } else {

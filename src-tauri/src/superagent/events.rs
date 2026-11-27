@@ -2107,21 +2107,27 @@ fn poll_authenticated_events_with_repository_id_scoped(
         }
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
-    // The HTTP window was anchored to the cursor captured before the request.
-    // A second authenticated poll can advance that cursor before this
-    // transaction starts. Never advance beyond the new durable boundary
-    // unless this same verified window contains its exact event identity.
+    // The HTTP collector proves its original cursor boundary, but native
+    // receipt admission must independently enforce the current durable
+    // boundary even if no competing poll changed it. A sparse feed cannot
+    // prove continuity merely by containing newer numeric event IDs.
     // Old/identical windows remain safe to deduplicate without advancing.
     if operator_id.is_some() {
         let current_cursor = current_policy.last_sequence;
-        if current_cursor < expected.last_sequence
-            || (current_cursor > expected.last_sequence
-                && feed_watermark.is_some_and(|newest| newest > current_cursor)
-                && !events.iter().any(|event| event.get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|id| id.parse::<i64>().ok()) == Some(current_cursor)))
-        {
+        if current_cursor < expected.last_sequence {
             return Err("GitHub Observe cursor changed during request; fetch a fresh anchored window before advancing.".into());
+        }
+        if current_cursor > 0
+            && feed_watermark.is_some_and(|newest| newest > current_cursor)
+            && !events.iter().any(|event| event.get("id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| id.parse::<i64>().ok()) == Some(current_cursor))
+        {
+            return Err(if current_cursor > expected.last_sequence {
+                "GitHub Observe cursor changed during request; fetch a fresh anchored window before advancing."
+            } else {
+                "GitHub Observe window lacks the exact durable cursor; fetch a fresh anchored window before advancing."
+            }.into());
         }
     }
     pin_authenticated_repository_identity(&tx, &current_policy.id, repository_id)?;
@@ -2184,8 +2190,11 @@ fn poll_authenticated_events_with_repository_id_scoped(
                     storage::now(),feed_watermark.unwrap_or(cursor)],
         ).map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    // Capture the watermark from this transaction, not a later competing
+    // poll or policy change after the commit. Counts and cursor describe
+    // the same observation batch.
     let current = source(store, &expected.id)?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(AuthenticatedPoll {
         source_id:current.id,
         repository:current.repository,
@@ -5067,6 +5076,71 @@ mod tests {
             |r| r.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
             |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn native_observe_commit_requires_exact_durable_cursor_after_restart() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "anchor-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &active.id, "anchor-ticket", "issue:42").unwrap();
+        let event = |id: &str| serde_json::json!({
+            "id":id, "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot","id":202},
+            "repo":{"name":"owner/repo","id":101},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        let identity = ObserveFeedContext {
+            repository_id:101, operator_id:Some(303), background_team_revision:None,
+        };
+        let first = serde_json::json!([event("5000000401")]);
+        let admitted = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &first, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!(admitted.last_sequence, 5_000_000_401);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let snapshot = source(&reopened, &active.id).unwrap();
+        let missing_anchor = serde_json::json!([event("5000000403"), event("5000000402")]);
+        let error = poll_authenticated_events_with_repository_id_scoped(
+            &reopened, &snapshot, 0, &missing_anchor, "operator", 1, identity,
+        ).unwrap_err();
+        assert!(error.contains("exact durable cursor"), "{error}");
+        assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, admitted.last_sequence);
+        assert_eq!(list_decisions(&reopened, &active.id, 10).unwrap().len(), 1);
+        assert_eq!(linked_decisions(&reopened, "anchor-ticket", 10).unwrap().len(), 1);
+
+        let anchored = serde_json::json!([
+            event("5000000403"), event("5000000402"), event("5000000401")
+        ]);
+        let next = poll_authenticated_events_with_repository_id_scoped(
+            &reopened, &snapshot, 0, &anchored, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((next.recorded, next.duplicates), (2, 1));
+        assert_eq!(next.last_sequence, 5_000_000_403);
+        let replay = poll_authenticated_events_with_repository_id_scoped(
+            &reopened, &snapshot, 0, &anchored, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((replay.recorded, replay.duplicates), (0, 3));
+        assert_eq!(replay.last_sequence, next.last_sequence);
+        assert_eq!(linked_decisions(&reopened, "anchor-ticket", 10).unwrap().len(), 3);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='anchor-ticket'
+             AND kind='source_context_observed'", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 3);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_assignments", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+        drop(reopened);
+        let final_store = Store::open(&path).unwrap();
+        assert_eq!(source(&final_store, &active.id).unwrap().last_sequence, next.last_sequence);
+        assert_eq!(linked_decisions(&final_store, "anchor-ticket", 10).unwrap().len(), 3);
     }
 
     #[test]

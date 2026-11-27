@@ -1014,8 +1014,9 @@ pub struct TaskSnapshot {
     pub ticket: Ticket,
     /// Reversible visibility from the same native snapshot as Ticket revision.
     pub archived: bool,
-    /// True only for an unarchived blocked Ticket whose initial Coordinator
-    /// reservation has not happened. Read-side role projection, not authority.
+    /// Legacy wire name: true for an unarchived blocked Ticket awaiting
+    /// initial Coordinator admission or one explicit recovery of its failed
+    /// launch. Read-side role projection, not authority.
     pub initial_coordinator_pending: bool,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
@@ -1092,7 +1093,7 @@ fn coordinator_plan_proposal(
         return Ok(None);
     }
     roster::require_current_profile(store, &ticket.id, "coordinator", &coordinator.id)?;
-    let Some(advice) = original_coordinator_advice(
+    let Some((assignment_id,advice)) = successful_coordinator_plan(
         store, &ticket.id, &coordinator.id, &coordinator.project_id,
     )? else {
         return Ok(None);
@@ -1101,11 +1102,6 @@ fn coordinator_plan_proposal(
     // a later Worker result. Only the entire original JSON response qualifies.
     let inputs = work_items::decode_plan(&advice)?;
     work_items::validate_coordinator_proposal(store, ticket, &config, &inputs)?;
-    let assignment_id: String = store.db.query_row(
-        "SELECT id FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2
-           AND attempt=1 AND state='finished'",
-        params![&ticket.id, &coordinator.id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
     Ok(Some(CoordinatorPlanProposal {
         assignment_id, ticket_revision: ticket.revision, plan_json: advice,
     }))
@@ -3256,7 +3252,10 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                       -- Do not treat a different, unadmitted bot as that role.
                       WHEN worker.id IS NULL OR worker.paused!=0
                            OR (a.bot_id=o.coordinator_bot_id AND
-                               (a.attempt!=1 OR NOT EXISTS(
+                               ((a.attempt!=1 AND NOT (a.attempt=2 AND EXISTS(
+                                  SELECT 1 FROM sa_audit retry WHERE retry.ticket_id=t.id
+                                    AND retry.kind='coordinator_retry_admitted' AND retry.detail=a.id
+                               ))) OR NOT EXISTS(
                                   SELECT 1 FROM sa_audit admission
                                   WHERE admission.ticket_id=t.id
                                     AND admission.kind='admitted'
@@ -4025,79 +4024,128 @@ fn coordinator_staged(store: &Store, ticket_id: &str) -> Result<bool> {
     ).map_err(|e| e.to_string())
 }
 
-fn initial_coordinator_pending(store: &Store, ticket_id: &str) -> Result<bool> {
-    if !coordinator_staged(store, ticket_id)? { return Ok(false); }
-    store.db.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='admitted')
-          AND NOT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1)",
-        [ticket_id], |r| r.get(0),
-    ).map_err(|e| e.to_string())
+fn pending_coordinator_attempt(store: &Store, ticket_id: &str) -> Result<Option<i64>> {
+    if coordinator_staged(store, ticket_id)? {
+        let initial: bool = store.db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='admitted')
+              AND NOT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1)",
+            [ticket_id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if initial { return Ok(Some(1)); }
+    }
+    // Only a native launch failure before any successful plan or Worker
+    // attempt may be recovered. One failed Assignment and its exact stored
+    // launch error bind the historical receipt; provider text cannot grant
+    // retry authority. No failed callback, stop, restart or revoked mandate
+    // is converted into an automatic retry.
+    let failed_session: Option<String> = store.db.query_row(
+        "SELECT a.session_id FROM sa_tickets t
+         JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         JOIN sa_assignments a ON a.ticket_id=t.id AND a.attempt=1
+         WHERE t.id=?1 AND t.state='blocked' AND t.active_assignment_id IS NULL
+           AND a.bot_id=o.coordinator_bot_id AND a.state='failed'
+           AND (SELECT COUNT(*) FROM sa_assignments prior WHERE prior.ticket_id=t.id)=1
+           AND (SELECT detail FROM sa_audit admission WHERE admission.ticket_id=t.id
+                AND admission.kind='admitted' ORDER BY id LIMIT 1)
+               ='manual readonly coordinator reserved'
+           AND EXISTS(SELECT 1 FROM sa_audit failure WHERE failure.ticket_id=t.id
+                AND failure.kind='launch_failed' AND failure.detail=a.result)
+           AND NOT EXISTS(SELECT 1 FROM sa_audit proof WHERE proof.ticket_id=t.id
+                AND proof.kind IN ('coordinator_planned','coordinator_retry_admitted'))
+           AND NOT EXISTS(SELECT 1 FROM sa_work_items w WHERE w.ticket_id=t.id)",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(session) = failed_session {
+        if assignment_thread_current(store, &session, ticket_id)? {
+            return Ok(Some(2));
+        }
+    }
+    Ok(None)
 }
 
-/// A recorded coordinator plan is not a transferable authorization. Its
-/// original native session must still exist in the coordinator's current
-/// project. For a direct manual ticket with no coordinator attempt, this
-/// check is intentionally vacuous; worker admission remains independently
-/// gated by its own native mandate.
+fn initial_coordinator_pending(store: &Store, ticket_id: &str) -> Result<bool> {
+    Ok(pending_coordinator_attempt(store, ticket_id)?.is_some())
+}
+
+fn coordinator_attempt_thread(ticket_id: &str, attempt: i64) -> String {
+    if attempt == 1 { ticket_id.to_owned() } else { format!("{ticket_id}:attempt:{attempt}") }
+}
+
+/// Read the one successful, originally admitted Coordinator plan, including
+/// its single explicitly authorized launch recovery. Every original thread
+/// must remain attributable; a failed attempt never supplies plan evidence.
+fn successful_coordinator_plan(
+    store: &Store, ticket_id: &str, coordinator_id: &str, project_id: &str,
+) -> Result<Option<(String,String)>> {
+    let candidate: Option<(String,String,i64)> = store.db.query_row(
+        "SELECT a.id,a.result,a.attempt FROM sa_assignments a
+         JOIN sessions original ON original.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.state='finished'
+           AND original.project_id=?3 AND length(trim(COALESCE(a.result,'')))>0
+           AND (SELECT detail FROM sa_audit admission WHERE admission.ticket_id=a.ticket_id
+                AND admission.kind='admitted' ORDER BY id LIMIT 1)
+               ='manual readonly coordinator reserved'
+           AND EXISTS(SELECT 1 FROM sa_audit proof WHERE proof.ticket_id=a.ticket_id
+                AND proof.kind='coordinator_planned' AND proof.detail='queued')
+           AND (a.attempt=1 OR (a.attempt=2 AND EXISTS(
+                SELECT 1 FROM sa_audit retry WHERE retry.ticket_id=a.ticket_id
+                  AND retry.kind='coordinator_retry_admitted' AND retry.detail=a.id)
+                AND EXISTS(SELECT 1 FROM sa_assignments prior
+                    WHERE prior.ticket_id=a.ticket_id AND prior.attempt=1
+                      AND prior.bot_id=a.bot_id AND prior.state='failed')))",
+        params![ticket_id,coordinator_id,project_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((assignment_id,result,attempt)) = candidate else { return Ok(None) };
+    if !assignment_role_authorized(
+        store,ticket_id,coordinator_id,attempt,coordinator_id,&ticket_worker(store,ticket_id)?,
+    )? {
+        return Ok(None);
+    }
+    let mut statement = store.db.prepare(
+        "SELECT a.session_id, a.attempt, a.state, original.project_id
+         FROM sa_assignments a LEFT JOIN sessions original ON original.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.bot_id=?2 ORDER BY a.attempt",
+    ).map_err(|e| e.to_string())?;
+    let historical = statement.query_map(params![ticket_id,coordinator_id], |row|
+        Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,
+            row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?)),
+    ).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    if historical.len() != attempt as usize { return Ok(None); }
+    for (session,number,state,project) in historical {
+        let expected_state = if number == attempt { "finished" } else { "failed" };
+        if number < 1 || number > attempt || state != expected_state
+            || project.as_deref() != Some(project_id)
+            || !assignment_thread_current(store,&session,ticket_id)?
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some((assignment_id,result)))
+}
+
+/// A Coordinator plan is not transferable authorization. A direct manual
+/// Ticket may have no Coordinator attempt; a coordinated Ticket must retain
+/// the successful native plan and every original attempt identity.
 fn coordinator_plan_current(
     store: &Store, ticket_id: &str, coordinator_id: &str, project_id: &str,
 ) -> Result<bool> {
-    // The original native admission fixes whether a coordinator was required.
-    // No coordinator on a direct ticket is valid; a coordinated ticket with a
-    // deleted/relabelled finished assignment is not a valid plan.
     let original: Option<String> = store.db.query_row(
         "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted'
          ORDER BY id LIMIT 1",
         [ticket_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     match original.as_deref() {
-        Some("manual readonly coordinator reserved") => {
-            let proven: bool = store.db.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM sa_assignments a
-                    JOIN sessions original ON original.id=a.session_id
-                    WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.attempt=1
-                      AND a.state='finished' AND original.project_id=?3
-                      AND length(trim(COALESCE(a.result,'')))>0
-                      AND EXISTS(
-                        SELECT 1 FROM sa_audit proof
-                        WHERE proof.ticket_id=a.ticket_id
-                          AND proof.kind='coordinator_planned')
-                )",
-                params![ticket_id,coordinator_id,project_id], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
-            if !proven { return Ok(false); }
-        }
+        Some("manual readonly coordinator reserved") =>
+            Ok(successful_coordinator_plan(store,ticket_id,coordinator_id,project_id)?.is_some()),
         Some("manual readonly worker reserved" | "blocked: worker occupied"
-            | "blocked: explicit headless staging") => {}
-        _ => return Ok(false),
+            | "blocked: explicit headless staging") => store.db.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2)",
+                params![ticket_id,coordinator_id], |row| row.get(0),
+            ).map_err(|e| e.to_string()),
+        _ => Ok(false),
     }
-    let invalid: bool = store.db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_assignments a
-           LEFT JOIN sessions original ON original.id=a.session_id
-           WHERE a.ticket_id=?1 AND a.bot_id=?2
-             AND (a.state<>'finished' OR original.id IS NULL OR original.project_id<>?3)
-         )",
-        params![ticket_id,coordinator_id,project_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if invalid { return Ok(false); }
-    // A provider's finished coordinator plan is still bound to the original
-    // native task thread. Removing or remapping that thread after settlement
-    // must not turn the old plan into an authority for a new worker attempt.
-    let mut statement = store.db.prepare(
-        "SELECT session_id FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2",
-    ).map_err(|e| e.to_string())?;
-    let session_ids = statement.query_map(params![ticket_id, coordinator_id],
-        |row| row.get::<_, String>(0),
-    ).map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
-    for session_id in session_ids {
-        if !assignment_thread_current(store, &session_id, ticket_id)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn assignment_session(store: &Store, task_id: &str) -> Result<Option<String>> {
@@ -4142,7 +4190,8 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
 
 /// A registered bot is not automatically authorized for every assignment
 /// phase. The original user-issued admission fixes whether attempt one is a
-/// coordinator plan or a direct worker. Later attempts can only be workers.
+/// coordinator plan or a direct worker. Only an exact native launch-recovery
+/// receipt permits one additional read-only Coordinator attempt.
 fn assignment_role_authorized(
     store: &Store, ticket_id: &str, bot_id: &str, attempt: i64,
     coordinator_id: &str, worker_id: &str,
@@ -4153,6 +4202,27 @@ fn assignment_role_authorized(
     ).optional().map_err(|e| e.to_string())?;
     if admission.as_deref() == Some("manual readonly coordinator reserved") && attempt == 1 {
         return Ok(bot_id == coordinator_id);
+    }
+    let coordinator_retry: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments a JOIN sa_audit retry
+          ON retry.ticket_id=a.ticket_id AND retry.kind='coordinator_retry_admitted'
+          AND retry.detail=a.id WHERE a.ticket_id=?1 AND a.attempt=?2)",
+        params![ticket_id,attempt], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if coordinator_retry {
+        if admission.as_deref() != Some("manual readonly coordinator reserved")
+            || attempt != 2 || bot_id != coordinator_id
+        {
+            return Ok(false);
+        }
+        return store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_assignments prior
+              WHERE prior.ticket_id=?1 AND prior.attempt=1 AND prior.bot_id=?2
+                AND prior.state='failed' AND EXISTS(SELECT 1 FROM sa_audit failure
+                   WHERE failure.ticket_id=prior.ticket_id AND failure.kind='launch_failed'
+                     AND failure.detail=prior.result))",
+            params![ticket_id,coordinator_id], |row| row.get(0),
+        ).map_err(|e| e.to_string());
     }
     if attempt <= 0 || bot_id == coordinator_id || !matches!(admission.as_deref(),
         Some("manual readonly coordinator reserved" | "manual readonly worker reserved"
@@ -4626,7 +4696,10 @@ fn fail_launch(store: &Store, ticket: &Ticket, reason: &str) -> Result<()> {
         return Err("SuperAgent launch failure no longer owns an active assignment.".into());
     }
     let ticket = tx.execute(
-        "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,
+        "UPDATE sa_tickets SET state=CASE WHEN EXISTS(
+             SELECT 1 FROM sa_audit retry WHERE retry.ticket_id=?1
+              AND retry.kind='coordinator_retry_admitted' AND retry.detail=?3
+         ) THEN 'failed' ELSE 'blocked' END,active_assignment_id=NULL,
          revision=revision+1,updated_at=?2
          WHERE id=?1 AND state='running' AND active_assignment_id=?3",
         params![ticket_id, now, assignment_id],
@@ -4782,7 +4855,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,if unresolved_effects { "callback_effect_unresolved" }
             else if !within_budget { "assignment_timed_out" }
             else if !authorized { "callback_rejected" }
-            else if coordinator { "coordinator_planned" } else { "turn_settled" },
+            else if coordinator && next == "queued" { "coordinator_planned" }
+            else if coordinator { "coordinator_settled" } else { "turn_settled" },
             if !unique_running { "blocked: conflicting running Assignments require native recovery" }
             else { next },now],
     ).map_err(|e| e.to_string())?;
@@ -6214,24 +6288,13 @@ fn record_work_item_admission(
     Ok(())
 }
 
-/// Use only the original native Coordinator attempt, not a later result or
-/// an unrelated session. Callers revalidate coordinator_plan_current first.
+/// Use only the successful native Coordinator plan; failed launch output,
+/// later Worker evidence and unrelated sessions are not planning authority.
 fn original_coordinator_advice(
     store: &Store, ticket_id: &str, coordinator_id: &str, project_id: &str,
 ) -> Result<Option<String>> {
-    store.db.query_row(
-        "SELECT a.result FROM sa_assignments a
-         JOIN sessions original ON original.id=a.session_id
-         WHERE a.ticket_id=?1 AND a.bot_id=?2 AND a.attempt=1
-           AND a.state='finished' AND original.project_id=?3
-           AND length(trim(COALESCE(a.result,'')))>0
-           AND EXISTS(SELECT 1 FROM sa_audit proof
-               WHERE proof.ticket_id=a.ticket_id AND proof.kind='coordinator_planned')
-           AND (SELECT detail FROM sa_audit admission WHERE admission.ticket_id=a.ticket_id
-                AND admission.kind='admitted' ORDER BY id LIMIT 1)
-               ='manual readonly coordinator reserved'",
-        params![ticket_id,coordinator_id,project_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())
+    Ok(successful_coordinator_plan(store,ticket_id,coordinator_id,project_id)?
+        .map(|(_,result)| result))
 }
 
 // Only a complete raw JSON array can prefill the reviewed plan editor.
@@ -6762,10 +6825,11 @@ fn prepare_initial_coordinator_at_revision(
         || ticket.active_assignment_id.is_some() || ticket.actor != "local-user"
         || request.is_some_and(|r| r.ticket_id != id || r.kind != "retry"
             || r.expected_revision != expected_revision || !headless_dispatch::is_current(r, now))
-        || !initial_coordinator_pending(store, id)?
     {
-        return Err("Initial Coordinator dispatch intent is stale or no longer pending.".into());
+        return Err("Coordinator dispatch intent is stale or no longer pending.".into());
     }
+    let attempt = pending_coordinator_attempt(store,id)?
+        .ok_or("Coordinator dispatch intent is stale or no longer pending.")?;
     if request.is_none() {
         headless_dispatch::require_no_live_pending(store, &ticket)?;
     }
@@ -6802,11 +6866,12 @@ fn prepare_initial_coordinator_at_revision(
         return Err(INITIAL_COORDINATOR_OCCUPIED.into());
     }
     let assignment_id = storage::id();
-    let session_id = bots::thread_session(store,&coordinator,CHANNEL,id,"SuperAgent · Coordinator")?.0;
+    let thread = coordinator_attempt_thread(id,attempt);
+    let session_id = bots::thread_session(store,&coordinator,CHANNEL,&thread,"SuperAgent · Coordinator")?.0;
     tx.execute(
         "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,'running',1,?5,?5)",
-        params![assignment_id,id,coordinator.id,session_id,now],
+         VALUES(?1,?2,?3,?4,'running',?5,?6,?6)",
+        params![assignment_id,id,coordinator.id,session_id,attempt,now],
     ).map_err(|e| e.to_string())?;
     let changed = tx.execute(
         "UPDATE sa_tickets SET state='running',active_assignment_id=?2,revision=revision+1,updated_at=?3
@@ -6814,13 +6879,16 @@ fn prepare_initial_coordinator_at_revision(
         params![id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if changed != 1 { return Err("Initial Coordinator Ticket changed before admission.".into()); }
-    // Record admission only when the real native session and Assignment exist.
-    // All existing Coordinator role, gateway, watchdog and plan checks reuse
-    // this exact receipt; no second role authorization or provider is added.
+    // Preserve the original admission; bind recovery to this exact native
+    // Assignment rather than reclassifying later Worker attempts.
+    let (kind,detail) = if attempt == 1 {
+        ("admitted","manual readonly coordinator reserved")
+    } else {
+        ("coordinator_retry_admitted",assignment_id.as_str())
+    };
     tx.execute(
-        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-         VALUES(?1,'admitted','manual readonly coordinator reserved',?2)",
-        params![id,now],
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+        params![id,kind,detail,now],
     ).map_err(|e| e.to_string())?;
     if let Some(request) = request {
         headless_dispatch::consume(&tx,request,&ticket,&assignment_id,now)?;
@@ -6838,7 +6906,7 @@ async fn dispatch_initial_coordinator(
     app: &tauri::AppHandle, state: &AppState, ticket_id: &str, expected_revision: i64,
     request: Option<&headless_dispatch::DispatchRequest>,
 ) -> Result<Ticket> {
-    let (ticket, coordinator_id, packet) = {
+    let (ticket, coordinator_id, packet, thread) = {
         let active: Vec<String> = state.agents.lock().map_err(|e| e.to_string())?
             .keys().cloned().collect();
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
@@ -6847,10 +6915,16 @@ async fn dispatch_initial_coordinator(
         let coordinator = bots::get(&store,&config.coordinator_bot_id)?;
         let busy = active_manual_conflict(&store,&active,&coordinator.id,&config.project_id)?
             || active_manual_conflict(&store,&active,&coordinator.id,&coordinator.project_id)?;
-        prepare_initial_coordinator_at_revision(&mut store,ticket_id,expected_revision,busy,request)?
+        let (ticket,recipient,packet) =
+            prepare_initial_coordinator_at_revision(&mut store,ticket_id,expected_revision,busy,request)?;
+        let attempt: i64 = store.db.query_row(
+            "SELECT attempt FROM sa_assignments WHERE id=?1 AND ticket_id=?2",
+            params![ticket.active_assignment_id.as_deref(),ticket_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        (ticket,recipient,packet,coordinator_attempt_thread(ticket_id,attempt))
     };
     let delivered = bots::gateway::deliver(app,bots::gateway::Inbound {
-        bot_id: coordinator_id, channel_id: CHANNEL.into(), thread: ticket.id.clone(),
+        bot_id: coordinator_id, channel_id: CHANNEL.into(), thread,
         sender_id: "local-user".into(), sender_name: "Manual coordination".into(),
         text: packet, trusted: true, image_ids: None, moodboard_ids: None,
     }).await;
@@ -8250,6 +8324,92 @@ mod tests {
         let (_,_,worker,_) = prepare_coordinated_worker_at_revision(
             &mut reopened,id,queued.revision,false).unwrap();
         assert_eq!(worker,"worker");
+    }
+
+
+    #[test]
+    fn coordinator_launch_failure_can_retry_once_through_the_same_native_role() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (first, started) = admit_role(
+            &mut store, &cfg.id, "Inspect checkout", "coordinator-launch-retry", false, true,
+        ).unwrap();
+        assert!(started);
+        let id = &first.id;
+        let original_session = assignment_session(&store,id).unwrap().unwrap();
+        fail_launch(&store,&first,"Gateway launch failed").unwrap();
+        let blocked = get_ticket(&store,id).unwrap();
+        assert_eq!(blocked.state,"blocked");
+        assert!(ticket_snapshot(&store,id,10).unwrap().initial_coordinator_pending);
+        assert!(retry_blocked_at_revision(&mut store,id,blocked.revision,false).is_err());
+        assert!(prepare_initial_coordinator_at_revision(
+            &mut store,id,blocked.revision+1,false,None).is_err());
+        assert!(prepare_initial_coordinator_at_revision(
+            &mut store,id,blocked.revision,true,None).is_err());
+        assert_eq!(assignments(&store,id,10).unwrap().len(),1);
+        assert!(!on_run_finished(&store,&original_session,true,"Late first plan").unwrap());
+        let request = headless_dispatch::enqueue(&store,id,blocked.revision,"retry-coordinator").unwrap();
+        let (running,recipient,packet) = prepare_initial_coordinator(&mut store,&request,false).unwrap();
+        assert_eq!(recipient,"router");
+        assert!(packet.contains("Admitted Team capability inventory"));
+        let retry_session = assignment_session(&store,id).unwrap().unwrap();
+        assert_ne!(retry_session,original_session);
+        let thread = format!("{id}:attempt:2");
+        assert!(guard_gateway_inbound(&store,"router",&thread,"local-user",true).is_ok());
+        assert!(guard_gateway_inbound(&store,"worker",&thread,"local-user",true).is_err());
+        assert!(guard_gateway_inbound(&store,"router",id,"local-user",true).is_err());
+        assert!(read_only_policy(&store,&retry_session).unwrap().is_some());
+        assert!(!assignment_role_authorized(&store,id,"worker",2,"router","worker").unwrap());
+        assert!(watchdog_expired_assignments(&store,storage::now()).unwrap().is_empty());
+        assert_eq!(get_ticket(&store,id).unwrap().revision,running.revision);
+        let activity = member_activity::page(&store,&cfg.id,"router",None,10).unwrap();
+        assert_eq!(activity.items.len(),2);
+        assert!(activity.items.iter().all(|item| item.role=="coordinator"));
+        assert!(prepare_initial_coordinator(&mut store,&request,false).is_err());
+        assert!(!on_run_finished(&store,&original_session,true,"Late first plan").unwrap());
+        assert!(on_run_finished(&store,&retry_session,true,"Inspect the checkout").unwrap());
+        let queued = get_ticket(&store,id).unwrap();
+        assert_eq!(queued.state,"queued");
+        assert!(coordinator_plan_current(&store,id,"router",&cfg.project_id).unwrap());
+        assert_eq!(original_coordinator_advice(&store,id,"router",&cfg.project_id)
+            .unwrap().as_deref(),Some("Inspect the checkout"));
+        let path=store.path.clone();
+        drop(store);
+        let mut reopened=Store::open(&path).unwrap();
+        let (_,_,worker,_) = prepare_coordinated_worker_at_revision(
+            &mut reopened,id,queued.revision,false).unwrap();
+        assert_eq!(worker,"worker");
+        assert!(assignments(&reopened,id,10).unwrap().iter().any(|a| a.attempt==3 && a.bot_id=="worker"));
+        let worker_session=assignment_session(&reopened,id).unwrap().unwrap();
+        assert!(on_run_finished(&reopened,&worker_session,true,"Worker evidence").unwrap());
+        let awaiting=get_ticket(&reopened,id).unwrap();
+        assert_eq!(accept(&reopened,id,awaiting.revision).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn coordinator_launch_retry_exhaustion_and_revocation_never_fall_back_to_worker() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (first,_) = admit_role(
+            &mut store,&cfg.id,"Inspect checkout","coordinator-retry-limit",false,true,
+        ).unwrap();
+        fail_launch(&store,&first,"First launch failed").unwrap();
+        let blocked=get_ticket(&store,&first.id).unwrap();
+        store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&first.id]).unwrap();
+        assert!(prepare_initial_coordinator_at_revision(
+            &mut store,&first.id,blocked.revision,false,None).is_err());
+        assert_eq!(assignments(&store,&first.id,10).unwrap().len(),1);
+        store.db.execute("UPDATE sa_mandates SET revoked=0 WHERE ticket_id=?1",[&first.id]).unwrap();
+        let (second,_,_) = prepare_initial_coordinator_at_revision(
+            &mut store,&first.id,blocked.revision,false,None).unwrap();
+        fail_launch(&store,&second,"Second launch failed").unwrap();
+        let exhausted=get_ticket(&store,&first.id).unwrap();
+        assert_eq!(exhausted.state,"failed");
+        assert!(!ticket_snapshot(&store,&first.id,10).unwrap().initial_coordinator_pending);
+        assert!(prepare_initial_coordinator_at_revision(
+            &mut store,&first.id,exhausted.revision,false,None).is_err());
+        assert!(retry_blocked_at_revision(&mut store,&first.id,exhausted.revision,false).is_err());
+        assert_eq!(assignments(&store,&first.id,10).unwrap().len(),2);
     }
 
     #[test]

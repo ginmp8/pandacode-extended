@@ -130,11 +130,15 @@ pub(super) fn page_for_demand(
         "SELECT a.id,t.id,t.orchestration_id,a.bot_id,a.session_id,
                 a.state,t.state,a.attempt,a.created_at,a.updated_at,
                 length(trim(COALESCE(a.result,'')))>0,
-                CASE WHEN a.attempt=1 AND EXISTS(
+                CASE WHEN (a.attempt=1 AND EXISTS(
                   SELECT 1 FROM sa_audit initial
                   WHERE initial.ticket_id=t.id AND initial.kind='admitted'
                     AND initial.detail='manual readonly coordinator reserved'
-                ) THEN 'coordinator' ELSE 'worker' END
+                )) OR (a.attempt=2 AND EXISTS(
+                  SELECT 1 FROM sa_audit retry
+                  WHERE retry.ticket_id=t.id AND retry.kind='coordinator_retry_admitted'
+                    AND retry.detail=a.id
+                )) THEN 'coordinator' ELSE 'worker' END
          FROM sa_assignments a JOIN sa_tickets t ON t.id=a.ticket_id
          WHERE t.orchestration_id=?1 AND a.bot_id=?2
            AND (?3 IS NULL OR t.id=?3)

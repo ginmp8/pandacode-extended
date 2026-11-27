@@ -648,9 +648,12 @@ fn effective_team(
             "Team is disabled; explicitly enable it before admitting a Demand.".into(),
         );
     }
-    if !roster.execution_ready {
+    // execution_ready is the legacy single-worker topology flag, not a
+    // verdict for explicitly selected Workers. Native manual admission
+    // supports multiple Workers without configured Council reviewers.
+    if !roster.reviewer_bot_ids.is_empty() {
         manual_admission_blockers.push(
-            "Multi-role Team requires native scoped role admission; manual dispatch is unavailable.".into(),
+            "Multi-role Team with configured Council reviewers requires native task-bound review; manual dispatch is unavailable.".into(),
         );
     }
     if crate::feature_controls::get().bots_paused {
@@ -665,18 +668,18 @@ fn effective_team(
             ));
             continue;
         }
-        if (member.role=="coordinator" || (member.role=="worker" && member.position==0))
+        if (member.role=="coordinator" || member.role=="worker")
             && member.paused {
             manual_admission_blockers.push(format!(
                 "{} bot is paused; native manual admission is unavailable.",member.role,
             ));
         }
-        if member.role=="worker" && member.position==0 && member.project_id!=config.project_id {
-            manual_admission_blockers.push(
-                "Primary Worker project differs from the Team execution project.".into(),
-            );
+        if member.role=="worker" && member.project_id!=config.project_id {
+            manual_admission_blockers.push(format!(
+                "Worker {} project differs from the Team execution project.",member.bot_id,
+            ));
         }
-        if member.role=="coordinator" || (member.role=="worker" && member.position==0) {
+        if member.role=="coordinator" || member.role=="worker" {
             let bot=bots::get(store,&member.bot_id)?;
             if let Some(issue)=member_execution_issue(&bot) {
                 manual_admission_blockers.push(issue.into());
@@ -1513,9 +1516,35 @@ mod tests {
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
 
+        // Explicitly selected multi-Worker admission is supported without
+        // Council. Restore valid profiles and verify the actual preflight agrees
+        // with the read-only Team projection, including secondary Worker drift.
+        store.db.execute("UPDATE bots SET project_id='effective-project' WHERE id='another-worker'",[]).unwrap();
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='reviewer'",[]).unwrap();
+        let multi=set(&store,&cfg.id,roster.policy_revision,&RosterInput {
+            worker_bot_ids:vec!["worker".into(),"another-worker".into()],reviewer_bot_ids:Vec::new(),
+        }).unwrap();
+        let multi_enabled=super::super::change_enabled(&store,&cfg.id,multi.policy_revision,true).unwrap();
+        let multi_report=effective_team(&store,&cfg.id,&library).unwrap();
+        assert!(!multi_report.execution_ready, "Legacy single-worker topology flag is unchanged");
+        assert!(multi_report.manual_admission_blockers.is_empty());
+        assert!(super::super::manual_preflight_worker(&store,&cfg.id,"Inspect","another-worker",false).unwrap().eligible);
+        assert!(!multi_report.grants_issued);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='another-worker'",[]).unwrap();
+        let paused_peer=effective_team(&store,&cfg.id,&library).unwrap();
+        assert!(paused_peer.manual_admission_blockers.iter().any(|reason|reason.contains("worker bot is paused")));
+        assert!(super::super::manual_preflight_worker(&store,&cfg.id,"Inspect","another-worker",false).is_err());
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='another-worker'",[]).unwrap();
+        store.db.execute("UPDATE bots SET project_id='moved-project' WHERE id='another-worker'",[]).unwrap();
+        let moved_peer=effective_team(&store,&cfg.id,&library).unwrap();
+        assert!(moved_peer.manual_admission_blockers.iter().any(|reason|reason.contains("another-worker")));
+        assert!(super::super::manual_preflight_worker(&store,&cfg.id,"Inspect","another-worker",false).is_err());
+        store.db.execute("UPDATE bots SET project_id='effective-project' WHERE id='another-worker'",[]).unwrap();
+        let multi_off=super::super::change_enabled(&store,&cfg.id,multi_enabled.policy_revision,false).unwrap();
+
         // Topology readiness is not user authorization: enabling and disabling
         // the same supported Team must change native admission diagnostics.
-        let reset=set(&store,&cfg.id,roster.policy_revision,&RosterInput {
+        let reset=set(&store,&cfg.id,multi_off.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into()],reviewer_bot_ids:Vec::new(),
         }).unwrap();
         let enabled=super::super::change_enabled(&store,&cfg.id,reset.policy_revision,true).unwrap();

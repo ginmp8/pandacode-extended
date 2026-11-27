@@ -1271,7 +1271,9 @@ let demandArchived = false;
         'No role, model or Skill grants tools.</p>' +
         '<p>Policy revision ' + effectiveTeam.policyRevision + ' · ' +
         (effectiveTeam.enabled ? 'Team enabled for manual checks' : 'Team Off') + ' · ' +
-        (effectiveTeam.executionReady ? 'Single-worker topology' : 'Multi-role execution unavailable') +
+        (effectiveTeam.executionReady ? 'Single-worker topology' :
+          roleRoster?.reviewerBotIds.length ? 'Multi-role execution unavailable' :
+            'Explicit Worker selection supported (read-only)') +
         ' · No task grant issued</p>' +
         (effectiveTeam.manualAdmissionBlockers.length
           ? '<p>Native manual admission blocked:</p><ul aria-label="Native manual admission blockers">' +
@@ -1359,7 +1361,9 @@ let demandArchived = false;
                 safe(policyEditBlocker) + '</p>' : '') +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :
-                'Multi-member execution is disabled until native scoped admission is available.') + '</p>' +
+                roleRoster.reviewerBotIds.length ?
+                  'Multi-member execution is disabled until native task-bound Council review is available.' :
+                  'Explicit Worker selection is available after enable; execution remains read-only.') + '</p>' +
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
             effectivePolicy) +
         '</section>' : '';
@@ -1370,7 +1374,7 @@ let demandArchived = false;
         '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
-        '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
+        '<dt>Current native support</dt><dd>Explicit manual Worker selection; scoped writes, configured Council review and automatic GitHub intake unsupported.</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-open-runs>Assign demand / Open runs</button>' +
         '<button type="button" data-sa-duplicate="' + safe(chosen.id) +
         '">Duplicate as new Team</button></div></section>'

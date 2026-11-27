@@ -3633,8 +3633,7 @@ test('Team effective policy view is native-backed and never grants or launches t
       if(command==='superagent_effective_team') return {
         orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
         grantsIssued:false,manualAdmissionBlockers:[
-          'Team is disabled; explicitly enable it before admitting a Demand.',
-          'Multi-role Team requires native scoped role admission; manual dispatch is unavailable.'
+          'Team is disabled; explicitly enable it before admitting a Demand.'
         ],members:[
           {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
             model:'gpt-main',mode:'plan',reasoningEffort:'medium',projectId:'p',paused:false,skills:[],configurationIssues:[]},
@@ -3665,9 +3664,10 @@ test('Team effective policy view is native-backed and never grants or launches t
   await expect(view.getByText('Assigned Skill removed is missing: install or unassign it in Skills Manager.')).toBeVisible();
   await expect(view).toContainText('No local configuration issues detected. Harness/tool eligibility unverified.');
   await expect(view).toContainText('Harness eligibility not_verified');
-  await expect(view).toContainText('Multi-role execution unavailable');
+  await expect(view).toContainText('Explicit Worker selection supported (read-only)');
+  await expect(view).not.toContainText('Multi-role execution unavailable');
   await expect(view.getByRole('list',{name:'Native manual admission blockers'}))
-    .toContainText('Multi-role Team requires native scoped role admission');
+    .not.toContainText('Multi-role Team');
   await expect(view).toContainText('Native manual admission blocked');
   await expect(view.getByRole('list',{name:'Native manual admission blockers'}))
     .toContainText('Team is disabled; explicitly enable it before admitting a Demand.');

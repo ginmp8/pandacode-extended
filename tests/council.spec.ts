@@ -1576,6 +1576,84 @@ test('native M4 S3 child challenge inspector correlates distinct phases without 
 });
 
 
+test('overlapping native evidence refreshes preserve only the owning inspector disclosure', async ({ page }) => {
+  const attempt = {
+    workerId: 'security-worker', name: 'Security reviewer', lens: 'Security', round: 1,
+    reviewerSource: 'direct_bot', status: 'completed', score: 7.5, abandoned: false,
+    provider: 'codex', model: 'native', attempt: 1, createdAt: 1000,
+    startedAt: 1001, lastUpdatedAt: 1010, usageProvenance: 'unknown',
+  };
+  const finding = {
+    schemaVersion: 1, id: 'report:1', cycleId: 'session-1:1000', round: 1,
+    workerId: 'security-worker', reportMessageId: 22, lens: 'Security',
+    severity: 'high', category: 'authorization', title: 'Initial guard',
+    explanation: 'Reviewer-reported claim only', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  };
+  const snapshot = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'fixing', round: 1, lowest: 7.5, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [attempt], reportedFindings: [finding],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+  await page.evaluate(async initial => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const w = window as any;
+    w.__overlappingInspectorReads = [];
+    w.__deferInspectorReads = false;
+    const host = document.createElement('div');
+    host.id = 'overlapping-inspectors';
+    for (const id of ['first', 'second']) {
+      const detail = createCouncilInspector(() => id === 'first' && w.__deferInspectorReads
+        ? new Promise(resolve => w.__overlappingInspectorReads.push(resolve))
+        : Promise.resolve(initial as any), 'session-1');
+      detail.dataset.testInspector = id;
+      host.append(detail);
+      detail.open = true;
+    }
+    document.body.append(host);
+  }, snapshot);
+  const first = page.locator('[data-test-inspector="first"]');
+  const second = page.locator('[data-test-inspector="second"]');
+  const reviewer = first.locator('.council-reviewer-findings[data-council-reviewer-key]');
+  const summary = reviewer.locator(':scope > summary');
+  await expect(reviewer).toContainText('Initial guard');
+  await expect(second).toContainText('Initial guard');
+  await reviewer.evaluate(node => { (node as HTMLDetailsElement).open = true; });
+  await summary.focus();
+  // An unrelated inspector refresh must not take focus from this one.
+  await second.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(summary).toBeFocused();
+  await page.evaluate(() => { (window as any).__deferInspectorReads = true; });
+  const invalidateTwice = () => first.evaluate(node => {
+    node.dispatchEvent(new Event('council-evidence-invalidated'));
+    node.dispatchEvent(new Event('council-evidence-invalidated'));
+  });
+  const pendingCount = () => page.evaluate(() => (window as any).__overlappingInspectorReads.length);
+  await invalidateTwice();
+  await expect.poll(pendingCount).toBe(2);
+  const newest = { ...snapshot, reportedFindings: [{ ...finding, title: 'Newest guard' }] };
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[1](value); }, newest);
+  await expect(reviewer).toContainText('Newest guard');
+  await expect(reviewer).toHaveAttribute('open', '');
+  await expect(summary).toBeFocused();
+  // A delayed response, including a valid but obsolete scope, cannot replace it.
+  await page.evaluate(value => {
+    const w = window as any;
+    w.__overlappingInspectorReads[0](value);
+    w.__overlappingInspectorReads = [];
+  }, snapshot);
+  await expect(reviewer).toContainText('Newest guard');
+  await invalidateTwice();
+  await expect.poll(pendingCount).toBe(2);
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[1](value); },
+    { ...newest, teamRevision: 8 });
+  await expect(reviewer).not.toHaveAttribute('open', '');
+  await expect(first.getByRole('button', { name: 'Refresh native evidence' })).toBeFocused();
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[0](value); }, snapshot);
+  await expect(reviewer).toContainText('Newest guard');
+});
+
 test('Council inspector keeps focused reviewer findings only for the same native attempt and revision', async ({ page }) => {
   const attempt = {
     workerId: 'security-worker', name: 'Security reviewer', lens: 'Security', round: 1,

@@ -569,6 +569,26 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
   // Closing an enclosing dialog does not disconnect its DOM or close this
   // disclosure. Fence native reads before the dialog's asynchronous close event.
   const canRender = () => details.open && details.isConnected && details.closest('dialog')?.open !== false;
+  const captureDisclosure = () => {
+    const priorScope = shownScope;
+    // Native updates can replace either a child Council or reviewer findings
+    // disclosure while keyboard focus is on its summary. Retain that focus and
+    // the user's drill-down only within the same task/cycle/artifact revision.
+    const active = document.activeElement;
+    const focusedChildKey = active instanceof HTMLElement && body.contains(active) && active.matches('.council-child-reservations details[data-council-child-key] > summary')
+      ? active.closest<HTMLDetailsElement>('details[data-council-child-key]')?.dataset.councilChildKey : undefined;
+    const focusedReviewerKey = active instanceof HTMLElement && body.contains(active) && active.matches('.council-reviewer-findings[data-council-reviewer-key] > summary')
+      ? active.closest<HTMLDetailsElement>('details[data-council-reviewer-key]')?.dataset.councilReviewerKey : undefined;
+    if (focusedChildKey || focusedReviewerKey) refresh.focus({ preventScroll: true });
+    const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
+      .map(child => child.dataset.councilChildKey));
+    const expandedReviewers = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-reviewer-findings[data-council-reviewer-key][open]'))
+      .map(reviewer => reviewer.dataset.councilReviewerKey));
+    return { priorScope, focusedChildKey, focusedReviewerKey, expandedChildren, expandedReviewers };
+  };
+  // A newer native invalidation may supersede an in-flight read after the
+  // original body has been erased. Retain only its scoped disclosure state.
+  let pendingDisclosure: ReturnType<typeof captureDisclosure> | null = null;
   const load = () => {
     if (!canRender()) return;
     const current = ++serial;
@@ -578,20 +598,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     refresh.disabled = false;
     refresh.setAttribute('aria-disabled', 'true');
     refresh.setAttribute('aria-busy', 'true');
-    const priorScope = shownScope;
-    // Native updates can replace either a child Council or reviewer findings
-    // disclosure while keyboard focus is on its summary. Retain that focus and
-    // the user's drill-down only within the same task/cycle/artifact revision.
-    const active = document.activeElement;
-    const focusedChildKey = active instanceof HTMLElement && active.matches('.council-child-reservations details[data-council-child-key] > summary')
-      ? active.closest<HTMLDetailsElement>('details[data-council-child-key]')?.dataset.councilChildKey : undefined;
-    const focusedReviewerKey = active instanceof HTMLElement && active.matches('.council-reviewer-findings[data-council-reviewer-key] > summary')
-      ? active.closest<HTMLDetailsElement>('details[data-council-reviewer-key]')?.dataset.councilReviewerKey : undefined;
-    if (focusedChildKey || focusedReviewerKey) refresh.focus({ preventScroll: true });
-    const expandedChildren = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-child-reservations details[data-council-child-key][open]'))
-      .map(child => child.dataset.councilChildKey));
-    const expandedReviewers = new Set(Array.from(body.querySelectorAll<HTMLDetailsElement>('.council-reviewer-findings[data-council-reviewer-key][open]'))
-      .map(reviewer => reviewer.dataset.councilReviewerKey));
+    const { priorScope, focusedChildKey, focusedReviewerKey, expandedChildren, expandedReviewers } = pendingDisclosure ??= captureDisclosure();
     body.textContent = 'Loading native Council result…';
     // A synchronous read failure must also fail closed and release the button.
     void Promise.resolve().then(() => boundSessionId ? read() : null).then(result => {
@@ -644,6 +651,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     }).finally(() => {
       if (serial === current) {
         loading = false;
+        pendingDisclosure = null;
         refresh.removeAttribute('aria-disabled');
         refresh.removeAttribute('aria-busy');
         refresh.disabled = !canRender();
@@ -654,6 +662,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
     if (!details.open) {
       serial++;
       loading = false;
+      pendingDisclosure = null;
       refresh.disabled = true;
       refresh.removeAttribute('aria-disabled');
       refresh.removeAttribute('aria-busy');
@@ -673,6 +682,7 @@ export function createCouncilInspector(read: () => Promise<CouncilInspection | n
       // Invalidation must also erase a closed snapshot and fence in-flight reads.
       serial++;
       loading = false;
+      pendingDisclosure = null;
       shownScope = null;
       body.replaceChildren();
       refresh.disabled = true;

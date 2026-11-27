@@ -78,6 +78,7 @@ mod recipes;
 mod schedules;
 mod storage;
 mod subagent_state;
+mod debug_bundle;
 mod support;
 mod task_controls;
 mod task_deletion;
@@ -4979,6 +4980,8 @@ pub(crate) fn main_invoke_handler(invoke: tauri::ipc::Invoke<tauri::Wry>) -> boo
         task_controls::archive_codex_task,
         task_controls::export_task,
         task_controls::save_task_export,
+        task_controls::export_debug_bundle,
+        task_controls::save_debug_bundle,
         task_controls::start_harness_terminal,
         list_projects,
         add_project,

@@ -622,6 +622,14 @@ fn effective_team(
                     "Assigned Skill {} has unresolved safety findings: review it in Skills Manager.",
                     skill.id,
                 ));
+            } else if skill.safety_status=="integrity_mismatch" {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} package integrity differs from the library metadata: review or reimport it in Skills Manager.",skill.id,
+                ));
+            } else if matches!(skill.safety_status.as_str(),"source_unpinned" | "unavailable") {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} has an unavailable or unpinned package: review it in Skills Manager.",skill.id,
+                ));
             }
         }
         members.push(EffectiveMember {
@@ -702,18 +710,25 @@ pub async fn superagent_effective_team(
     state:State<'_,AppState>,orchestration_id:String,
 )->Result<EffectiveTeam> {
     require_main_window(&window)?;
-    let items=crate::skills::skills_list(app).await?;
-    let library:HashMap<String,LibraryStatus>=items.into_iter()
-        .filter(|item|item.meta.kind==crate::skills::Kind::Skill)
-        .map(|item| {
-            let safety=if item.findings.is_empty() {"clean"}
-                else if item.meta.acknowledged.as_deref()==Some(item.meta.sha256.as_str()) {
-                    "findings_acknowledged"
-                } else {"review_required"};
-            (item.meta.id,LibraryStatus{safety})
-        }).collect();
+    let initial={
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        effective_team(&store,&orchestration_id,&HashMap::new())?
+    };
+    let assigned:HashSet<String>=initial.members.iter()
+        .flat_map(|member|member.skills.iter().map(|skill|skill.id.clone())).collect();
+    // Release the store lock before the bounded, read-only library scan.
+    // The ordinary library listing may recover imports and mutate storage.
+    let library=crate::skills::library(&app)?;
+    let statuses=crate::skills::reviewer::inspect_team_skills(&library,&assigned)?;
+    let statuses=statuses.into_iter().map(|(id,safety)|(id,LibraryStatus{safety})).collect();
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    effective_team(&store,&orchestration_id,&library)
+    let current=effective_team(&store,&orchestration_id,&statuses)?;
+    let current_assigned:HashSet<String>=current.members.iter()
+        .flat_map(|member|member.skills.iter().map(|skill|skill.id.clone())).collect();
+    if current.policy_revision!=initial.policy_revision || current_assigned!=assigned {
+        return Err("Team configuration changed during Skills inspection; refresh the Team.".into());
+    }
+    Ok(current)
 }
 
 fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Result<()> {
@@ -1473,6 +1488,14 @@ mod tests {
         }).unwrap();
         let library=HashMap::from([("known".to_string(),LibraryStatus{safety:"review_required"})]);
         let view=effective_team(&store,&cfg.id,&library).unwrap();
+        let changed_library=HashMap::from([("known".to_string(),LibraryStatus{safety:"integrity_mismatch"})]);
+        let changed=effective_team(&store,&cfg.id,&changed_library).unwrap();
+        assert_eq!(changed.members[1].skills[0].library_status,"installed");
+        assert_eq!(changed.members[1].skills[0].safety_status,"integrity_mismatch");
+        assert_eq!(changed.members[1].skills[0].invocation_evidence,"not_verified");
+        assert!(changed.members[1].configuration_issues.iter().any(|issue|
+            issue.contains("package integrity")));
+        assert!(!changed.grants_issued);
         assert_eq!(view.policy_revision,roster.policy_revision);
         assert_eq!(view.members.iter().map(|m|m.role.as_str()).collect::<Vec<_>>(),
             vec!["coordinator","worker","worker","reviewer"]);

@@ -169,6 +169,55 @@ fn trusted_package(library: &Library, meta: &Meta) -> Result<(super::Files, BTre
     Ok((files, hashes))
 }
 
+/// Inspect explicitly assigned packages using the native Council package verifier.
+/// This is a diagnostic snapshot only: no recovery, activation, staging, dependency
+/// closure, harness eligibility, invocation or execution authorization is inferred.
+pub(crate) fn inspect_team_skills(
+    library: &Library,
+    ids: &HashSet<String>,
+) -> Result<std::collections::HashMap<String, &'static str>, String> {
+    let _guard = super::LOCK.lock().map_err(|e| e.to_string())?;
+    let mut result = std::collections::HashMap::new();
+    for id in ids {
+        if !super::valid_id(id) { continue; }
+        let metadata = match fs::symlink_metadata(library.meta_path(id)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                result.insert(id.clone(), "unavailable");
+                continue;
+            }
+        };
+        let status = if !metadata.is_file() || metadata.file_type().is_symlink() {
+            "integrity_mismatch"
+        } else {
+            match library.load(id) {
+                Err(_) => "integrity_mismatch",
+                Ok(meta) if meta.id != *id => "integrity_mismatch",
+                Ok(meta) if meta.kind != Kind::Skill => continue,
+                Ok(meta) if !matches!(meta.source.kind.as_str(), "folder" | "github") => "review_required",
+                Ok(meta) => match trusted_package(library, &meta) {
+                    Ok((files, _)) => {
+                        if files.iter().any(|(path, bytes)|
+                            !super::safety::scan(path, &String::from_utf8_lossy(bytes)).is_empty())
+                        {
+                            "findings_acknowledged"
+                        } else {
+                            "clean"
+                        }
+                    }
+                    Err(reason) if reason.starts_with("reviewer_skill_drift:") => "integrity_mismatch",
+                    Err(reason) if reason.starts_with("reviewer_skill_untrusted:") => "review_required",
+                    Err(reason) if reason.starts_with("reviewer_skill_source_unpinned:") => "source_unpinned",
+                    Err(_) => "unavailable",
+                },
+            }
+        };
+        result.insert(id.clone(), status);
+    }
+    Ok(result)
+}
+
 /// Immutable, content-addressed read-only copies outside the assessed checkout.
 /// A harness is told the exact path and never receives a global skill activation.
 fn stage(library: &Library, meta: &Meta, files: &super::Files, hashes: &BTreeMap<String, String>, scope: Option<&str>) -> Result<String, String> {
@@ -547,6 +596,44 @@ mod tests {
             file_hashes: hashes, activations: vec![],
         };
         fs::write(library.dir.join(format!("{id}.json")), serde_json::to_vec(&meta).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn team_skill_inventory_is_read_only_and_detects_package_drift() {
+        let (library, root) = fixture();
+        add(&library, "assigned", "Check evidence carefully.", &[]);
+        add(&library, "other", "Unrelated.", &[]);
+        let staging = library.dir.join(".assigned.staging");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("marker"), "incomplete import").unwrap();
+        // Unrelated damaged metadata must not prevent inspection of assigned IDs.
+        fs::write(library.dir.join("other.json"), "invalid json").unwrap();
+        let ids = HashSet::from(["assigned".to_owned(), "missing".to_owned()]);
+        let initial = inspect_team_skills(&library, &ids).unwrap();
+        assert_eq!(initial.get("assigned"), Some(&"clean"));
+        assert!(!initial.contains_key("missing"));
+        assert!(!initial.contains_key("other"));
+        assert!(staging.join("marker").is_file());
+        let meta_path = library.dir.join("assigned.json");
+        let original = fs::read(&meta_path).unwrap();
+        let mut meta: Meta = serde_json::from_slice(&original).unwrap();
+        meta.acknowledged = Some(meta.sha256.clone());
+        fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        fs::write(library.dir.join("assigned/extra.md"), "Changed package").unwrap();
+        let before = fs::read(&meta_path).unwrap();
+        let changed = inspect_team_skills(&library, &ids).unwrap();
+        assert_eq!(changed.get("assigned"), Some(&"integrity_mismatch"));
+        assert_eq!(fs::read(&meta_path).unwrap(), before);
+        assert!(staging.join("marker").is_file());
+        assert!(!library.dir.join(STAGE_ROOT).exists());
+        fs::remove_file(library.dir.join("assigned/extra.md")).unwrap();
+        meta.id = "../unrelated".into();
+        fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        assert_eq!(inspect_team_skills(&library, &ids).unwrap().get("assigned"),
+            Some(&"integrity_mismatch"));
+        fs::write(&meta_path, original).unwrap();
+        assert_eq!(inspect_team_skills(&library, &ids).unwrap().get("assigned"), Some(&"clean"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

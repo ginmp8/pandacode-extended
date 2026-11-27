@@ -6442,9 +6442,10 @@ async function reloadBotProjects(withProjects = true): Promise<void> {
     call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
     call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
   ]);
-  sidebarBots = nextBots;
-  // A delayed pre-archive response must not replace a newer Channel list.
+  // Apply bot identities and Channel membership from the same refresh.
+  // A delayed response must not restore an older reviewer roster or archive state.
   if (channelRequest > channelListApplied) {
+    sidebarBots = nextBots;
     sidebarChannels = nextChannels;
     channelListApplied = channelRequest;
   }

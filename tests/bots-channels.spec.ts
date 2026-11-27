@@ -1434,6 +1434,60 @@ test.describe('shared bot channels', () => {
     await expect(sidebar(page).getByRole('group', { name: 'Channels', exact: true }).getByRole('button', { name: '#launch' })).toHaveCount(0);
   });
 
+  test('a late bot roster cannot restore stale reviewer identities in the sidebar', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview-bots.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(/(case\s+['"]bots_list['"]\s*:[\s\S]*?)(\bbreak\s*;)/, (_match, listCase, end) =>
+        listCase + ' if (window.__botRosterResponse === "stale") { window.__botRosterResponse = ""; ' +
+        'result = result.map(bot => bot.name === "Scout" ? {...bot, name: "Stale Scout"} : bot); ' +
+        'await new Promise(resolve => { window.__releaseStaleBotRoster = resolve; }); ' +
+        'window.__staleBotRosterReturned = true; } else if (window.__botRosterResponse === "fresh") { ' +
+        'result = result.map(bot => bot.name === "Scout" ? {...bot, name: "Current Scout"} : bot); } ' + end)
+        .replace(/(case\s+['"]bot_task_links['"]\s*:[\s\S]*?)(\bbreak\s*;)/, (_match, linksCase, end) =>
+          linksCase + ' if (window.__staleBotRosterReturned) window.__staleBotRosterLinksRead = true; ' + end);
+      if (body === source || !body.includes('window.__staleBotRosterLinksRead')) throw new Error('Delayed bot roster interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await expect(sidebar(page).getByRole('button', { name: 'Scout settings' })).toBeVisible();
+    await page.evaluate(() => {
+      (window as any).__botRosterResponse = 'stale';
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
+    });
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__releaseStaleBotRoster)).toBe('function');
+    await page.evaluate(() => {
+      (window as any).__botRosterResponse = 'fresh';
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
+    });
+    const current = sidebar(page).getByRole('button', { name: 'Current Scout settings' });
+    await expect(current).toBeVisible();
+    // The older roster must not appear even transiently after the newer one.
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__staleBotRosterPainted = false;
+      const observer = new MutationObserver(() => {
+        if (document.querySelector('[aria-label="Stale Scout settings"]')) w.__staleBotRosterPainted = true;
+      });
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-label'] });
+      w.__stopBotRosterObservation = () => observer.disconnect();
+    });
+    await page.evaluate(() => (window as any).__releaseStaleBotRoster());
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__staleBotRosterLinksRead))).toBe(true);
+    await page.evaluate(async () => {
+      await new Promise<number>(requestAnimationFrame);
+      await new Promise<number>(requestAnimationFrame);
+    });
+    await expect(current).toBeVisible();
+    expect(await sidebar(page).getByRole('button', { name: 'Stale Scout settings' }).count()).toBe(0);
+    expect(await page.evaluate(() => {
+      const w = window as any;
+      w.__stopBotRosterObservation();
+      return w.__staleBotRosterPainted;
+    })).toBe(false);
+  });
+
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
     await showBots(page);
     await sidebar(page).getByRole('button', { name: 'Bot actions', exact: true }).click();

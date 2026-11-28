@@ -675,11 +675,12 @@ fn settle_pending(
     let now = storage::now();
     // The durable receipt, not a stale in-memory snapshot or a provider
     // error string, decides whether this poll has already reserved work.
-    let state: String = tx.query_row(
-        "SELECT state FROM sa_headless_dispatch_requests
-         WHERE id=?1 AND ticket_id=?2 AND expected_revision=?3",
+    let (state, current_revision): (String, i64) = tx.query_row(
+        "SELECT r.state,t.revision FROM sa_headless_dispatch_requests r
+         JOIN sa_tickets t ON t.id=r.ticket_id
+         WHERE r.id=?1 AND r.ticket_id=?2 AND r.expected_revision=?3",
         params![request.id, request.ticket_id, request.expected_revision],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
     match state.as_str() {
         "admitted" | "rejected" => {
@@ -689,10 +690,15 @@ fn settle_pending(
         "pending" => {}
         _ => return Err("Invalid native dispatch receipt state.".into()),
     }
-    if defer_if_busy && is_current(request, now) {
+    // A busy result may have been produced before another connection
+    // revised the Ticket. It is not permission to retain an obsolete intent.
+    // Already admitted receipts above remain immutable across revisions.
+    let stale = current_revision != request.expected_revision;
+    if defer_if_busy && !stale && is_current(request, now) {
         tx.commit().map_err(|e| e.to_string())?;
         return Ok(true);
     }
+    let reason = if stale { "Ticket revision changed" } else { reason };
     let detail: String = reason.chars().take(500).collect();
     let changed = tx.execute(
         "UPDATE sa_headless_dispatch_requests SET state='rejected',rejection=?2,updated_at=?3
@@ -849,6 +855,39 @@ mod stale_capacity_tests {
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id IN (?1,?2,?3)",
             params![stale,current,fresh], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+
+        // A delayed busy result from another host must recheck the current
+        // Ticket revision, not merely the immutable request's own lifetime.
+        assert!(settle_poll_failure(&store, &live, super::super::RETRY_WORKER_OCCUPIED).unwrap());
+        assert_eq!(by_key(&store, &current, "live").unwrap().unwrap().state, "pending");
+        let other_host = Store::open(&path).unwrap();
+        other_host.db.execute(
+            "UPDATE sa_tickets SET revision=revision+1 WHERE id=?1", [&current],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER fail_busy_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_dispatch_rejected'
+             BEGIN SELECT RAISE(ABORT,'test audit failure'); END;"
+        ).unwrap();
+        assert!(settle_poll_failure(&store, &live, super::super::RETRY_WORKER_OCCUPIED).is_err());
+        assert_eq!(by_key(&store, &current, "live").unwrap().unwrap().state, "pending");
+        store.db.execute_batch("DROP TRIGGER fail_busy_audit;").unwrap();
+
+        assert!(settle_poll_failure(&store, &live, super::super::RETRY_WORKER_OCCUPIED).unwrap());
+        assert!(settle_poll_failure(&other_host, &live, super::super::RETRY_WORKER_OCCUPIED).unwrap());
+        let reopened = Store::open_read_only(&path).unwrap();
+        let receipt = by_key(&reopened, &current, "live").unwrap().unwrap();
+        assert_eq!(receipt.state, "rejected");
+        assert_eq!(receipt.rejection.as_deref(), Some("Ticket revision changed"));
+        assert_eq!(pending_batch(&reopened).unwrap()[0].id, next.id);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='headless_dispatch_rejected'",
+            [&current], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&current], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
     }
 

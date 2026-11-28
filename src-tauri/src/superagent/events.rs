@@ -833,12 +833,17 @@ fn next_observe_subscription_sources(
                WHERE g.source_id=s.id AND g.cursor_sequence=s.last_sequence
                  AND g.verified_at IS NULL
            )
+           AND NOT EXISTS (
+               SELECT 1 FROM sa_event_decisions d
+               WHERE d.source_id=s.id AND d.sequence>s.last_sequence
+           )
+           AND (SELECT COUNT(*) FROM sa_event_decisions d WHERE d.source_id=s.id)<?4
            AND (?1 IS NULL OR s.created_at>?1
                 OR (s.created_at=?1 AND s.id>?2))
          ORDER BY s.created_at,s.id LIMIT ?3",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(
-        params![after_at, after_id, AUTO_OBSERVE_BATCH],
+        params![after_at, after_id, AUTO_OBSERVE_BATCH, MAX_RECEIPTS],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
     ).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -868,9 +873,14 @@ fn next_background_linked_pr_check(
                WHERE g.source_id=s.id AND g.cursor_sequence=s.last_sequence
                  AND g.verified_at IS NULL
            )
+           AND NOT EXISTS (
+               SELECT 1 FROM sa_event_decisions d
+               WHERE d.source_id=s.id AND d.sequence>s.last_sequence
+           )
+           AND (SELECT COUNT(*) FROM sa_event_decisions d WHERE d.source_id=s.id)<?3
            AND (?1 IS NULL OR s.id>?1 OR (s.id=?1 AND l.subject_key>?2))
          ORDER BY s.id,l.subject_key LIMIT 1",
-        params![after_source,after_key],
+        params![after_source,after_key,MAX_RECEIPTS],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(|e| e.to_string())
 }
@@ -1037,10 +1047,11 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
             params![source_id,&selected.orchestration_id], |row| row.get::<_, bool>(0),
         ).map_err(|e| e.to_string())?
     } else { false };
-    let background_selected = team_enabled == 1 && selected.mode == "observe"
-        && (!is_check_source || has_pr_link) && !gap_needs_operator;
     let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
     let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
+    let background_selected = team_enabled == 1 && selected.mode == "observe"
+        && (!is_check_source || has_pr_link) && !gap_needs_operator
+        && cursor_consistent && !receipt_capacity_reached;
     let next_action = if !cursor_consistent {
         "investigate_cursor_receipt_mismatch"
     } else if receipt_capacity_reached {
@@ -4152,6 +4163,70 @@ mod tests {
         assert_eq!(list_thread_links(&reopened, reopened_id).unwrap()[0].subject_key, "issue:43");
         assert_eq!(super::super::get_ticket(&reopened,id).unwrap().objective,
             "Inspect local checkout");
+    }
+
+    #[test]
+    fn background_rotation_skips_unusable_sources_and_preserves_healthy_work() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "check-ticket", "orch");
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1 WHERE id='orch'", [],
+        ).unwrap();
+        for kind in ["issues.opened", "check_run.completed"] {
+            let make = |actor: &str| {
+                let off = create_source(&store, "orch", "owner/repo", actor, kind).unwrap();
+                if kind == "check_run.completed" {
+                    link_thread(&store, &off.id, "check-ticket", "pull:42").unwrap();
+                }
+                set_mode(&store, &off.id, off.policy_revision, "observe").unwrap()
+            };
+            let damaged = make("damaged");
+            let full = make("full");
+            let healthy = make("healthy");
+            for (source_id, count) in [(&damaged.id, 1), (&full.id, MAX_RECEIPTS)] {
+                store.db.execute(
+                    "WITH RECURSIVE numbers(n) AS (
+                         SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<?2
+                     ) INSERT INTO sa_event_decisions
+                     (source_id,delivery_id,repository,actor,event_kind,subject_key,
+                      sequence,decision,policy_revision,at)
+                     SELECT ?1,'fixture-' || n,'owner/repo','fixture',?3,'pull:42',
+                            n,'observed_permitted',1,1 FROM numbers",
+                    params![source_id,count,kind],
+                ).unwrap();
+            }
+            store.db.execute(
+                "UPDATE sa_event_sources SET last_sequence=?2 WHERE id=?1",
+                params![&full.id,MAX_RECEIPTS],
+            ).unwrap();
+            let bad_health = inspect_source_integrity(&store, &damaged.id).unwrap();
+            assert!(!bad_health.cursor_consistent && !bad_health.background_selected);
+            let full_health = inspect_source_integrity(&store, &full.id).unwrap();
+            assert!(full_health.receipt_capacity_reached && !full_health.background_selected);
+            assert!(inspect_source_integrity(&store, &healthy.id).unwrap().background_selected);
+            if kind == "issues.opened" {
+                let batch = next_observe_subscription_sources(&store, None).unwrap();
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].1, healthy.id);
+            } else {
+                let next = next_background_linked_pr_check(&store, None).unwrap().unwrap();
+                assert_eq!(next.0, healthy.id);
+                assert!(next_background_linked_pr_check(&store, Some((&next.0,&next.1)))
+                    .unwrap().is_none());
+            }
+            // A repaired cursor is eligible again without altering any receipts.
+            store.db.execute("UPDATE sa_event_sources SET last_sequence=1 WHERE id=?1",
+                [&damaged.id]).unwrap();
+            assert!(inspect_source_integrity(&store, &damaged.id).unwrap().background_selected);
+        }
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(next_observe_subscription_sources(&reopened, None).unwrap().len(), 2);
+        let first = next_background_linked_pr_check(&reopened, None).unwrap().unwrap();
+        let second = next_background_linked_pr_check(&reopened, Some((&first.0,&first.1)))
+            .unwrap().unwrap();
+        assert!(next_background_linked_pr_check(&reopened, Some((&second.0,&second.1)))
+            .unwrap().is_none());
     }
 
     #[test]

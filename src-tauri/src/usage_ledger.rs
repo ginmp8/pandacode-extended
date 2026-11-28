@@ -551,6 +551,46 @@ fn task_usage_from_matching_cache(
     usage
 }
 
+/// Sum the union of all exclusively attributed Assignment log identities.
+/// Do not add independent Assignment totals: resumed Claude replies may be
+/// present in more than one log. The existing ledger deduplicates reply keys.
+fn demand_usage_from_cache(
+    cache: &Cache, assignments: &[(Agent, Vec<String>)],
+) -> (TaskUsage, usize) {
+    let usage = task_usage_from_matching_cache(cache, 0, &|agent, path| {
+        assignments.iter().any(|(expected, links)| {
+            assignment_log_matches(*expected, links, agent, path)
+        })
+    });
+    let observed = assignments.iter().filter(|(expected, links)| {
+        !links.is_empty() && links.iter().all(|link| {
+            cache.files.iter().any(|(path, entry)| {
+                entry.agent.is_some_and(|agent| {
+                    assignment_log_matches(*expected, std::slice::from_ref(link), agent, Path::new(path))
+                }) && entry.records.iter().any(|record| record.hour >= 0)
+            })
+        })
+    }).count();
+    (usage, observed)
+}
+
+pub(crate) async fn demand_task_usage(
+    dir: PathBuf, assignments: Vec<(Agent, Vec<String>)>,
+) -> crate::Result<(TaskUsage, usize)> {
+    if assignments.is_empty() {
+        return Ok((TaskUsage::default(), 0));
+    }
+    let mut state = state().lock().await;
+    let since_scan = crate::storage::now() - HISTORY_DAYS * 86_400_000;
+    with_cache(&mut state, &dir, move |cache| {
+        let keep = |actual, path: &Path| assignments.iter().any(|(agent, links)| {
+            assignment_log_matches(*agent, links, actual, path)
+        });
+        let changed = refresh_matching(cache, &agent_roots(), since_scan, &keep);
+        (changed, demand_usage_from_cache(cache, &assignments))
+    }).await
+}
+
 /// Task totals sharing the ledger's log cache; `since_ms` trims older records.
 /// Only the task's own log files are refreshed, so a run end reads just what it appended.
 pub(crate) async fn task_usage(dir: PathBuf, links: Vec<String>, since_ms: Option<i64>) -> crate::Result<TaskUsage> {

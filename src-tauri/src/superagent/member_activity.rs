@@ -275,6 +275,98 @@ pub(crate) fn assignment_usage_scope(
     Ok(AssignmentUsageScope::Bound { assignment_id, ticket_id, agent, links })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DemandUsageSnapshot {
+    revision: i64,
+    assignments: Vec<(String, String, AssignmentUsageScope)>,
+}
+
+fn demand_usage_snapshot(
+    store: &Store, orchestration_id: &str, ticket_id: &str,
+) -> Result<DemandUsageSnapshot> {
+    // Bind the full set of attempts, not just the paginated inspector or
+    // the mutable Team roster. Read one SQLite snapshot across all checks.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let revision = tx.query_row(
+        "SELECT revision FROM sa_tickets WHERE id=?1 AND orchestration_id=?2",
+        params![ticket_id, orchestration_id], |r| r.get::<_, i64>(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("Demand does not belong to this Team.")?;
+    let attempts = {
+        let mut stmt = tx.prepare(
+            "SELECT id,session_id FROM sa_assignments WHERE ticket_id=?1
+             ORDER BY id LIMIT 101",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([ticket_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    if attempts.len() > 100 {
+        return Err("Demand usage exceeds the 100-assignment scan limit; totals unavailable.".into());
+    }
+    let mut assignments = Vec::with_capacity(attempts.len());
+    for (id, session_id) in attempts {
+        let scope = assignment_usage_scope(store, &session_id)?;
+        match &scope {
+            AssignmentUsageScope::Bound { assignment_id, ticket_id: owner, .. }
+                if assignment_id == &id && owner == ticket_id => {}
+            AssignmentUsageScope::Unknown => {}
+            _ => return Err("Native Demand assignment identity changed; refresh usage.".into()),
+        }
+        assignments.push((id, session_id, scope));
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(DemandUsageSnapshot { revision, assignments })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DemandUsage {
+    orchestration_id: String,
+    ticket_id: String,
+    ticket_revision: i64,
+    assignment_count: usize,
+    observed_assignment_count: usize,
+    usage: Option<crate::usage_ledger::TaskUsage>,
+}
+
+/// Observed local log tokens, not a billing receipt or proof of task completion.
+#[tauri::command]
+pub(crate) async fn superagent_demand_usage(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    orchestration_id: String,
+    ticket_id: String,
+) -> Result<DemandUsage> {
+    use tauri::Manager;
+    require_main_window(&window)?;
+    let snapshot = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        demand_usage_snapshot(&store, &orchestration_id, &ticket_id)?
+    };
+    let links = snapshot.assignments.iter().filter_map(|(_, _, scope)| {
+        match scope {
+            AssignmentUsageScope::Bound { agent, links, .. } => Some((*agent, links.clone())),
+            _ => None,
+        }
+    }).collect::<Vec<_>>();
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let (usage, observed_assignment_count) =
+        crate::usage_ledger::demand_task_usage(dir, links).await?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    if demand_usage_snapshot(&store, &orchestration_id, &ticket_id)? != snapshot {
+        return Err("Native Demand usage identity changed during scan; refresh usage.".into());
+    }
+    Ok(DemandUsage {
+        orchestration_id, ticket_id, ticket_revision: snapshot.revision,
+        assignment_count: snapshot.assignments.len(),
+        observed_assignment_count,
+        usage: usage.last_used.map(|_| usage),
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignmentChatLink {
@@ -592,6 +684,11 @@ mod tests {
             links: vec![harness_id.into()],
         };
         assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(), expected_scope);
+        let usage_snapshot = demand_usage_snapshot(&store, &team.id, &ticket.id).unwrap();
+        assert_eq!(usage_snapshot.assignments.len(), 1);
+        assert_eq!(usage_snapshot.assignments[0].2, expected_scope);
+        assert!(demand_usage_snapshot(&store, &foreign.id, &ticket.id).is_err(),
+            "A shared bot cannot expose another Team's usage");
         store.db.execute(
             "INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at,resume_id)
              VALUES('ordinary-usage','chat-project','Ordinary','codex','default','plan','idle',0,0,?1)",
@@ -601,6 +698,9 @@ mod tests {
             AssignmentUsageScope::Ordinary);
         assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
             AssignmentUsageScope::Unknown, "A shared current resume ID is ambiguous");
+        let ambiguous = demand_usage_snapshot(&store, &team.id, &ticket.id).unwrap();
+        assert_ne!(usage_snapshot, ambiguous, "In-flight usage scan must become stale");
+        assert_eq!(ambiguous.assignments[0].2, AssignmentUsageScope::Unknown);
         store.db.execute(
             "UPDATE sessions SET resume_id=NULL WHERE id='ordinary-usage'", [],
         ).unwrap();
@@ -647,6 +747,8 @@ mod tests {
             &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
         ).is_ok(), "Historical native identity survives restart");
         assert_eq!(assignment_usage_scope(&reopened, &session_id).unwrap(), expected_scope);
+        assert_eq!(demand_usage_snapshot(&reopened, &team.id, &ticket.id).unwrap(),
+            usage_snapshot, "Attribution identity survives reopening the database");
         let audit_before: i64 = reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
         ).unwrap();

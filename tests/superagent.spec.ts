@@ -98,6 +98,12 @@ test(`explicit secondary Worker selection uses native preflight and read-only ta
       } as never;
       }
       if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_demand_usage') return {
+        orchestrationId: (window as unknown as {saTamperUsage?:boolean}).saTamperUsage
+          ? 'another-team' : 'team',
+        ticketId:'task', ticketRevision:1, assignmentCount:2, observedAssignmentCount:1,
+        usage:{input:25,cacheRead:0,cacheWrite:0,output:5},
+      } as never;
       if(command==='superagent_roster') return {
         orchestrationId:(args as {orchestrationId:string}).orchestrationId,
         policyRevision:2,coordinatorBotId:'coordinator',
@@ -157,8 +163,23 @@ test(`explicit secondary Worker selection uses native preflight and read-only ta
   await expect(host.getByRole('status').filter({hasText:'Native Demand task opened'}))
     .toContainText('No completion or Council approval inferred.');
   await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await page.evaluate(() => {
+    (window as unknown as {saTamperUsage:boolean}).saTamperUsage=true;
+  });
+  await host.getByRole('button',{name:'Load observed usage'}).click();
+  await expect(host.getByRole('alert')).toContainText('Invalid or stale Demand usage');
+  await expect(host.getByRole('region',{name:'Demand usage'})).not.toContainText('25 input');
+  await page.evaluate(() => {
+    (window as unknown as {saTamperUsage:boolean}).saTamperUsage=false;
+  });
+  await host.getByRole('button',{name:'Load observed usage'}).click();
+  await expect(host.getByRole('region',{name:'Demand usage'})).toContainText('25 input');
+  await expect(host.getByRole('region',{name:'Demand usage'})).toContainText('1 / 2');
+  await expect(host.getByRole('region',{name:'Demand usage'})).toContainText('Cost unknown');
   const calls=await page.evaluate(()=>
     (window as unknown as {saDirectCalls:Array<{command:string;args:unknown}>}).saDirectCalls);
+  expect(calls.filter(call=>call.command==='superagent_demand_usage').map(call=>call.args))
+    .toEqual([{orchestrationId:'team',ticketId:'task'}, {orchestrationId:'team',ticketId:'task'}]);
   const expectedCommand=dispatchMode==='coordinated' ? 'superagent_submit_coordinated' : 'superagent_submit_to_worker';
   const otherCommand=dispatchMode==='coordinated' ? 'superagent_submit_to_worker' : 'superagent_submit_coordinated';
   const submitted=calls.filter(call=>call.command===expectedCommand);

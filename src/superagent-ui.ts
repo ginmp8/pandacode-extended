@@ -48,6 +48,11 @@ interface EffectReceipt {
   effectKey: string; payloadSha256: string; state: 'pending' | 'uncertain' | 'applied';
   createdAt: number; updatedAt: number;
 }
+interface DemandUsage {
+  orchestrationId: string; ticketId: string; ticketRevision: number;
+  assignmentCount: number; observedAssignmentCount: number;
+  usage: {input:number; cacheRead:number; cacheWrite:number; output:number} | null;
+}
 interface AssignmentInsight {
   assignmentId: string; currentAssignment: boolean; hasResult: boolean;
   mandateRevoked: boolean; runBudgetExpired: boolean; remainingRunBudgetMs: number | null;
@@ -205,6 +210,7 @@ let demandArchived = false;
   let activityFilter = '';
   let olderActivity: Activity[] = [], olderActivityTicketId = '', olderActivityHasMore = true;
   let ticketDetails: TicketDetails | null = null;
+  let demandUsage: DemandUsage | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
@@ -654,6 +660,9 @@ let demandArchived = false;
           Math.max(0, Math.floor(insight.remainingRunBudgetMs / 1000)) + ' seconds remain') +
         '</dd></dl><button type="button" data-sa-close-assignment>Close attempt</button></section>'
       : '';
+    const usage = demandUsage && demandUsage.ticketId === inspected?.id &&
+      demandUsage.orchestrationId === selected &&
+      demandUsage.ticketRevision === ticketDetails?.ticket.revision ? demandUsage : null;
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
@@ -678,6 +687,15 @@ let demandArchived = false;
             : ticketDetails.finalizationGate === 'native_recheck_required'
               ? 'Manual decision possible only after native authorization recheck.'
               : 'No finalization decision pending.') + '</dd></dl>' +
+        '<section role="region" aria-label="Demand usage"><h5>Demand usage</h5>' +
+        '<p>Observed provider log tokens only; missing logs and financial costs are unknown.</p>' +
+        '<button type="button" data-sa-load-demand-usage>Load observed usage</button>' +
+        (usage ? '<p>' + (usage.usage ?
+          safe(usage.usage.input) + ' input · ' + safe(usage.usage.output) + ' output · ' +
+          safe(usage.usage.cacheRead) + ' cache read · ' + safe(usage.usage.cacheWrite) + ' cache write'
+          : 'Token usage unknown') + '</p><p>Linked log evidence: ' +
+          safe(usage.observedAssignmentCount) + ' / ' + safe(usage.assignmentCount) +
+          ' assignments · Cost unknown</p>' : '') + '</section>' +
         '<section class="sa-admitted-profile" role="region" aria-label="Admitted Team configuration">' +
         '<h5>Team configuration at Demand admission</h5>' +
         '<p>Historical native configuration, not provider capability, a tool grant, Skill invocation or Council approval. ' +
@@ -1713,6 +1731,7 @@ let demandArchived = false;
     host.setAttribute('aria-busy', String(busy || loading));
   }
   async function refreshTicketDetails(preloaded?: {snapshot:TicketDetails; links:ThreadLink[]}): Promise<void> {
+    demandUsage = null;
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
@@ -2396,6 +2415,26 @@ let demandArchived = false;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
         preflightWorkerId = workerId;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-demand-usage')) {
+      const ticketId = inspectedTicket, orchestrationId = selected;
+      if (ticketId && ticketDetails) void work(async () => {
+        demandUsage = null;
+        const result = await call<DemandUsage>('superagent_demand_usage', {ticketId, orchestrationId});
+        if (inspectedTicket !== ticketId || selected !== orchestrationId) return;
+        const count = (n: number) => Number.isSafeInteger(n) && n >= 0;
+        if (!result || result.ticketId !== ticketId || result.orchestrationId !== orchestrationId ||
+            result.ticketRevision !== ticketDetails?.ticket.revision ||
+            !count(result.assignmentCount) || result.assignmentCount > 100 ||
+            !count(result.observedAssignmentCount) || result.observedAssignmentCount > result.assignmentCount ||
+            (result.usage === null ? result.observedAssignmentCount !== 0 :
+              !result.usage || ![result.usage.input, result.usage.cacheRead,
+                result.usage.cacheWrite, result.usage.output].every(count))) {
+          throw new Error('Invalid or stale Demand usage; refresh the Inspector.');
+        }
+        demandUsage = result;
       });
       return;
     }

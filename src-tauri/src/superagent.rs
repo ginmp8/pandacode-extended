@@ -3625,6 +3625,19 @@ fn native_provider_scope(store: &Store, session_id: &str) -> Result<Option<(Stri
     ).optional().map_err(|e| e.to_string())
 }
 
+/// A session's provider can run from an attached worktree rather than its
+/// project root. Preserve the existing conservative project lease and also
+/// fence the actual worktree, including cross-project aliases.
+fn session_checkout_overlaps(
+    store: &Store, session: &storage::Session, requested_path: &str,
+) -> Result<bool> {
+    if checkout_paths_overlap(&checkout_path(store, &session.project_id)?, requested_path) {
+        return Ok(true);
+    }
+    Ok(session.worktree_path.as_deref().is_some_and(|path|
+        path.trim().is_empty() || checkout_paths_overlap(path, requested_path)))
+}
+
 /// Native admission must account for ordinary running chats/direct tasks,
 /// not just persisted SuperAgent leases. Unknown live sessions fail closed.
 fn active_manual_conflict(
@@ -3635,9 +3648,7 @@ fn active_manual_conflict(
         let session = store.session(session_id)
             .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
         if session.project_id == project_id
-            || checkout_paths_overlap(
-                &checkout_path(store,&session.project_id)?, &requested_path,
-            ) {
+            || session_checkout_overlaps(store, &session, &requested_path)? {
             return Ok(true);
         }
         if let Some((assigned_bot, ticket_project)) = native_provider_scope(store, session_id)? {
@@ -4622,10 +4633,9 @@ pub(crate) fn guard_run_admission(
     ))).map_err(|e|e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     if !leased.is_empty() {
-        let session_path=checkout_path(store,&session.project_id)?;
         for (ticket_project,assigned_project) in leased {
             for id in std::iter::once(ticket_project.as_str()).chain(assigned_project.as_deref()) {
-                if checkout_paths_overlap(&session_path,&checkout_path(store,id)?) {
+                if session_checkout_overlaps(store, &session, &checkout_path(store,id)?)? {
                     return Err("Physical checkout is reserved by another native SuperAgent assignment.".into());
                 }
             }
@@ -4635,18 +4645,17 @@ pub(crate) fn guard_run_admission(
     // Assignment settles. A still-running provider may outlive cancellation,
     // so also check the in-memory registry after the durable orphan fence.
     if !superagent_run && !running_sessions.is_empty() {
-        let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
             if other_id == session_id { continue; }
             let Some((assigned_bot, ticket_project)) = native_provider_scope(store, other_id)?
                 else { continue; };
             let native_session=store.session(other_id)?;
             let same_bot = session_bot_id.as_deref() == Some(assigned_bot.as_str());
-            if same_bot || checkout_paths_overlap(
-                &session_path,&checkout_path(store,&native_session.project_id)?,
-            ) || checkout_paths_overlap(
-                &session_path,&checkout_path(store,&ticket_project)?,
-            ) {
+            if same_bot || session_checkout_overlaps(
+                store, &session, &checkout_path(store,&native_session.project_id)?,
+            )? || session_checkout_overlaps(
+                store, &session, &checkout_path(store,&ticket_project)?,
+            )? {
                 return Err("Native SuperAgent provider is still running on this bot or checkout.".into());
             }
         }
@@ -4671,9 +4680,7 @@ pub(crate) fn guard_run_admission(
             };
             if (session_bot_id.is_some() && session_bot_id == other_bot_id)
                 || other.project_id == session.project_id
-                || checkout_paths_overlap(
-                    &checkout_path(store,&other.project_id)?, &session_path,
-                ) {
+                || session_checkout_overlaps(store, &other, &session_path)? {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }
@@ -18885,6 +18892,66 @@ mod tests {
         ).unwrap());
         assert!(guard_run_admission(&store, &child_session.id, &[]).is_ok());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_lease_fences_attached_ordinary_worktree() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-attached-worktree-{}", storage::id()));
+        let native_root = root.join("native");
+        let ordinary_root = root.join("ordinary");
+        let independent_root = root.join("independent");
+        for dir in [&native_root, &ordinary_root, &independent_root] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(".git"), "gitdir: fixture").unwrap();
+        }
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [native_root.to_string_lossy().into_owned()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('ordinary-project','Ordinary',?1)",
+            [ordinary_root.to_string_lossy().into_owned()],
+        ).unwrap();
+        let ordinary = store.create_session("ordinary-project", "codex", "default", "ask").unwrap();
+        store.attach_worktree(&ordinary.id, &native_root, "existing-worktree").unwrap();
+        let independent = store.create_session("ordinary-project", "codex", "default", "ask").unwrap();
+        store.attach_worktree(&independent.id, &independent_root, "other-worktree").unwrap();
+        assert_eq!(store.workspace_root("ordinary-project", Some(&ordinary.id)).unwrap(),
+            native_root.canonicalize().unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok(),
+            "An ordinary session is unchanged before a native lease exists");
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap(), "An already running ordinary worktree occupies the native checkout");
+        assert!(!active_manual_conflict(
+            &store, std::slice::from_ref(&independent.id), "worker", "project",
+        ).unwrap());
+
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Protect the attached checkout", "attached-worktree", false,
+        ).unwrap();
+        assert!(started);
+        let native = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        assert!(guard_run_admission(
+            &store, &native, std::slice::from_ref(&ordinary.id),
+        ).is_err());
+        assert!(guard_run_admission(&store, &independent.id, &[]).is_ok());
+        assert!(guard_run_admission(
+            &store, &native, std::slice::from_ref(&independent.id),
+        ).is_ok());
+
+        stop(&store, &ticket.id).unwrap();
+        assert!(guard_run_admission(
+            &store, &ordinary.id, std::slice::from_ref(&native),
+        ).is_err(), "A stopped but still-live native provider retains its checkout fence");
+        assert!(guard_run_admission(
+            &store, &independent.id, std::slice::from_ref(&native),
+        ).is_ok());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

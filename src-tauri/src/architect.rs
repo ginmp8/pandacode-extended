@@ -4295,12 +4295,19 @@ fn completed_with_agents(
     if let Some(admission) = admission {
         if let Ok(store) = state.store.lock() {
             // Completion is not an authority grant. Ignore spoofed child callbacks.
-            let authorized = if parent_of(&store, &admission.parent).ok().flatten().is_some() {
-                child_council::authorize_leaf(&store, sid, admission)
-            } else {
-                reject_task_owned_child_lead(&store, &admission.parent)
+            let root_strategy = match parent_of(&store, &admission.parent) {
+                Ok(Some(root_sid)) => {
+                    if child_council::authorize_leaf(&store, sid, admission).is_err() { return; }
+                    let Ok(Some(root)) = load(&store, &root_sid) else { return; };
+                    let Some(config) = root.config.council.as_ref() else { return; };
+                    Some(config.strategy)
+                }
+                Ok(None) => {
+                    if reject_task_owned_child_lead(&store, &admission.parent).is_err() { return; }
+                    None
+                }
+                Err(_) => return,
             };
-            if authorized.is_err() { return; }
             if let Ok(Some(mut team)) = load(&store, &admission.parent) {
                 if team.generation == admission.generation {
                     if let Some(index) = team.workers.iter().position(|w| w.session_id == sid) {
@@ -4317,8 +4324,15 @@ fn completed_with_agents(
                         let replied: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND role='assistant' AND trim(content)<>'' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination','tool')))", [sid], |r| r.get(0)).unwrap_or(true);
                         let silent = successful && !stopped && !replied;
                         let ran_tools = silent && store.db.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1 AND role='tool')", [sid], |r| r.get(0)).unwrap_or(false);
+                        // A child uses an automatic local Council, but its leaf
+                        // evidence must satisfy the owning root's strategy.
+                        let strategy = root_strategy.or_else(||
+                            team.config.council.as_ref().map(|config| config.strategy)).unwrap_or_default();
+                        let bounded_report = strategy != council::CouncilExecutionStrategy::Parallel;
                         let worker = &mut team.workers[index];
-                        let score = if worker.council.is_some() && successful && !stopped { council::latest_score(&store, sid) } else { None };
+                        let score = if worker.council.is_some() && successful && !stopped {
+                            council::latest_score_for_strategy(&store, sid, strategy)
+                        } else { None };
                         let unscored = worker.council.is_some() && score.is_none();
                         // A reply ends the silence: a later silent run is asked once again.
                         if replied {
@@ -4341,10 +4355,14 @@ fn completed_with_agents(
                                 "failed"
                             } else if successful && unscored && !worker.score_nudged {
                                 worker.score_nudged = true;
-                                worker.resume_prompt = Some(council::SCORE_PROMPT.into());
+                                worker.resume_prompt = Some((if bounded_report {
+                                    council::BOUNDED_SCORE_PROMPT
+                                } else { council::SCORE_PROMPT }).into());
                                 "queued"
                             } else if successful && unscored {
-                                worker.error = Some(council::SCORE_ERROR.into());
+                                worker.error = Some((if bounded_report {
+                                    council::BOUNDED_SCORE_ERROR
+                                } else { council::SCORE_ERROR }).into());
                                 "failed"
                             } else if successful {
                                 "completed"

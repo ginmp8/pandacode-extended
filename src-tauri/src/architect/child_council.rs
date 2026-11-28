@@ -1226,7 +1226,10 @@ fn validate_admitted(
             || leaf.reasoning_effort != session.reasoning_effort
             || session.reasoning_effort != coordinator.reasoning_effort
             || leaf.resume_prompt.as_deref().is_some_and(|prompt|
-                prompt != super::EMPTY_REPLY_PROMPT && prompt != super::council::SCORE_PROMPT)
+                prompt != super::EMPTY_REPLY_PROMPT && prompt != super::council::SCORE_PROMPT
+                    && !(prompt == super::council::BOUNDED_SCORE_PROMPT
+                        && root.config.council.as_ref().is_some_and(|policy|
+                            policy.strategy != super::council::CouncilExecutionStrategy::Parallel)))
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
             // A queued snapshot cannot authorize a second provider launch if

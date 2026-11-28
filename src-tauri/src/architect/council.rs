@@ -22,6 +22,8 @@ const SCORE_TAIL_CHARS: i64 = 8192;
 /// The whole report again, so read_worker and the summary carry it with its score.
 pub(super) const SCORE_PROMPT: &str = "Your final report did not end with a score. Repeat your final report in full, ending with the exact line `Council score: N/10`, where N is your score for the work you just reviewed.";
 pub(super) const SCORE_ERROR: &str = "The reviewer ended two runs without a `Council score: N/10` line. Cancel it and dispatch a fresh reviewer with councilLens.";
+pub(super) const BOUNDED_SCORE_PROMPT: &str = "Provide a fresh complete review report in at most 8192 UTF-8 bytes, preserving all material findings and required evidence. If supplied, include one valid Council findings JSON block. End with the exact line `Council score: N/10`.";
+pub(super) const BOUNDED_SCORE_ERROR: &str = "The reviewer ended two runs without a valid bounded Council score and report. Cancel it and dispatch a fresh reviewer with councilLens.";
 pub(super) const NO_FOLLOWUP: &str = "Dispatch a fresh reviewer for the next round";
 /// Below the target, the user decides whether a blocker must be fixed.
 const ESCAPE: &str = "If a remaining blocker should not be fixed, end your turn and tell the user, who can lower the target or turn Council off; if they say to accept the current scores, tell them to press Accept and finish on the Council card.";
@@ -1452,19 +1454,35 @@ pub(super) fn scored_report_is_current_for_strategy(
     strategy: CouncilExecutionStrategy,
 ) -> bool {
     if seat.score.is_none() { return false; }
-    // Both S3 phases remain bound to complete reports after handoff. A
-    // replacement phase-one report cannot hide findings beyond the score tail.
     let require_complete = strategy != CouncilExecutionStrategy::Parallel;
-    // The native completion callback requires assistant output after the latest
-    // tool activity. Revalidate that same boundary for S2/S3, including S3 phase one.
-    // Preserve the legacy S1 report boundary.
-    let tail: Option<String> = store.db.query_row(
+    latest_report_for_strategy(store, session_id, strategy)
+        .is_some_and(|report| matching_report_findings(&report, seat, require_complete).is_some())
+}
+
+/// Admission and terminal verification share the complete native report boundary.
+/// Keep S1's historical score-tail semantics; S2/S3 cannot truncate findings or
+/// admit a report preceding the most recent tool event.
+fn latest_report_for_strategy(
+    store: &storage::Store, session_id: &str, strategy: CouncilExecutionStrategy,
+) -> Option<String> {
+    let require_complete = strategy != CouncilExecutionStrategy::Parallel;
+    store.db.query_row(
         "SELECT CASE WHEN ?3 AND length(CAST(content AS BLOB)) > abs(?2)
           THEN NULL ELSE substr(content,?2) END FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND (role IN ('user','coordination') OR (?4 AND role='tool'))) ORDER BY id DESC LIMIT 1",
-        params![session_id, -SCORE_TAIL_CHARS, require_complete, strategy != CouncilExecutionStrategy::Parallel],
+        params![session_id, -SCORE_TAIL_CHARS, require_complete, require_complete],
         |row| row.get::<_, Option<String>>(0),
-    ).optional().ok().flatten().flatten();
-    tail.is_some_and(|report| matching_report_findings(&report, seat, require_complete).is_some())
+    ).optional().ok().flatten().flatten()
+}
+
+pub(super) fn latest_score_for_strategy(
+    store: &storage::Store, session_id: &str, strategy: CouncilExecutionStrategy,
+) -> Option<f64> {
+    if strategy == CouncilExecutionStrategy::Parallel {
+        return latest_score(store, session_id);
+    }
+    let report = latest_report_for_strategy(store, session_id, strategy)?;
+    complete_reported_findings(&report)?;
+    parse_score(&report)
 }
 
 /// This cycle's reviewers: each new user objective starts a new cycle.

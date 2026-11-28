@@ -13537,6 +13537,90 @@ fn assert_bounded_native_report(
 }
 
 #[test]
+fn native_s2_s3_callbacks_reject_invalid_reports_before_recording_a_score() {
+    for strategy in [council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase] {
+        for report in [
+            format!("{}\nCouncil score: 9.8/10", "x".repeat(8192)),
+            format!("{}\nCouncil score: 9.8/10", "\u{00e9}".repeat(4096)),
+            "Council findings JSON: invalid\nCouncil score: 9.8/10".into(),
+            "Council findings JSON: []\nCouncil findings JSON: []\nCouncil score: 9.8/10".into(),
+        ] {
+            let mut config = on(9.0, 3, 2);
+            config.strategy = strategy;
+            let (state, sid) = council_state(config);
+            call(&state, &sid, "pandacode_dispatch_workers", json!({
+                "assignments": [reviewer_assignment("bounded-security", "security"),
+                    reviewer_assignment("bounded-correctness", "correctness")]
+            })).unwrap();
+            let (run, _) = claim(&state, next_action_state(&state, &mut |_| {}).unwrap().unwrap());
+            finish(&state, &run, &report, true);
+            let team = saved(&state, &sid);
+            let worker = team.workers.iter().find(|w| w.session_id == run.config.session_id).unwrap();
+            assert_eq!(worker.status, "queued", "{strategy:?}: invalid report must request a bounded retry");
+            assert_eq!(worker.council.as_ref().unwrap().score, None);
+            assert!(worker.score_nudged);
+            assert!(worker.resume_prompt.as_deref().unwrap().contains("8192 UTF-8 bytes"));
+        }
+    }
+}
+
+#[test]
+fn native_s2_s3_child_callbacks_inherit_the_root_report_boundary() {
+    for strategy in [council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase] {
+        let (state, sid) = state_fixture();
+        {
+            let store = state.store.lock().unwrap();
+            let project = store.session(&sid).unwrap().project_id;
+            for bot in ["bounded-child-a", "bounded-child-b"] {
+                store.db.execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                    rusqlite::params![bot, project, storage::now()],
+                ).unwrap();
+            }
+            let mut root = load(&store, &sid).unwrap().unwrap();
+            let mut policy = on(9.0, 3, 0);
+            policy.strategy = strategy;
+            policy.nested_bot_reviewers = ["bounded-child-a", "bounded-child-b"]
+                .iter().map(|bot| council::CouncilNestedReviewer {
+                    escalation_policy: Default::default(), bot_id: (*bot).into(),
+                    child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+                }).collect();
+            root.config.council = Some(policy);
+            root.status = "ready".into();
+            root.round = 0;
+            save(&store, &mut root).unwrap();
+        }
+        let (started, _) = start_state(&state, &sid, "Review the immutable artifact", None, None).unwrap();
+        dispatch_state(&state, &sid, started.generation, "pandacode_finish_team",
+            json!({"summary":"Admit real nested reviewers"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+            store.message(&launch.sid, "assistant",
+                "Council findings JSON: invalid\nCouncil score: 9.8/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+        {
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+            let worker = child.workers.iter().find(|w| w.session_id == launch.sid).unwrap();
+            assert_eq!(worker.status, "queued");
+            assert_eq!(worker.council.as_ref().unwrap().score, None);
+            assert!(worker.resume_prompt.as_deref().unwrap().contains("8192 UTF-8 bytes"));
+            let root = load(&store, &sid).unwrap().unwrap();
+            assert!(child_council::inspect(&store, &root).is_ok(),
+                "the exact bounded-report retry remains authorized");
+            assert!(!verified_council_pass(&store, &root));
+        }
+    }
+}
+
+#[test]
 fn native_s2_s3_reports_must_follow_the_latest_same_session_tool_event() {
     let (state, sid) = council_state(on(9.0, 3, 2));
     let store = state.store.lock().unwrap();

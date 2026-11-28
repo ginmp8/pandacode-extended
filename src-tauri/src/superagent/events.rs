@@ -2366,12 +2366,14 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
     poll_authenticated_events_with_identity(store, expected, since, raw, "local-operator", 1)
 }
 
+type AuthenticatedGithubWindow = (String, serde_json::Value, usize, u64, u64);
+
 /// Shared authenticated GitHub Events read for desktop and explicit local
 /// headless Observe. Nothing is persisted until the policy/revision is
 /// revalidated by the existing transactional decision adapter.
 fn fetch_authenticated_github_window(
     repo: &str, since: i64, prior_cursor: i64,
-) -> Result<(String, serde_json::Value, usize, u64, u64)> {
+) -> Result<AuthenticatedGithubWindow> {
     let root = std::env::temp_dir();
     let user = crate::github::run_github_com_api_read(
         &root, "user", crate::github::TIMEOUT,
@@ -2581,6 +2583,7 @@ async fn poll_source_authenticated(
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let selected = observe_poll_snapshot(&store, source_id, expected_revision)?;
         if background {
+            require_observe_host_running(&state.shutdown)?;
             require_background_observe_preflight(&store, &selected)?;
         }
         let team_revision = if background {
@@ -2604,19 +2607,43 @@ async fn poll_source_authenticated(
         fetch_authenticated_github_window(&repo, since, prior_cursor)
     }).await.map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    // A revoked background subscription cannot create a failure receipt or
-    // apply a response even if the Team was re-enabled during its HTTP read.
-    if let Some(expected_revision) = team_revision {
-        require_background_team_revision(
-            &store, &snapshot.orchestration_id, Some(expected_revision),
-        )?;
+    settle_authenticated_events_fetch(
+        &store, &snapshot, since, fetched,
+        team_revision.map(|revision| (&state.shutdown, revision)),
+    )
+}
+
+/// A background response must not enter receipt settlement after host
+/// shutdown has already been requested. Check under the Store mutex, before
+/// either failure diagnostics or successful cursor/identity writes.
+fn require_observe_host_running(shutdown: &std::sync::atomic::AtomicU8) -> Result<()> {
+    if shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return Err("SuperAgent is shutting down; background GitHub observation cancelled.".into());
     }
+    Ok(())
+}
+
+fn settle_authenticated_events_fetch(
+    store: &Store, snapshot: &EventSource, since: i64,
+    fetched: Result<AuthenticatedGithubWindow>,
+    background: Option<(&std::sync::atomic::AtomicU8, i64)>,
+) -> Result<AuthenticatedPoll> {
+    let team_revision = if let Some((shutdown, expected_revision)) = background {
+        require_observe_host_running(shutdown)?;
+        // Re-enabling a Team does not resurrect an old in-flight response.
+        require_background_team_revision(
+            store, &snapshot.orchestration_id, Some(expected_revision),
+        )?;
+        Some(expected_revision)
+    } else {
+        None
+    };
     if let Err(failure) = &fetched {
-        record_observe_fetch_failure_scoped(&store, &snapshot, failure, team_revision)?;
+        record_observe_fetch_failure_scoped(store, snapshot, failure, team_revision)?;
     }
     let (signed_in, response, pages_fetched, repository_id, operator_id) = fetched?;
     poll_authenticated_events_with_repository_id_scoped(
-        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+        store, snapshot, since, &response, &signed_in, pages_fetched,
         ObserveFeedContext {
             repository_id, operator_id: Some(operator_id),
             background_team_revision: team_revision,
@@ -3326,10 +3353,8 @@ async fn poll_background_linked_pr_checks(
     let (signed_in, pull, listing, repository_id) = tokio::task::spawn_blocking(move || {
         fetch_authenticated_linked_pr_checks(&repository, &key)
     }).await.map_err(|e| e.to_string())??;
-    if state.shutdown.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-        return Err("SuperAgent is shutting down; background Checks observation cancelled.".into());
-    }
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_observe_host_running(&state.shutdown)?;
     commit_authenticated_linked_pr_checks(
         &store, &context, &pull, &listing, &signed_in, repository_id,
     )?;
@@ -4163,6 +4188,74 @@ mod tests {
         assert_eq!(list_thread_links(&reopened, reopened_id).unwrap()[0].subject_key, "issue:43");
         assert_eq!(super::super::get_ticket(&reopened,id).unwrap().objective,
             "Inspect local checkout");
+    }
+
+    #[test]
+    fn background_events_shutdown_discards_success_and_failure_without_mutating_source() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id='orch'", [],
+        ).unwrap();
+        let revision = require_background_team_revision(&store, "orch", None).unwrap();
+        let shutdown = AtomicU8::new(0);
+        let response = serde_json::json!([{
+            "id":"5000000600", "created_at":"2026-11-12T08:59:00Z",
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":101},
+            "actor":{"login":"trusted-bot","id":202},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        let fetched = || Ok(("operator".into(), response.clone(), 1, 101, 999));
+        // The provider response arrives after the host starts shutting down.
+        shutdown.store(1, Ordering::SeqCst);
+        let denied = settle_authenticated_events_fetch(
+            &store, &active, 0, fetched(), Some((&shutdown, revision)),
+        ).unwrap_err();
+        assert!(denied.contains("shutting down"), "{denied}");
+        let untouched = inspect_source_integrity(&store, &active.id).unwrap();
+        assert_eq!(untouched.last_sequence, 0);
+        assert_eq!(untouched.receipt_count, 0);
+        assert_eq!(untouched.repository_id, None);
+        assert_eq!(untouched.actor_id, None);
+
+        // An active host still admits the same authenticated observation.
+        let running = AtomicU8::new(0);
+        let accepted = settle_authenticated_events_fetch(
+            &store, &active, 0, fetched(), Some((&running, revision)),
+        ).unwrap();
+        assert_eq!(accepted.recorded, 1);
+        let pinned = source(&store, &active.id).unwrap();
+        let failure = combine_github_pages(
+            &[github_page(5_000_000_602, 2)], 0, pinned.last_sequence,
+        ).unwrap_err();
+        assert!(failure.contains("durable source cursor"));
+        // A late error must not quarantine the cursor during shutdown either.
+        let denied = settle_authenticated_events_fetch(
+            &store, &pinned, 0, Err(failure.clone()), Some((&shutdown, revision)),
+        ).unwrap_err();
+        assert!(denied.contains("shutting down"), "{denied}");
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_cursor, None);
+        // Explicit observation retains its normal failure accounting.
+        assert_eq!(settle_authenticated_events_fetch(
+            &store, &pinned, 0, Err(failure.clone()), None,
+        ).unwrap_err(), failure);
+        assert_eq!(inspect_source_integrity(&store, &pinned.id).unwrap().history_gap_cursor,
+            Some(pinned.last_sequence));
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let health = inspect_source_integrity(&reopened, &pinned.id).unwrap();
+        assert_eq!(health.last_sequence, pinned.last_sequence);
+        assert_eq!(health.receipt_count, 1);
+        assert_eq!(health.history_gap_occurrences, 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

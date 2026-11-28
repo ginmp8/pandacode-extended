@@ -393,6 +393,18 @@ fn enqueue_in_transaction(
     // A fresh confirmation cannot widen a cancelled plan into an unbound
     // objective; old request keys above remain inspectable.
     super::next_work_item(store, ticket_id)?;
+    // Use the same immutable admission-time ceiling as the native Worker
+    // dispatcher. Exhausted Demands must not reserve queue capacity for an
+    // impossible retry. Coordinator attempts do not spend the Worker budget.
+    // Existing request-key receipts returned above are still inspectable.
+    let worker_attempts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND bot_id<>?2",
+        params![ticket_id, &cfg.coordinator_bot_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if worker_attempts >= super::roster::ticket_worker_attempt_limit(store, ticket_id)? {
+        return Err("Native Worker attempt limit reached; create a new authorized Demand.".into());
+    }
     let unsafe_state: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE ticket_id=?1 AND state='running')
             OR EXISTS(SELECT 1 FROM sa_demand_archives WHERE ticket_id=?1)
@@ -839,4 +851,77 @@ mod stale_capacity_tests {
             params![stale,current,fresh], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
     }
+
+    #[test]
+    fn exhausted_worker_budget_rejects_new_dispatch_but_preserves_receipts_and_other_demands() {
+        let path = std::env::temp_dir().join(format!("sa-dispatch-budget-{}.sqlite3", storage::id()));
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Disposable','/tmp/sa-dispatch-budget')",
+            [],
+        ).unwrap();
+        for id in ["router", "worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg = super::super::create_configuration(&store, super::super::NewOrchestration {
+            name: "Dispatch budget".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let bounded = super::super::roster::set_worker_attempt_limit(
+            &store, &cfg.id, cfg.policy_revision, 1,
+        ).unwrap();
+        let cfg = super::super::change_enabled(
+            &store, &cfg.id, bounded.policy_revision, true,
+        ).unwrap();
+        let (ticket, launched) = super::super::admit_role_with_staging(
+            &mut store, &cfg.id, "Inspect source", "budgeted-demand", false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        super::super::work_items::plan(
+            &store, &ticket.id, ticket.revision, "root", "Inspect root", None,
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let original = enqueue_desktop_plan(&store, &ticket.id, revision, "first").unwrap();
+        let (running, _, _, _) = super::super::retry_blocked_with_request(
+            &mut store, &ticket.id, revision, false, Some(&original),
+        ).unwrap();
+        super::super::fail_launch(&store, &running, "test provider unavailable").unwrap();
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+
+        assert!(enqueue(&store, &ticket.id, blocked.revision, "retry").unwrap_err()
+            .contains("attempt limit reached"));
+        assert!(enqueue_plan(&store, &ticket.id, blocked.revision, "cli-plan").is_err());
+        assert!(enqueue_desktop_plan(&store, &ticket.id, blocked.revision, "desktop-plan").is_err());
+        assert!(pending_batch(&store).unwrap().is_empty());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, blocked.revision);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), audit_before);
+        let replay = enqueue_desktop_plan(&store, &ticket.id, revision, "first").unwrap();
+        assert_eq!(replay.id, original.id);
+        assert_eq!(replay.state, "admitted");
+
+        // A spent Ticket must not consume queue capacity or another Demand's budget.
+        let (other, launched) = super::super::admit_role_with_staging(
+            &mut store, &cfg.id, "Inspect another component", "independent-demand", false, false, true,
+        ).unwrap();
+        assert!(!launched);
+        let next = enqueue(&store, &other.id, other.revision, "independent").unwrap();
+        assert_eq!(pending_batch(&store).unwrap()[0].id, next.id);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+
 }

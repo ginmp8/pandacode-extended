@@ -78,6 +78,8 @@ export interface CouncilReportedFinding {
   workerId: string; reportMessageId: number; lens: string;
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
   category: string; title: string; explanation: string;
+  /** Unverified advice for display only; not a command or remediation receipt. */
+  suggestedFix?: string;
   artifactRevision: string | null;
   verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
 }

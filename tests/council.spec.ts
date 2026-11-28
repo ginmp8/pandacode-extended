@@ -459,9 +459,12 @@ test(`Council inspector rejects cross-task and malformed finding claims without 
     title, explanation: 'Reviewer claim', artifactRevision: 'revision-7',
     verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
   });
-  const own = finding('session-1:1000', 'Own current finding');
-  const history = finding('session-1:800', 'Own earlier-cycle finding');
-  const foreign = finding('another-task:2000', 'Private foreign task finding');
+  const own = { ...finding('session-1:1000', 'Own current finding'),
+    suggestedFix: 'Add a guard <img src=x onerror=alert(1)>' };
+  const history = { ...finding('session-1:800', 'Own earlier-cycle finding'),
+    suggestedFix: 'Earlier suggested guard' };
+  const foreign = { ...finding('another-task:2000', 'Private foreign task finding'),
+    suggestedFix: 'Private foreign remediation' };
   const foreignHistory = finding('another-task:800', 'Foreign historical claim');
   const malformed = { ...own, id: 'bad-severity', title: 'Malformed claim', severity: null };
   const inspection = {
@@ -498,6 +501,10 @@ test(`Council inspector rejects cross-task and malformed finding claims without 
   }
   await expect(view).toContainText('Own current finding');
   await expect(view).toContainText('Own earlier-cycle finding');
+  await expect(view).toContainText('Reviewer suggestion (unverified advice): Add a guard <img src=x onerror=alert(1)>');
+  await expect(view).toContainText('Reviewer suggestion (unverified advice): Earlier suggested guard');
+  await expect(view.locator('img[src="x"]')).toHaveCount(0);
+  await expect(view).not.toContainText('Private foreign remediation');
   await expect(view.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
   await expect(view).not.toContainText('Private foreign task finding');
   await expect(view).not.toContainText('Foreign historical claim');

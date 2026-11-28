@@ -221,7 +221,10 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   const findingRow = (f: CouncilReportedFinding): string =>
     '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
     '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
-    '</p><small>Reviewer report only; independent evidence unverified · Round ' +
+    '</p>' + (typeof f.suggestedFix === 'string' && f.suggestedFix.trim()
+      && Array.from(f.suggestedFix).length <= 1000 && !/[\u0000-\u001f\u007f-\u009f]/.test(f.suggestedFix)
+      ? '<p>Reviewer suggestion (unverified advice): ' + escape(f.suggestedFix) + '</p>' : '') +
+    '<small>Reviewer report only; independent evidence unverified · Round ' +
     escape(String(f.round)) + ' · ' + escape(f.workerId) +
     ' · Finding ID ' + escape(typeof f.id === 'string' ? f.id : 'unavailable') +
     ' · Artifact revision ' + escape(typeof f.artifactRevision === 'string' ? f.artifactRevision : 'unavailable') +

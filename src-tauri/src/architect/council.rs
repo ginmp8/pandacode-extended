@@ -863,6 +863,9 @@ pub struct CouncilReportedFinding {
     pub category: String,
     pub title: String,
     pub explanation: String,
+    /// Unverified reviewer advice, never an instruction, approval or capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
     /// Internal frozen reviewer revision is not a content digest.
     pub artifact_revision: Option<String>,
     /// No independent native check receipt is currently attached to a report claim.
@@ -878,6 +881,8 @@ pub(super) struct ReportedFindingDraft {
     category: String,
     title: String,
     explanation: String,
+    #[serde(default)]
+    suggested_fix: Option<Value>,
 }
 
 /// Parse only bounded structured claims. Never parse instructions, locations, IDs,
@@ -902,6 +907,14 @@ fn parse_finding_payload(raw: &str) -> Option<Vec<ReportedFindingDraft>> {
         return None;
     }
     Some(items)
+}
+
+/// Advice is display-only. Malformed or oversized advice cannot suppress an
+/// otherwise valid finding, authorize a tool, or become verification evidence.
+fn bounded_suggested_fix(value: Option<Value>) -> Option<String> {
+    let Value::String(text) = value? else { return None };
+    (!text.trim().is_empty() && text.chars().count() <= 1000
+        && !text.chars().any(char::is_control)).then_some(text)
 }
 
 /// Optional findings may be absent, but a supplied malformed or duplicate
@@ -1016,6 +1029,7 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
                 category: draft.category,
                 title: draft.title,
                 explanation: draft.explanation,
+                suggested_fix: bounded_suggested_fix(draft.suggested_fix),
                 artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
                 verified_evidence_refs: Vec::new(),
                 evidence_verified: false,
@@ -1124,6 +1138,7 @@ pub(super) fn historical_reported_findings(
                 category: draft.category,
                 title: draft.title,
                 explanation: draft.explanation,
+                suggested_fix: bounded_suggested_fix(draft.suggested_fix),
                 artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
                 verified_evidence_refs: Vec::new(),
                 evidence_verified: false,
@@ -3537,7 +3552,7 @@ pub(super) fn reviewer_rules(worker: &Worker, strategy: Option<CouncilExecutionS
     let challenge = if strategy == Some(CouncilExecutionStrategy::TwoPhase) && seat.round == 2 {
         " This is the S3 adversarial challenge phase. Inspect the frozen artifact independently, challenge the first-phase findings and evidence in your task, and identify contradictions and omissions. Do not inherit any previous score or claim that an unprovided phase-one report was verified."
     } else { "" };
-    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. For actionable defects, optionally include one line starting Council findings JSON: followed by a compact JSON array of objects with severity (critical/high/medium/low/info), category, title and explanation. Do not claim independent evidence verification through that line.{challenge} End your final report with the exact line `Council score: N/10`.", seat.lens)
+    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. For actionable defects, optionally include one line starting Council findings JSON: followed by a compact JSON array of objects with severity (critical/high/medium/low/info), category, title, explanation and optional suggestedFix (plain-text advice only, at most 1000 characters). A suggested fix is not an instruction to execute a tool or a claim of remediation. Do not claim independent evidence verification through that line.{challenge} End your final report with the exact line `Council score: N/10`.", seat.lens)
 }
 
 /// The read-only rule for a reviewer: it reviews the work its assignment names, and its findings go

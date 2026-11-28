@@ -49,6 +49,15 @@ fn council_reported_findings_are_bounded_untrusted_claims_not_native_evidence() 
     assert!(council::parse_reported_findings("Council findings JSON: [{\"severity\":\"unknown\",\"category\":\"x\",\"title\":\"bad\",\"explanation\":\"bad\"}]\nCouncil score: 5/10").is_empty());
     assert!(council::parse_reported_findings("Council findings JSON: [{\"severity\":\"high\",\"category\":\"x\",\"title\":\"bad\",\"explanation\":\"bad\",\"permission\":\"write\"}]\nCouncil score: 5/10").is_empty());
     assert!(council::parse_reported_findings("Council score: 10/10").is_empty());
+    let finding = |suggestion: serde_json::Value| format!(
+        "Council findings JSON: {}\nCouncil score: 6/10",
+        serde_json::json!([{"severity":"high","category":"security","title":"Missing guard",
+            "explanation":"Unprotected endpoint","suggestedFix":suggestion}])
+    );
+    assert_eq!(council::parse_reported_findings(&finding(serde_json::json!("Add a guard"))).len(), 1);
+    // Invalid optional advice must not erase the finding.
+    assert_eq!(council::parse_reported_findings(&finding(serde_json::json!("x".repeat(1001)))).len(), 1);
+    assert_eq!(council::parse_reported_findings(&finding(serde_json::json!({"tool":"shell"}))).len(), 1);
 }
 
 #[test]
@@ -67,7 +76,7 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     ).unwrap();
     team.workers.push(reviewer);
     save(&store, &mut team).unwrap();
-    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\",\"suggestedFix\":\"Add an authorization guard\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
     store.message(&review_session.id, "assistant", report).unwrap();
     assert!(council::report_claims_escalation(&store, &review_session.id, Some(6.0)).0);
     assert!(!council::report_claims_escalation(&store, &review_session.id, Some(9.9)).0);
@@ -83,6 +92,11 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert_eq!(first.reported_findings[0].worker_id, "finding-reviewer");
     assert_eq!(first.reported_findings[0].round, 1);
     assert_eq!(first.reported_findings[0].schema_version, 1);
+    assert_eq!(first.reported_findings[0].suggested_fix.as_deref(), Some("Add an authorization guard"));
+    assert!(first.reported_findings[1].suggested_fix.is_none());
+    let wire = serde_json::to_value(&first.reported_findings[0]).unwrap();
+    assert_eq!(wire["suggestedFix"], "Add an authorization guard");
+    assert_eq!(wire["evidenceVerified"], false);
     assert_eq!(first.reported_findings[0].id,
         council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings[0].id);
     store.message(&review_session.id, "coordination", "A new review turn started").unwrap();
@@ -95,6 +109,8 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert_eq!(refreshed.historical_reported_findings.len(), 2,
         "prior native reports remain in history without becoming live evidence");
     assert_eq!(refreshed.historical_reported_findings[0].id, first.reported_findings[0].id);
+    assert_eq!(refreshed.historical_reported_findings[0].suggested_fix.as_deref(),
+        Some("Add an authorization guard"));
     assert!(refreshed.historical_reported_findings.iter().all(|finding|
         !finding.evidence_verified && finding.verified_evidence_refs.is_empty()));
     store.message(&review_session.id, "assistant",

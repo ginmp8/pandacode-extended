@@ -636,7 +636,7 @@ test.describe('shared bot channels', () => {
     await expect(prompt).toHaveValue('');
   });
 
-  test('Channel membership removal requires explicit confirmation before sending a reduced Council roster', async ({ page }) => {
+  for (const dormantRoster of [false, true]) test(`Channel membership removal requires explicit confirmation before sending a reduced Council roster (${dormantRoster ? 'dormant' : 'active'})`, async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
@@ -660,6 +660,7 @@ test.describe('shared bot channels', () => {
     const writerId = await writer.inputValue();
     await panel.getByRole('checkbox', { name: 'Ledger', exact: true }).check();
     await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    if (dormantRoster) await panel.getByRole('radio', { name: 'Auto' }).check();
     await page.keyboard.press('Escape');
     const prompt = composer.getByRole('textbox', { name: 'Message channel' });
     await prompt.fill('Review this artifact.');
@@ -669,6 +670,14 @@ test.describe('shared bot channels', () => {
     await settings.getByRole('button', { name: 'Save' }).click();
     await expect(settings).not.toBeVisible();
     await expect(composer.locator('input[name="councilReviewer"]')).toHaveCount(3);
+    if (dormantRoster) {
+      await composer.getByRole('button', { name: 'Council: on' }).click();
+      await expect(panel.getByRole('radio', { name: 'Auto' })).toBeChecked();
+      await expect(panel.getByRole('alert')).not.toBeVisible();
+      await panel.getByRole('radio', { name: 'Bots' }).check();
+      await expect(panel.getByRole('alert')).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
     await composer.locator('button[type=submit]').click();
     await expect(panel.getByRole('alert')).toContainText('A selected Council reviewer is no longer available');
     await expect(writer).toBeChecked();

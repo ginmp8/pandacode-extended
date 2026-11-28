@@ -189,8 +189,9 @@ export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | nu
   // A refreshed membership roster may no longer contain a selected reviewer.
   // Never silently submit a smaller (but still valid) Council on the user's behalf.
   const nextReviewerIds = new Set([...next.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]')].map(input => input.value));
-  const lostReviewer = previous.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected'
-    && [...previous.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')].some(input => !nextReviewerIds.has(input.value));
+  // Track dormant selections too: switching to Auto must not silently shrink
+  // the saved bot roster if the user switches back to Bots after a refresh.
+  const lostReviewer = [...previous.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')].some(input => !nextReviewerIds.has(input.value));
   if (lostReviewer || previous.dataset.councilRosterChanged === 'true') next.dataset.councilRosterChanged = 'true';
   const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
   const nextInputs = [...next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
@@ -287,10 +288,10 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     // An opt-out message has no Council configuration to validate. Keep its
     // editable draft, but do not let inactive numeric constraints block sending.
     form.noValidate = !enabled;
-    panel.querySelector<HTMLElement>('.bc-council-roster-warning')!.hidden = !enabled || form.dataset.councilRosterChanged !== 'true';
     trigger.dataset.on = enabled ? 'true' : 'false';
     trigger.setAttribute('aria-label', enabled ? 'Council: on' : 'Council: off');
     const selected = panel.querySelector<HTMLInputElement>('input[name="councilMode"]:checked')?.value === 'selected';
+    panel.querySelector<HTMLElement>('.bc-council-roster-warning')!.hidden = !enabled || !selected || form.dataset.councilRosterChanged !== 'true';
     const selectedBots = [...panel.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')];
     const escalated = panel.querySelector<HTMLSelectElement>('select[name="councilStrategy"]')?.value === 'escalated';
     for (const row of panel.querySelectorAll<HTMLElement>('.bc-council-reviewer')) {

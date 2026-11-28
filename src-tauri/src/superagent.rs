@@ -3236,10 +3236,11 @@ pub(crate) fn headless_watchdog_tick(
 ) -> (std::collections::BTreeSet<String>, Vec<String>) {
     let mut sessions = std::collections::BTreeSet::new();
     let mut errors = Vec::new();
-    match watchdog_expired_assignments(store, now) {
-        Ok(expired) => sessions.extend(expired),
-        Err(error) => errors.push(format!("durable settlement: {error}")),
+    let mut expired = Vec::new();
+    if let Err(error) = collect_watchdog_settlements(store, now, &mut expired, &mut errors) {
+        errors.push(format!("durable settlement: {error}"));
     }
+    sessions.extend(expired);
     match headless_cancelled_assignments(store, active_sessions) {
         Ok(revoked) => sessions.extend(revoked),
         Err(error) => errors.push(format!("live authority inspection: {error}")),
@@ -3247,7 +3248,23 @@ pub(crate) fn headless_watchdog_tick(
     (sessions, errors)
 }
 
-pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
+#[cfg(test)]
+fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
+    let mut sessions = Vec::new();
+    let mut errors = Vec::new();
+    collect_watchdog_settlements(store, now, &mut sessions, &mut errors)?;
+    if !errors.is_empty() {
+        return Err(errors.join("; ").into());
+    }
+    Ok(sessions)
+}
+
+/// A Ticket's audit and state transitions stay atomic, but a failure in that
+/// transaction must not starve independently revoked Tickets. Keep successful
+/// settlement IDs even when another Ticket or a later query fails.
+fn collect_watchdog_settlements(
+    store: &Store, now: i64, sessions: &mut Vec<String>, errors: &mut Vec<String>,
+) -> Result<()> {
     // Only the owning serve process calls this. Inspect every live assignment:
     // limiting the SQL page before filtering healthy entries could starve a
     // later revoked assignment forever. No automatic retry is permitted; the
@@ -3316,7 +3333,6 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
-    let mut sessions = Vec::new();
     for (assignment_id,ticket_id,session_id,revision,reason) in stopped {
         // The SQL fast path does not capture task thread, frozen bot prompt,
         // provider profile or resolved checkout identity. The owner watchdog
@@ -3327,37 +3343,43 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                 "Native task admission or session identity changed; no replay".to_owned(),
             None => continue,
         };
-        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let changed = tx.execute(
-            "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
-             revision=revision+1,updated_at=?3
-             WHERE id=?1 AND state='running' AND active_assignment_id=?2 AND revision=?4",
-            params![ticket_id,assignment_id,now,revision],
-        ).map_err(|e| e.to_string())?;
-        if changed == 0 {
-            tx.rollback().map_err(|e| e.to_string())?;
-            continue;
+        let outcome = (|| -> Result<()> {
+            let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let changed = tx.execute(
+                "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+                 revision=revision+1,updated_at=?3
+                 WHERE id=?1 AND state='running' AND active_assignment_id=?2 AND revision=?4",
+                params![ticket_id,assignment_id,now,revision],
+            ).map_err(|e| e.to_string())?;
+            if changed == 0 {
+                tx.rollback().map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+                 WHERE id=?1 AND state='running'",
+                params![assignment_id,now],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+                 WHERE ticket_id=?1 AND state='pending'",
+                params![ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'watchdog_interrupted',?2,?3)",
+                params![ticket_id,reason,now],
+            ).map_err(|e| e.to_string())?;
+            headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            sessions.push(session_id);
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            errors.push(format!("durable settlement for Ticket {ticket_id}: {error}"));
         }
-        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket_id])
-            .map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
-             WHERE id=?1 AND state='running'",
-            params![assignment_id,now],
-        ).map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
-             WHERE ticket_id=?1 AND state='pending'",
-            params![ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'watchdog_interrupted',?2,?3)",
-            params![ticket_id,reason,now],
-        ).map_err(|e| e.to_string())?;
-        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        sessions.push(session_id);
     }
     // A damaged or legacy writer can lose the active Assignment link while
     // leaving a Ticket running. The ordinary watchdog join only visits linked
@@ -3385,61 +3407,67 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     for (ticket_id, revision) in unlinked {
-        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let provider_sessions: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT session_id FROM sa_assignments
-                 WHERE ticket_id=?1 AND state='running'",
+        let outcome = (|| -> Result<()> {
+            let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let provider_sessions: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT session_id FROM sa_assignments
+                     WHERE ticket_id=?1 AND state='running'",
+                ).map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([&ticket_id], |r| r.get(0))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            };
+            // Recheck the structural fault with the current Ticket revision
+            // inside the same transaction. A repaired running Ticket is untouched.
+            let changed = tx.execute(
+                "UPDATE sa_tickets SET state='interrupted',
+                   active_assignment_id=NULL,revision=revision+1,updated_at=?3
+                 WHERE id=?1 AND revision=?2 AND state='running' AND (
+                   active_assignment_id IS NULL
+                   OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
+                                 WHERE o.id=sa_tickets.orchestration_id)
+                   OR (SELECT COUNT(*) FROM sa_assignments a
+                       WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
+                   OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                       WHERE a.id=sa_tickets.active_assignment_id
+                         AND a.ticket_id=sa_tickets.id AND a.state='running')
+                 )",
+                params![&ticket_id,revision,now],
             ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([&ticket_id], |r| r.get(0))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
-        };
-        // Recheck the structural fault with the current Ticket revision
-        // inside the same transaction. A repaired running Ticket is untouched.
-        let changed = tx.execute(
-            "UPDATE sa_tickets SET state='interrupted',
-               active_assignment_id=NULL,revision=revision+1,updated_at=?3
-             WHERE id=?1 AND revision=?2 AND state='running' AND (
-               active_assignment_id IS NULL
-               OR NOT EXISTS(SELECT 1 FROM sa_orchestrations o
-                             WHERE o.id=sa_tickets.orchestration_id)
-               OR (SELECT COUNT(*) FROM sa_assignments a
-                   WHERE a.ticket_id=sa_tickets.id AND a.state='running')<>1
-               OR NOT EXISTS(SELECT 1 FROM sa_assignments a
-                   WHERE a.id=sa_tickets.active_assignment_id
-                     AND a.ticket_id=sa_tickets.id AND a.state='running')
-             )",
-            params![&ticket_id,revision,now],
-        ).map_err(|e| e.to_string())?;
-        if changed == 0 {
-            tx.rollback().map_err(|e| e.to_string())?;
-            continue;
-        }
-        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
-            [&ticket_id]).map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
-             WHERE ticket_id=?1 AND state='running'",
-            params![&ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
-             WHERE ticket_id=?1 AND state='pending'",
-            params![&ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'watchdog_orphan_interrupted',
-               'Running Ticket lost its Team or unique active Assignment; all task authority revoked without replay',?2)",
-            params![&ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        for session_id in provider_sessions {
-            if !sessions.contains(&session_id) {
-                sessions.push(session_id);
+            if changed == 0 {
+                tx.rollback().map_err(|e| e.to_string())?;
+                return Ok(());
             }
+            tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                [&ticket_id]).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+                 WHERE ticket_id=?1 AND state='running'",
+                params![&ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+                 WHERE ticket_id=?1 AND state='pending'",
+                params![&ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'watchdog_orphan_interrupted',
+                   'Running Ticket lost its Team or unique active Assignment; all task authority revoked without replay',?2)",
+                params![&ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            for session_id in provider_sessions {
+                if !sessions.contains(&session_id) {
+                    sessions.push(session_id);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            errors.push(format!("durable settlement for Ticket {ticket_id}: {error}"));
         }
     }
     // A non-running Ticket must never retain a live Assignment. This includes
@@ -3460,67 +3488,73 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     for (ticket_id, revision, previous_state) in inactive_orphans {
-        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let provider_sessions: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT session_id FROM sa_assignments
-                 WHERE ticket_id=?1 AND state='running'",
+        let outcome = (|| -> Result<()> {
+            let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+            let provider_sessions: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT session_id FROM sa_assignments
+                     WHERE ticket_id=?1 AND state='running'",
+                ).map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([&ticket_id], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            };
+            // Guard the exact previously observed state as well as the revision.
+            // A terminal verdict is preserved; waiting/blocked/queued Tickets with
+            // a live attempt are interrupted rather than made eligible for approval.
+            let terminal = matches!(previous_state.as_str(),
+                "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
+            let next_state = if terminal { previous_state.as_str() } else { "interrupted" };
+            let changed = tx.execute(
+                "UPDATE sa_tickets
+                 SET state=?4,active_assignment_id=NULL,revision=revision+1,updated_at=?3
+                 WHERE id=?1 AND revision=?2 AND state=?5 AND state!='running'
+                   AND (active_assignment_id IS NOT NULL OR EXISTS(
+                        SELECT 1 FROM sa_assignments a
+                        WHERE a.ticket_id=sa_tickets.id AND a.state='running'))",
+                params![&ticket_id,revision,now,next_state,&previous_state],
             ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([&ticket_id], |row| row.get(0))
-                .map_err(|e| e.to_string())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
-        };
-        // Guard the exact previously observed state as well as the revision.
-        // A terminal verdict is preserved; waiting/blocked/queued Tickets with
-        // a live attempt are interrupted rather than made eligible for approval.
-        let terminal = matches!(previous_state.as_str(),
-            "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
-        let next_state = if terminal { previous_state.as_str() } else { "interrupted" };
-        let changed = tx.execute(
-            "UPDATE sa_tickets
-             SET state=?4,active_assignment_id=NULL,revision=revision+1,updated_at=?3
-             WHERE id=?1 AND revision=?2 AND state=?5 AND state!='running'
-               AND (active_assignment_id IS NOT NULL OR EXISTS(
-                    SELECT 1 FROM sa_assignments a
-                    WHERE a.ticket_id=sa_tickets.id AND a.state='running'))",
-            params![&ticket_id,revision,now,next_state,&previous_state],
-        ).map_err(|e| e.to_string())?;
-        if changed == 0 {
-            tx.rollback().map_err(|e| e.to_string())?;
-            continue;
-        }
-        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
-            [&ticket_id]).map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_assignments SET state='interrupted',updated_at=?2
-             WHERE ticket_id=?1 AND state='running'",
-            params![&ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
-             WHERE ticket_id=?1 AND state='pending'",
-            params![&ticket_id,now],
-        ).map_err(|e| e.to_string())?;
-        let (kind, detail) = if terminal {
-            ("watchdog_terminal_orphan_quarantined",
-             "Terminal Ticket retained a native Assignment or active pointer; revoke, cancel provider and reconcile effects before any new action")
-        } else {
-            ("watchdog_inactive_orphan_quarantined",
-             "Non-running Ticket retained a live Assignment or active pointer; interrupted and revoked without approval or replay")
-        };
-        tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
-            params![&ticket_id,kind,detail,now],
-        ).map_err(|e| e.to_string())?;
-        headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        for session_id in provider_sessions {
-            if !sessions.contains(&session_id) {
-                sessions.push(session_id);
+            if changed == 0 {
+                tx.rollback().map_err(|e| e.to_string())?;
+                return Ok(());
             }
+            tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                [&ticket_id]).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+                 WHERE ticket_id=?1 AND state='running'",
+                params![&ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+                 WHERE ticket_id=?1 AND state='pending'",
+                params![&ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            let (kind, detail) = if terminal {
+                ("watchdog_terminal_orphan_quarantined",
+                 "Terminal Ticket retained a native Assignment or active pointer; revoke, cancel provider and reconcile effects before any new action")
+            } else {
+                ("watchdog_inactive_orphan_quarantined",
+                 "Non-running Ticket retained a live Assignment or active pointer; interrupted and revoked without approval or replay")
+            };
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+                params![&ticket_id,kind,detail,now],
+            ).map_err(|e| e.to_string())?;
+            headless_dispatch::reject_stale_pending(&tx, &ticket_id, now)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            for session_id in provider_sessions {
+                if !sessions.contains(&session_id) {
+                    sessions.push(session_id);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            errors.push(format!("durable settlement for Ticket {ticket_id}: {error}"));
         }
     }
-    Ok(sessions)
+    Ok(())
 }
 
 fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
@@ -11795,6 +11829,85 @@ mod tests {
                 &store, &ordinary,
             ).is_ok(), "ordinary bot paths must not inherit task revocation: {scenario}");
         }
+    }
+
+    #[test]
+    fn watchdog_audit_failure_does_not_starve_independent_ticket_settlement() {
+        let mut store = fixture();
+        let first_team = enabled(&store);
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-project','Other','/tmp/disposable-superagent-watchdog-other')", [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('other-worker','Other Builder','other-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let other_team = create_configuration(&store, NewOrchestration {
+            name: "Independent watchdog".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "other-worker".into(),
+        }).unwrap();
+        let other_team = change_enabled(
+            &store, &other_team.id, other_team.policy_revision, true,
+        ).unwrap();
+        let (first, started) = admit(
+            &mut store, &first_team.id, "Inspect first checkout", "watchdog-first", false,
+        ).unwrap();
+        assert!(started);
+        let (second, started) = admit(
+            &mut store, &other_team.id, "Inspect second checkout", "watchdog-second", false,
+        ).unwrap();
+        assert!(started);
+        let first_session = assignment_session(&store, &first.id).unwrap().unwrap();
+        let second_session = assignment_session(&store, &second.id).unwrap().unwrap();
+        let now = storage::now();
+        for (ticket, created) in [(&first, now-1000), (&second, now-500)] {
+            store.db.execute(
+                "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+                params![ticket.id,created],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket.id],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'pending-effect',?2,'pending',?3,?3)",
+                params![ticket.id,"a".repeat(64),now],
+            ).unwrap();
+        }
+        store.db.execute_batch(&format!(
+            "CREATE TEMP TRIGGER fail_one_watchdog_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='watchdog_interrupted' AND NEW.ticket_id='{}'
+             BEGIN SELECT RAISE(ABORT,'first Ticket audit failure'); END;",
+            first.id,
+        )).unwrap();
+
+        let (cancel, errors) = headless_watchdog_tick(&store, std::slice::from_ref(&first_session), now);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("first Ticket audit failure"));
+        assert!(cancel.contains(&first_session));
+        assert!(cancel.contains(&second_session));
+        assert_eq!(get_ticket(&store, &first.id).unwrap().revision, first.revision);
+        assert_eq!(get_ticket(&store, &first.id).unwrap().state, "running");
+        assert_eq!(effects::receipt_history(&store, &first.id, 1).unwrap()[0].state, "pending");
+        assert_eq!(get_ticket(&store, &second.id).unwrap().state, "interrupted");
+        assert_eq!(effects::receipt_history(&store, &second.id, 1).unwrap()[0].state, "uncertain");
+        assert_eq!(history(&store, &second.id, 30).unwrap().iter()
+            .filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+
+        store.db.execute_batch("DROP TRIGGER fail_one_watchdog_audit").unwrap();
+        let (cancel, errors) = headless_watchdog_tick(&store, &[], now+1);
+        assert!(errors.is_empty());
+        assert_eq!(cancel.into_iter().collect::<Vec<_>>(), vec![first_session]);
+        assert_eq!(get_ticket(&store, &first.id).unwrap().state, "interrupted");
+        assert_eq!(effects::receipt_history(&store, &first.id, 1).unwrap()[0].state, "uncertain");
+        assert_eq!(history(&store, &second.id, 30).unwrap().iter()
+            .filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+        let reopened = Store::open_read_only(&store.path).unwrap();
+        assert_eq!(get_ticket(&reopened, &first.id).unwrap().state, "interrupted");
+        assert_eq!(get_ticket(&reopened, &second.id).unwrap().state, "interrupted");
     }
 
     #[test]

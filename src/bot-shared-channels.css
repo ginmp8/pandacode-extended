@@ -104,11 +104,11 @@
 .bc-council-panel :is(input,button):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 @media(max-width:420px){.bc-council-panel .bc-council-value-row{flex-wrap:wrap}.bc-council-panel .bc-council-value-row>.ds-seg{flex-basis:100%}.bc-council-panel .bc-council-value-row>input[type=number]{margin-left:auto}}
 @media(prefers-reduced-transparency:reduce){.bc-council-panel[popover]{background:var(--bg)}}
-.bc-council-report { padding: 2px 8px; font-size: 12px; }
-.bc-council-summary { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; color: var(--text); }
+.bc-council-report { max-inline-size: 100%; padding: 2px 8px; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.bc-council-summary { display: inline-flex; flex-wrap: wrap; min-inline-size: 0; max-inline-size: 100%; gap: 4px; align-items: baseline; color: var(--text); overflow-wrap: anywhere; }
 .bc-council-summary strong { font-weight: 600; }
-.bc-council-reviewers { color: var(--muted); }
-.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; }
+.bc-council-reviewers { min-inline-size: 0; color: var(--muted); overflow-wrap: anywhere; }
+.bc-assigned:has(.bc-council-summary) { flex-wrap: wrap; min-inline-size: 0; max-inline-size: 100%; overflow-wrap: anywhere; }
 .bc-create-form, .bc-settings-form { display: grid; gap: 11px; padding: 0 20px 18px; }
 .bc-create-form .dialog-description { margin: 0; }
 .bc-create-form input[name=name], .bc-settings-form input[name=name], .bc-settings-form select { min-height: 36px; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: var(--fill-hover); color: var(--text); font: inherit; }
@@ -129,3 +129,43 @@
 .bots-group-channels .channel-row .bc-face-count { width: 21px; height: 21px; font-size: 8px; }
 .bots-group-channels .bots-group-label { margin-top: 13px; }
 .bc-earlier { flex: none; align-self: center; }
+
+/* Channel delivery evidence uses the same native inspector as direct chat. */
+.bc-council-inspector-host{width:min(640px,calc(100dvw - 44px));min-width:0;max-height:calc(100dvh - 160px);overflow:auto;overflow-wrap:anywhere}
+.bc-council-inspector-host .council-inspection{display:block;max-width:100%;font-size:var(--ds-text-ui)}
+.bc-council-inspector-host .council-inspection summary{cursor:pointer;font-weight:var(--weight-medium)}
+.bc-council-inspector-host .council-inspection-body{min-width:0;overflow-wrap:anywhere;line-height:1.5}
+.bc-council-inspector-host .council-inspection-body li{margin:8px 0}
+.bc-council-inspector-host .council-inspection-body small{display:block;color:var(--muted)}
+.bc-council-inspector-host .council-inspection :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* Per-message hybrid/child Council settings reuse the existing Channel modal. */
+.bc-council-reviewer-options .bc-council-automatic{flex-basis:100%;display:flex;justify-content:space-between;align-items:center;gap:12px;cursor:default}
+.bc-council-reviewer-options .bc-council-reviewer{display:grid;flex:1 1 100%;gap:6px;padding:8px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner)}
+.bc-council-reviewer-options .bc-council-reviewer>label{justify-content:flex-start;cursor:default}
+.bc-council-reviewer-options .bc-council-child-settings{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.bc-council-reviewer-options .bc-council-child-settings label{display:grid;gap:4px;min-width:0;font-size:var(--ds-text-meta)}
+.bc-council-panel .bc-council-advanced{display:grid;gap:9px;padding-top:10px;border-top:1px solid var(--ds-border)}
+.bc-council-panel .bc-council-advanced>label,.bc-council-panel .bc-council-criterion-fields>label{display:grid;gap:5px}
+.bc-council-panel .bc-council-criterion-fields{display:grid;gap:7px}
+.bc-council-panel .bc-council-criterion-fields small{color:var(--muted)}
+.bc-council-panel :is(.bc-council-advanced,.bc-council-reviewer-options) :is(input:not([type=checkbox]),select){box-sizing:border-box;max-width:100%;width:100%;min-width:0;min-height:32px;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit}
+.bc-council-panel .bc-council-automatic input{width:64px!important}
+.bc-council-plan{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4}
+.bc-council-panel .bc-council-advanced>label.bc-council-s2-trigger{display:flex;align-items:center;gap:6px}
+.bc-council-panel :is(.bc-council-role,.bc-council-child-settings,.bc-council-criterion-fields,.bc-council-s2-trigger)[hidden]{display:none!important}
+.bc-council-panel :is(select,input):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media(max-width:420px){.bc-council-reviewer-options .bc-council-child-settings{grid-template-columns:1fr}}
+
+/* Task-scoped Channel criteria have the same eight-lens limit as direct Council. */
+.bc-council-panel .bc-council-criterion-rows{display:grid;gap:9px}
+.bc-council-panel .bc-council-criterion-row{display:grid;gap:7px;min-inline-size:0;margin:0;padding:9px 0;border:0;border-top:1px solid var(--ds-border)}
+.bc-council-panel .bc-council-criterion-row legend{padding:0 0 4px;color:var(--muted);font-size:var(--ds-text-meta)}
+.bc-council-panel .bc-council-criterion-row>label{display:grid;gap:5px;min-width:0}
+.bc-council-panel .bc-council-criterion-row>label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}
+.bc-council-panel .bc-council-criterion-row input[type=checkbox]{flex:none}
+.bc-council-panel .bc-council-criterion-row button,.bc-council-panel [data-council-criterion-add]{justify-self:start}
+.bc-council-panel .bc-council-criterion-row button:disabled{opacity:.5;cursor:not-allowed}
+.bc-council-panel .bc-council-criterion-row [hidden]{display:none!important}
+.bc-council-panel .bc-council-criterion-row [data-file-check-fields] label{display:grid;gap:5px;min-width:0}
+.bc-council-panel .bc-council-criterion-row [data-file-check-text]{box-sizing:border-box;max-width:100%;width:100%;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit;resize:vertical}

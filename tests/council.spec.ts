@@ -12,10 +12,12 @@ type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: 
 test.setTimeout(60_000);
 
 /** Records every architect_set_council; `refuse` makes the mock refuse a command, like a native error. */
-async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture): Promise<void> {
+async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null, recovery?: 'eligible' | 'denied', criteriaPreset?: object): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
-    const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
+    // Vite serves transpiled JavaScript here: injected mocks must not contain TypeScript syntax.
+    const source = await response.text();
+    const body = source.replace(/switch\s*\(command\)\s*\{/, `
       if (command === 'architect_set_council') (window.__councilCalls ??= []).push(structuredClone(args.council));
       if (command === 'architect_start') (window.__councilStarts ??= []).push(args.text);
       if (command === 'architect_council_accept') (window.__councilAccepts ??= []).push(args.sessionId);
@@ -29,8 +31,30 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
         return team;
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
+      if (command === 'architect_council_inspect' && window.__councilInspectionError) throw new Error(window.__councilInspectionError);
+      if (command === 'architect_council_inspect' && ${inspection !== undefined}) return (window.__councilInspectorOverride ?? ${JSON.stringify(inspection ?? null)});
+      if (command === 'architect_get' && ${Boolean(criteriaPreset)}) {
+        const team = architect.get(args.sessionId);
+        if (team?.config.council) return { ...team, config: { ...team.config, council: { ...team.config.council, ...${JSON.stringify(criteriaPreset ?? {})} } } };
+      }
+      if (command === 'architect_get' && ${Boolean(recovery)}) {
+        const current = architect.get(args.sessionId);
+        if (current?.config.council) return {
+          ...current, status: 'paused', config: { ...current.config, council: {
+            ...current.config.council, nestedBotReviewers: [
+              { botId: 'child-reviewer', childReviewers: 2, childTarget: 9, childMaxRounds: 2 },
+            ],
+          } },
+        };
+      }
+      if (command === 'architect_control' && args.action === 'recover' && ${Boolean(recovery)}) {
+        (window.__councilRecoverCalls ??= []).push(structuredClone(args));
+        if (${recovery === 'denied'}) throw new Error(window.__councilRecoveryError ?? 'child_council_recovery_denied: interrupted child has existing work.');
+        return architect.get(args.sessionId);
+      }
       switch (command) {
     `);
+    if (body === source) throw new Error('Council preview command interceptor was not installed.');
     await route.fulfill({ response, body });
   });
   await page.goto(url);
@@ -45,6 +69,2253 @@ const settle = async (page: Page) => { await expect(button(page)).toBeVisible();
 
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
+test('a late reviewer-options failure cannot replace a fresh lookup after reopening Council', async ({ page }) => {
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots: [
+    { id: 'qa-reviewer', name: 'QA Reviewer', role: 'QA', provider: 'codex', model: 'gpt', paused: false },
+    { id: 'security-reviewer', name: 'Security Reviewer', role: 'Security', provider: 'codex', model: 'gpt', paused: false },
+  ] });
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold = state.__hold ?? {};
+    state.__hold.architect_council_reviewer_options = new Promise<void>((_resolve, reject) => {
+      state.__rejectStaleReviewerLookup = reject;
+    });
+  });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(panel(page).getByText('Loading available bots…')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await page.evaluate(() => { delete (window as any).__hold.architect_council_reviewer_options; });
+
+  await button(page).click();
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await page.evaluate(async () => {
+    (window as any).__rejectStaleReviewerLookup(new Error('outdated lookup failed'));
+    // Allow the earlier native rejection and its UI continuation to settle.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  await expect(panel(page).getByText('Cannot load bots:', { exact: false })).toHaveCount(0);
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await eligibleReviewers(page).first().check();
+  await expect(eligibleReviewers(page).first()).toBeChecked();
+});
+
+test('native Council inspector displays unknown usage and never trusts a display-only pass', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
+    verifiedPass: false,
+    usage: { uniqueAttempts: 1, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+      cumulativeQueueWaitMs: 1000, cumulativeObservedSpanMs: 8000, settledReviewWindowMs: 6400,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    criteria: [{ id: 'security', lens: 'Security', target: 9, required: true }],
+    attempts: [{ workerId: 'a', name: '<img src=x onerror=alert(1)>', lens: 'Security',
+      round: 1, reviewerSource: 'direct_bot', status: 'completed', score: 9.8,
+      abandoned: false, provider: 'codex', model: 'gpt-model', attempt: 1,
+      createdAt: 1001, startedAt: 1002, lastUpdatedAt: 1010,
+      queueWaitMs: 1000, observedSpanMs: 8000,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Provider tokens unknown');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Cost unknown');
+  await expect(panel(page).getByText('Native attempts: 1', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Cumulative queue 1.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Cumulative observed span 8.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Settled review window 6.4 s');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('overlap counted once; not provider time');
+  await expect(panel(page).getByText('Provider tokens unknown', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-inspection section[aria-label="Review round 1"] small').getByText('Queue 1.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Observed span (last update) 8.0 s', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
+});
+
+test('Council inspector omits malformed native round data without interpreting it as HTML', async ({ page }) => {
+  const injectedRound = '1"><img src=x onerror="window.__councilInjected = true">';
+  const attempt = {
+    workerId: 'native-safe', name: 'Native valid reviewer', lens: 'Security',
+    round: 1, reviewerSource: 'direct_bot', status: 'completed', score: 9.1,
+    abandoned: false, provider: 'codex', model: 'default', attempt: 1,
+    createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1002,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, {
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 2,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [attempt, { ...attempt, workerId: 'native-bad', name: 'Injected reviewer', round: injectedRound }],
+  });
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector.getByRole('region', { name: 'Review round 1' })).toContainText('Native valid reviewer');
+  await expect(inspector).toContainText('1 malformed native reviewer attempt(s) omitted');
+  await expect(inspector).not.toContainText('Injected reviewer');
+  await expect(inspector.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean((window as any).__councilInjected))).toBe(false);
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
+test('Council inspector refreshes an approved native snapshot without promoting stale approval', async ({ page }) => {
+  const current = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'session-1', cycleId: 'session-1:1000',
+      teamRevision: 7, round: 1, lowest: 9.5,
+    },
+    attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, current);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toBeVisible();
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+  }, { ...current, status: { ...current.status, stale: true } });
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Stale revision', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+  await expect(inspector).toContainText('The recorded passed status has no current verified native proof.');
+  await expect(refresh).toBeEnabled();
+});
+
+test('direct Council inspector follows acknowledged enable and disable without reopening the panel', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true, verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 7, round: 1, lowest: 9.5 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector).toHaveCount(0);
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_set_council = new Promise<void>(resolve => { state.__releaseInspectorEnable = resolve; });
+  });
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  await expect(inspector).toHaveCount(0);
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseInspectorEnable();
+    delete state.__hold.architect_set_council;
+  });
+  await expect(inspector).toHaveCount(1);
+  await inspector.locator('summary').first().click();
+  await expect(inspector).toContainText('Verified native pass');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__removedCouncilInspection = document.querySelector('.council-inspection');
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => { state.__releaseInspectorRead = resolve; });
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  await expect(inspector).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as any).__removedCouncilInspection.querySelector('.council-inspection-body').textContent)).toBe('');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseInspectorRead();
+    delete state.__hold.architect_council_inspect;
+  });
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  await expect(inspector).toHaveCount(1);
+  await expect(inspector).not.toHaveAttribute('open', '');
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, teamRevision: 8, status: { ...inspection.status, stale: true }, verifiedPass: false, verifiedCompletion: null,
+  });
+  await inspector.locator('summary').first().click();
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await expect.poll(() => page.evaluate(() => (window as any).__removedCouncilInspection.querySelector('.council-inspection-body').textContent)).toBe('');
+});
+
+test('direct-chat native Council updates invalidate displayed approval without affecting unrelated tasks', async ({ page }) => {
+  const current = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'session-1', cycleId: 'session-1:1000',
+      teamRevision: 7, round: 1, lowest: 9.5,
+    },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, current);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').click();
+  await expect(inspector).toContainText('Verified native pass');
+
+  await page.evaluate(next => {
+    (window as any).__councilInspectorOverride = next;
+    (window as any).__previewEmit('architect-event', { sessionId: 'unrelated-task', removed: true });
+  }, { ...current, teamRevision: 8, status: { ...current.status, state: 'reviewing', stale: true } });
+  await expect(inspector).toContainText('Verified native pass');
+
+  // A native update for this same task must hide the old approval before the
+  // asynchronous authoritative inspector read resolves, even on direct chat.
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => {
+      state.__releaseDirectCouncilInspection = resolve;
+    });
+    state.__councilSeat({ round: 2, lens: 'Security', score: 7.5 });
+  });
+  await expect(inspector.locator('.council-inspection-body'))
+    .toHaveText('Loading native Council result…');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__releaseDirectCouncilInspection();
+    delete state.__hold.architect_council_inspect;
+  });
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Verified native pass');
+});
+
+test('keyboard refresh retains focus during a pending native Council read', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 3,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').click();
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeEnabled();
+
+  await page.evaluate(() => {
+    const state = window as any;
+    state.__hold ??= {};
+    state.__hold.architect_council_inspect = new Promise<void>(resolve => {
+      state.__releaseCouncilInspection = resolve;
+    });
+  });
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toHaveAttribute('aria-disabled', 'true');
+  await expect(refresh).toHaveAttribute('aria-busy', 'true');
+  // A second keypress while pending cannot launch another native request.
+  await page.keyboard.press('Enter');
+  await expect(inspector.locator('.council-inspection-body')).toHaveText('Loading native Council result…');
+  await page.evaluate(() => (window as any).__releaseCouncilInspection());
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toBeEnabled();
+  await expect(refresh).not.toHaveAttribute('aria-busy', 'true');
+  await inspector.locator('summary').click();
+  await expect(inspector).not.toHaveAttribute('open');
+  // An HTML <details> disclosure hides its children from the accessibility
+  // tree; inspect the DOM control directly to verify the actual disabled state.
+  const collapsedRefresh = inspector.locator('.council-inspection-refresh');
+  await expect(collapsedRefresh).toBeDisabled();
+  await expect(collapsedRefresh).not.toHaveAttribute('aria-busy', 'true');
+  await inspector.locator('summary').click();
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(collapsedRefresh).toBeEnabled();
+});
+
+test('Council inspector does not present stale human acceptance as current approval', async ({ page }) => {
+  const accepted = {
+    sessionId: 'session-1', mode: 'm1', cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'accepted', round: 1, lowest: 8.8, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, accepted);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  await expect(inspector).toContainText('Accepted by user (not a native pass)');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => {
+    (window as any).__councilInspectorOverride = snapshot;
+  }, { ...accepted, status: { ...accepted.status, stale: true } });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector).toContainText('Stale revision');
+  await expect(inspector).not.toContainText('Accepted by user (not a native pass)');
+  await expect(inspector).not.toContainText('Verified native pass');
+});
+
+
+test('the native Council inspector rejects foreign task responses before exposing evidence in direct or embedded views', async ({ page }) => {
+  const own = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [], reservedChildren: [],
+  };
+  const foreign = {
+    ...own, sessionId: 'foreign-task', cycleStartedAt: 2000, teamRevision: 9,
+    status: { state: 'passed', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'foreign-task', cycleId: 'foreign-task:2000',
+      teamRevision: 9, round: 1, lowest: 9.9 },
+    reportedFindings: [{ schemaVersion: 1, id: 'private:1', cycleId: 'foreign-task:2000',
+      round: 1, workerId: 'private-worker', reportMessageId: 11, lens: 'Security',
+      severity: 'high', category: 'privacy', title: 'Foreign private finding',
+      explanation: 'Another task must never render this finding', artifactRevision: 'other-revision',
+      verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, own);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator(':scope > summary').click();
+  await expect(inspector).toContainText('Native pass not verified');
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, foreign);
+  await refresh.click();
+  await expect(inspector.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(inspector).not.toContainText('Foreign private finding');
+  await expect(inspector).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, own);
+  await refresh.click();
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector.getByRole('alert')).toHaveCount(0);
+
+  // The embedded consumer pins its task before the first response, just as
+  // the direct and Channel consumers do. A self-consistent foreign first
+  // response must never establish the identity of the inspector.
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__embeddedCouncil = snapshot;
+    const host = document.createElement('div');
+    host.id = 'embedded-native-council';
+    document.body.append(host);
+    const detail = createCouncilInspector(async () => (window as any).__embeddedCouncil, 'session-1');
+    host.append(detail);
+    detail.open = true;
+  }, foreign);
+  const embedded = page.locator('#embedded-native-council .council-inspection');
+  await expect(embedded.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(embedded).not.toContainText('Foreign private finding');
+  await expect(embedded).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, own);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embedded).toContainText('Native pass not verified');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, foreign);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embedded.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(embedded).not.toContainText('Foreign private finding');
+  await expect(embedded).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__embeddedCouncil = snapshot; }, own);
+  await embedded.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embedded).toContainText('Native pass not verified');
+
+  // A missing caller-side task identity is an invalid inspection request.
+  // Even a valid foreign response must not be fetched or rendered.
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__unboundCouncil = snapshot;
+    const host = document.createElement('div');
+    host.id = 'unbound-native-council';
+    document.body.append(host);
+    (window as any).__unboundCouncilReads = 0;
+    const detail = createCouncilInspector(async () => {
+      (window as any).__unboundCouncilReads++;
+      return (window as any).__unboundCouncil;
+    }, '');
+    host.append(detail);
+    detail.open = true;
+  }, foreign);
+  const unbound = page.locator('#unbound-native-council .council-inspection');
+  await expect(unbound.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(unbound).not.toContainText('Foreign private finding');
+  await expect(unbound).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__unboundCouncil = snapshot; }, own);
+  await unbound.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(unbound.getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(unbound).not.toContainText('Foreign private finding');
+  expect(await page.evaluate(() => (window as any).__unboundCouncilReads)).toBe(0);
+});
+
+for (const target of ['direct', 'embedded'] as const) {
+test(`Council inspector rejects cross-task and malformed finding claims without hiding valid history (${target})`, async ({ page }) => {
+  const finding = (cycleId: string, title: string) => ({
+    schemaVersion: 1, id: title, cycleId, round: 1, workerId: 'security',
+    reportMessageId: 11, lens: 'Security', severity: 'high', category: 'privacy',
+    title, explanation: 'Reviewer claim', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  });
+  const own = { ...finding('session-1:1000', 'Own current finding'),
+    suggestedFix: 'Add a guard <img src=x onerror=alert(1)>' };
+  const history = { ...finding('session-1:800', 'Own earlier-cycle finding'),
+    suggestedFix: 'Earlier suggested guard' };
+  const foreign = { ...finding('another-task:2000', 'Private foreign task finding'),
+    suggestedFix: 'Private foreign remediation' };
+  const foreignHistory = finding('another-task:800', 'Foreign historical claim');
+  const malformed = { ...own, id: 'bad-severity', title: 'Malformed claim', severity: null };
+  const inspection = {
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'passed', round: 1, lowest: 9.8, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
+      teamRevision: 7, round: 1, lowest: 9.8 },
+    criteria: [], attempts: [], reservedChildren: [],
+    reportedFindings: [own, foreign, malformed],
+    historicalReportedFindings: [history, foreignHistory],
+    findingTriage: { reported: 3, highPriorityClaims: 3, unverifiedClaims: 3 },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  // The Council modal closes on an outside pointer interaction. Exercise
+  // each consumer in its own page so that no assertion relies on two open surfaces.
+  const view = target === 'direct'
+    ? panel(page).locator('.council-inspection')
+    : page.locator('#embedded-scope-council .council-inspection');
+  if (target === 'direct') {
+    await button(page).click();
+    await panel(page).getByText('Review evidence and usage').click();
+  } else {
+    await page.evaluate(async snapshot => {
+      const { createCouncilInspector } = await import('/src/council-inspector.ts');
+      (window as any).__embeddedScopeInspection = snapshot;
+      const host = document.createElement('div');
+      host.id = 'embedded-scope-council';
+      document.body.append(host);
+      const detail = createCouncilInspector(async () => (window as any).__embeddedScopeInspection, 'session-1');
+      host.append(detail);
+      detail.open = true;
+    }, inspection);
+  }
+  await expect(view).toContainText('Own current finding');
+  await expect(view).toContainText('Own earlier-cycle finding');
+  await expect(view).toContainText('Reviewer suggestion (unverified advice): Add a guard <img src=x onerror=alert(1)>');
+  await expect(view).toContainText('Reviewer suggestion (unverified advice): Earlier suggested guard');
+  await expect(view.locator('img[src="x"]')).toHaveCount(0);
+  await expect(view).not.toContainText('Private foreign remediation');
+  await expect(view.getByRole('alert')).toContainText('3 malformed or foreign-cycle reviewer finding(s) omitted');
+  await expect(view).not.toContainText('Private foreign task finding');
+  await expect(view).not.toContainText('Foreign historical claim');
+  await expect(view).not.toContainText('Malformed claim');
+  await expect(view).not.toContainText('Verified native pass');
+  await expect(view.locator('.council-finding-triage')).toHaveCount(0);
+  const setSnapshot = async (snapshot: object) => {
+    await page.evaluate(({ snapshot, target }) => {
+      if (target === 'direct') (window as any).__councilInspectorOverride = snapshot;
+      else (window as any).__embeddedScopeInspection = snapshot;
+    }, { snapshot, target });
+  };
+
+  const clean = { ...inspection, reportedFindings: [own],
+    historicalReportedFindings: [history],
+    findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 } };
+  await setSnapshot(clean);
+  await view.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(view).toContainText('Verified native pass');
+  await expect(view).toContainText('Own earlier-cycle finding');
+  await expect(view.getByRole('alert')).toHaveCount(0);
+
+  const foreignChild = { ...clean, reservedChildren: [{ botId: 'Private child bot',
+    rootCycleId: 'another-task:1000', childSessionId: 'foreign-child',
+    requiredLeafReviewers: 2, status: 'reviewing' }, { botId: 'Own child bot',
+    rootCycleId: 'session-1:1000', childSessionId: 'own-child',
+    requiredLeafReviewers: 2, status: 'reviewing' }] };
+  await setSnapshot(foreignChild);
+  await view.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(view.getByRole('alert')).toContainText('1 foreign-cycle or malformed child Council reservation(s) omitted');
+  await expect(view).not.toContainText('Private child bot');
+  await expect(view).toContainText('Own child bot');
+  await expect(view).not.toContainText('Verified native pass');
+  await view.locator(':scope > summary').click();
+  await expect(view.locator('.council-inspection-body')).toBeEmpty();
+  const revoked = { ...clean, verifiedPass: false, verifiedCompletion: undefined,
+    status: { ...clean.status, state: 'blocked', stale: true }, reportedFindings: [] };
+  await setSnapshot(revoked);
+  await view.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(view.locator('.council-inspection-body')).toBeEmpty();
+  await view.locator(':scope > summary').click();
+  await expect(view).toContainText('Native pass not verified');
+  await expect(view).not.toContainText('Own current finding');
+  await expect(view).not.toContainText('Verified native pass');
+});
+}
+
+test('Council inspector preserves expanded child drill-down only for the same native task on refresh', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    reservedChildren: [
+      { botId: 'security-child', childSessionId: 'child-a', rootCycleId: 'session-1:1000',
+        requiredLeafReviewers: 2, status: 'reviewing' },
+      { botId: 'quality-child', childSessionId: 'child-b', rootCycleId: 'session-1:1000',
+        requiredLeafReviewers: 2, status: 'reviewing' },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').first().click();
+  const children = inspector.getByRole('region', { name: 'Task-owned child Councils' });
+  const first = children.locator('details[data-council-child-key="session-1:1000:child-a"]');
+  const second = children.locator('details[data-council-child-key="session-1:1000:child-b"]');
+  await first.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(first).toHaveAttribute('open', '');
+  await expect(second).not.toHaveAttribute('open', '');
+  // A Shared Channel/native event may refresh while the keyboard is on a child.
+  await first.locator('summary').focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(first.locator('summary')).toBeFocused();
+  await expect(first).toHaveAttribute('open', '');
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(first).toHaveAttribute('open', '');
+  await expect(second).not.toHaveAttribute('open', '');
+
+  // The same child reservation cannot inherit disclosure across an artifact revision.
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, teamRevision: 8,
+  });
+  await first.locator('summary').focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toBeEnabled();
+  await expect(first).not.toHaveAttribute('open', '');
+  await first.locator('summary').click();
+  await expect(first).toHaveAttribute('open', '');
+
+  // A new child reservation cannot inherit the prior task's expanded state.
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, cycleStartedAt: 2000, teamRevision: 8,
+    reservedChildren: [
+      { ...inspection.reservedChildren[0], childSessionId: 'new-child-a', rootCycleId: 'session-1:2000' },
+      { ...inspection.reservedChildren[1], childSessionId: 'new-child-b', rootCycleId: 'session-1:2000' },
+    ],
+  });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(children.locator('details[data-council-child-key="session-1:2000:new-child-a"]'))
+    .not.toHaveAttribute('open', '');
+  await expect(children.locator('details[data-council-child-key="session-1:2000:new-child-b"]'))
+    .not.toHaveAttribute('open', '');
+  await expect(second).toHaveCount(0);
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
+test('Council inspector exposes native mandatory evidence gaps without manufacturing a passed criterion', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [{ id: '<svg onload=alert(1)>', lens: 'Security', required: true,
+      target: 9.8, evidenceRequired: true }],
+    criterionObservations: [{ id: '<svg onload=alert(1)>', round: 1,
+      rootScoredSeats: 2, lowestRootScore: 9.9, state: 'native_evidence_unverified' }],
+    attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const observations = panel(page).getByRole('region', { name: 'Native criterion observations' });
+  await expect(observations).toContainText('Independent native criterion evidence not verified; approval blocked');
+  await expect(observations).toContainText('Scored root reports 2');
+  await expect(observations).toContainText('Lowest root score 9.9/10');
+  await expect(observations).toContainText('child Council receipts are inspected separately');
+  await expect(observations.getByText('<svg onload=alert(1)>')).toBeVisible();
+  await expect(observations.locator('svg')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
+test('Council inspector presents native TOML syntax evidence without promoting a Council pass', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [{ id: 'cargo-syntax', lens: 'File valid TOML: Cargo.toml',
+      required: true, target: 9, evidenceRequired: true,
+      nativeEvidence: { kind: 'reviewed_file_toml_valid', path: 'Cargo.toml' } }],
+    criterionObservations: [{ id: 'cargo-syntax', round: 1, rootScoredSeats: 2,
+      lowestRootScore: 9.9, state: 'reviewed_file_toml_verified' }],
+    attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const observations = panel(page).getByRole('region', { name: 'Native criterion observations' });
+  await expect(observations).toContainText('Native checkout TOML syntax was valid');
+  await expect(observations).toContainText('does not prove Cargo checks, project tests, builds or Council approval');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('Council inspector distinguishes an exact native pinned-input check from unverified evidence and approval', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', strategy: 'parallel', criteriaSource: 'hybrid',
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
+    status: { state: 'fixing', round: 1, lowest: 9.8, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [
+      { id: '<img src=x onerror=alert(1)>', lens: 'Required skill integrity', required: true,
+        target: 9, evidenceRequired: true,
+        nativeEvidence: { kind: 'pinned_input_integrity', skillId: 'pinned-skill' } },
+      { id: 'project-security', lens: 'Project security', required: true,
+        target: 9, evidenceRequired: true },
+    ],
+    criterionObservations: [
+      { id: '<img src=x onerror=alert(1)>', round: 1, rootScoredSeats: 2,
+        lowestRootScore: 9.8, state: 'pinned_input_integrity_verified' },
+      { id: 'project-security', round: 1, rootScoredSeats: 2,
+        lowestRootScore: 9.8, state: 'native_evidence_unverified' },
+    ],
+    attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const observations = panel(page).getByRole('region', { name: 'Native criterion observations' });
+  await expect(observations.locator('li')).toHaveCount(2);
+  await expect(observations.locator('li').first())
+    .toContainText('Native pinned-input integrity verified for this criterion');
+  await expect(observations.locator('li').first())
+    .toContainText('does not prove project tests, artifact correctness or Council approval');
+  await expect(observations.locator('li').nth(1))
+    .toContainText('Independent native criterion evidence not verified; approval blocked');
+  await expect(observations).toContainText('covers only that named check');
+  await expect(observations.getByText('<img src=x onerror=alert(1)>')).toBeVisible();
+  await expect(observations.locator('img')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('Council inspector shows disjoint root usage per round/source without claiming child billing', async ({ page }) => {
+  const usage = (count: number, queue: number | null, span: number | null) => ({
+    uniqueAttempts: count, queueMeasuredAttempts: queue === null ? 0 : count,
+    spanMeasuredAttempts: span === null ? 0 : count,
+    cumulativeQueueWaitMs: queue, cumulativeObservedSpanMs: span,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  });
+  const inspection = {
+    sessionId: 'session-1', mode: 'm7', cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [
+      { workerId: 'direct', name: 'Security bot', round: 1, lens: 'Security', reviewerSource: 'direct_bot',
+        status: 'completed', score: 8, abandoned: false, provider: 'codex', model: 'test', attempt: 1,
+        createdAt: 1000, startedAt: 1300, lastUpdatedAt: 2300, queueWaitMs: 300, observedSpanMs: 1000,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      { workerId: 'auto', name: 'Architecture', round: 2, lens: 'Architecture', reviewerSource: 'automatic',
+        status: 'queued', score: null, abandoned: false, provider: 'claude', model: 'test', attempt: 1,
+        createdAt: 2300, startedAt: 0, lastUpdatedAt: 2300, queueWaitMs: null, observedSpanMs: null,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    ],
+    usage: usage(2, 300, 1000),
+    usageByRoundSource: [
+      { round: 1, reviewerSource: 'direct_bot', usage: usage(1, 300, 1000) },
+      { round: 2, reviewerSource: 'automatic', usage: usage(1, null, null) },
+    ],
+    reservedChildren: [{ botId: 'nested-bot', childSessionId: 'child-one', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const groups = panel(page).getByRole('region', { name: 'Root usage by round and source' });
+  await expect(groups.locator('li')).toHaveCount(2);
+  await expect(groups.locator('li').first()).toContainText('Round 1 · direct bot · Native attempts 1 · Queue 300 ms');
+  await expect(groups.locator('li').nth(1)).toContainText('Round 2 · automatic · Native attempts 1 · Queue unknown');
+  await expect(groups).toContainText('Child reservations are excluded');
+  await expect(groups).toContainText('provider tokens and cost remain unknown without receipts');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Native attempts: 2');
+  const sources = panel(page).locator('.council-native-mode');
+  await expect(sources).toContainText('Native mode: Mixed bots + Architect');
+  await expect(sources).toContainText('1 direct bot, 1 automatic');
+  await expect(sources).toContainText('Task-owned child Council reservations: 1');
+  await expect(sources).toContainText('reservations are not approvals');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
+test('Council inspector does not present invalid native reviewer scores or usage as evidence', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [{
+      workerId: 'reviewer-one', name: 'Security reviewer', round: 1, lens: 'Security',
+      reviewerSource: 'direct_bot', status: 'completed', score: -1,
+      provider: 'codex', model: 'native', tokenCount: -3,
+      costAmount: -2, costCurrency: 'USD', usageProvenance: 'unknown',
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('No native score');
+  await expect(panel(page)).toContainText('Tokens unknown');
+  await expect(panel(page)).toContainText('Cost unknown');
+  await expect(panel(page)).not.toContainText('-1.0/10');
+  await expect(panel(page)).not.toContainText('-3 tokens');
+  await expect(panel(page)).not.toContainText('-2 USD');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
+test('native Council inspector rejects malformed usage sources and rounds without hiding valid root and child observations', async ({ page }) => {
+  const usage = {
+    uniqueAttempts: 1, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+    cumulativeQueueWaitMs: 30, cumulativeObservedSpanMs: 100,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  const malformedRound = '1"><img src=x onerror="window.__groupInjected=true">';
+  const inspection = {
+    sessionId: 'session-1', mode: 'm7', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    reservedChildren: [{ botId: 'security-bot', childSessionId: 'child-group',
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2, status: 'reviewing' }],
+    usageByRoundSource: [
+      { round: 1, reviewerSource: 'direct_bot', usage },
+      { round: malformedRound, reviewerSource: 'automatic', usage },
+      { round: 1, reviewerSource: 'nested_child', usage }, // A child is not a root reviewer.
+      { round: 1, reviewerSource: 'automatic', usage: null },
+    ],
+    composedUsageByRoundSource: [
+      { round: 1, reviewerSource: 'nested_child', usage },
+      { round: 0, reviewerSource: 'direct_bot', usage },
+      { round: 1, reviewerSource: '<img src=x>', usage },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const root = inspector.getByRole('region', { name: 'Root usage by round and source' });
+  const composed = inspector.getByRole('region', { name: 'Root and child usage by round and source' });
+  await expect(root.locator('li')).toHaveCount(1);
+  await expect(root.locator('li')).toContainText('Round 1 · direct bot · Native attempts 1');
+  await expect(root).toContainText('3 malformed root usage group(s) omitted');
+  await expect(composed.locator('li')).toHaveCount(1);
+  await expect(composed.locator('li')).toContainText('Round 1 · nested child · Native attempts 1');
+  await expect(composed).toContainText('2 malformed composed usage group(s) omitted');
+  await expect(inspector).toContainText('Native pass not verified');
+  await expect(inspector.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean((window as any).__groupInjected))).toBe(false);
+  // The shared native renderer must preserve the same fail-closed display when
+  // embedded for another authorized task consumer, not just in the modal.
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const host = document.createElement('div');
+    host.id = 'embedded-group-inspector';
+    document.body.append(host);
+    const view = createCouncilInspector(async () => snapshot, 'session-1');
+    host.append(view);
+    view.open = true;
+  }, inspection);
+  const embedded = page.locator('#embedded-group-inspector .council-inspection');
+  await expect(embedded).toContainText('3 malformed root usage group(s) omitted');
+  await expect(embedded).toContainText('2 malformed composed usage group(s) omitted');
+  await expect(embedded.locator('img')).toHaveCount(0);
+});
+
+test('Council inspector rejects invalid root, child and composed metering but preserves real zero observations', async ({ page }) => {
+  const invalid = {
+    uniqueAttempts: -3, queueMeasuredAttempts: -2, spanMeasuredAttempts: -1,
+    cumulativeQueueWaitMs: -30, cumulativeObservedSpanMs: -10, settledReviewWindowMs: -5,
+    tokenCount: -800, costAmount: -42, costCurrency: 'USD', usageProvenance: 'unknown',
+  };
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 1, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    usage: invalid, composedUsage: invalid, retiredChildAttempts: 2,
+    usageByRoundSource: [{ round: 1, reviewerSource: 'automatic', usage: invalid }],
+    composedUsageByRoundSource: [{ round: 1, reviewerSource: 'nested_child', usage: invalid }],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-usage', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'reviewing', observedLeafUsage: invalid,
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const rootUsage = inspector.locator('.council-usage-totals');
+  await expect(rootUsage).toContainText('Native attempts: unknown');
+  await expect(rootUsage).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(rootUsage).toContainText('Cumulative queue unknown');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Root + child native attempts: unknown');
+  await expect(inspector.locator('.council-composed-usage-breakdown'))
+    .toContainText('Current/retired attempt breakdown unknown');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(inspector.getByRole('region', { name: 'Root usage by round and source' }))
+    .toContainText('Native attempts unknown');
+  await expect(inspector.getByRole('region', { name: 'Root and child usage by round and source' }))
+    .toContainText('Native attempts unknown');
+  const child = inspector.getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('Child-observed native leaf attempts: unknown');
+  await expect(child).toContainText('Provider tokens unknown · Cost unknown');
+  await expect(inspector).not.toContainText('Cost -42 USD');
+  await expect(inspector).not.toContainText('Provider tokens -800');
+  await expect(inspector).not.toContainText('attempts: -3');
+  await expect(inspector).toContainText('Native pass not verified');
+  // Zero is valid observed usage; rejecting bad values must preserve it.
+  const zero = { ...invalid, uniqueAttempts: 0, queueMeasuredAttempts: 0,
+    spanMeasuredAttempts: 0, cumulativeQueueWaitMs: 0,
+    cumulativeObservedSpanMs: 0, settledReviewWindowMs: 0,
+    tokenCount: 0, costAmount: 0 };
+  await page.evaluate(next => { (window as any).__councilInspectorOverride = next; }, {
+    ...inspection, usage: zero, composedUsage: zero, retiredChildAttempts: 0,
+    reservedChildren: [{ ...inspection.reservedChildren[0], observedLeafUsage: zero }],
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(rootUsage).toContainText('Native attempts: 0');
+  await expect(rootUsage).toContainText('Provider tokens 0 · Cost 0 USD');
+  await expect(inspector.locator('.council-composed-usage')).toContainText('Provider tokens 0 · Cost 0 USD');
+  await expect(child).toContainText('Child-observed native leaf attempts: 0');
+  await expect(inspector.locator('.council-composed-usage-breakdown'))
+    .toContainText('Retired child attempts (included in total): 0');
+});
+
+test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
+  const inspection = {
+    mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, criteria: [
+      { id: 'security', lens: '<img src=x onerror=alert(1)> Security', required: true,
+        target: 9.7, evidenceRequired: true },
+      { id: 'style', lens: 'Maintainability', required: false, target: 7.5, evidenceRequired: false },
+    ], attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const criteria = panel(page).getByRole('region', { name: 'Task criteria' });
+  await expect(criteria.locator('li')).toHaveCount(2);
+  await expect(criteria.locator('li').nth(0)).toContainText('Required · Target 9.7/10 · Evidence required · User-defined criterion');
+  await expect(criteria.locator('li').nth(1)).toContainText('Optional · Target 7.5/10 · Evidence not explicitly required');
+  await expect(criteria).toContainText('do not establish reviewer coverage or approval');
+  await expect(criteria.getByText('<img src=x onerror=alert(1)> Security')).toBeVisible();
+  await expect(criteria.locator('img')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('M3 native read-only inspector discloses both reviewer sources without treating stale status as approval', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', mode: 'm3', strategy: 'escalated', forceEscalation: true, criteriaSource: 'hybrid', cycleStartedAt: 1000, teamRevision: 18,
+    status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: true },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 18, round: 1, lowest: 9.5 },
+    criteria: [], attempts: [
+      { workerId: 'direct', round: 1, name: 'Security', lens: 'Security',
+        reviewerSource: 'direct_bot', status: 'completed', score: 10,
+        provider: 'codex', model: 'model-one', attempt: 1,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      { workerId: 'auto', round: 1, name: 'Compatibility', lens: 'Compatibility',
+        reviewerSource: 'automatic', status: 'completed', score: 9.5,
+        provider: 'claude', model: 'model-two', attempt: 1,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).locator('.council-native-mode')).toContainText('Native mode: Bots + Architect');
+  await expect(panel(page).locator('.council-native-mode')).toContainText('1 direct bot, 1 automatic');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Configured native strategy: Escalated / on-demand');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Explicit fresh-round escalation required');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Criteria origin: Hybrid');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await expect(panel(page).getByText('Stale revision', { exact: false })).toBeVisible();
+});
+
+test('Council inspector shows verified triggered S2 child evidence without a passing first wave', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
+      automaticEscalationTriggers: ['below_target'],
+      verifiedChildReceipt: null,
+      verifiedEscalationReceipt: {
+        rootCycleId: 'session-1:1000', childSessionId: 'child-s2', botId: 'security-child',
+        objectiveSha256: 'a'.repeat(64), policySha256: 'b'.repeat(64),
+        childConfigSha256: 'c'.repeat(64), lowestScore: 9.8,
+        leafWorkerIds: ['fresh-a', 'fresh-b'], criterionEvidence: [],
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').click();
+  await expect(children).toContainText('Native second-wave child evidence recorded (root approval pending)');
+  await expect(children).toContainText('9.8/10');
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  await expect(children).not.toContainText('correlation or reviewer identity mismatch');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('Council blocked child state remains non-passing in shared native inspector', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 5,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true,
+      notice: 'Nested Council requires a task-isolated native child review before any root approval.' },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{ botId: '<img src=x onerror=alert(1)>', childSessionId: 'child-session-one',
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  // Assert the actual child reservation status rather than matching unrelated
+  // root status prose; Playwright strict locators must remain unambiguous.
+  await expect(child.locator('summary')).toContainText('blocked');
+  await expect(child).toContainText('Reservations are not executed reviews');
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(child.getByText('Configured leaf reviewers: 3', { exact: false })).toBeVisible();
+  await expect(child.getByText('child-session-one', { exact: false })).toBeVisible();
+  await expect(child.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(child.locator('img')).toHaveCount(0);
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+
+test('Council inspector exposes authenticated unforced S2 triggers without presenting review or approval as completed', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{ botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_required',
+      automaticEscalationTriggers: ['below_target'] }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').click();
+  await expect(children.getByRole('status')).toContainText('Authenticated S2 first-wave trigger: below target');
+  await expect(children).toContainText('admission and root approval remain pending');
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('unforced S2 inspector distinguishes an admitted second wave from pending native receipt', async ({ page }) => {
+  const leafAttempts = ['first-a', 'first-b', 'fresh-a', 'fresh-b'].map((workerId, index) => ({
+    workerId, round: index < 2 ? 1 : 2, name: workerId, lens: 'Authorization',
+    reviewerSource: 'automatic', status: index < 2 ? 'completed' : 'queued',
+    score: index < 2 ? 6.0 : null, provider: 'codex', model: 'native-reviewer',
+    queueWaitMs: index < 2 ? 50 : null, observedSpanMs: index < 2 ? 200 : null,
+  }));
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'isolated-s2-child', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_reviewing',
+      automaticEscalationTriggers: ['below_target'], leafAttempts,
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(child).toContainText('Authenticated S2 first-wave trigger: below target');
+  await expect(child).toContainText('Fresh native second-wave reviewers have been admitted');
+  await expect(child).toContainText('round 2 admitted 2 of 2 reviewers');
+  await expect(child).not.toContainText('admission and root approval remain pending');
+  await expect(child).toContainText('No independent second-wave child receipt is available yet; no parent vote');
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('native child receipt inspector shows independent evidence without promoting root approval', async ({ page }) => {
+  const receipt = {
+    rootCycleId: 'session-1:1000', childSessionId: 'child-session', botId: 'security-child',
+    objectiveSha256: 'sha-objective', policySha256: 'sha-policy',
+    childConfigSha256: 'sha-config', lowestScore: 9.5,
+    leafWorkerIds: ['leaf-one', '<img src=x onerror=alert(1)>'],
+  };
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [
+      { botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'session-1:1000',
+        requiredLeafReviewers: 2, status: 'child_evidence_ready_root_pending',
+        observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+          cumulativeQueueWaitMs: 150, cumulativeObservedSpanMs: 950,
+          tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+        verifiedChildReceipt: receipt },
+      { botId: 'stale-child', childSessionId: 'other-child', rootCycleId: 'session-1:1000',
+        requiredLeafReviewers: 2, status: 'reviewing',
+        verifiedChildReceipt: { ...receipt, botId: 'wrong-owner' } },
+    ],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await expect(children.locator('summary')).toHaveCount(2);
+  await children.locator('summary').first().focus();
+  await page.keyboard.press('Enter');
+  await expect(children).toContainText('Native child evidence recorded (root approval pending)');
+  await expect(children).toContainText('minimum score 9.5/10');
+  await expect(children).toContainText('Child-observed native leaf attempts: 2');
+  await expect(children).toContainText('Provider tokens unknown');
+  await expect(children).toContainText('Cost unknown');
+  await expect(children.getByRole('list', { name: 'Child reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(children.getByText('<img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
+  await expect(children.locator('img')).toHaveCount(0);
+  await children.locator('summary').nth(1).focus();
+  await page.keyboard.press('Enter');
+  await expect(children.getByRole('alert')).toContainText('correlation or reviewer count mismatch');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('Council inspector rejects malformed child reviewer receipt identifiers without rendering them', async ({ page }) => {
+  const first = {
+    rootCycleId: 'session-1:1000', childSessionId: 'child-first', botId: 'bad-first',
+    objectiveSha256: 'objective', policySha256: 'policy', childConfigSha256: 'config',
+    lowestScore: 9.5, leafWorkerIds: ['first-a', null],
+  };
+  const valid = { ...first, childSessionId: 'child-second', botId: 'bad-second',
+    leafWorkerIds: ['first-a', 'first-b'] };
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: true,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 10,
+    status: { state: 'passed', round: 2, lowest: 9.5, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 10, round: 2, lowest: 9.5 },
+    criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'bad-first', childSessionId: 'child-first', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'reviewing', verifiedChildReceipt: first,
+    }, {
+      botId: 'bad-second', childSessionId: 'child-second', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
+      verifiedChildReceipt: valid,
+      verifiedEscalationReceipt: { ...valid, leafWorkerIds: ['fresh-a', '  '] },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').first().click();
+  await children.locator('summary').nth(1).click();
+  await expect(children.getByRole('alert')).toHaveCount(2);
+  await expect(children).toContainText('Child evidence receipt correlation or reviewer count mismatch; no approval');
+  await expect(children).toContainText('Second-wave child receipt correlation or reviewer identity mismatch; no approval');
+  await expect(children.getByRole('list', { name: 'Fresh child reviewer evidence identifiers' })).toHaveCount(0);
+  await expect(panel(page)).toContainText('Conflicting child receipts in this inspection');
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('child Council drill-down shows actual native leaves without root votes or unsafe HTML', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, criteria: [], attempts: [],
+    usage: { uniqueAttempts: 0, queueMeasuredAttempts: 0, spanMeasuredAttempts: 0,
+      cumulativeQueueWaitMs: null, cumulativeObservedSpanMs: null,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    retiredChildAttempts: 2,
+    composedUsage: { uniqueAttempts: 4, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+      cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    composedUsageByRoundSource: [{
+      round: 1, reviewerSource: 'nested_child',
+      usage: { uniqueAttempts: 4, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+        cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    }],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'reviewing',
+      observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+        cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      leafAttempts: [
+        { workerId: 'leaf-one', name: '<img src=x onerror=alert(1)>', lens: 'Authorization',
+          reviewerSource: 'automatic', status: 'completed', score: 9.5, provider: 'codex',
+          model: 'model-a', queueWaitMs: 250, observedSpanMs: 800 },
+        { workerId: 'leaf-two', name: 'Security leaf', lens: 'Injection',
+          reviewerSource: 'automatic', status: 'running', score: null, provider: 'codex',
+          model: 'model-a', queueWaitMs: null, observedSpanMs: null },
+      ],
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  const leaves = children.getByRole('region', { name: 'Child native reviewer attempts' });
+  await expect(leaves.locator('li')).toHaveCount(2);
+  await expect(leaves).toContainText('9.5/10 (reported)');
+  await expect(leaves).toContainText('No native score');
+  await expect(leaves).toContainText('Queue 250 ms');
+  await expect(leaves).toContainText('Tokens unknown');
+  await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(leaves.locator('img')).toHaveCount(0);
+  const combined = panel(page).locator('.council-composed-usage');
+  await expect(combined).toContainText('Root + child native attempts: 4');
+  const breakdown = panel(page).locator('.council-composed-usage-breakdown');
+  await expect(breakdown).toContainText('Current root and child reservation attempts: 2');
+  await expect(breakdown).toContainText('Retired child attempts (included in total): 2');
+  await expect(breakdown).toContainText('not current evidence or approval');
+  await expect(combined).toContainText('Provider tokens unknown');
+  await expect(combined).toContainText('Cost unknown');
+  const grouped = panel(page).getByRole('region', { name: 'Root and child usage by round and source' });
+  await expect(grouped.locator('li')).toHaveCount(1);
+  await expect(grouped.locator('li')).toContainText('Round 1 · nested child · Native attempts 4');
+  await expect(grouped).toContainText('composite parent seats and unadmitted reservations are excluded');
+  await expect(combined).toContainText('parent composite seats excluded');
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  const sources = panel(page).locator('.council-native-mode');
+  await expect(sources).toContainText('Native mode: Bots with own Architect');
+  await expect(sources).toContainText('0 direct bot, 0 automatic');
+  await expect(sources).toContainText('Task-owned child Council reservations: 1');
+  await expect(sources).toContainText('reservations are not approvals');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const host = document.createElement('div');
+    host.id = 'embedded-recovered-usage';
+    document.body.append(host);
+    const view = createCouncilInspector(async () => snapshot, 'session-1');
+    host.append(view);
+    view.open = true;
+  }, inspection);
+  const embedded = page.locator('#embedded-recovered-usage .council-inspection');
+  await expect(embedded.locator('.council-composed-usage-breakdown'))
+    .toHaveText(await breakdown.textContent() ?? '');
+  await expect(embedded).toContainText('Native pass not verified');
+});
+
+test('forced S2 child inspector exposes both native waves without promoting first-wave proof', async ({ page }) => {
+  const leafAttempts = Array.from({ length: 16 }, (_, index) => ({
+    workerId: index === 15 ? '<img src=x onerror=alert(1)>' : 'leaf-' + index,
+    round: index < 8 ? 1 : 2,
+    name: 'Independent child leaf ' + index,
+    lens: 'Security review', reviewerSource: 'automatic',
+    status: index === 15 ? 'running' : 'completed',
+    score: index === 15 ? null : 9.8,
+    provider: 'codex', model: 'native-reviewer',
+    queueWaitMs: 120, observedSpanMs: index === 15 ? null : 450,
+  }));
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: true,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'isolated-child', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 8, status: 'child_escalation_reviewing',
+      leafAttempts,
+      // This is a genuine first-wave receipt, not a second-wave terminal receipt.
+      verifiedChildReceipt: {
+        rootCycleId: 'session-1:1000', childSessionId: 'isolated-child', botId: 'security-child',
+        objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+        childConfigSha256: 'frozen-child-policy', lowestScore: 9.8,
+        leafWorkerIds: leafAttempts.slice(0, 8).map(attempt => attempt.workerId),
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  const leaves = child.getByRole('region', { name: 'Child native reviewer attempts' });
+  await expect(leaves.locator('li')).toHaveCount(16);
+  await expect(leaves).toContainText('Round 1');
+  await expect(leaves).toContainText('Round 2');
+  await expect(leaves).toContainText('No native score');
+  await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(leaves.locator('img')).toHaveCount(0);
+  await expect(child.getByRole('status')).toContainText('round 2 admitted 8 of 8 reviewers');
+  await expect(child).toContainText('First-wave receipts do not verify second-wave completion');
+  await expect(child).toContainText('First-wave native child evidence recorded (second-wave approval pending)');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+test('child S2 inspector distinguishes a native second-wave receipt from terminal root approval', async ({ page }) => {
+  const attempts = ['first-a', 'first-b', 'fresh-a', 'fresh-b'].map((workerId, index) => ({
+    workerId, round: index < 2 ? 1 : 2, name: workerId,
+    lens: 'Authorization', reviewerSource: 'automatic',
+    status: 'completed', score: 9.6, provider: 'codex', model: 'native-reviewer',
+    queueWaitMs: 25, observedSpanMs: 160,
+  }));
+  const receipt = {
+    rootCycleId: 'session-1:1000', childSessionId: 'child-only-task', botId: 'security-child',
+    objectiveSha256: 'pinned-objective', policySha256: 'pinned-policy',
+    childConfigSha256: 'pinned-criteria', lowestScore: 9.6,
+    leafWorkerIds: ['first-a', 'first-b'],
+  };
+  const inspection = {
+    mode: 'm5', strategy: 'escalated', forceEscalation: true,
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 16,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-only-task',
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2,
+      status: 'child_escalation_evidence_ready_root_pending',
+      leafAttempts: attempts,
+      verifiedChildReceipt: receipt,
+      verifiedEscalationReceipt: {
+        ...receipt, leafWorkerIds: ['fresh-a', 'fresh-b'],
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(child).toContainText('Native second-wave child evidence recorded (root approval pending)');
+  await expect(child).toContainText('2 independent fresh reviewer identifiers');
+  await expect(child).toContainText('Fresh child evidence is recorded separately; root approval remains pending');
+  await expect(child.getByRole('list', { name: 'Fresh child reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  inspection.reservedChildren[0].verifiedEscalationReceipt.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const altered = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await altered.locator('summary').click();
+  await expect(altered.getByRole('alert')).toContainText('Second-wave child receipt correlation or reviewer identity mismatch');
+  await expect(panel(page)).toContainText('Native pass not verified');
+});
+
+
+for (const strategy of ['parallel', 'escalated'] as const) {
+  test(`Council inspector denies root pass with an incomplete child receipt (${strategy})`, async ({ page }) => {
+    const receipt = {
+      rootCycleId: 'session-1:1000', childSessionId: 'child-task', botId: 'security-child',
+      objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+      childConfigSha256: 'frozen-child', lowestScore: 9.6, leafWorkerIds: ['leaf-a', 'leaf-b'],
+    };
+    const child = {
+      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'reviewing', automaticEscalationTriggers: [],
+      leafAttempts: [],
+    };
+    const snapshot = {
+      sessionId: 'session-1', mode: 'm5', strategy, forceEscalation: false,
+      cycleStartedAt: 1000, teamRevision: 22,
+      status: { state: 'passed', round: 1, lowest: 9.6, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
+        teamRevision: 22, round: 1, lowest: 9.6 },
+      criteria: [], attempts: [], reservedChildren: [child],
+    };
+    await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+    await button(page).click();
+    const inspector = panel(page).locator('.council-inspection');
+    await inspector.getByText('Review evidence and usage').click();
+    await expect(inspector).toContainText('Required child phase receipts are pending');
+    await expect(inspector).not.toContainText('Verified native pass');
+    await expect(inspector.locator('.council-verified-completion')).toHaveCount(0);
+    // A genuinely correlated child receipt makes the same native terminal
+    // projection displayable. This is display consistency, not native approval.
+    await open(page, '/?council', {}, 0, '', {}, undefined, {
+      ...snapshot, reservedChildren: [{ ...child, status: 'child_evidence_ready_root_pending',
+        verifiedChildReceipt: receipt }],
+    });
+    await button(page).click();
+    await inspector.getByText('Review evidence and usage').click();
+    await expect(inspector).toContainText('Verified native pass');
+    await expect(inspector).not.toContainText('Required child phase receipts are pending');
+    await expect(inspector.locator('.council-verified-completion')).toHaveCount(1);
+  });
+}
+
+test('verified M4 S2 inspector distinguishes authenticated root completion from pending child evidence', async ({ page }) => {
+  const nativeReceipt = {
+    rootCycleId: 'session-1:1000', childSessionId: 'child-task', botId: 'security-child',
+    objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+    childConfigSha256: 'frozen-child', lowestScore: 9.6, leafWorkerIds: ['fresh-a', 'fresh-b'],
+  };
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    cycleStartedAt: 1000, teamRevision: 22,
+    status: { state: 'passed', round: 1, lowest: 9.6, target: 9.0, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 22, round: 1, lowest: 9.6 },
+    criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'session-1:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
+      automaticEscalationTriggers: ['below_target'],
+      verifiedEscalationReceipt: nativeReceipt,
+      leafAttempts: [
+        { workerId: 'first-a', round: 1 },
+        { workerId: 'first-b', round: 1 },
+        { workerId: 'fresh-a', round: 2 },
+        { workerId: 'fresh-b', round: 2 },
+      ],
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  let child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('root native pass verified');
+  await expect(panel(page)).toContainText('Verified native pass');
+
+  // A stale cycle cannot turn an independently correlated child receipt into
+  // a successful root verdict.
+  inspection.verifiedCompletion.cycleId = 'another-task:1000';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('root approval pending');
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(child).not.toContainText('root native pass verified');
+});
+
+test('native M4 S3 child challenge inspector correlates distinct phases without approving the root', async ({ page }) => {
+  const receipt = {
+    rootCycleId: 'session-1:1000', childSessionId: 'task-owned-child', botId: 'child-reviewer',
+    objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+    childConfigSha256: 'frozen-child-policy', lowestScore: 9.7,
+    leafWorkerIds: ['first-a', 'first-b'],
+  };
+  const inspection = {
+    sessionId: 'session-1', mode: 'm4', strategy: 'two_phase', cycleStartedAt: 1000, teamRevision: 20,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'child-reviewer', childSessionId: 'task-owned-child',
+      rootCycleId: 'session-1:1000', requiredLeafReviewers: 2,
+      status: 'child_challenge_evidence_ready_root_pending',
+      leafAttempts: ['first-a', 'first-b', 'challenger-a', 'challenger-b'].map((workerId, i) => ({
+        workerId, round: i < 2 ? 1 : 2, name: workerId,
+        lens: 'Security', reviewerSource: 'automatic',
+        status: 'completed', score: 9.7, provider: 'codex', model: 'native',
+        queueWaitMs: 12, observedSpanMs: 120,
+      })),
+      verifiedChildReceipt: receipt,
+      verifiedChallengeReceipt: {
+        rootCycleId: 'session-1:1000', childSessionId: 'task-owned-child',
+        botId: 'child-reviewer', phaseOneReceiptSha256: 'a'.repeat(64),
+        phaseTwo: { ...receipt, leafWorkerIds: ['challenger-a', 'challenger-b'] },
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(children).toContainText('Native S3 challenge child receipt recorded (root approval pending)');
+  await expect(children).toContainText('2 fresh independent reviewer identifiers');
+  await expect(children.getByRole('list', { name: 'S3 child challenge reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  // This browser fixture is display-only: it must reflect a correlated
+  // native root completion, then fail closed if its revision no longer matches.
+  const approvedInspection = {
+    ...inspection,
+    sessionId: 'session-1',
+    status: { state: 'passed', round: 2, lowest: 9.7, target: 9.0, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: {
+      sessionId: 'session-1', cycleId: 'session-1:1000',
+      teamRevision: 20, round: 2, lowest: 9.7,
+    },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, approvedInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const passedChild = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await passedChild.locator('summary').click();
+  await expect(panel(page)).toContainText('Verified native pass');
+  await expect(passedChild).toContainText('Independent S3 challenge receipt and root native pass are verified');
+  await expect(passedChild).toContainText('Native S3 challenge child receipt recorded (root native pass verified)');
+
+  // Even a matching root completion cannot be presented as verified when
+  // an included child receipt contradicts the native task or reviewer identity.
+  const conflictingInspection = structuredClone(approvedInspection);
+  conflictingInspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, conflictingInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('Conflicting child receipts in this inspection');
+  await expect(panel(page)).not.toContainText('Verified native pass');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+  await page.evaluate(async snapshot => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    (window as any).__conflictingCouncilSnapshot = snapshot;
+    const host = document.createElement('div');
+    host.id = 'embedded-conflicting-council';
+    const detail = createCouncilInspector(async () => (window as any).__conflictingCouncilSnapshot, 'session-1');
+    host.append(detail);
+    document.body.append(host);
+    detail.open = true;
+  }, conflictingInspection);
+  const embeddedConflict = page.locator('#embedded-conflicting-council .council-inspection');
+  await expect(embeddedConflict).toContainText('Conflicting child receipts in this inspection');
+  await expect(embeddedConflict).not.toContainText('Verified native pass');
+  await page.evaluate(snapshot => { (window as any).__conflictingCouncilSnapshot = snapshot; }, approvedInspection);
+  await embeddedConflict.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embeddedConflict).toContainText('Verified native pass');
+  await expect(embeddedConflict).not.toContainText('Conflicting child receipts in this inspection');
+
+  // A valid sibling challenge cannot cover an absent required phase receipt.
+  const pendingSibling = {
+    ...approvedInspection,
+    reservedChildren: [...approvedInspection.reservedChildren, {
+      ...approvedInspection.reservedChildren[0], botId: 'pending-child',
+      childSessionId: 'pending-child-task', status: 'child_challenge_reviewing',
+      verifiedChildReceipt: { ...receipt, botId: 'pending-child',
+        childSessionId: 'pending-child-task', leafWorkerIds: ['pending-a', 'pending-b'] },
+      verifiedChallengeReceipt: null, leafAttempts: [],
+    }],
+  };
+  await page.evaluate(snapshot => { (window as any).__conflictingCouncilSnapshot = snapshot; }, pendingSibling);
+  await embeddedConflict.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(embeddedConflict).toContainText('Required child phase receipts are pending');
+  await expect(embeddedConflict).not.toContainText('Conflicting child receipts in this inspection');
+  await expect(embeddedConflict).not.toContainText('Verified native pass');
+  await open(page, '/?council', {}, 0, '', {}, undefined, pendingSibling);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page)).toContainText('Required child phase receipts are pending');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  const staleInspection = {
+    ...approvedInspection,
+    verifiedCompletion: { ...approvedInspection.verifiedCompletion, teamRevision: 19 },
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, staleInspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const staleChild = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await staleChild.locator('summary').click();
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(staleChild).toContainText('The challenge receipt is authenticated; root approval remains pending');
+  await expect(staleChild).not.toContainText('root native pass verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  inspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const tampered = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await tampered.locator('summary').click();
+  await expect(tampered.getByRole('alert')).toContainText('S3 challenge receipt correlation or reviewer identity mismatch');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  // Untrusted inspection payloads must not crash the panel or become evidence.
+  inspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds = 'not-an-array';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const malformed = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await malformed.locator('summary').click();
+  await expect(malformed.getByRole('alert')).toContainText('S3 challenge receipt correlation or reviewer identity mismatch');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+
+test('overlapping native evidence refreshes preserve only the owning inspector disclosure', async ({ page }) => {
+  const attempt = {
+    workerId: 'security-worker', name: 'Security reviewer', lens: 'Security', round: 1,
+    reviewerSource: 'direct_bot', status: 'completed', score: 7.5, abandoned: false,
+    provider: 'codex', model: 'native', attempt: 1, createdAt: 1000,
+    startedAt: 1001, lastUpdatedAt: 1010, usageProvenance: 'unknown',
+  };
+  const finding = {
+    schemaVersion: 1, id: 'report:1', cycleId: 'session-1:1000', round: 1,
+    workerId: 'security-worker', reportMessageId: 22, lens: 'Security',
+    severity: 'high', category: 'authorization', title: 'Initial guard',
+    explanation: 'Reviewer-reported claim only', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  };
+  const snapshot = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'fixing', round: 1, lowest: 7.5, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [attempt], reportedFindings: [finding],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+  await page.evaluate(async initial => {
+    const { createCouncilInspector } = await import('/src/council-inspector.ts');
+    const w = window as any;
+    w.__overlappingInspectorReads = [];
+    w.__deferInspectorReads = false;
+    const host = document.createElement('div');
+    host.id = 'overlapping-inspectors';
+    for (const id of ['first', 'second']) {
+      const detail = createCouncilInspector(() => id === 'first' && w.__deferInspectorReads
+        ? new Promise(resolve => w.__overlappingInspectorReads.push(resolve))
+        : Promise.resolve(initial as any), 'session-1');
+      detail.dataset.testInspector = id;
+      host.append(detail);
+      detail.open = true;
+    }
+    document.body.append(host);
+  }, snapshot);
+  const first = page.locator('[data-test-inspector="first"]');
+  const second = page.locator('[data-test-inspector="second"]');
+  const reviewer = first.locator('.council-reviewer-findings[data-council-reviewer-key]');
+  const summary = reviewer.locator(':scope > summary');
+  await expect(reviewer).toContainText('Initial guard');
+  await expect(second).toContainText('Initial guard');
+  await reviewer.evaluate(node => { (node as HTMLDetailsElement).open = true; });
+  await summary.focus();
+  // An unrelated inspector refresh must not take focus from this one.
+  await second.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(summary).toBeFocused();
+  await page.evaluate(() => { (window as any).__deferInspectorReads = true; });
+  const invalidateTwice = () => first.evaluate(node => {
+    node.dispatchEvent(new Event('council-evidence-invalidated'));
+    node.dispatchEvent(new Event('council-evidence-invalidated'));
+  });
+  const pendingCount = () => page.evaluate(() => (window as any).__overlappingInspectorReads.length);
+  await invalidateTwice();
+  await expect.poll(pendingCount).toBe(2);
+  const newest = { ...snapshot, reportedFindings: [{ ...finding, title: 'Newest guard' }] };
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[1](value); }, newest);
+  await expect(reviewer).toContainText('Newest guard');
+  await expect(reviewer).toHaveAttribute('open', '');
+  await expect(summary).toBeFocused();
+  // A delayed response, including a valid but obsolete scope, cannot replace it.
+  await page.evaluate(value => {
+    const w = window as any;
+    w.__overlappingInspectorReads[0](value);
+    w.__overlappingInspectorReads = [];
+  }, snapshot);
+  await expect(reviewer).toContainText('Newest guard');
+  await invalidateTwice();
+  await expect.poll(pendingCount).toBe(2);
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[1](value); },
+    { ...newest, teamRevision: 8 });
+  await expect(reviewer).not.toHaveAttribute('open', '');
+  await expect(first.getByRole('button', { name: 'Refresh native evidence' })).toBeFocused();
+  await page.evaluate(value => { (window as any).__overlappingInspectorReads[0](value); }, snapshot);
+  await expect(reviewer).toContainText('Newest guard');
+});
+
+test('Council inspector keeps focused reviewer findings only for the same native attempt and revision', async ({ page }) => {
+  const attempt = {
+    workerId: 'security-worker', name: 'Security reviewer', lens: 'Security', round: 1,
+    reviewerSource: 'direct_bot', status: 'completed', score: 7.5, abandoned: false,
+    provider: 'codex', model: 'native', attempt: 1, createdAt: 1000,
+    startedAt: 1001, lastUpdatedAt: 1010, tokenCount: null,
+    costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  };
+  const finding = {
+    schemaVersion: 1, id: 'report:1', cycleId: 'session-1:1000', round: 1,
+    workerId: 'security-worker', reportMessageId: 22, lens: 'Security',
+    severity: 'high', category: 'authorization', title: 'Missing guard',
+    explanation: 'Reviewer-reported claim only', artifactRevision: 'revision-7',
+    verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  };
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'fixing', round: 1, lowest: 7.5, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [attempt], reportedFindings: [finding],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').first().click();
+  const reviewer = inspector.locator('.council-reviewer-findings[data-council-reviewer-key]');
+  const reviewerSummary = reviewer.locator(':scope > summary');
+  await reviewerSummary.focus();
+  await page.keyboard.press('Enter');
+  await expect(reviewer).toHaveAttribute('open', '');
+  await reviewerSummary.focus();
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  await expect(reviewerSummary).toBeFocused();
+  await expect(reviewer).toHaveAttribute('open', '');
+  await expect(reviewer).toContainText('Missing guard');
+
+  // A replacement native reviewer attempt cannot inherit the old disclosure.
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, attempts: [{ ...attempt, attempt: 2 }],
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await expect(inspector.locator('.council-reviewer-findings')).not.toHaveAttribute('open', '');
+
+  // Even with a matching reviewer identity, a new artifact revision resets focus and disclosure.
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, teamRevision: 8,
+  });
+  await inspector.getByRole('button', { name: 'Refresh native evidence' }).click();
+  await reviewerSummary.focus();
+  await page.keyboard.press('Enter');
+  await reviewerSummary.focus();
+  await page.evaluate(snapshot => { (window as any).__councilInspectorOverride = snapshot; }, {
+    ...inspection, teamRevision: 9,
+  });
+  await inspector.evaluate(node => node.dispatchEvent(new Event('council-evidence-invalidated')));
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeFocused();
+  await expect(reviewer).not.toHaveAttribute('open', '');
+  await expect(inspector).toContainText('Native pass not verified');
+});
+
+test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 1, lowest: 6, target: 9, stale: false },
+    verifiedPass: false, criteria: [], attempts: [],
+    findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 },
+    reportedFindings: [
+      { schemaVersion: 1, id: 'cycle:worker:22:0', cycleId: 'session-1:1000', round: 1,
+        workerId: 'worker-1', reportMessageId: 22, lens: 'Security', severity: 'high',
+        category: 'authorization', title: '<img src=x onerror=alert(1)>',
+        explanation: 'The route is missing a guard', artifactRevision: null,
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const findings = panel(page).getByRole('region', { name: 'Reviewer-reported findings' });
+  await expect(findings.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(findings.getByText('independent evidence unverified', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Finding ID cycle:worker:22:0', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Artifact revision unavailable', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Location unverified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-finding-triage')).toContainText('Critical/high reported: 1');
+  await expect(panel(page).locator('.council-finding-triage')).toContainText('Independently unverified: 1');
+  await expect(findings.locator('img')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+test('a newer reviewer turn retains unverified history without approving a fix', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'fixing', round: 2, lowest: 6, target: 9, stale: true },
+    verifiedPass: false, criteria: [], attempts: [], reportedFindings: [],
+    findingTriage: { reported: 0, highPriorityClaims: 0, unverifiedClaims: 0 },
+    historicalReportedFindings: [
+      { schemaVersion: 1, id: 'old:cycle:worker:22:0', cycleId: 'session-1:800', round: 1,
+        workerId: 'former-reviewer', reportMessageId: 22, lens: 'Security',
+        severity: 'high', category: 'authorization',
+        title: '<img src=x onerror=alert(1)>', explanation: 'Earlier report identified a missing guard',
+        artifactRevision: 'frozen-revision', verifiedEvidenceRefs: [],
+        evidenceVerified: false, locationVerified: false },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const history = inspector.getByRole('region', { name: 'Earlier reviewer-reported findings' });
+  await expect(history.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(history).toContainText('No automatic resolution or native approval is inferred');
+  await expect(history).toContainText('Finding ID old:cycle:worker:22:0');
+  await expect(history.locator('img')).toHaveCount(0);
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+  await expect(inspector.locator('.council-finding-triage')).toContainText('Native current-cycle reviewer claims: 0');
+});
+test('native inspector attributes reported findings to the exact reviewer and round without promoting their claims', async ({ page }) => {
+  const attempt = (workerId: string, name: string, round: number) => ({
+    workerId, name, round, lens: 'Security', reviewerSource: 'direct_bot',
+    status: 'completed', score: 8, abandoned: false, provider: 'codex', model: 'test-model',
+    attempt: 1, createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1002,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  });
+  const finding = (workerId: string, round: number, title: string) => ({
+    schemaVersion: 1, id: workerId + ':' + round, cycleId: 'session-1:1000', round,
+    workerId, reportMessageId: 22, lens: 'Security', severity: 'high',
+    category: 'security', title, explanation: 'Reviewer-reported claim only',
+    artifactRevision: null, verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  });
+  const inspection = {
+    sessionId: 'session-1', mode: 'm2', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 2, lowest: 8, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [attempt('alice', 'Alice', 1), attempt('bob', 'Bob', 1), attempt('alice', 'Alice', 2)],
+    reportedFindings: [
+      finding('alice', 1, '<img src=x onerror=alert(1)>'),
+      finding('bob', 1, 'Bob claim'),
+      finding('alice', 2, 'Later round claim'),
+      finding('missing-worker', 1, 'Older orphan claim'),
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const firstRound = inspector.getByRole('region', { name: 'Review round 1' });
+  const seats = firstRound.locator(':scope > ul > li');
+  await seats.nth(0).locator('details > summary').click();
+  await expect(seats.nth(0).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(seats.nth(0).getByText('Bob claim')).toHaveCount(0);
+  await seats.nth(1).locator('details > summary').click();
+  await expect(seats.nth(1).getByText('Bob claim')).toBeVisible();
+  await expect(seats.nth(1).getByText('Later round claim')).toHaveCount(0);
+  const secondRound = inspector.getByRole('region', { name: 'Review round 2' });
+  await secondRound.locator('.council-reviewer-findings > summary').click();
+  await expect(secondRound.getByText('Later round claim')).toBeVisible();
+  const unlinked = inspector.getByRole('region', { name: 'Reviewer-reported findings' });
+  await expect(unlinked.getByText('Older orphan claim')).toBeVisible();
+  await expect(unlinked.getByText('Bob claim')).toHaveCount(0);
+  await expect(inspector.locator('img')).toHaveCount(0);
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
+test('Council inspector discloses only a correlated native terminal completion', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Verified native pass', { exact: false })).toBeVisible();
+  await expect(panel(page).getByText('Completed native review cycle')).toBeVisible();
+  await expect(panel(page).getByText('session-1:1000', { exact: false })).toBeVisible();
+});
+
+for (const [tamper, receipt] of [
+  ['foreign cycle', { cycleId: '<foreign-cycle>' }],
+  ['foreign session', { sessionId: 'other-task' }],
+  ['foreign self-consistent task proof', { sessionId: 'other-task', cycleId: 'other-task:1000' }],
+  ['foreign revision', { teamRevision: 18 }],
+  ['foreign round', { round: 2 }],
+  ['different minimum score', { lowest: 9.5 }],
+  ['below-target proof', { lowest: 8.0 }],
+] as const) {
+  test(`Council inspector rejects a claimed native pass with ${tamper}`, async ({ page }) => {
+    const inspection = {
+      sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
+      status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: {
+        sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4,
+        ...receipt,
+      },
+      criteria: [], attempts: [],
+    };
+    await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+    await button(page).click();
+    await panel(page).getByText('Review evidence and usage').click();
+    await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+    await expect(panel(page).locator('img')).toHaveCount(0);
+  });
+}
+test('Council inspector never promotes a legacy pass without a root task identity', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByRole('alert')).toContainText('Council evidence does not match this task');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+test('Council inspector never promotes an unverified terminal hint', async ({ page }) => {
+  const inspection = {
+    sessionId: 'session-1', cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: false,
+    verifiedCompletion: { sessionId: 'session-1', cycleId: 'unverified-cycle', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
+for (const consumer of ['direct', 'embedded'] as const) {
+  test(`Council inspector clears a verified result on native child evidence conflict (${consumer})`, async ({ page }) => {
+    const snapshot = {
+      sessionId: 'session-1', mode: 'm5', strategy: 'escalated', forceEscalation: false,
+      cycleStartedAt: 1000, teamRevision: 17,
+      status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+      verifiedPass: true,
+      verifiedCompletion: { sessionId: 'session-1', cycleId: 'session-1:1000',
+        teamRevision: 17, round: 1, lowest: 9.4 },
+      criteria: [], attempts: [],
+    };
+    await page.setViewportSize({ width: 360, height: 640 });
+    await open(page, '/?council', {}, 0, '', {}, undefined, snapshot);
+    const view = consumer === 'direct' ? panel(page).locator('.council-inspection')
+      : page.locator('#embedded-s2-conflict .council-inspection');
+    if (consumer === 'direct') {
+      await button(page).click();
+      await view.locator('summary').click();
+    } else {
+      await page.evaluate(async inspection => {
+        const { createCouncilInspector } = await import('/src/council-inspector.ts');
+        const host = document.createElement('div');
+        host.id = 'embedded-s2-conflict';
+        document.body.append(host);
+        const detail = createCouncilInspector(async () => {
+          const failure = (window as any).__councilInspectionError;
+          if (failure) throw failure;
+          return inspection as any;
+        }, 'session-1');
+        host.append(detail);
+        detail.open = true;
+      }, snapshot);
+    }
+    await expect(view).toContainText('Verified native pass');
+    const refresh = view.getByRole('button', { name: 'Refresh native evidence' });
+    await page.evaluate(() => { (window as any).__councilInspectionError =
+      'child_council_stale: unexpected triggered S2 receipt /private/child-scope'; });
+    await refresh.click();
+    await expect(view.getByRole('alert')).toHaveText(
+      'Council child evidence is stale or conflicting. Native approval is blocked; refresh after recovery.');
+    await expect(view).not.toContainText('/private/child-scope');
+    await expect(view).not.toContainText('Verified native pass');
+    await expect(view).not.toContainText('Required child phase receipts are pending');
+    await expect(view.locator('.council-verified-completion')).toHaveCount(0);
+    await expect(refresh).toBeEnabled();
+    await page.evaluate(() => { delete (window as any).__councilInspectionError; });
+    await refresh.click();
+    await expect(view).toContainText('Verified native pass');
+    await expect(view.getByRole('alert')).toHaveCount(0);
+  });
+}
+
+test('Council inspector safely redacts private native denial details and remains accessible on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  const privateDetail = '/private/channels/finance/unrelated-direct-message';
+  await open(page, '/?council', { architect_council_inspect: 'task scope denied: ' + privateDetail });
+  await button(page).click();
+  const inspector = panel(page).locator('.council-inspection');
+  await inspector.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  const alert = inspector.getByRole('alert');
+  await expect(alert).toHaveText('Could not inspect this Council. Check task access and retry.');
+  await expect(inspector).not.toContainText(privateDetail);
+  const refresh = inspector.getByRole('button', { name: 'Refresh native evidence' });
+  await expect(refresh).toBeEnabled();
+  await refresh.focus();
+  await page.keyboard.press('Enter');
+  await expect(alert).toHaveText('Could not inspect this Council. Check task access and retry.');
+  await expect(inspector).not.toContainText(privateDetail);
+  await expect(refresh).toBeEnabled();
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+});
+
+
+test('existing Council modal exposes native interrupted child recovery on resting nested tasks', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'eligible');
+  await button(page).click();
+  const recovery = panel(page).getByRole('button', { name: 'Recover interrupted child Council' });
+  await expect(recovery).toBeVisible();
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  await expect(panel(page).locator('.council-recovery-feedback')).toContainText('resume the team separately');
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
+  await expect(recovery).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+
+  await open(page, '/?council');
+  await button(page).click();
+  await expect(panel(page).getByRole('button', { name: 'Recover interrupted child Council' })).toBeHidden();
+});
+
+test('native child recovery denial is visible but cannot silently resume or approve', async ({ page }) => {
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'denied');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Recover interrupted child Council' }).click();
+  await expect(panel(page).locator('.council-recovery-feedback[role="alert"]'))
+    .toContainText('Child Council recovery denied. Inspect the child Council state before retrying.');
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
+  await expect(panel(page).getByRole('button', { name: 'Recover interrupted child Council' })).toBeEnabled();
+});
+
+test('native child recovery errors never disclose private backend context to the Council modal or live region', async ({ page }) => {
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'denied');
+  const secret = '/private/channel/participants-and-secrets';
+  await page.evaluate(detail => { (window as any).__councilRecoveryError = `child_council_recovery_denied: ${detail}`; }, secret);
+  await button(page).click();
+  const recovery = panel(page).getByRole('button', { name: 'Recover interrupted child Council' });
+  await recovery.focus();
+  await page.keyboard.press('Enter');
+  const alert = panel(page).locator('.council-recovery-feedback[role="alert"]');
+  await expect(alert).toContainText('Inspect the child Council state before retrying.');
+  await expect(alert).not.toContainText(secret);
+  await expect(page.locator('#composer-live')).not.toContainText(secret);
+  await expect(recovery).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
+    { sessionId: 'session-1', action: 'recover' },
+  ]);
+});
+
+
+// Each independently mounted scenario records the real Council settings command.
+// Preview transport proves UI serialization, not native reviewer execution.
+const sourceModes = [
+  { mode: 'M1', roles: [], automatic: 0 },
+  { mode: 'M2', roles: ['direct', 'direct'], automatic: 0 },
+  { mode: 'M3', roles: ['direct'], automatic: 1 },
+  { mode: 'M4', roles: ['nested', 'nested'], automatic: 0 },
+  { mode: 'M5', roles: ['nested'], automatic: 1 },
+  { mode: 'M6', roles: ['direct', 'nested'], automatic: 0 },
+  { mode: 'M7', roles: ['direct', 'nested'], automatic: 1 },
+] as const;
+for (const mode of sourceModes) for (const strategy of ['parallel', 'escalated', 'two_phase'] as const) {
+  test(`direct Council matrix ${mode.mode}/${strategy} serializes only selected sources`, async ({ page }) => {
+    const bots = [
+      { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'model-a', paused: false },
+      { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'model-b', paused: false },
+    ];
+    await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+    await button(page).click();
+    if (mode.roles.length) {
+      await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+      await expect(eligibleReviewers(page)).toHaveCount(2);
+      for (const [index, role] of mode.roles.entries()) {
+        await eligibleReviewers(page).nth(index).check();
+        if (role === 'nested') await panel(page).getByLabel('Review role for ' + bots[index].name).selectOption('nested');
+      }
+      if (mode.automatic) await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption(String(mode.automatic));
+    }
+    await panel(page).getByLabel('Review strategy').selectOption(strategy);
+    if (strategy === 'escalated') await expect(panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' })).not.toBeChecked();
+    expect(await calls(page)).toEqual([]);
+    await toggle(page).click();
+    await expect.poll(async () => (await calls(page)).length).toBe(1);
+    const saved = (await calls(page))[0];
+    expect(saved.strategy ?? 'parallel').toBe(strategy);
+    expect(saved.forceEscalation ?? false).toBe(false);
+    expect(saved.automaticReviewers ?? 0).toBe(mode.automatic);
+    expect(saved.reviewers).toBe(0);
+    expect(saved.reviewerBotIds ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'direct' ? [bots[index].id] : []));
+    expect(saved.nestedBotReviewers ?? []).toEqual(mode.roles.flatMap((role, index) => role === 'nested'
+      ? [{ botId: bots[index].id, childReviewers: 2, childTarget: 9, childMaxRounds: 10 }] : []));
+  });
+}
+
+test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {
+  // Start without a Council: strategy selection remains staged until the explicit enable.
+  await open(page, '/');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  await expect(strategy).toHaveValue('parallel');
+  await expect(strategy.locator('option[value="two_phase"]')).toHaveCount(1);
+  await strategy.selectOption('escalated');
+  expect(await calls(page)).toEqual([]);
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: false, maxRounds: 10, reviewerBotIds: undefined,
+  });
+  await expect(strategy).toHaveValue('escalated');
+  await strategy.selectOption('parallel');
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'parallel', forceEscalation: false });
+  await expect(strategy).toHaveValue('parallel');
+  await strategy.selectOption('two_phase');
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  expect((await calls(page))[2]).toMatchObject({ strategy: 'two_phase', forceEscalation: false });
+  await expect(strategy).toHaveValue('two_phase');
+});
+
+
+test('S2 on-demand trigger policy is task-scoped, keyboard accessible and does not add reviewer sources', async ({ page }) => {
+  await open(page, '/');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  await expect(immediate).toBeHidden();
+  await strategy.selectOption('escalated');
+  await expect(immediate).not.toBeChecked();
+  await immediate.focus();
+  await page.keyboard.press('Space');
+  await expect(immediate).toBeChecked();
+  await page.keyboard.press('Space');
+  await expect(immediate).not.toBeChecked();
+  expect(await calls(page)).toEqual([]);
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: false, reviewers: 0,
+    reviewerBotIds: undefined, nestedBotReviewers: undefined,
+  });
+  await expect(immediate).not.toBeChecked();
+  await strategy.selectOption('parallel');
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'parallel', forceEscalation: false });
+  await expect(immediate).toBeHidden();
+});
+
+test('S2 persisted on-demand selection survives reopening and switches to explicit escalation', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  await strategy.selectOption('escalated');
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  expect((await calls(page))[0]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
+  await expect(immediate).not.toBeChecked();
+  await immediate.check();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
+  await immediate.uncheck();
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  expect((await calls(page))[2]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
+  await page.keyboard.press('Escape');
+  await button(page).click();
+  const restored = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  await expect(restored).not.toBeChecked();
+  await restored.check();
+  await expect.poll(async () => (await calls(page)).length).toBe(4);
+  expect((await calls(page))[3]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
+});
+
+test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-accessible modal', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'model-a', paused: false },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'model-b', paused: false },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  const strategy = panel(page).getByLabel('Review strategy');
+  await strategy.focus();
+  await strategy.selectOption('escalated');
+  await expect(strategy).toHaveValue('escalated');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: false,
+    automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
+  });
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+});
+
+test('Council criteria editor saves task-scoped user criteria without altering legacy defaults', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await expect(criteria.getByLabel('Criteria source')).toBeHidden();
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await criteria.getByLabel('Criterion ID').fill('security');
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByLabel('Minimum score').fill('9.8');
+  await criteria.getByLabel('Require native evidence (blocks until verified)').check();
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteriaSource).toBe('user');
+  expect((await calls(page))[0].criteria).toEqual([{ id: 'security', lens: 'Security', target: 9.8, required: true, evidenceRequired: true }]);
+  await expect.poll(() => panel(page).getByRole('switch', { name: 'Council' }).isChecked()).toBe(true);
+  await page.keyboard.press('Escape');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Review criteria' }).click();
+  await expect(panel(page).getByLabel('Criteria source')).toHaveValue('user');
+  await expect(panel(page).getByLabel('Review lens')).toHaveValue('Security');
+});
+
+test('Council criteria editor authors native file checks without granting execution or weakening evidence', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await expect(criteria.getByLabel('Minimum score')).toHaveValue('9.5');
+  await criteria.getByLabel('Criterion ID').fill('manifest');
+  await criteria.getByLabel('Review lens').fill('Manual lens');
+  await criteria.getByLabel('Native file check').selectOption('reviewed_file_json_valid');
+  await criteria.getByLabel('Repository-relative file').fill('../package.json');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('repository-relative file');
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByLabel('Native file check').selectOption('');
+  await expect(criteria.getByLabel('Review lens')).toHaveValue('Manual lens');
+  await criteria.getByLabel('Native file check').selectOption('reviewed_file_sha256');
+  await criteria.getByLabel('Repository-relative file').fill('package.json');
+  await criteria.getByLabel('Expected SHA-256').fill('invalid');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('64-character SHA-256');
+  expect(await calls(page)).toEqual([]);
+  const digest = 'a'.repeat(64);
+  await criteria.getByLabel('Expected SHA-256').fill(digest);
+  await expect(criteria.getByLabel('Review lens')).toHaveValue('File SHA-256: package.json');
+  await expect(criteria.getByLabel('Required criterion', { exact: true })).toBeChecked();
+  await expect(criteria.getByLabel('Require native evidence (blocks until verified)')).toBeDisabled();
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteria).toEqual([{
+    id: 'manifest', lens: 'File SHA-256: package.json', target: 9.5, required: true, evidenceRequired: true,
+    nativeEvidence: { kind: 'reviewed_file_sha256', path: 'package.json', expectedSha256: digest },
+  }]);
+});
+
+test('Council criteria editor preserves pinned native checks and refuses silent evidence removal', async ({ page }) => {
+  const nativeEvidence = { kind: 'reviewed_file_text_contains', path: 'policy.txt', expectedText: 'feature: enabled', skillId: '' };
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, undefined, {
+    criteriaSource: 'user',
+    criteria: [{
+      id: 'policy', lens: 'File contains: policy.txt', required: true, target: 9.5,
+      evidenceRequired: true, nativeEvidence,
+    }],
+  });
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByText('Native evidence check: reviewed_file_text_contains (locked in this editor)')).toBeVisible();
+  await criteria.getByLabel('Require native evidence (blocks until verified)').uncheck();
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Native evidence checks cannot be changed or removed');
+  expect(await calls(page)).toEqual([]);
+
+  await criteria.getByLabel('Require native evidence (blocks until verified)').check();
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Native evidence checks cannot be changed or removed');
+  expect(await calls(page)).toEqual([]);
+
+  await criteria.getByLabel('Review lens').fill('File contains: policy.txt');
+  await criteria.getByLabel('Minimum score').fill('9.8');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const saved = (await calls(page))[0];
+  expect(saved.criteriaSource).toBe('user');
+  expect(saved.criteria[0]).toEqual({
+    id: 'policy', lens: 'File contains: policy.txt', required: true, target: 9.8,
+    evidenceRequired: true, nativeEvidence,
+  });
+});
+
+test('Council criteria editor rejects duplicate lenses atomically and supports hybrid anchors', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await criteria.getByLabel('Criteria source').selectOption('hybrid');
+  await criteria.getByLabel('Criterion ID').fill('security');
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByRole('button', { name: 'Add criterion' }).click();
+  await criteria.getByLabel('Criterion ID').nth(1).fill('quality');
+  await criteria.getByLabel('Review lens').nth(1).fill('Security');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('unique criterion IDs and lenses');
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByLabel('Review lens').nth(1).fill('Reliability');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteriaSource).toBe('hybrid');
+  expect((await calls(page))[0].criteria).toHaveLength(2);
+});
+
+test('Council criterion editor remains keyboard accessible on a narrow viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await expect(criteria.getByLabel('Criterion ID')).toBeVisible();
+  const bounds = await panel(page).boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await expect(button(page)).toBeFocused();
+});
+
 test('selected configured bots are task-scoped, attributed by ID, and automatic reviewers remain the default', async ({ page }) => {
   await open(page, '/?bots=sample');
   await button(page).click();
@@ -71,6 +2342,238 @@ test('selected configured bots are task-scoped, attributed by ID, and automatic 
   await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('M3 mixed Council preserves a direct bot plus one explicitly added automatic seat', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'QA', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await expect(panel(page).getByText('Root Council: 2 of 2–8 combined seats; every source is required.')).toBeVisible();
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    reviewers: 0, automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
+  });
+  // A recorded request alone cannot prove native-style preview acceptance.
+  await expect.poll(() => panel(page).getByRole('switch', { name: 'Council' }).isChecked()).toBe(true);
+  await expect(panel(page).getByLabel('Additional automatic Architect reviewers')).toHaveValue('1');
+  await expect(panel(page).getByRole('alert')).toBeHidden();
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1].automaticReviewers).toBeUndefined();
+  expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
+});
+
+test('M3 automatic reviewer count keeps keyboard focus through repeated roster previews', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'sonnet', paused: false },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect(eligibleReviewers(page)).toHaveCount(2);
+  await eligibleReviewers(page).first().check();
+  const automatic = panel(page).getByLabel('Additional automatic Architect reviewers');
+  await automatic.focus();
+  await automatic.selectOption('1');
+  await expect(automatic).toBeFocused();
+  await expect(panel(page).getByText('Root Council: 2 of 2–8 combined seats; every source is required.')).toBeVisible();
+  await automatic.selectOption('2');
+  await expect(automatic).toBeFocused();
+  await expect(automatic).toHaveValue('2');
+  await expect(panel(page).getByText('Root Council: 3 of 2–8 combined seats; every source is required.')).toBeVisible();
+  expect(await calls(page)).toEqual([]);
+});
+
+test('M3 one selected bot and one automatic seat persist native reviewer grants and skill checks', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: ['risk-scan'] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(1);
+  await eligibleReviewers(page).first().check();
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+
+  const grant = panel(page).getByRole('checkbox', { name: /Allow one exact native host action/ });
+  await grant.focus();
+  await page.keyboard.press('Space');
+  await expect(grant).toBeChecked();
+  await expect(grant).toBeFocused();
+  await expect(panel(page).getByRole('alert')).toContainText('Choose a relative file path');
+  expect(await calls(page)).toHaveLength(1);
+  const path = panel(page).getByRole('textbox', { name: 'Allowed reviewer file path' });
+  await path.fill('src/example.ts');
+  await path.press('Tab');
+  await expect.poll(async () => (await calls(page)).at(-1)?.reviewPermissions?.grants?.[0]?.resource).toBe('src/example.ts');
+  expect((await calls(page)).at(-1)?.reviewPermissions?.authorizationId).toMatch(/^[a-f0-9-]{36}$/);
+
+  const optional = panel(page).getByRole('group', { name: 'Optional reviewer skills' }).getByRole('checkbox', { name: 'risk-scan' });
+  await optional.focus();
+  await page.keyboard.press('Space');
+  await expect(optional).toBeFocused();
+  await expect.poll(async () => (await calls(page)).at(-1)?.optionalSkillIds).toEqual(['risk-scan']);
+
+  const required = panel(page).getByRole('group', { name: 'Required native skill checks' }).getByRole('checkbox', { name: 'risk-scan' });
+  await required.focus();
+  await page.keyboard.press('Space');
+  await expect(required).toBeFocused();
+  await expect.poll(async () => (await calls(page)).at(-1)?.requiredCheckSkillIds).toEqual(['risk-scan']);
+  const final = (await calls(page)).at(-1);
+  expect(final).toMatchObject({ automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'] });
+  expect(final.optionalSkillIds).toBeUndefined();
+  expect(final.reviewPermissions.grants).toEqual([
+    { tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: 'src/example.ts' },
+  ]);
+});
+
+test('M4 and M7 task child roles preserve native configuration and require authenticated leaf callbacks', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Architecture', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('nested');
+  await expect(panel(page).getByText('Child reviewers run in isolated read-only native sessions. Completion requires independently authenticated callbacks.')).toHaveCount(2);
+  await panel(page).getByLabel('Child reviewers for Alpha').fill('3');
+  await panel(page).getByLabel('Child reviewers for Alpha').press('Tab');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const [m4] = await calls(page);
+  expect(m4.reviewers).toBe(0);
+  expect(m4.reviewerBotIds).toBeUndefined();
+  expect(m4.nestedBotReviewers).toEqual([
+    { botId: 'reviewer-alpha', childReviewers: 3, childTarget: 9, childMaxRounds: 10 },
+    { botId: 'reviewer-beta', childReviewers: 2, childTarget: 9, childMaxRounds: 10 },
+  ]);
+  await expect(panel(page).getByLabel('Review role for Alpha')).toHaveValue('nested');
+  const policy = panel(page).getByLabel('Escalation policy for Alpha');
+  await policy.selectOption('on_trigger');
+  await expect.poll(async () => (await calls(page)).at(-1)?.nestedBotReviewers?.[0]?.escalationPolicy).toBe('on_trigger');
+  await expect(policy).toHaveValue('on_trigger');
+  const beforeBlocked = (await calls(page)).length;
+  await panel(page).getByLabel('Review strategy').selectOption('escalated');
+  await expect(panel(page).getByRole('alert')).toContainText('On-trigger preliminary review is not available in S2');
+  expect((await calls(page)).length).toBe(beforeBlocked);
+  await expect(panel(page).getByLabel('Review strategy')).toHaveValue('parallel');
+  await policy.selectOption('always_nested');
+  await expect.poll(async () => (await calls(page)).length).toBe(beforeBlocked + 1);
+  expect((await calls(page)).at(-1).nestedBotReviewers[0].escalationPolicy).toBeUndefined();
+  await panel(page).getByLabel('Review role for Beta').selectOption('direct');
+  await expect.poll(async () => (await calls(page)).length).toBe(beforeBlocked + 2);
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await expect.poll(async () => (await calls(page)).at(-1)?.automaticReviewers).toBe(1);
+  const m7 = (await calls(page)).at(-1);
+  expect(m7.reviewerBotIds).toEqual(['reviewer-beta']);
+  expect(m7.nestedBotReviewers).toHaveLength(1);
+  expect(m7.nestedBotReviewers[0].botId).toBe('reviewer-alpha');
+  expect(m7.reviewers).toBe(0);
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
+  await expect.poll(async () => (await calls(page)).at(-1)?.nestedBotReviewers).toBeUndefined();
+  await expect(panel(page).getByLabel('Review role for Alpha')).toHaveCount(0);
+});
+
+test('nested Council rejects the combined child review budget before saving and admits the boundary', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  // Two child Councils at 8 x 16 reach the 256-child ceiling. Root must
+  // use three rounds so the new composed 1,024-attempt budget is not exceeded.
+  await option(page, 'maxRounds', '3').click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('nested');
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child reviewers for ${name}`).fill('8');
+    await panel(page).getByLabel(`Child reviewers for ${name}`).press('Tab');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('17');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('exceeds 256 child reviewer attempts');
+  expect(await calls(page)).toHaveLength(0);
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('16');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].nestedBotReviewers).toEqual([
+    { botId: 'reviewer-alpha', childReviewers: 8, childTarget: 9, childMaxRounds: 16 },
+    { botId: 'reviewer-beta', childReviewers: 8, childTarget: 9, childMaxRounds: 16 },
+  ]);
+});
+
+test('nested Council blocks root-times-child attempts before enabling and accepts a bounded revision', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('nested');
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('30');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  // 10 root rounds x (2 parent seats + 120 leaf attempts) = 1,220.
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('exceeds 1024 planned reviewer attempts');
+  expect(await calls(page)).toHaveLength(0);
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('20');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  // 10 x (2 + 80) = 820; no phantom reviewers or approvals are emitted.
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].nestedBotReviewers).toEqual([
+    { botId: 'reviewer-alpha', childReviewers: 2, childTarget: 9, childMaxRounds: 20 },
+    { botId: 'reviewer-beta', childReviewers: 2, childTarget: 9, childMaxRounds: 20 },
+  ]);
+});
+
+test('M3 never saves a bot-only zero-quorum configuration as the user changes sources', async ({ page }) => {
+  const bots = [{ id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false }];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await eligibleReviewers(page).first().check();
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Select 2 to 8 distinct reviewer bots');
+  expect(await calls(page)).toHaveLength(0);
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].automaticReviewers).toBe(1);
 });
 
 test('optional selected-bot skill remains optional after Council configuration is reloaded', async ({ page }) => {
@@ -526,8 +3029,12 @@ test('panel hierarchy: one description, labels in text ink, a footer checkbox fo
 /** A new thread draws its composer twice (at once, then when its page loads); a draft typed in between is lost. Waits
  *  until the prompt stays the same element across two polls. */
 const composerSettled = (page: Page) => page.waitForFunction(() => {
-  const seen = window as any, now = document.querySelector('#prompt'), same = Boolean(now) && seen.__prompt === now;
-  seen.__prompt = now; return same;
+  const seen = window as any, now = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const send = document.querySelector<HTMLButtonElement>('#composer button[type="submit"]');
+  const same = Boolean(now) && seen.__prompt === now;
+  seen.__prompt = now;
+  // A stable textarea is not enough: thread history can still be loading.
+  return same && !now?.disabled && Boolean(send && !send.disabled);
 }, undefined, { polling: 300 });
 
 async function newThreadsOn(page: Page): Promise<void> {
@@ -537,6 +3044,24 @@ async function newThreadsOn(page: Page): Promise<void> {
   await page.locator('.new-task-button').click();
   await composerSettled(page);
 }
+
+test('new Council threads keep Send disabled until native history has loaded', async ({ page }) => {
+  await open(page);
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
+  await page.evaluate(() => {
+    (window as any).__hold = {
+      get_messages: new Promise<void>(resolve => { (window as any).__releaseMessages = resolve; }),
+    };
+  });
+  await page.locator('.new-task-button').click();
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const send = page.getByRole('button', { name: 'Send message' });
+  await expect(prompt).toBeDisabled();
+  await expect(send).toBeDisabled();
+  await page.evaluate(() => (window as any).__releaseMessages());
+  await expect(prompt).toBeEnabled();
+  await expect(send).toBeEnabled();
+});
 
 test('with Classic team setup, a first send starts no automatic team for Council', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'true'));
@@ -657,12 +3182,28 @@ test('Auto is explained, the off note is plain, and the button is busy while a s
   await expect(button(page)).toHaveAttribute('aria-busy', 'false', { timeout: 5000 });
 });
 
+test('a collapsed Council inspector cannot trap keyboard focus on its refresh action', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const inspection = panel(page).locator('.council-inspection');
+  await expect(inspection).toHaveCount(1);
+  const refresh = inspection.locator('.council-inspection-refresh');
+  await expect(refresh).toBeDisabled();
+  await inspection.locator('summary').focus();
+  await page.keyboard.press('Tab');
+  await expect(panel(page).locator('.council-new-threads')).toBeFocused();
+  await inspection.locator('summary').click();
+  await expect(refresh).toBeEnabled();
+  await inspection.locator('summary').click();
+  await expect(refresh).toBeDisabled();
+});
+
 test('Tab and Shift+Tab stay inside the panel through every control, from any of them (WebKit too)', async ({ page }) => {
   await open(page, '/?council');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();
-  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.closest<HTMLElement>('[data-field]')!.dataset.field!) : `outside:${active.tagName}`; });
-  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'new'];
+  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.classList.contains('council-criteria-toggle') ? 'criteria' : active.matches('.council-inspection > summary') ? 'inspector' : active.matches('[data-council-strategy]') ? 'strategy' : active.closest<HTMLElement>('[data-field]')?.dataset.field ?? 'unmapped') : `outside:${active.tagName}`; });
+  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'strategy', 'criteria', ...(await panel(page).locator('.council-inspection > summary').count() ? ['inspector'] : []), 'new'];
   const seen: string[] = [];
   for (let step = 0; step < order.length; step++) { seen.push(await where()); await page.keyboard.press('Tab'); }
   expect(seen).toEqual(order);
@@ -677,24 +3218,47 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
       const location = !active.closest('.council-panel') ? `outside:${active.tagName}`
         : active.classList.contains('council-switch') ? 'switch'
         : active.classList.contains('council-new-threads') ? 'new'
+        : active.classList.contains('council-criteria-toggle') ? 'criteria'
+        : active.matches('.council-inspection > summary') ? 'inspector'
+        : active.matches('[data-council-strategy]') ? 'strategy'
         : field?.dataset.field ?? 'unmapped';
       (window as any).__councilFocusTrail.push(location);
     }, true);
   });
-  for (const start of order) {
-    for (const key of ['Tab', 'Shift+Tab']) {
-      // Start on that control, then traverse two full rounds using real key events.
-      for (let step = 0; step < order.length && await where() !== start; step++) await page.keyboard.press('Tab');
-      expect(await where()).toBe(start);
+  // Prove both directed keyboard edges from every control, including both
+  // wraps. Two uninterrupted cycles in each direction additionally guard focus
+  // retention without repeating equivalent WebKit keyboard walks 16 times.
+  const focusAt = async (at: number) => {
+    await page.evaluate(index => {
+      const root = document.querySelector<HTMLElement>('.council-panel');
+      if (!root) throw new Error('Council panel is missing');
+      const controls = [...root.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), details > summary')]
+        .filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      if (!controls[index]) throw new Error('Missing Council focus target');
+      controls[index].focus();
+    }, at);
+    expect(await where()).toBe(order[at]);
+  };
+  for (const at of order.keys()) {
+    for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+      await focusAt(at);
       await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
-      for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
+      await page.keyboard.press(key);
+      const expected = order[(at + direction + order.length) % order.length];
       const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
-      const direction = key === 'Tab' ? 1 : -1;
-      const expected = Array.from({ length: order.length * 2 }, (_, step) =>
-        order[(order.indexOf(start) + direction * (step + 1) + order.length * 2) % order.length]);
-      expect(visited).toEqual(expected);
-      expect(await where()).toBe(start);
+      expect(visited).toEqual([expected]);
+      expect(await where()).toBe(expected);
     }
+  }
+  for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+    await focusAt(0);
+    await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
+    for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
+    const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
+    const expected = Array.from({ length: order.length * 2 }, (_, step) =>
+      order[(direction * (step + 1) + order.length * 2) % order.length]);
+    expect(visited).toEqual(expected);
+    expect(await where()).toBe('switch');
   }
   expect(await panel(page).locator('.council-new-threads').getAttribute('tabindex')).toBe('0');
   expect(await toggle(page).getAttribute('tabindex')).toBe('0');
@@ -703,10 +3267,31 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
 test('at 900×420 the composer panel fits above its button without scrolling', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 420 });
   await open(page, '/?council');
-  await composerSettled(page);
+  // Panel geometry is independent of whether task history has enabled Send.
+  // A preview task may show Stop instead of a submit button while still permitting Council settings.
   await button(page).click();
   await expect(panel(page)).toBeVisible();
   expect(await panel(page).evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);
+});
+
+test('expanded review criteria retain focus and a bounded panel on short screens', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 420 });
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await page.keyboard.press('Tab');
+  await expect(criteria.getByLabel('Criterion ID')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(criteria.getByLabel('Criteria source')).toBeFocused();
+  await panel(page).locator('.council-new-threads').focus();
+  await page.keyboard.press('Tab');
+  await expect(toggle(page)).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(panel(page).locator('.council-new-threads')).toBeFocused();
+  expect(await panel(page).evaluate(node => node.getBoundingClientRect().height <= window.innerHeight - 20)).toBe(true);
 });
 
 test('with Council on and nothing reviewed yet, the panel says so quietly', async ({ page }) => {
@@ -909,20 +3494,25 @@ for (const used of [25, 30]) test(`at ${used} used rounds there is no empty Rais
   await expect(panel(page)).toHaveCount(0);
 });
 
-test('the tray button is settings only: no score badge, a cue dot when asking or settled', async ({ page }) => {
-  await open(page, '/?council');
+for (const { state, name, value } of [
+  { state: '', name: 'Council: Round 2 of 10 · reviewing', value: '' },
+  { state: '=asking', name: 'Council needs you', value: 'asking' },
+  { state: '=passed', name: /^Council: Passed/, value: 'settled' },
+  { state: '=accepted', name: /^Council: Accepted/, value: '' },
+] as const) test(`the tray button is settings only: no score badge and correct cue (${state || 'reviewing'})`, async ({ page }) => {
+  // Each case used a full navigation already. Use independent fixtures so a
+  // slow initial paint in one state cannot consume the next state's budget.
+  await open(page, `/?council${state}`);
   await expect(button(page).locator('b')).toHaveCount(0);
-  await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
-  await expect.poll(dot).toBe(false);
-  await open(page, '/?council=asking');
-  await expect(button(page)).toHaveAccessibleName('Council needs you');
-  await expect.poll(dot).toBe(true);
-  await open(page, '/?council=passed');
-  await expect.poll(dot).toBe(true);
-  await open(page, '/?council=accepted');
-  await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
-  await expect.poll(dot).toBe(false);
+  await expect(button(page)).toHaveAccessibleName(name);
+  // Test native-derived UI state and a rendered 6px cue, without relying on
+  // engine-specific serialization of the ::after empty-string content value.
+  const cue = () => button(page).locator('.council-glyph');
+  await expect(cue()).toHaveAttribute('data-cue', value);
+  await expect.poll(() => cue().evaluate(node => {
+    const after = getComputedStyle(node, '::after');
+    return after.width === '6px' && after.height === '6px' && after.content !== 'none';
+  })).toBe(value !== '');
 });
 
 test('in the thread, reviewers are ordinary worker rows with their verdict as status', async ({ page }) => {

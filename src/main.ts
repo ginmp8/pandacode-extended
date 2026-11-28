@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, readSharedChannelCriteria, restoreSharedChannelCouncilInputs, resolveSharedChannelCouncilFocus, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -120,7 +120,7 @@ import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
 import { isMac, isWindows, shortcut } from './platform';
 import { createGoalBanner, showGoalDialog, showCommandCenter, type GoalState, type GoalAction, type CommandPanel } from './command-center';
-import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamSnapshot, type TeamEvent, type TeamLibrary, type TeamConfig, type WorkerProfile } from './architect-types';
+import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamSnapshot, type TeamEvent, type TeamLibrary, type TeamConfig, type WorkerProfile, type CouncilNestedReviewer } from './architect-types';
 import type { ArchitectView } from './architect';
 import { syncOverlayContext } from './overlay-client';
 import { initializeAgentUpdates } from './agent-updates';
@@ -171,8 +171,10 @@ const state = {
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
   generation: 0, hasOlder: false,
   sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
-  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
+  sharedChannelDrafts: new Map<string, string>(), failedChannelCouncilDrafts: new Map<string, HTMLFormElement>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
 };
+// A pending Channel settings read belongs to one navigation/modal intent.
+let sharedChannelSettingsIntent = 0;
 let renderFrame = 0;
 /** Shows the open thread's scene behind the conversation (set once the sky mounts; `renderTranscript` calls it). */
 let showThreadScene: (id: string | null) => void = () => {};
@@ -246,7 +248,17 @@ async function ensureArchitectView(): Promise<ArchitectView> {
 }
 function onArchitect(team: TeamEvent): void {
   if (deletedSessions.has(team.sessionId)) return;
-  if ('removed' in team) { teams.set(team.sessionId, null); if (team.sessionId === state.sessionId) { architectView?.setTask(team.sessionId, null, state.providers); renderComposer(); } return; }
+  if ('removed' in team) {
+    teams.set(team.sessionId, null);
+    if (team.sessionId === state.sessionId) {
+      // A removed task cannot retain a displayed, previously verified Council pass.
+      document.querySelector<HTMLElement>('.council-panel .council-inspection')
+        ?.dispatchEvent(new Event('council-evidence-invalidated'));
+      architectView?.setTask(team.sessionId, null, state.providers);
+      renderComposer();
+    }
+    return;
+  }
   const current = teams.get(team.sessionId);
   if (current && current.revision > team.revision) return;
   // Pauses and failures the user did not ask for would otherwise only show inside the panel.
@@ -255,6 +267,14 @@ function onArchitect(team: TeamEvent): void {
   if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && team.councilStatus?.state !== 'asking' && !/^Team (paused|stopped)\./.test(team.error) && !LEAD_RETRY.test(team.error)) notify(councilNotice(team) ?? team.error);
   const wasActive = teamActive(current);
   teams.set(team.sessionId, team);
+  // The direct-chat results inspector shares the Channel inspector's native
+  // invalidation contract. Revision-only changes can invalidate earlier proof
+  // even when the visible Team status has not changed.
+  if (team.sessionId === state.sessionId && (!current || current.revision !== team.revision
+    || teamSignature(current) !== teamSignature(team))) {
+    document.querySelector<HTMLElement>('.council-panel .council-inspection')
+      ?.dispatchEvent(new Event('council-evidence-invalidated'));
+  }
   const task = state.sessions.find(s => s.id === team.sessionId), taskState = `${task?.status}:${task?.taskStage}`;
   if (task && teamActive(team)) { task.status = 'running'; task.taskStage = 'in_progress'; }
   if (task && !teamActive(team) && !state.streams.has(task.id)) task.status = 'idle';
@@ -2787,6 +2807,8 @@ const settleUnfolded = (element: HTMLElement): void => settleIn(element, 4, { re
 /** The reference's steer arrow (↳) and effort gauge; dom.ts has no such glyphs. */
 const STEER_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a3 3 0 0 0 3 3h10m-4-4 4 4-4 4"/></svg>';
 const GAUGE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13 3.5-4"/></svg>';
+// Cache generated markup, not the live per-message draft or open menus.
+const sharedChannelComposerMarkup = new WeakMap<HTMLFormElement, { form: string; actions: string }>();
 function renderComposer(): void {
   refreshTeamProgress();
   syncProgressPip();
@@ -2813,17 +2835,99 @@ function renderComposer(): void {
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
     const oldChannelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    $('#composer-area').innerHTML = channel ? `${sharedChannelActionsHtml(channel, sidebarBots)}${sharedChannelComposerHtml(channel, sidebarBots)}` : '';
+    const composerArea = $('#composer-area');
+    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    const actionsMarkup = channel ? sharedChannelActionsHtml(channel, sidebarBots) : '';
+    const formMarkup = channel ? sharedChannelComposerHtml(channel, sidebarBots) : '';
+    const nextMarkup = actionsMarkup + formMarkup;
+    const restoreReassignMenu = (): void => {
+      const menu = reassign ? composerArea.querySelector<HTMLElement>(`.bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
+      if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
+    };
+    const previousMarkup = oldChannelComposer && sharedChannelComposerMarkup.get(oldChannelComposer);
+    // A history or activity refresh must not destroy a live Council control
+    // when its own form is unchanged. Refresh the sibling activity controls
+    // separately; changed rosters, posting and rejected drafts still rebuild
+    // through the existing validation and restoration path.
+    if (oldChannelComposer && oldChannelComposer.parentElement === composerArea
+      && oldChannelComposer.dataset.channelId === state.sharedChannelId
+      && previousMarkup && previousMarkup.form === formMarkup
+      && !posting && !state.failedChannelCouncilDrafts.has(state.sharedChannelId)
+      && oldChannelComposer.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.disabled === false) {
+      if (previousMarkup.actions !== actionsMarkup) {
+        composerArea.querySelector(':scope > .bc-channel-actions')?.remove();
+        oldChannelComposer.insertAdjacentHTML('beforebegin', actionsMarkup);
+        restoreReassignMenu();
+        sharedChannelComposerMarkup.set(oldChannelComposer, { form: formMarkup, actions: actionsMarkup });
+      }
+      return;
+    }
+    // Channel events redraw the composer while Council settings may be open.
+    // Capture its live keyboard/scroll state before removing the old popover.
+    const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
+    const councilWasOpen = oldChannelComposer?.dataset.channelId === state.sharedChannelId
+      && (oldCouncilPanel?.matches(':popover-open') ?? false);
+    const councilFocusedControl = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      && document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const councilScrollTop = councilWasOpen ? oldCouncilPanel?.scrollTop ?? 0 : 0;
+    // A channel event can replace a text field while the user edits the middle
+    // of a criterion or file scope. Retain the caret as well as the focus.
+    const councilFocusedText = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      && (document.activeElement instanceof HTMLTextAreaElement
+        || (document.activeElement instanceof HTMLInputElement
+          && ['text', 'search', 'tel', 'url'].includes(document.activeElement.type)))
+      ? document.activeElement : null;
+    const councilCaret = councilFocusedText ? {
+      start: councilFocusedText.selectionStart ?? 0,
+      end: councilFocusedText.selectionEnd ?? 0,
+      direction: councilFocusedText.selectionDirection ?? 'none',
+    } : null;
+    const oldPrompt = oldChannelComposer?.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
+    const promptCaret = oldChannelComposer?.dataset.channelId === state.sharedChannelId
+      && oldPrompt && document.activeElement === oldPrompt ? {
+        start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd, direction: oldPrompt.selectionDirection,
+      } : null;
+    composerArea.innerHTML = nextMarkup;
     const channelComposer = document.querySelector<HTMLFormElement>('#shared-channel-composer');
-    if (!state.sharedChannelPosting.has(state.sharedChannelId)) {
-      restoreSharedChannelCouncilInputs(oldChannelComposer, channelComposer);
+    if (channelComposer) sharedChannelComposerMarkup.set(channelComposer, { form: formMarkup, actions: actionsMarkup });
+    if (!posting && channelComposer) {
+      const failedDraft = state.failedChannelCouncilDrafts.get(state.sharedChannelId);
+      restoreSharedChannelCouncilInputs(failedDraft ?? oldChannelComposer, channelComposer);
+      state.failedChannelCouncilDrafts.delete(state.sharedChannelId);
     }
     bindSharedChannelCouncil(channelComposer);
-    const menu = reassign ? document.querySelector<HTMLElement>(`#composer-area .bc-reassign-menu:has([data-message="${CSS.escape(reassign)}"])`) : null;
-    if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
+    if (!posting && councilWasOpen && channelComposer) {
+      const nextTrigger = channelComposer.querySelector<HTMLElement>('.bc-council-trigger');
+      const nextPanel = channelComposer.querySelector<HTMLElement>('.bc-council-panel');
+      if (nextTrigger && nextPanel) {
+        toggleSharedChannelCouncil(nextTrigger);
+        if (oldCouncilPanel && councilFocusedControl) {
+          const focus = resolveSharedChannelCouncilFocus(oldCouncilPanel, nextPanel, councilFocusedControl);
+          if (focus?.getClientRects().length && !focus.matches(':disabled')) {
+            focus.focus({ preventScroll: true });
+            // A roster change may shift the numeric Tab position to a different
+            // control. Never apply a text selection to a number input or checkbox.
+            if (councilCaret && councilFocusedText && focus.getAttribute('name') === councilFocusedText.name
+              && (focus instanceof HTMLTextAreaElement
+                || (focus instanceof HTMLInputElement && ['text', 'search', 'tel', 'url'].includes(focus.type))))
+              focus.setSelectionRange(councilCaret.start, councilCaret.end, councilCaret.direction);
+          }
+        }
+        nextPanel.scrollTop = councilScrollTop;
+      }
+    }
+    restoreReassignMenu();
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
-    const posting = state.sharedChannelPosting.has(state.sharedChannelId);
-    if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
+    if (prompt) {
+      prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? '';
+      prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting;
+      // A native Channel update must not interrupt typing or move the caret in
+      // the same Channel, even when its Council settings are closed.
+      if (promptCaret && !prompt.disabled) {
+        prompt.focus({ preventScroll: true });
+        prompt.setSelectionRange(promptCaret.start, promptCaret.end, promptCaret.direction);
+      }
+    }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;
     return;
@@ -2841,7 +2945,7 @@ function renderComposer(): void {
     ? `<button type="button" class="send-button stop-button" data-action="stop" title="Stop task (Esc)" aria-label="${remoteStartCancels.has(s.id) ? 'Stopping…' : 'Stop task'}" ${remoteStartCancels.has(s.id) ? 'disabled' : ''}>${icon('stop')}</button>`
     : checking ? '<button type="button" class="secondary-button remote-checking" aria-label="Checking…" disabled>Checking…</button>'
     : offline ? `<button type="button" class="secondary-button remote-composer-retry" data-action="remote-retry" aria-label="${retrying ? 'Reconnecting…' : 'Retry connection'}" ${retrying ? 'disabled' : ''}>${icon('refresh')}<span>${retrying ? 'Reconnecting…' : 'Retry'}</span></button>`
-    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
+    : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam || state.messagesLoading || Boolean(state.messagesError) ? 'disabled' : ''}>${icon('arrow')}</button>`;
   // The composer redraws on every session change; the orchestration slot's nodes outlive it.
   const orchestrationSlot = document.querySelector('#machine-orchestration');
   $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name })}${s.remoteDevice ? '' : council.strip(s.id)}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" dir="auto" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${escape(promptDescription())}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}${s.remoteDevice ? '' : council.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
@@ -5249,6 +5353,7 @@ function disposeSettingsViews(): void {
   wallpaperSettingsCleanup?.(); wallpaperSettingsCleanup = undefined;
 }
 function modal(title: string, body: string, cls = ''): HTMLDialogElement {
+  sharedChannelSettingsIntent++;
   disposeSettingsViews();
   closeMenus();
   openingProjectForTask = undefined;
@@ -5283,7 +5388,7 @@ function modal(title: string, body: string, cls = ''): HTMLDialogElement {
 }
 const LONG_DESCRIPTION = 90;
 // Close before disposing so the departing dialog still shows its content while it fades.
-function closeModal(): void { closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
+function closeModal(): void { sharedChannelSettingsIntent++; closeMenus(); const dialog = document.querySelector<HTMLDialogElement>('#dialog')!; dialog.close(); disposeSettingsViews(); openingProjectForTask = undefined; previousFocus?.focus(); }
 async function showTurnDiff(element: HTMLElement): Promise<void> {
   const request = changeRequest(element); if (!request) return;
   await openSavedDiff(request.sessionId, request.changes, request.path);
@@ -6318,6 +6423,8 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
  * conversations deliver queued messages natively, so the window never sends them twice. */
 let sidebarBots: import('./bots').Bot[] = [];
 let sidebarChannels: SharedChannelSummary[] = [];
+let channelListRequest = 0;
+let channelListApplied = 0;
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
 const botSwitches = new Map<string, BotActivity[]>();
@@ -6328,12 +6435,18 @@ const botThreadMetaLoaded = new Set<string>();
 const botThreadMetaRequests = new Map<string, number>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
+  const channelRequest = ++channelListRequest;
   const [nextBots, nextChannels] = await Promise.all([
     call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
     call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
   ]);
-  sidebarBots = nextBots;
-  sidebarChannels = nextChannels;
+  // Apply bot identities and Channel membership from the same refresh.
+  // A delayed response must not restore an older reviewer roster or archive state.
+  if (channelRequest > channelListApplied) {
+    sidebarBots = nextBots;
+    sidebarChannels = nextChannels;
+    channelListApplied = channelRequest;
+  }
   botsLoaded = true;
   botProjects = new Set(sidebarBots.map(bot => bot.projectId));
   taskBots = new Map(Object.entries(await call<Record<string, string>>('bot_task_links').catch(() => Object.fromEntries(taskBots))));
@@ -6844,7 +6957,9 @@ function syncChannelWorkingLabel(): void {
 /** Channel history rows per page, as `HISTORY_PAGE` in `shared_channels.rs`. */
 const CHANNEL_PAGE = 100;
 async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<void> {
-  if (!channelId) return;
+  // A late post/stop/retry completion from a departed Channel must not
+  // advance the active Channel's request serial or invalidate its detail read.
+  if (!channelId || channelId !== state.sharedChannelId) return;
   const request = ++state.sharedChannelRequest;
   const history = document.querySelector<HTMLElement>('.bc-history');
   if (history) {
@@ -6854,14 +6969,15 @@ async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<
   const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
   if (prompt && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
   try {
-    const detail = await call<SharedChannelDetail>('bot_shared_channel_detail', { channelId, limit: state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE });
+    const detail = await readSharedChannelDetail(call, channelId, state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE);
     if (request !== state.sharedChannelRequest || channelId !== state.sharedChannelId) return;
     state.sharedChannelDetail = detail;
     renderHeader(); renderTranscript(true); renderComposer(); renderBots();
     syncChannelWorkingLabel();
-  } catch (error) { if (channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
+  } catch (error) { if (request === state.sharedChannelRequest && channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
 }
 function activateSharedChannel(channelId: string): void {
+  sharedChannelSettingsIntent++;
   voiceDictation.detach();
   state.sharedChannelId = channelId;
   state.sharedChannelDetail = null;
@@ -6874,6 +6990,7 @@ function activateSharedChannel(channelId: string): void {
 /** Leave the channel before showing any task, preserving its draft and discarding late refreshes. */
 function leaveSharedChannel(): void {
   if (!state.sharedChannelId) return;
+  sharedChannelSettingsIntent++;
   const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
   if (prompt) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
   state.sharedChannelId = ''; state.sharedChannelDetail = null;
@@ -6886,6 +7003,17 @@ function closeSharedChannel(): void {
 }
 function sharedChannelUi(): SharedChannelUiOptions {
   return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify };
+}
+/** A delayed settings response must not replace a newer dialog or navigation. */
+async function showSharedChannelSettings(channelId: string): Promise<void> {
+  const intent = ++sharedChannelSettingsIntent;
+  const { view, projectId, sessionId, sharedChannelId } = state;
+  const isCurrent = () => intent === sharedChannelSettingsIntent
+    && state.view === view && state.projectId === projectId
+    && state.sessionId === sessionId && state.sharedChannelId === sharedChannelId
+    && !document.querySelector<HTMLDialogElement>('#dialog')?.open;
+  const { openSharedChannelSettings } = await import('./bot-shared-channels');
+  if (isCurrent()) await openSharedChannelSettings(channelId, sharedChannelUi(), isCurrent);
 }
 async function createSharedChannel(): Promise<void> {
   const { openCreateChannel } = await import('./bot-shared-channels');
@@ -6905,8 +7033,7 @@ async function showSharedChannelMenu(anchor: HTMLElement, channelId: string): Pr
 async function sharedChannelMenuAction(action: string, channel: SharedChannelSummary): Promise<void> {
   try {
     if (action === 'edit') {
-      const { openSharedChannelSettings } = await import('./bot-shared-channels');
-      await openSharedChannelSettings(channel.id, sharedChannelUi());
+      await showSharedChannelSettings(channel.id);
     }
     else {
       await call('bot_shared_channel_archive', { channelId: channel.id, archived: action !== 'restore' });
@@ -7166,14 +7293,43 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'export-bots': hideCreateBotMenu(); await showBotManifestDialog('export'); break;
     case 'open-shared-channel': if (element.dataset.channel) await openSharedChannel(element.dataset.channel); break;
     case 'close-shared-channel': closeSharedChannel(); break;
-    case 'shared-channel-settings': if (state.sharedChannelId) { const { openSharedChannelSettings } = await import('./bot-shared-channels'); await openSharedChannelSettings(state.sharedChannelId, sharedChannelUi()); } break;
+    case 'shared-channel-settings': if (state.sharedChannelId) await showSharedChannelSettings(state.sharedChannelId); break;
     case 'channel-council': toggleSharedChannelCouncil(element); break;
     case 'channel-council-accept': {
       const deliveryId = element.dataset.deliveryId;
-      if (deliveryId) {
+      const acceptanceRevision = element.dataset.acceptanceRevision;
+      const channelId = state.sharedChannelId;
+      if (deliveryId && acceptanceRevision && channelId) {
         const { openSharedChannelCouncilAcceptance } = await import('./bot-shared-channels');
-        openSharedChannelCouncilAcceptance(deliveryId, sharedChannelUi());
+        if (state.sharedChannelId === channelId) {
+          openSharedChannelCouncilAcceptance(deliveryId, acceptanceRevision, sharedChannelUi());
+        }
       }
+      break;
+    }
+    case 'channel-council-inspect': {
+      const deliveryId = element.dataset.deliveryId;
+      const channelId = state.sharedChannelId;
+      // Pin the read-only display to the session already shown in this delivery.
+      // This DOM hint is never sent as authority to the native inspection command.
+      const expectedSessionId = element.closest<HTMLElement>('.bc-council-summary')
+        ?.querySelector<HTMLButtonElement>('[data-action="channel-council-report"]')
+        ?.dataset.sessionId?.trim();
+      if (!deliveryId || !channelId || !expectedSessionId) break;
+      // Native resolves and revalidates the delivery's owning channel, policy,
+      // isolated task and frozen cycle. DOM-provided task ids have no authority.
+      const { createCouncilInspector } = await import('./council-inspector');
+      const dialog = modal('Council inspection',
+        '<div class="bc-council-inspector-host" role="region" aria-label="Native Council evidence"></div>',
+        'bc-council-inspector-dialog');
+      const inspector = createCouncilInspector(() =>
+        call<import('./architect-types').CouncilInspection>('bot_shared_channel_council_inspect',
+          { channelId, deliveryId }), expectedSessionId);
+      const host = dialog.querySelector<HTMLElement>('.bc-council-inspector-host');
+      if (host) { host.dataset.channelId = channelId; host.append(inspector); }
+      const summary = inspector.querySelector<HTMLElement>('summary');
+      summary?.focus();
+      summary?.click();
       break;
     }
     case 'channel-council-report': {
@@ -7333,25 +7489,115 @@ document.addEventListener('submit', event => {
   const form = event.target as HTMLFormElement; event.preventDefault();
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
     const channelId = state.sharedChannelId, data = new FormData(form), text = String(data.get('text') ?? '').trim();
-    if (!text) return;
+    if (form.dataset.channelId !== channelId || state.sharedChannelDetail?.id !== channelId
+      || !text || state.sharedChannelPosting.has(channelId)) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
+    const showCouncilError = (message: string): void => {
+      notify(message);
+      const panel = form.querySelector<HTMLElement>('.bc-council-panel');
+      const trigger = form.querySelector<HTMLElement>('.bc-council-trigger');
+      // Clicking Send light-dismisses the popover before submit validation.
+      // Reopen it so the rejected configuration can be corrected in place.
+      if (trigger && panel && !panel.matches(':popover-open')) toggleSharedChannelCouncil(trigger);
+    };
     const councilMode = data.get('councilMode');
-    const reviewerBotIds = [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value);
-    const target = Number(data.get('councilTarget') ?? 9);
-    const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
-    if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
-      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
-      || (councilMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)))) {
-      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+    const isSelected = councilMode === 'selected';
+    if (councilEnabled && isSelected && form.dataset.councilRosterChanged === 'true') {
+      showCouncilError('Confirm the updated Council reviewer roster before sending.');
       return;
     }
-    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    const channel = state.sharedChannelDetail;
+    const selectedBotIds = isSelected
+      ? [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value)
+      : [];
+    const directBotIds: string[] = [], nestedBotReviewers: CouncilNestedReviewer[] = [];
+    const roles = [...form.querySelectorAll<HTMLSelectElement>('select[name=councilReviewerRole]')];
+    const childValue = (name: string, botId: string): number => Number(
+      [...form.querySelectorAll<HTMLInputElement>('input[name=' + name + ']')].find(input => input.dataset.botId === botId)?.value ?? NaN
+    );
+    let rolesValid = true;
+    for (const id of selectedBotIds) {
+      const role = roles.find(select => select.dataset.botId === id)?.value;
+      if (role === 'direct') directBotIds.push(id);
+      else if (role === 'nested') {
+        const policy = [...form.querySelectorAll<HTMLSelectElement>('select[name="councilChildEscalation"]')]
+          .find(select => select.dataset.botId === id)?.value;
+        if (policy !== 'always_nested' && policy !== 'on_trigger') rolesValid = false;
+        nestedBotReviewers.push({
+          botId: id, childReviewers: childValue('councilChildReviewers', id),
+          childTarget: childValue('councilChildTarget', id), childMaxRounds: childValue('councilChildMaxRounds', id),
+          ...(policy === 'on_trigger' ? { escalationPolicy: policy } : {}),
+        });
+      } else rolesValid = false;
+    }
+    const automaticReviewers = isSelected ? Number(data.get('councilAutomaticReviewers')) : 0;
+    const target = Number(data.get('councilTarget') ?? 9);
+    const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
+    const strategy = String(data.get('councilStrategy') ?? 'parallel');
+    if (councilEnabled && strategy === 'escalated' && nestedBotReviewers.some(child => child.escalationPolicy === 'on_trigger')) {
+      showCouncilError('On-trigger preliminary review is not available in S2. Choose Always nested or another strategy.');
+      return;
+    }
+    const forceEscalation = strategy === 'escalated' && data.get('councilForceEscalation') === 'on';
+    const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
+    let criteria: ReturnType<typeof readSharedChannelCriteria> = [];
+    if (councilEnabled && criteriaSource !== 'architect') {
+      try {
+        criteria = readSharedChannelCriteria(form);
+      } catch (cause) {
+        showCouncilError(cause instanceof Error ? cause.message : String(cause));
+        return;
+      }
+    }
+    const criteriaValid = criteriaSource === 'architect' || (
+      criteria.length >= 1 && criteria.length <= 8
+      && criteria.every(criterion => /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id)
+        && criterion.lens.length > 0 && criterion.lens.length <= 80
+        && Number.isFinite(criterion.target) && criterion.target >= 1 && criterion.target <= 10)
+      && new Set(criteria.map(c => c.id)).size === criteria.length
+      && new Set(criteria.map(c => c.lens.toLowerCase())).size === criteria.length
+      && (!isSelected || criteria.length <= selectedBotIds.length + automaticReviewers)
+      && nestedBotReviewers.every(child => child.childReviewers >= criteria.length)
+    );
+    const childAttempts = nestedBotReviewers.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
+    const totalSeats = selectedBotIds.length + automaticReviewers;
+    const validSelection = !isSelected || (
+      rolesValid && selectedBotIds.length >= (automaticReviewers > 0 ? 1 : 2)
+      && selectedBotIds.length <= 8 && totalSeats >= 2 && totalSeats <= 8
+      && new Set(selectedBotIds).size === selectedBotIds.length
+      && selectedBotIds.every(id => channel?.memberIds.includes(id))
+      && Number.isInteger(automaticReviewers) && automaticReviewers >= 0 && automaticReviewers <= 7
+      && nestedBotReviewers.every(child =>
+        Number.isInteger(child.childReviewers) && child.childReviewers >= 2 && child.childReviewers <= 8
+        && Number.isFinite(child.childTarget) && child.childTarget >= 1 && child.childTarget <= 10
+        && Number.isInteger(child.childMaxRounds) && child.childMaxRounds >= 1 && child.childMaxRounds <= 100)
+      && Number.isSafeInteger(childAttempts) && childAttempts <= 256
+      && Number.isSafeInteger((totalSeats + childAttempts) * maxRounds)
+      && (totalSeats + childAttempts) * maxRounds <= 1024
+    );
+    if (councilEnabled && (
+      !['auto', 'selected'].includes(String(councilMode))
+      || !Number.isFinite(target) || target < 1 || target > 10
+      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
+      || !['parallel', 'escalated', 'two_phase'].includes(strategy)
+      || (strategy !== 'parallel' && (maxRounds < 2 || nestedBotReviewers.some(child => child.childMaxRounds < 2)))
+      || !['architect', 'user', 'hybrid'].includes(criteriaSource)
+      || !criteriaValid || !validSelection
+    )) {
+      showCouncilError('Check Council seats (2–8), child limits, strategy and required criteria before sending.');
+      return;
+    }
+    const scopedRequested = data.get('councilScopedFile') === 'on' && isSelected;
+    if (councilEnabled && scopedRequested && !directBotIds.length) {
+      showCouncilError('Scoped reviewer grants require at least one direct bot, not only child Councils.');
+      return;
+    }
     const filePath = String(data.get('councilFilePath') ?? '').trim();
     const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
       && !filePath.startsWith('\\') && !filePath.includes(':')
       && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
-    if (councilEnabled && scopedFile && !validFilePath) {
-      notify('Choose one valid relative file path for the scoped reviewer action.');
+    if (councilEnabled && scopedRequested && !validFilePath) {
+      showCouncilError('Choose one valid relative file path for the scoped reviewer action.');
       return;
     }
     const issueEnabled = councilEnabled && data.get('councilGithubIssue') === 'on';
@@ -7359,32 +7605,46 @@ document.addEventListener('submit', event => {
     const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
       && !issueRepo.split('/').some(part => part === '.' || part === '..');
     if (issueEnabled && !validIssueRepo) {
-      notify('Specify the exact authorized GitHub repository as owner/name.');
+      showCouncilError('Specify the exact authorized GitHub repository as owner/name.');
       return;
     }
     const council = councilEnabled ? {
-      target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      target, maxRounds, reviewers: 0,
+      ...(directBotIds.length ? { reviewerBotIds: directBotIds } : {}),
+      ...(nestedBotReviewers.length ? { nestedBotReviewers } : {}),
+      ...(automaticReviewers ? { automaticReviewers } : {}),
+      ...(strategy !== 'parallel' ? { strategy, forceEscalation } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
-      ...(scopedFile ? { reviewPermissions: {
+      ...(scopedRequested ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
         grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],
       } } : {}),
     } : undefined;
-    const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id)) && councilMode === 'selected') {
-      notify('A message executor cannot also be one of its Council reviewers.');
+    // Native routing assigns the channel lead when no bot is explicitly mentioned.
+    const executorIds = recipients.length ? recipients : channel?.leadBotId ? [channel.leadBotId] : [];
+    if (councilEnabled && selectedBotIds.some(id => executorIds.includes(id)) && isSelected) {
+      showCouncilError('A message executor cannot also be one of its Council reviewers.');
       return;
     }
     state.sharedChannelDrafts.delete(channelId);
+    state.failedChannelCouncilDrafts.delete(channelId);
     state.sharedChannelPosting.add(channelId); renderComposer();
     // A failed post goes back to its own channel's draft, unless something new was typed there.
     run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}), ...(council ? { council } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
       state.sharedChannelPosting.delete(channelId);
-      if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
+      const draft = state.sharedChannelDrafts.get(channelId);
+      if (!draft?.trim() || draft === text) {
+        state.sharedChannelDrafts.set(channelId, text);
+        // Restore the submitted Council settings together with the rejected text.
+        // A retry must not silently become an ordinary non-Council message.
+        // The detached form is scoped to this Channel and consumed on its next render.
+        state.failedChannelCouncilDrafts.set(channelId, form);
+      }
       notify(error instanceof Error ? error.message : String(error));
       if (channelId === state.sharedChannelId) renderComposer();
     }));
@@ -7494,7 +7754,15 @@ function outsideDialog(event: MouseEvent): boolean {
 }
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('pointerdown', event => { dialogBackdropPressed = outsideDialog(event); });
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('click', event => { if (dialogBackdropPressed && outsideDialog(event)) closeModal(); dialogBackdropPressed = false; });
-document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', disposeSettingsViews);
+document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('close', event => {
+  const dialog = event.currentTarget as HTMLDialogElement;
+  // A closed dialog remains mounted. Remove its Channel evidence and detach
+  // in-flight reads; a later inspection must bind a fresh native request.
+  if (!dialog.open && dialog.classList.contains('bc-council-inspector-dialog')) {
+    dialog.querySelector('.bc-council-inspector-host')?.replaceChildren();
+  }
+  disposeSettingsViews();
+});
 document.querySelector<HTMLDialogElement>('#dialog')!.addEventListener('cancel', () => { closeMenus(); openingProjectForTask = undefined; });
 window.matchMedia('(max-width: 920px)').addEventListener('change', event => { if (event.matches) { state.inspector = false; renderInspector(); } });
 document.addEventListener('paste', event => { if ((event.target as HTMLElement | null)?.id === 'prompt' && !document.querySelector<HTMLDialogElement>('#dialog')!.open) attachments.handlePaste(event); });
@@ -7536,7 +7804,21 @@ async function boot(): Promise<void> {
   run((subscribe as (name: string, callback: (event: { sessionId?: string } | null) => void) => Promise<() => void>)('progress-changed', event => progressPip?.refresh(event?.sessionId)).then(() => undefined));
   run(subscribe('simulator-changed', event => { if (event?.show) openSimulator(); void simulatorPanel?.refresh(); }).then(() => undefined));
   run(subscribe('bots-changed', () => run((async () => { botProjectsLoad = reloadBotProjects(); await botProjectsLoad; botsView?.refresh(); })())).then(() => undefined));
-  run(subscribe('bot-shared-channel-changed', event => { run(reloadBotProjects(false)); if (state.sharedChannelId && (!event?.channelId || event.channelId === state.sharedChannelId)) void refreshSharedChannel(); }).then(() => undefined));
+  run(subscribe('bot-shared-channel-changed', event => {
+    run(reloadBotProjects(false));
+    // The read-only inspector remains bound to its original authenticated
+    // delivery even when the user navigates away from the source Channel.
+    // Never treat the currently selected Channel as inspection authority.
+    const dialog = document.querySelector<HTMLDialogElement>('#dialog.bc-council-inspector-dialog[open]');
+    const host = dialog?.querySelector<HTMLElement>('.bc-council-inspector-host');
+    const inspectedChannel = host?.dataset.channelId;
+    if (inspectedChannel && (!event?.channelId || event.channelId === inspectedChannel)) {
+      host.querySelector('.council-inspection')?.dispatchEvent(new Event('council-evidence-invalidated'));
+    }
+    if (state.sharedChannelId && (!event?.channelId || event.channelId === state.sharedChannelId)) {
+      void refreshSharedChannel();
+    }
+  }).then(() => undefined));
   run(subscribe('bot-messages-changed', () => {
     botThreadMetaLoaded.clear();
     const bot = botForThread();

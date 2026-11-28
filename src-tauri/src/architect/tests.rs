@@ -1723,6 +1723,71 @@ fn legacy_worker_snapshots_and_writer_request_keys_keep_their_original_meaning()
     assert!(normalized.get("readOnly").is_none(), "default access must not change persisted idempotency request content");
 }
 #[test]
+fn composed_council_root_admission_is_bounded_without_changing_legacy_modes() {
+    let (_, mut team) = fixture();
+    team.config.max_parallel = 0;
+    assert_eq!(effective_parallel_limit(&team), usize::MAX);
+    team.config.council = Some(CouncilConfig::default());
+    assert_eq!(effective_parallel_limit(&team), usize::MAX, "legacy automatic Council remains unlimited");
+    let direct = CouncilConfig {
+        reviewer_bot_ids: vec!["security-bot".into(), "qa-bot".into()],
+        ..CouncilConfig::default()
+    };
+    team.config.council = Some(direct.clone());
+    assert_eq!(effective_parallel_limit(&team), usize::MAX, "legacy direct bot Council remains unlimited");
+    let mixed = CouncilConfig { automatic_reviewers: 2, ..direct };
+    mixed.validate().unwrap();
+    team.config.council = Some(mixed);
+    assert_eq!(effective_parallel_limit(&team), MAX_COMPOSED_ROOT_PARALLEL);
+    team.config.max_parallel = 3;
+    assert_eq!(effective_parallel_limit(&team), 3);
+    team.config.max_parallel = 16;
+    assert_eq!(effective_parallel_limit(&team), MAX_COMPOSED_ROOT_PARALLEL);
+}
+
+#[test]
+fn composed_council_root_scheduler_queues_excess_workers_and_refills_capacity() {
+    let (state, sid) = state_fixture();
+    let assignments = (0..10).map(|i| assignment(
+        &format!("unit-{i}"), "fast", &format!("unit-{i}.rs")
+    )).collect::<Vec<_>>();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments": assignments})).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.max_parallel = 0;
+        team.config.council = Some(CouncilConfig {
+            reviewer_bot_ids: vec!["security-bot".into(), "qa-bot".into()],
+            automatic_reviewers: 2,
+            ..CouncilConfig::default()
+        });
+        team.config.council.as_ref().unwrap().validate().unwrap();
+        save(&store, &mut team).unwrap();
+    }
+    let (_lead, _lead_rx) = claim(&state, Launch {
+        sid: sid.clone(), prompt: "Coordinate this task".into(), images: None,
+        admission: Admission { parent: sid.clone(), generation: 1 },
+    });
+    let mut running = Vec::new();
+    while let Some(action) = next_action_state(&state, &mut |_| {}).unwrap() {
+        assert!(running.len() < MAX_COMPOSED_ROOT_PARALLEL);
+        running.push(claim(&state, action));
+    }
+    assert_eq!(running.len(), MAX_COMPOSED_ROOT_PARALLEL);
+    {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &sid).unwrap().unwrap();
+        let queued = team.workers.iter().filter(|worker| worker.status == "queued").collect::<Vec<_>>();
+        assert_eq!(queued.len(), 2);
+        assert!(queued.iter().all(|worker|
+            queue_reason(&team, worker).as_deref() == Some("Waiting for an available worker slot")));
+    }
+    finish(&state, &running[0].0, "Finished first independent unit", true);
+    assert!(next_action_state(&state, &mut |_| {}).unwrap().is_some(),
+        "settled worker must free a native root admission slot");
+}
+
+#[test]
 fn unlimited_team_launches_more_than_four_agents_without_bypassing_scope_ownership() {
     let (state, sid) = state_fixture();
     {

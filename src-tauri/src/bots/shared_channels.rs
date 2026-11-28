@@ -50,6 +50,9 @@ pub struct ChannelCouncilView {
     pub target: f64,
     pub lowest: Option<f64>,
     pub artifact_revision: String,
+    /// Displayed native snapshot identity, not an approval grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_revision: Option<String>,
     pub notice: Option<String>,
     pub reviewers: Vec<ChannelCouncilReviewer>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,9 +284,23 @@ pub(crate) fn bind_delivery_cycle(store: &Store, session_id: &str, since: i64) -
     Ok(())
 }
 
-/** Recheck frozen per-message authority against current channel members and
- * all message executors on every selected seat, including resumed rounds. */
-pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selected: &[String]) -> Result<()> {
+/// Revalidate the entire frozen Council policy, including nested bot
+/// coordinators, against the originating Shared Channel message. Checking only
+/// direct seats would let a removed nested member keep its task-owned child.
+pub(crate) fn validate_delivery_council(
+    store: &Store, session_id: &str, council: &crate::architect::CouncilConfig,
+) -> Result<()> {
+    let mut selected = council.reviewer_bot_ids.clone();
+    selected.extend(council.nested_bot_reviewers.iter().map(|child| child.bot_id.clone()));
+    validate_delivery_sources(
+        store, session_id, &council.reviewer_bot_ids, &selected, Some(council),
+    )
+}
+
+fn validate_delivery_sources(
+    store: &Store, session_id: &str, direct: &[String], selected: &[String],
+    expected: Option<&crate::architect::CouncilConfig>,
+) -> Result<()> {
     let thread: Option<String> = store.db.query_row(
         "SELECT external_id FROM bot_threads WHERE session_id=?1 AND external_id LIKE 'channel-council:%'",
         [session_id], |row| row.get(0),
@@ -311,7 +328,9 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
     }
     let request = council_request(store, &message_id)?
         .ok_or("channel_council_scope_missing: original Council opt-in is absent.")?;
-    if request.council.reviewer_bot_ids.as_slice() != selected {
+    if request.council.reviewer_bot_ids.as_slice() != direct
+        || expected.is_some_and(|council| request.council != *council)
+    {
         return Err("channel_council_scope_mismatch: original message reviewer roster changed.".into());
     }
     let mut executors = request.executors;
@@ -326,6 +345,13 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
         }
         if executors.contains(id) {
             return Err("reviewer_unavailable: a message executor cannot review its channel delivery.".into());
+        }
+        if expected.is_some() {
+            let bot = super::get(store, id)
+                .map_err(|_| "reviewer_unavailable: a selected Council reviewer was removed.")?;
+            if bot.paused {
+                return Err("reviewer_unavailable: a selected Council reviewer is paused.".into());
+            }
         }
     }
     Ok(())
@@ -343,14 +369,28 @@ pub(super) fn skipped_skill_status(reason: &str) -> &'static str {
     else { "skipped" }
 }
 
+fn review_acceptance_revision(cycle_id: &str, team: &crate::architect::TeamSnapshot) -> String {
+    format!("{cycle_id}:{}:{}", team.session_id, team.revision)
+}
+
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String, String)> = store.db.query_row(
-        "SELECT cycle_id,artifact_revision,source_message_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
-        [delivery_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        "SELECT c.cycle_id,c.artifact_revision,c.source_message_id
+         FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d
+           ON d.id=c.delivery_id AND d.channel_id=c.channel_id
+              AND d.message_id=c.source_message_id AND d.bot_id=c.executor_bot_id
+         JOIN bot_threads t
+           ON t.session_id=d.session_id AND t.external_id='channel-council:' || d.id
+         WHERE c.delivery_id=?1 AND d.session_id=?2",
+        params![delivery_id,session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((cycle_id, original_revision, source_message_id)) = cycle else { return Ok(None) };
     let original = council_request(store, &source_message_id)?.map(|request| request.council);
     let team = crate::architect::load(store, session_id)?;
+    let request_current = crate::architect::council_requests::channel_request_is_current(
+        store, delivery_id, session_id,
+    );
     let proof: Option<(i64, i64, i64, String)> = store.db.query_row(
         "SELECT council_since,dispatch_revision,changed_at,reason
          FROM extended_channel_council_acceptances
@@ -358,21 +398,45 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         params![delivery_id,cycle_id],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
+    let mut acceptance_revision = None;
     let (state, round, target, lowest, revision, notice, reviewers, acceptance_reason) = if let Some(team) = team {
         let status = team.council_status.as_ref();
-        let original_matches = original.as_ref() == team.config.council.as_ref()
-            && original_revision == format!("cycle:{}",team.council_since);
+        let original_matches = request_current
+            && original.as_ref() == team.config.council.as_ref()
+            && original_revision == format!("cycle:{}", team.council_since);
+        // A newly admitted delivery has no native cycle yet. Show a pending
+        // label only for its original, authenticated, empty Council task.
+        let pending_admission = request_current
+            && original.as_ref() == team.config.council.as_ref()
+            && original_revision == "0"
+            && team.council_since == 0
+            && team.workers.is_empty()
+            // Saving a new native team computes a "waiting" status even
+            // before the first Council cycle. Nested configurations can have
+            // an initial "blocked" projection until their child is admitted.
+            && status.is_none_or(|state| state.round == 0 && state.lowest.is_none()
+                && matches!(state.state.as_str(), "waiting" | "blocked"))
+            && matches!(delivery_status, "queued" | "in_progress");
         let authorized_exception = original_matches && proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
             team.council_accepted == Some(*since) && team.council_since == *since
                 && team.dispatch_revision as i64 == *dispatch && team.changed_at == *changed
                 && status.is_some_and(|s| s.state == "accepted" && !s.stale)
         });
-        let state = match team.status.as_str() {
+        // A persisted Council label is not a passing native receipt. The compact
+        // Channel row must obey the same live gate as its final callback.
+        let native_pass = original_matches
+            && crate::architect::verified_council_pass(store, &team);
+        let state = if pending_admission {
+            "Reviewing"
+        } else if !original_matches {
+            "Inconclusive"
+        } else {
+            match team.status.as_str() {
             "stopped" => "Stopped",
             "failed" => "Failed",
             "interrupted" => "Paused",
             _ => match status.map(|s| s.state.as_str()) {
-                Some("passed") if original_matches => "Passed",
+                Some("passed") if native_pass => "Passed",
                 Some("passed") => "Inconclusive",
                 Some("accepted") if authorized_exception => "Accepted by user",
                 Some("accepted") => "Inconclusive",
@@ -382,8 +446,16 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 Some("waiting" | "reviewing" | "dispatch") => "Reviewing",
                 _ => "Inconclusive",
             },
+            }
         };
-        let reviewers = team.workers.iter().filter_map(|worker| {
+        if original_matches && delivery_status == "in_progress"
+            && matches!(state, "Limit reached" | "Needs correction" | "Inconclusive")
+            && matches!(team.status.as_str(), "running" | "waiting" | "ready" | "completed")
+            && status.is_some_and(|s| s.round > 0 && s.lowest.is_some() && !s.stale)
+        {
+            acceptance_revision = Some(review_acceptance_revision(&cycle_id, &team));
+        }
+        let reviewers: Vec<ChannelCouncilReviewer> = team.workers.iter().filter_map(|worker| {
             worker.council.as_ref().map(|seat| {
                 let mut skills_out = Vec::new();
                 if let Some(binding) = worker.reviewer_binding.as_ref() {
@@ -430,15 +502,25 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
                 }
             })
         }).collect();
-        let note = (!original_matches)
-            .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
+        // Never expose task-private reviewer identities, skill provenance or
+        // cached scores when the frozen Channel Council policy has drifted.
+        let reviewers = if original_matches { reviewers } else { Vec::new() };
+        let note = (!original_matches && !pending_admission)
+            .then(|| "Council settings, request or cycle differ from this channel delivery; approval is unavailable.".to_string())
             .or_else(|| (team.status == "interrupted")
                 .then(|| "PandaCode restarted during Council review. Open the Council report and resume this task; no result has been approved.".to_string()))
+            .or_else(|| (status.is_some_and(|s| s.state == "passed") && !native_pass)
+                .then(|| "Stored Council scores lack verified native reviewer evidence; this delivery remains inconclusive.".to_string()))
             .or_else(|| status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()))
             .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
                 .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));
+        // Do not present an unverified cached score as a verified result.
+        let lowest = status.and_then(|s| if !original_matches
+            || (s.state == "passed" && !native_pass) {
+            None
+        } else { s.lowest });
         (state.to_owned(), status.map_or(0, |s| s.round),
-            status.map_or(9.0, |s| s.target), status.and_then(|s| s.lowest),
+            status.map_or(9.0, |s| s.target), lowest,
             format!("{}:{}", team.council_since, team.dispatch_revision),
             note, reviewers,
             if authorized_exception { proof.as_ref().map(|(_,_,_,reason)| reason.clone()) } else { None })
@@ -462,7 +544,63 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         Some("Council delivery ended without approval. Review the report before retrying.".into())
     } else { notice };
     let accepted_by = acceptance_reason.as_ref().map(|_| "local_user".to_string());
-    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
+    Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, acceptance_revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
+}
+
+/// Read one channel-owned Council projection through its durable delivery identity.
+/// This is a read-only view, not a new Council verdict or an approval capability.
+/// An unrelated task id, changed review policy or superseded cycle is never inspected.
+pub(crate) fn inspect_channel_delivery(
+    store: &Store, channel_id: &str, delivery_id: &str,
+) -> Result<serde_json::Value> {
+    // The local user may inspect an archived channel's historical Council,
+    // but its delivery must have originated in this exact channel.
+    shared_channel(store, channel_id)?;
+    let delivery: Option<(String, String, String, String, String)> = store.db.query_row(
+        "SELECT d.session_id,c.source_message_id,c.artifact_revision,c.executor_bot_id,d.bot_id
+         FROM bot_shared_channel_deliveries d
+         JOIN extended_channel_council_deliveries c
+           ON c.delivery_id=d.id AND c.channel_id=d.channel_id
+              AND c.source_message_id=d.message_id
+         WHERE d.id=?1 AND d.channel_id=?2",
+        params![delivery_id,channel_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((session_id, message_id, artifact_revision, executor, assigned_bot)) = delivery else {
+        return Err("channel_council_inspection_denied: delivery does not belong to this channel.".into());
+    };
+    let thread: Option<String> = store.db.query_row(
+        "SELECT external_id FROM bot_threads WHERE session_id=?1",
+        [&session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if executor != assigned_bot
+        || thread.as_deref() != Some(&format!("channel-council:{delivery_id}"))
+    {
+        return Err("channel_council_inspection_denied: task ownership changed.".into());
+    }
+    let requested = council_request(store, &message_id)?
+        .ok_or("channel_council_inspection_denied: original Council opt-in is unavailable.")?;
+    let team = crate::architect::load(store, &session_id)?
+        .ok_or("channel_council_inspection_denied: native task no longer exists.")?;
+    if team.config.council.as_ref() != Some(&requested.council)
+        || artifact_revision != format!("cycle:{}", team.council_since)
+    {
+        return Err("channel_council_inspection_stale: policy or cycle differs from the channel delivery.".into());
+    }
+    // A matching cycle and config alone cannot prove the original request:
+    // the admitted objective, executor, source message and root identity
+    // must still match their immutable native task-bound record.
+    if !crate::architect::council_requests::channel_request_is_current(
+        store, delivery_id, &session_id,
+    ) {
+        return Err("channel_council_inspection_stale: frozen native request no longer matches this delivery.".into());
+    }
+    let inspection = crate::architect::council_inspection_state(store, &session_id)?
+        .ok_or("channel_council_inspection_denied: no native Council exists.")?;
+    if inspection.session_id != session_id || inspection.cycle_started_at != team.council_since {
+        return Err("channel_council_inspection_stale: native Council identity changed.".into());
+    }
+    serde_json::to_value(inspection).map_err(|e| e.to_string())
 }
 
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.
@@ -739,6 +877,9 @@ pub(super) fn provision_channel_delivery(
         store.db.execute("INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?7)", params![delivery_id,channel_id,message_id,bot_id,session_id,depth as i64,created_at]).map_err(|e| e.to_string())?;
         if requested.is_some() {
             store.db.execute("INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,'0',?7)", params![delivery_id,channel_id,message_id,bot_id,crate::storage::id(),text,created_at]).map_err(|e| e.to_string())?;
+            // Freeze the same task's native review request before admitting a
+            // provider turn. Failure rolls back the delivery and task together.
+            crate::architect::council_requests::admit_channel(store, delivery_id)?;
         }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok((channel, bot, prompt, thread))
@@ -876,6 +1017,25 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
     if status != "completed" || !council_scope_active(store, delivery_id)? {
         return Ok(false);
     }
+    // Schema v44 requests pin the task, delivery, source objective and policy.
+    // Older deliveries admitted before v44 have no request and retain the
+    // existing independent native/acceptance gates below.
+    let issued_request: Option<String> = store.db.query_row(
+        "SELECT request_id FROM extended_council_task_requests
+         WHERE delivery_id=?1 AND session_id=?2",
+        params![delivery_id,session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(request_id) = issued_request {
+        // Request IDs are not approval tokens. Deny stale or inconsistent
+        // request data before considering the real native Council verdict.
+        let inspection = match crate::architect::council_requests::inspect_channel(
+            store, &request_id, delivery_id, &session_id,
+        ) {
+            Ok(inspection) => inspection,
+            Err(_) => return Ok(false),
+        };
+        if inspection.native.status.stale { return Ok(false); }
+    }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
     if team.status != "completed" || team.config.council.is_none()
         || frozen_cycle != format!("cycle:{}",team.council_since)
@@ -921,10 +1081,20 @@ pub(super) fn settle_channel_delivery(
     let approved = successful && !denied;
     let changed = store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status=?2,updated_at=?3
-         WHERE id=?1 AND session_id=?4 AND status='in_progress'",
-        params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id],
+         WHERE id=?1 AND session_id=?4 AND status='in_progress'
+           AND channel_id=?5 AND message_id=?6 AND bot_id=?7",
+        params![delivery_id,if approved {"completed"} else {"failed"},crate::storage::now(),session_id,
+            channel_id,message_id,bot_id],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Ok(None); }
+    if approved && matches!(gate, super::ChannelCouncilOutcome::Approved) {
+        // Verify the same immutable native request at the winning terminal
+        // transition and persist its receipt before publishing one channel reply.
+        // A stale/tampered v44+ request rolls back the entire approval.
+        crate::architect::council_requests::record_terminal_channel(
+            store, delivery_id, session_id,
+        )?;
+    }
     // The legacy message schema accepts only user/reply, not synthetic
     // Council notices. A denied delivery is visible through its native
     // per-delivery status/notice, never as a fabricated bot response.
@@ -1162,12 +1332,13 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
 #[tauri::command]
 pub async fn bot_shared_channel_council_accept(
     app: tauri::AppHandle, state: State<'_,AppState>, delivery_id: String, reason: String,
+    acceptance_revision: String,
 ) -> Result<()> {
     let reason = reason.trim();
     if !(8..=1024).contains(&reason.chars().count()) || reason.chars().any(char::is_control) {
         return Err("Enter an acceptance reason between 8 and 1024 printable characters.".into());
     }
-    let (channel_id, session_id, cycle_id, expected_since, expected_dispatch, expected_changed) = {
+    let (channel_id, session_id, cycle_id, expected_since, expected_dispatch, expected_changed, expected_revision) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let (channel_id, session_id, cycle_id): (String, String, String) = store.db.query_row(
             "SELECT c.channel_id,d.session_id,c.cycle_id
@@ -1184,16 +1355,19 @@ pub async fn bot_shared_channel_council_accept(
             return Err("Council evidence changed after the last native review.".into());
         }
         let config = team.config.council.as_ref().ok_or("Council is disabled.")?;
-        validate_delivery_reviewers(&store, &session_id, &config.reviewer_bot_ids)?;
+        validate_delivery_council(&store, &session_id, config)?;
         let status = team.council_status.as_ref().ok_or("Council has no review.")?;
         if status.round == 0 || status.lowest.is_none() || status.stale
             || !matches!(team.status.as_str(), "running" | "waiting" | "ready" | "completed")
         {
             return Err("A current Council review with recorded scores is required before exceptional acceptance.".into());
         }
-        (channel_id, session_id, cycle_id, team.council_since, team.dispatch_revision, team.changed_at)
+        if acceptance_revision != review_acceptance_revision(&cycle_id, &team) {
+            return Err("Council review changed; inspect the current result before accepting.".into());
+        }
+        (channel_id, session_id, cycle_id, team.council_since, team.dispatch_revision, team.changed_at, team.revision)
     };
-    let team = crate::architect::accept_channel_delivery(&app, &state, &session_id)?;
+    let team = crate::architect::accept_channel_delivery(&app, &state, &session_id, expected_revision)?;
     // Do not let a concurrent reassignment, stop or newer reviewer revision
     // rebind a local user's approval to a different delivery.
     {
@@ -1205,7 +1379,10 @@ pub async fn bot_shared_channel_council_accept(
              WHERE d.id=?1 AND d.session_id=?2 AND d.status='in_progress'",
             params![delivery_id,session_id], |r| r.get(0),
         ).map_err(|_| "Council delivery changed during acceptance.".to_string())?;
-        if !crate::architect::council_evidence_is_current(&store, &team)
+        let persisted = crate::architect::load(&store, &session_id)?
+            .ok_or("Council delivery has no native team.")?;
+        if persisted.revision != team.revision
+            || !crate::architect::council_evidence_is_current(&store, &team)
             || current_cycle != cycle_id || team.council_accepted != Some(team.council_since)
             || team.council_since != expected_since || team.dispatch_revision != expected_dispatch
             || team.changed_at != expected_changed
@@ -1213,9 +1390,9 @@ pub async fn bot_shared_channel_council_accept(
         {
             return Err("Council approval no longer matches the current review.".into());
         }
-        let selected = &team.config.council.as_ref()
-            .ok_or("Council is disabled.")?.reviewer_bot_ids;
-        validate_delivery_reviewers(&store, &session_id, selected)?;
+        let council = team.config.council.as_ref()
+            .ok_or("Council is disabled.")?;
+        validate_delivery_council(&store, &session_id, council)?;
         store.db.execute(
             "INSERT OR IGNORE INTO extended_channel_council_acceptances
              (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
@@ -1245,6 +1422,16 @@ pub async fn bot_shared_channels(state: State<'_,AppState>) -> Result<Vec<Shared
 pub async fn bot_shared_channel_detail(state: State<'_,AppState>, channel_id:String, limit:Option<usize>) -> Result<SharedChannelDetail> {
     let store = state.store.lock().map_err(|e|e.to_string())?;
     detail(&store,&channel_id,limit.unwrap_or(HISTORY_PAGE))
+}
+
+/// A channel's historical Council can only be inspected by its delivery id.
+/// No arbitrary task id is accepted from webview markup or message content.
+#[tauri::command]
+pub async fn bot_shared_channel_council_inspect(
+    state: State<'_,AppState>, channel_id: String, delivery_id: String,
+) -> Result<serde_json::Value> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    inspect_channel_delivery(&store, &channel_id, &delivery_id)
 }
 
 #[tauri::command]

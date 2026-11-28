@@ -8,19 +8,24 @@ use std::collections::HashSet;
 
 /// Only a direct bot conversation or explicitly assigned bot task establishes
 /// executor identity. Sharing a project does not identify an executing bot.
-fn executor(store: &Store, session_id: &str) -> Result<Option<String>> {
-    let linked: Option<String> = store.db.query_row(
-        "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION ALL SELECT bot_id FROM bot_tasks WHERE session_id=?1 LIMIT 1",
-        [session_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if linked.is_some() { return Ok(linked); }
-    // Project membership is not executor identity: several bots may share a project.
-    // Only explicit bot task/thread ownership proves who is executing this session.
-    Ok(None)
+fn executors(store: &Store, session_id: &str) -> Result<HashSet<String>> {
+    let mut stmt = store.db.prepare(
+        "SELECT bot_id FROM bot_threads WHERE session_id=?1 UNION SELECT bot_id FROM bot_tasks WHERE session_id=?1",
+    ).map_err(|e| e.to_string())?;
+    let ids = stmt.query_map([session_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    ids.collect::<rusqlite::Result<HashSet<_>>>().map_err(|e| e.to_string())
 }
 
-fn valid_bot(bot: &bots::Bot, executor: Option<&str>, check_executable: bool) -> Result<()> {
-    if executor == Some(bot.id.as_str()) {
+pub(super) fn require_independent_reviewer(store: &Store, session_id: &str, bot_id: &str) -> Result<()> {
+    if executors(store, session_id)?.contains(bot_id) {
+        return Err("reviewer_unavailable: a bot cannot review its own task.".into());
+    }
+    Ok(())
+}
+
+fn valid_bot(bot: &bots::Bot, executors: &HashSet<String>, check_executable: bool) -> Result<()> {
+    if executors.contains(&bot.id) {
         return Err("reviewer_unavailable: a bot cannot review its own task.".into());
     }
     if bot.paused {
@@ -46,6 +51,9 @@ pub(super) fn validate_frozen_seat(
     store: &Store, binding: &super::reviewer_security::ReviewerBinding, check_executable: bool,
 ) -> Result<()> {
     let Some(bot_id) = binding.reviewer_bot_id.as_deref() else { return Ok(()) };
+    let (session_id, _) = binding.council_cycle_id.rsplit_once(':')
+        .ok_or("reviewer_session_mismatch: invalid native Council cycle.")?;
+    require_independent_reviewer(store, session_id, bot_id)?;
     let current = bots::get(store, bot_id)
         .map_err(|_| format!("reviewer_unavailable: selected bot {bot_id} was removed."))?;
     if current.paused {
@@ -67,10 +75,10 @@ pub(super) fn validate_frozen_seat(
 /// Return the same server-side eligibility rules used for actual dispatch, including
 /// executable installation and model health. A UI can never authorize a bot itself.
 pub(super) fn options(store: &Store, session_id: &str) -> Result<Vec<serde_json::Value>> {
-    let executor = executor(store, session_id)?;
+    let executors = executors(store, session_id)?;
     let mut result = Vec::new();
     for bot in bots::list(store)? {
-        let reason = valid_bot(&bot, executor.as_deref(), true).err()
+        let reason = valid_bot(&bot, &executors, true).err()
             .map(|e| e.trim_start_matches("reviewer_unavailable: ").to_string());
         result.push(serde_json::json!({
             "id": bot.id, "name": bot.name, "role": bot.role,
@@ -125,19 +133,33 @@ pub(super) fn review_policy(
 /// Called on a user setting change and again before dispatch, not by model output.
 pub(super) fn validate_roster(store: &Store, session_id: &str, council: &CouncilConfig) -> Result<()> {
     council.validate()?;
-    if council.reviewer_bot_ids.is_empty() { return Ok(()); }
-    let executor = executor(store, session_id)?;
+    if council.reviewer_bot_ids.is_empty() && council.nested_bot_reviewers.is_empty() { return Ok(()); }
+    let executors = executors(store, session_id)?;
+    let project_id = store.session(session_id)?.project_id;
     let mut used = HashSet::new();
     let mut available_skills = HashSet::new();
-    for id in &council.reviewer_bot_ids {
+    for id in council.reviewer_bot_ids.iter().chain(council.nested_bot_reviewers.iter().map(|child| &child.bot_id)) {
         if !used.insert(id) {
             return Err("reviewer_unavailable: repeated reviewer bot ID.".into());
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
-        valid_bot(&bot, executor.as_deref(), true)?;
-        available_skills.extend(bot.skills.iter().cloned());
-        if let Some(permissions) = &council.review_permissions {
-            review_policy(&bot, permissions)?;
+        // Child reviewers may only coordinate a task in their own project.
+        // Reject before Council is configured, not after creating child sessions.
+        if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id)
+            && bot.project_id != project_id
+        {
+            return Err("child_council_denied: selected nested bot belongs to another project.".into());
+        }
+        valid_bot(&bot, &executors, true)?;
+        if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id) {
+            if bot.provider == "zcode" {
+                return Err("child_council_unavailable: the selected bot harness cannot host a native child Architect.".into());
+            }
+        } else {
+            available_skills.extend(bot.skills.iter().cloned());
+            if let Some(permissions) = &council.review_permissions {
+                review_policy(&bot, permissions)?;
+            }
         }
     }
     if council.optional_skill_ids.iter().any(|id| !available_skills.contains(id)) {
@@ -175,6 +197,8 @@ pub(super) struct SelectedReviewer {
 }
 
 fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Vec<SelectedReviewer>> {
+    let config = team.config.council.as_ref().ok_or("Council is off.")?;
+    config.validate()?;
     let key = format!("native-reviewer-round:{}:{round}", team.council_since);
     let saved: Option<String> = store.db.query_row(
         "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_round'",
@@ -183,6 +207,13 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     if let Some(raw) = saved {
         let frozen: Vec<SelectedReviewer> = serde_json::from_str(&raw)
             .map_err(|_| "reviewer_session_mismatch: invalid frozen reviewer round.".to_string())?;
+        // A persisted round is evidence of the originally selected direct seats, not
+        // authority to admit a bot outside the current task's selected roster.
+        if !frozen.iter().map(|r| r.id.as_str()).eq(config.reviewer_bot_ids.iter().map(String::as_str))
+            || frozen.iter().any(|r| r.roster_bot_ids != config.reviewer_bot_ids)
+        {
+            return Err("reviewer_session_mismatch: frozen reviewer roster differs from the selected round.".into());
+        }
         if check_executable && frozen.iter().any(|r| !r.context.skill_ids.is_empty() && r.skills.is_none()) {
             return Err("reviewer_skill_unavailable: legacy round has assigned skills without immutable pins; start a new round.".into());
         }
@@ -196,13 +227,11 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.as_ref().is_some_and(|s| s.round == round)) {
         return Err("reviewer_session_mismatch: this legacy round has no frozen roster. Stop its reviewers and change the selected roster to start a new round.".into());
     }
-    let config = team.config.council.as_ref().ok_or("Council is off.")?;
-    config.validate()?;
-    let executor = executor(store, &team.session_id)?;
+    let executors = executors(store, &team.session_id)?;
     let mut reviewers = Vec::new();
     for id in &config.reviewer_bot_ids {
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
-        valid_bot(&bot, executor.as_deref(), check_executable)?;
+        valid_bot(&bot, &executors, check_executable)?;
         let tool_policy = config.review_permissions.as_ref().map(|permissions| review_policy(&bot, permissions)).transpose()?.unwrap_or(super::reviewer_security::ReviewerToolPolicy::NativeReadOnly);
         let skills = if bot.skills.is_empty() { None } else if let Some(library) = library {
             let optional = config.optional_skill_ids.iter()
@@ -227,6 +256,18 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     Ok(reviewers)
 }
 
+/// Freeze all selected bot inputs before the first mixed-source reviewer starts.
+pub(super) fn freeze_mixed_roster(
+    store: &Store, team: &TeamSnapshot, round: usize, library: Option<&crate::skills::Library>,
+) -> Result<()> {
+    if team.config.council.as_ref().is_some_and(|config|
+        config.automatic_reviewers > 0 && !config.reviewer_bot_ids.is_empty())
+    {
+        round_reviewers(store, team, round, true, library)?;
+    }
+    Ok(())
+}
+
 /// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
 /// availability are still checked, without substituting a newly edited profile or another bot.
 pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
@@ -243,7 +284,7 @@ pub(super) fn seat_bot_inner_with_skills(store: &Store, team: &TeamSnapshot, rou
 fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.reviewer_bot_ids.is_empty() { return Ok(None); }
-    crate::bots::shared_channels::validate_delivery_reviewers(store, &team.session_id, &config.reviewer_bot_ids)?;
+    crate::bots::shared_channels::validate_delivery_council(store, &team.session_id, config)?;
     let reviewers = round_reviewers(store, team, round, check_executable, library)?;
     let old = replaces.and_then(|id| team.workers.iter().find(|w| w.id == id));
     let inherited = old.and_then(|w| w.reviewer_binding.as_ref()).and_then(|b| b.reviewer_bot_id.as_deref());
@@ -251,6 +292,9 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
         return Err("reviewer_session_mismatch: a selected seat cannot replace a native reviewer.".into());
     }
     let occupied = occupied_bot_ids(team, round, replaces);
+    // A new native worker session may challenge reports by *other* selected
+    // bots. The per-bot S3 handoff removes its own authenticated phase-one
+    // report; the root verdict requires independent cross-challenge coverage.
     let selected = match inherited {
         Some(id) => id,
         None => reviewers.iter().find(|bot| !occupied.contains(bot.id.as_str()))
@@ -266,7 +310,7 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
     available.provider = frozen.profile.provider.clone();
     available.model = frozen.profile.model.clone();
     available.reasoning_effort = frozen.context.reasoning_effort.clone();
-    valid_bot(&available, executor(store, &team.session_id)?.as_deref(), check_executable)?;
+    valid_bot(&available, &executors(store, &team.session_id)?, check_executable)?;
     if let Some(binding) = old.and_then(|w| w.reviewer_binding.as_ref()) {
         super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
         if binding.round == round && (binding.snapshot.provider != frozen.profile.provider || binding.snapshot.model != frozen.profile.model
@@ -291,6 +335,15 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let old = team.config.council.as_ref();
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
+        || old.map(|c| &c.nested_bot_reviewers) != next.map(|c| &c.nested_bot_reviewers)
+        || old.map(|c| c.strategy) != next.map(|c| c.strategy)
+        || old.map(|c| c.force_escalation) != next.map(|c| c.force_escalation)
+        || old.map(|c| c.automatic_reviewers) != next.map(|c| c.automatic_reviewers)
+        || ((old.is_some_and(|c| c.automatic_reviewers > 0)
+            || next.is_some_and(|c| c.automatic_reviewers > 0))
+            && old.map(|c| c.reviewers) != next.map(|c| c.reviewers))
+        || old.map(|c| &c.criteria_source) != next.map(|c| &c.criteria_source)
+        || old.map(|c| &c.criteria) != next.map(|c| &c.criteria)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
         || old.map(|c| &c.optional_skill_ids) != next.map(|c| &c.optional_skill_ids)
         || old.map(|c| &c.required_check_skill_ids) != next.map(|c| &c.required_check_skill_ids)
@@ -300,10 +353,27 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
 /// round, while fixed native lenses must remain satisfiable by distinct selected bots.
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     if !selection_changed(team, next) || next.is_none() { return Ok(()); }
-    if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()) {
+    // A running Architect team may enable Council before its first review cycle.
+    // Freeze task-owned nested seats only after the native Council cycle starts.
+    if team.council_since > 0 && super::active(&team.status)
+        && team.config.council.as_ref().map(|c| &c.nested_bot_reviewers)
+            != next.as_ref().map(|c| &c.nested_bot_reviewers)
+    {
+        return Err("Stop the active Council cycle before changing its task-owned child reviewer roster.".into());
+    }
+    let criteria_changed = team.config.council.as_ref().is_some_and(|old| {
+        next.as_ref().is_some_and(|config| old.criteria_source != config.criteria_source
+            || old.criteria != config.criteria)
+    });
+    if criteria_changed && team.workers.iter().any(|worker| {
+        worker.created_at >= team.council_since && worker.council.is_some()
+    }) {
+        return Err("Council criteria are frozen after a reviewer seat is issued; start a new Council cycle to revise them.".into());
+    }
+    if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty() || !c.nested_bot_reviewers.is_empty()) {
         let lenses = super::council::fixed_lens_count(team);
-        if config.reviewer_bot_ids.len() < lenses {
-            return Err(format!("This Council cycle fixed {lenses} lenses. Select at least {lenses} reviewer bots, or finish this cycle before reducing the roster."));
+        if config.needed() < lenses {
+            return Err(format!("This Council cycle fixed {lenses} lenses. Reserve at least {lenses} top-level reviewer seats, or finish this cycle before reducing the roster."));
         }
     }
     if team.workers.iter().any(|w| w.created_at >= team.council_since && w.council.is_some() && super::unsettled(&w.status)) {
@@ -334,8 +404,8 @@ mod tests {
             backup_models: vec![], fallback_mode: "ask".into(), notify: true, while_working: "queue".into(),
             show_plan: false, skills: vec![], mcp: vec![],
         };
-        assert!(valid_bot(&bot, Some("reviewer-one"), false).unwrap_err().contains("own task"));
-        assert!(valid_bot(&bots::Bot { paused: true, ..bot.clone() }, None, false).unwrap_err().contains("paused"));
+        assert!(valid_bot(&bot, &HashSet::from(["reviewer-one".into()]), false).unwrap_err().contains("own task"));
+        assert!(valid_bot(&bots::Bot { paused: true, ..bot.clone() }, &HashSet::new(), false).unwrap_err().contains("paused"));
 
         let grant = super::super::reviewer_security::ReviewerCapabilityGrant {
             tool: "pandacode_open_file".into(), action: "call".into(),

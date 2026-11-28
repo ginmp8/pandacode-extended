@@ -5,6 +5,7 @@ use crate::{providers::ToolHost, storage::Store, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,22 +155,26 @@ impl ReviewerToolPolicy {
                 tools.push(spec.clone());
             }
         }
-        // Only these exact PandaCode-defined, immutable read-only skill tools
-        // may accompany scoped user grants. A skill cannot introduce tool names.
-        let mut native_skill_tools = HashSet::new();
-        for spec in super::reviewer_skill_evidence::tools() {
+        // Only exact PandaCode-defined, immutable read-only evidence tools
+        // already exposed by the task-owned native host may accompany scoped
+        // user grants. The file tool is offered only for an admitted required
+        // criterion; its handler independently revalidates reviewer authority.
+        let mut native_readonly_tools = HashSet::new();
+        let mut read_only_specs = super::reviewer_skill_evidence::tools();
+        read_only_specs.push(super::reviewer_skill_evidence::file_tool());
+        for spec in read_only_specs {
             if host.tools.iter().any(|candidate| candidate == &spec) {
                 let name = spec["name"].as_str().unwrap_or_default().to_string();
                 if seen.insert(name.clone()) {
                     tools.push(spec);
-                    native_skill_tools.insert(name);
+                    native_readonly_tools.insert(name);
                 }
             }
         }
         let grants = policy.grants.clone();
         let original = host.handler;
         let handler = Arc::new(move |name: String, args: Value| {
-            let allowed = native_skill_tools.contains(&name) || grants.iter().any(|grant| grant.permits(&name, &args));
+            let allowed = native_readonly_tools.contains(&name) || grants.iter().any(|grant| grant.permits(&name, &args));
             let original = original.clone();
             let future: crate::providers::ToolFuture = Box::pin(async move {
                 if !allowed {
@@ -194,7 +199,29 @@ pub struct ReviewerPermissionSelection {
 
 impl ReviewerCapabilityGrant {
     fn clone_key(&self) -> String {
-        format!("{}:{}:{}:{}", self.tool, self.action, self.resource_argument, self.resource)
+        format!("{}:{}:{}:{}:{}", self.tool, self.action, self.action_argument.as_deref().unwrap_or(""), self.resource_argument, self.resource)
+    }
+}
+
+/// Immutable reviewer identity pinned separately from the mutable team snapshot.
+/// A score cannot migrate to a different round, lens, provider or model by
+/// changing both the worker and its binding after native admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewerSeatContext {
+    round: usize,
+    lens: String,
+    provider: String,
+    model: String,
+}
+impl ReviewerSeatContext {
+    fn from_binding(binding: &ReviewerBinding) -> Self {
+        Self {
+            round: binding.round,
+            lens: binding.snapshot.lens.clone(),
+            provider: binding.snapshot.provider.clone(),
+            model: binding.snapshot.model.clone(),
+        }
     }
 }
 
@@ -205,6 +232,15 @@ impl ReviewerCapabilityGrant {
 struct ReviewerAuthority {
     council_cycle_id: String,
     seat_id: String,
+    /// Older grants lacked an independent identity snapshot. Only original
+    /// automatic/selected parallel Councils may consume that legacy format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seat_context: Option<ReviewerSeatContext>,
+    /// Native child leaves bind their exact issued review prompt without
+    /// duplicating its contents. Older unbound child grants require a fresh task;
+    /// root reviewer grants do not use this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_assignment_sha256: Option<String>,
     artifact_revision: String,
     tool_policy: ReviewerToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,9 +256,27 @@ struct ReviewerAuthority {
 }
 fn authority_key(seat: &str) -> String { format!("native-reviewer-authority:{seat}") }
 pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    record_authority(store, parent, binding, None)
+}
+
+pub(super) fn record_native_child_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, assignment: &str,
+) -> Result<()> {
+    record_authority(store, parent, binding, Some(assignment))
+}
+
+fn assignment_digest(assignment: &str) -> String {
+    format!("{:x}", Sha256::digest(assignment.as_bytes()))
+}
+
+fn record_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
     let record = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
+        child_assignment_sha256: child_assignment.map(assignment_digest),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
@@ -239,6 +293,12 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
     Ok(())
 }
 pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &ReviewerBinding) -> Result<()> {
+    validate_issued_authority_with_assignment(store, parent, binding, None)
+}
+
+fn validate_issued_authority_with_assignment(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
     let row: Option<(String, String, String)> = store.db.query_row(
         "SELECT kind,content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         params![parent, authority_key(&binding.seat_id)],
@@ -260,6 +320,32 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
             }
+            if let Some(assignment) = child_assignment {
+                if original.child_assignment_sha256.as_deref()
+                    != Some(assignment_digest(assignment).as_str())
+                {
+                    return Err("reviewer_session_mismatch: native child assignment is missing or changed; start a fresh Council task.".into());
+                }
+            }
+            match original.seat_context.as_ref() {
+                Some(context) if context == &ReviewerSeatContext::from_binding(binding) => {}
+                None => {
+                    // A pre-upgrade grant never gains composed-source, named-
+                    // criterion or multi-phase authority by deserialization.
+                    let legacy = super::load(store, parent)?
+                        .and_then(|team| team.config.council)
+                        .is_some_and(|config| {
+                            matches!(config.mode(), "m1" | "m2")
+                                && config.strategy == super::council::CouncilExecutionStrategy::Parallel
+                                && config.criteria_source == super::council::CouncilCriteriaSource::Architect
+                                && config.criteria.is_empty()
+                        });
+                    if !legacy {
+                        return Err("reviewer_session_mismatch: legacy reviewer context cannot authorize composed or criteria-bound review.".into());
+                    }
+                }
+                _ => return Err("reviewer_session_mismatch: native reviewer round, lens or model was changed.".into()),
+            }
             Ok(())
         }
         // Backward-compatible S1/native seats issued before authority records;
@@ -268,6 +354,36 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
             && binding.reviewer_bot_id.is_none() && binding.snapshot.bot_context.is_none() => Ok(()),
         _ => Err("capability_not_authorized: no matching native reviewer authorization.".into()),
     }
+}
+
+/// New composed Councils require a recorded native grant even for read-only
+/// automatic reviewers. The legacy automatic-reviewer fallback in
+/// validate_issued_authority is deliberately not used for this stricter gate.
+pub(crate) fn validate_recorded_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding,
+) -> Result<()> {
+    validate_recorded_authority_with_assignment(store, parent, binding, None)
+}
+
+pub(super) fn validate_recorded_child_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding, assignment: &str,
+) -> Result<()> {
+    validate_recorded_authority_with_assignment(store, parent, binding, Some(assignment))
+}
+
+fn validate_recorded_authority_with_assignment(
+    store: &Store, parent: &str, binding: &ReviewerBinding, child_assignment: Option<&str>,
+) -> Result<()> {
+    let recorded: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_authority' AND worker_id=?3)",
+        params![parent, authority_key(&binding.seat_id), binding.seat_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if recorded != 1 {
+        return Err("capability_not_authorized: a composed reviewer has no recorded native authority.".into());
+    }
+    validate_issued_authority_with_assignment(store, parent, binding, child_assignment)
 }
 
 /// Called by the future S2/S4 trusted user-action adapter; never from a model
@@ -287,6 +403,8 @@ pub(crate) fn authorize_user_grants(
     let old = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
+        child_assignment_sha256: None,
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
@@ -467,7 +585,11 @@ impl ReviewerBinding {
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
-            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(self.roster_bot_ids.len())
+            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(
+                team.config.council.as_ref()
+                    .filter(|config| config.automatic_reviewers > 0
+                        || !config.nested_bot_reviewers.is_empty())
+                    .map_or(self.roster_bot_ids.len(), |config| config.needed()))
                 || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
         {
             return Err("reviewer_session_mismatch: immutable reviewer binding differs from scheduled worker.".into());
@@ -501,18 +623,40 @@ mod tests {
         let mut catalog = vec![json!({"type":"function","name":"pandacode_github_issue",
             "inputSchema":{"type":"object","properties":{"action":{"type":"string"},"repository":{"type":"string"}}}})];
         catalog.extend(super::super::reviewer_skill_evidence::tools());
+        catalog.push(super::super::reviewer_skill_evidence::file_tool());
         let original = ToolHost {
             tools: catalog,
             approval_tools: HashSet::new(),
             handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
         };
         let filtered = policy.restrict_host(Some(original)).unwrap().unwrap();
-        assert_eq!(filtered.tools.len(), 3);
+        assert_eq!(filtered.tools.len(), 4);
         assert!((filtered.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"assigned"})).await.is_ok());
         assert!((filtered.handler)("pandacode_reviewer_skill_verify".into(), json!({"skillId":"assigned"})).await.is_ok());
+        assert!((filtered.handler)("pandacode_reviewer_file_verify".into(), json!({"criterionId":"required-file"})).await.is_ok());
         assert!((filtered.handler)("pandacode_unknown_tool".into(), json!({})).await.is_err());
         assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"other/repo"})).await.is_err());
         assert!((filtered.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn scoped_reviewer_rejects_a_forged_native_file_tool_spec() {
+        let grant = issue_grant();
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "owner", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
+        ).unwrap();
+        let mut forged = super::super::reviewer_skill_evidence::file_tool();
+        forged["description"] = json!("Forged file verifier with untrusted authority");
+        let host = ToolHost {
+            tools: vec![json!({"type":"function","name":"pandacode_github_issue",
+                "inputSchema":{"type":"object","properties":{"action":{"type":"string"},"repository":{"type":"string"}}}}), forged],
+            approval_tools: HashSet::new(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
+        };
+        let filtered = policy.restrict_host(Some(host)).unwrap().unwrap();
+        assert_eq!(filtered.tools.len(), 1, "only the exact native file verifier definition may be exposed");
+        assert!((filtered.handler)("pandacode_reviewer_file_verify".into(),
+            json!({"criterionId":"required-file"})).await.is_err());
     }
 
     #[test]
@@ -522,6 +666,21 @@ mod tests {
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", &[], std::slice::from_ref(&grant)).is_err());
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), &[grant.clone(), grant.clone()]).is_err());
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).is_ok());
+    }
+    #[test]
+    fn exact_scoped_grants_distinguish_action_argument_names() {
+        let grant = issue_grant();
+        let mut alternative = grant.clone();
+        alternative.action_argument = Some("operation".into());
+        let configured = vec![grant.clone(), alternative.clone()];
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-1", &configured, &configured,
+        ).unwrap();
+        assert!(matches!(policy, ReviewerToolPolicy::Scoped(ref policy) if policy.grants.len() == 2),
+            "two explicitly authorized argument contracts are different grants");
+        assert!(ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-1", &configured, &[grant.clone(), grant],
+        ).is_err(), "the same exact grant must still be rejected as duplicate");
     }
     #[tokio::test]
     async fn scoped_host_checks_tool_action_and_exact_resource_at_dispatch() {
@@ -548,6 +707,8 @@ mod tests {
             assert!((host.handler)("pandacode_github_issue".into(), args).await.is_err());
         }
         assert!((host.handler)("pandacode_other".into(), json!({"action":"create","repository":"owner/repo"})).await.is_err());
+        assert!((host.handler)("pandacode_reviewer_file_verify".into(), json!({"criterionId":"required-file"})).await.is_err(),
+            "a missing native file tool must not be synthesized by a scoped policy");
         assert_eq!(executed.load(Ordering::SeqCst), 0);
         assert!((host.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
         assert_eq!(executed.load(Ordering::SeqCst), 1);

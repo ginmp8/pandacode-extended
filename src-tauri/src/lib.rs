@@ -1637,6 +1637,11 @@ fn prepare_task_run_in_project(
         return Err("This task is already running in an agent or harness console.".into());
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    architect::validate_child_launch_input(
+        &store, &session_id, admission.team.as_ref(), text.as_deref(),
+        !images.is_empty() || admission.command.is_some() || admission.goal.is_some()
+            || admission.cloud_attach || admission.kind.is_some(),
+    )?;
     let team_maintenance = admission.team.is_none()
         && admission.command.as_ref().is_some_and(PreparedCommand::runs_bare_on_team);
     if team_maintenance {
@@ -3805,14 +3810,40 @@ async fn get_run_script(
 /// clean turn. Bounded; no plan is a result, not an error.
 #[tauri::command]
 async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value> {
-    let project_id = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .session(&session_id)?
-        .project_id;
-    let root = state.root(&project_id, Some(&session_id))?;
-    blocking(move || Ok(checks::turn_report(&root))).await
+    let (task_request, root) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let project_id = checks::eligible_turn_check_project(&store, &session_id)?;
+        let task_request = architect::council_requests::active_native_task_for_checks(&store, &session_id)?;
+        let root = store.workspace_root(&project_id, Some(&session_id))?;
+        (task_request, root)
+    };
+    let native_request_id = task_request.as_ref().map(|request| request.request_id.clone());
+    let (mut report, native_report) = blocking(move || Ok(if let Some(request_id) = native_request_id.as_deref() {
+        let observed = checks::turn_report_for_native_task(&root, request_id);
+        (observed.as_json().clone(), Some(observed))
+    } else {
+        (checks::turn_report(&root), None)
+    })).await?;
+    // A check is not native task proof unless its original Council request
+    // still has identical live authority after the process has finished.
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        checks::eligible_turn_check_project(&store, &session_id)?;
+        if let (Some(request), Some(observed)) = (task_request.as_ref(), native_report.as_ref()) {
+            if observed.as_json().get("hostObservation").is_some() {
+                let receipt = architect::council_requests::record_native_host_check(&store, request, observed)?;
+                report["hostObservation"]["nativeTaskReceipt"] =
+                    serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    // The existing user-enabled check belongs to the resolved native session.
+    // This observation cannot grant tools to a Council reviewer or attest a
+    // frozen artifact/cycle; that separate native C-2 gate remains mandatory.
+    if let Some(observation) = report.get_mut("hostObservation") {
+        observation["sessionId"] = serde_json::json!(session_id);
+    }
+    Ok(report)
 }
 #[tauri::command]
 async fn get_run_script_preview(
@@ -4466,6 +4497,7 @@ pub fn run() {
                 superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
+                bots::shared_channels::bot_shared_channel_council_inspect,
                 bots::shared_channels::bot_shared_channel_create,
                 bots::shared_channels::bot_shared_channel_update,
                 bots::shared_channels::bot_shared_channel_archive,
@@ -4531,6 +4563,8 @@ pub fn run() {
                 architect::profiles::architect_save_profile,
                 architect::profiles::architect_delete_profile,
                 architect::architect_get,
+                architect::architect_council_inspect,
+                architect::architect_council_native_task,
                 architect::architect_configure,
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,

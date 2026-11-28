@@ -2203,6 +2203,10 @@ fn poll_authenticated_events_with_repository_id_scoped(
         if enabled != 1 || revision != expected_team_revision {
             return Err("Team activation changed during background GitHub Observe; no event recorded.".into());
         }
+        // A concurrent poll may have quarantined this cursor during HTTP.
+        // Background responses cannot clear a history gap reserved for explicit
+        // operator reconciliation, even when their window includes the anchor.
+        require_background_observe_preflight(store, &current_policy)?;
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
     // The HTTP collector proves its original cursor boundary, but native
@@ -5914,6 +5918,71 @@ mod tests {
         require_background_observe_preflight(&reopened, &resumed).unwrap();
         assert_eq!(next_observe_subscription_sources(&reopened, None).unwrap().len(), 2);
         assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn in_flight_background_observe_cannot_reconcile_a_new_history_gap() {
+        let (store, _path) = fixture();
+        store.db.execute("UPDATE sa_orchestrations SET enabled=1 WHERE id='orch'", []).unwrap();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: i64| serde_json::json!({
+            "id":id.to_string(), "created_at":chrono::Utc::now().to_rfc3339(),
+            "type":"IssuesEvent", "repo":{"name":"owner/repo","id":101},
+            "actor":{"login":"trusted-bot","id":202},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        let context = |revision| ObserveFeedContext {
+            repository_id:101, operator_id:Some(303), background_team_revision:revision,
+        };
+        let first = 5_000_000_600_i64;
+        poll_authenticated_events_with_repository_id_scoped(
+            &store, &on, 0, &serde_json::json!([event(first)]), "operator", 1,
+            context(None),
+        ).unwrap();
+        let selected = source(&store, &on.id).unwrap();
+        let revision = require_background_team_revision(&store, "orch", None).unwrap();
+        require_background_observe_preflight(&store, &selected).unwrap();
+
+        // While a background HTTP request is in flight, another native poll
+        // detects a missing cursor and requires explicit operator recovery.
+        let missing = combine_github_pages(
+            &[serde_json::json!([event(first + 1)])], 0, first,
+        ).unwrap_err();
+        record_observe_fetch_failure(&store, &selected, &missing).unwrap();
+        let response = serde_json::json!([event(first + 1), event(first)]);
+        let denied = poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &response, "operator", 1, context(Some(revision)),
+        ).unwrap_err();
+        assert!(denied.contains("explicit operator reconciliation"), "{denied}");
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, first);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+        assert!(!inspect_source_integrity(&store, &on.id).unwrap().background_selected);
+        let unresolved: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_source_history_gaps
+             WHERE source_id=?1 AND cursor_sequence=?2 AND verified_at IS NULL)",
+            params![&on.id, first], |row| row.get(0),
+        ).unwrap();
+        assert!(unresolved);
+
+        // An explicit local operator may still reconcile the exact cursor.
+        let manual = poll_authenticated_events_with_repository_id_scoped(
+            &store, &selected, 0, &response, "operator", 1, context(None),
+        ).unwrap();
+        assert_eq!((manual.recorded, manual.duplicates, manual.last_sequence),
+            (1, 1, first + 1));
+        let resumed = source(&store, &on.id).unwrap();
+        require_background_observe_preflight(&store, &resumed).unwrap();
+        let next = poll_authenticated_events_with_repository_id_scoped(
+            &store, &resumed, 0, &serde_json::json!([event(first + 2), event(first + 1)]),
+            "operator", 1, context(Some(revision)),
+        ).unwrap();
+        assert_eq!((next.recorded, next.last_sequence), (1, first + 2));
+        assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0);
     }

@@ -254,6 +254,33 @@ test.describe('web mode', () => {
     await expect(resume).toHaveCount(0);
   });
 
+  test('an older queue hold event cannot restore a released hold', async ({ page }) => {
+    const { sessionId, web } = await openQueueClients(page, async (host, sessionId, agentStatus) => {
+      await agentStatus(true);
+      await host.evaluate(async sessionId => {
+        const { invoke } = await import('/src/preview.ts');
+        await invoke('set_queue_hold', { sessionId, held: true, reason: 'reset' });
+        await invoke('queue_add', { sessionId, text: 'Follow up after Resume', attachments: [] });
+      }, sessionId);
+    });
+    const resume = page.getByRole('button', { name: 'Resume after this run', exact: true });
+    await expect(resume).toBeVisible();
+    const sendHold = (held: boolean, holdSeq: number) => web.socket().send(JSON.stringify({
+      type: 'event', name: 'queue-changed', payload: { sessionId, held, holdSeq, ...(held ? { reason: 'reset' } : {}) },
+    }));
+    sendHold(false, 20);
+    await expect(resume).toHaveCount(0);
+
+    const row = await queueRows(page).elementHandle();
+    const refreshed = nextQueueEventReply(page, sessionId);
+    sendHold(true, 19);
+    await refreshed;
+    // Wait for the stale event's queue redraw before checking that the hold stayed released.
+    await expect.poll(() => row.evaluate(element => element.isConnected)).toBe(false);
+    await expect(resume).toHaveCount(0);
+    await expect(queueRows(page)).toHaveText(['Follow up after Resume']);
+  });
+
   test('delayed boot snapshots cannot restore a removed queue row or a released hold', async ({ page }) => {
     const kept = 'Keep this follow-up', removed = 'Remove this follow-up';
     const { host, sessionId, web } = await openQueueClients(page, async (host, sessionId, agentStatus) => {
@@ -763,7 +790,10 @@ test.describe('web mode', () => {
     await expect.poll(() => finishedRuns).toEqual([sessionId]);
     await expect(queueRows(page)).toHaveCount(0);
     await expect(queueRows(host)).toHaveCount(0);
-    expect(queueEvents.filter(event => event.held !== undefined)).toEqual([{ sessionId, held: true, reason: 'stopped' }, { sessionId, held: false }]);
+    expect(queueEvents.filter(event => event.held !== undefined)).toEqual([
+      { sessionId, held: true, reason: 'stopped', holdSeq: expect.any(Number) },
+      { sessionId, held: false, holdSeq: expect.any(Number) },
+    ]);
     expect(await sentCount(text)).toBe(1);
     expect(web.commands.filter(command => ['set_queue_hold', 'queue_take', 'send_message'].includes(command))).toEqual(['set_queue_hold']);
   });

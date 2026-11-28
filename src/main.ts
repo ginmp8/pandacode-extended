@@ -1710,6 +1710,7 @@ function discardDraft(id: string): void {
   state.drafts.delete(id);
   provisionalTasks.delete(id);
   deletedSessions.add(id);
+  queueHoldServerSeq.delete(id);
   setQueueHold(id);
   const pending = provisionalCorrections.get(id);
   const drop = () => void call<boolean>('discard_draft', { sessionId: id }).catch(() => undefined);
@@ -5296,6 +5297,7 @@ function removeDeletedSessions(ids: string[]): void {
   for (const id of removed) {
     provisionalTasks.delete(id);
     deletedSessions.add(id); writeLink(localStorage, id, null);
+    queueHoldServerSeq.delete(id);
     setQueueHold(id); passedLimitResets.delete(id);
     const live = state.streams.get(id); if (live) clearAgentInputs(live);
     state.streams.delete(id); streamEventVersion.delete(id); finishingStreams.delete(id); teams.delete(id);
@@ -5481,6 +5483,7 @@ const sendFirst = new Map<string, { id: string; stopping?: boolean; hold?: HoldR
 let queueClock = 0;
 const queueListVersion = new Map<string, number>();
 const queueHoldVersion = new Map<string, number>();
+const queueHoldServerSeq = new Map<string, number>();
 let lastQueueHoldSnapshot = 0;
 function queueOf(id: string): QueuedMessage[] { return state.queues.get(id) ?? []; }
 function setQueue(id: string, entries: QueuedMessage[]): void { if (entries.length) state.queues.set(id, entries); else state.queues.delete(id); btwPanel.event(id, 'queue'); }
@@ -9761,12 +9764,13 @@ async function boot(): Promise<void> {
   // Follow-up changes are shared across clients. On the host, an idle, unheld task sends right away.
   listening.push(subscribe('queue-changed', payload => run((async () => {
     const id = payload?.sessionId; if (!id || deletedSessions.has(id)) return;
-    if (payload.held === false) {
+    const lastHoldSeq = queueHoldServerSeq.get(id);
+    const staleHold = typeof payload.holdSeq === 'number' && lastHoldSeq !== undefined && payload.holdSeq <= lastHoldSeq;
+    if (!staleHold && typeof payload.held === 'boolean') {
+      if (typeof payload.holdSeq === 'number') queueHoldServerSeq.set(id, payload.holdSeq);
       queueHoldVersion.set(id, ++queueClock);
-      state.queueHolds.delete(id);
-    } else if (payload.held === true) {
-      queueHoldVersion.set(id, ++queueClock);
-      state.queueHolds.set(id, asHoldReason(payload.reason));
+      if (payload.held) state.queueHolds.set(id, asHoldReason(payload.reason));
+      else state.queueHolds.delete(id);
     }
     // Bot conversations drain in Rust, not dispatchQueue. Reconcile native takes and restores.
     if (payload.delivery === 'failed') {
@@ -9783,7 +9787,7 @@ async function boot(): Promise<void> {
     if (queueListVersion.get(id) !== seq || deletedSessions.has(id)) return;
     setQueue(id, entries);
     if (id === state.sessionId) renderComposer();
-    if (payload.held !== true) await dispatchQueue(id);
+    if (staleHold || payload.held !== true) await dispatchQueue(id);
   })())));
   // The launcher and Agents dock open a task in the desktop window; connected browser tabs keep their own.
   if (!webMode) listening.push(subscribe('overlay-open-task', event => run((async () => {
@@ -10070,6 +10074,7 @@ function correctProvisionalTask(task: Session): Promise<'ok' | 'missing' | 'stal
         state.drafts.delete(live.id);
         provisionalTasks.delete(live.id);
         deletedSessions.add(live.id);
+        queueHoldServerSeq.delete(live.id);
         setQueueHold(live.id);
         void call<boolean>('discard_draft', { sessionId: live.id }).catch(() => undefined);
         return 'stale';

@@ -4506,15 +4506,17 @@ pub(crate) fn guard_prepared_provider_launch(
     // prepared value to the live session, then require exclusive native
     // attribution before letting an existing thread enter this task. Usage
     // links are deliberately checked across all sessions because they do not
-    // carry a provider namespace. Ambiguous ownership must fail closed.
+    // carry a provider namespace. Reject case aliases as well as exact
+    // matches in other sessions, consistently with native usage attribution.
+    // The assignment's own recorded link must still be an exact match.
     if config.resume_id != session.resume_id {
         return Err("policy_unsupported: prepared SuperAgent provider history changed.".into());
     }
     if let Some(resume_id) = config.resume_id.as_deref() {
         let exclusively_owned: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM task_usage_links WHERE session_id=?1 AND harness_id=?2)
-               AND NOT EXISTS(SELECT 1 FROM sessions WHERE id<>?1 AND resume_id=?2)
-               AND NOT EXISTS(SELECT 1 FROM task_usage_links WHERE session_id<>?1 AND harness_id=?2)",
+               AND NOT EXISTS(SELECT 1 FROM sessions WHERE id<>?1 AND lower(resume_id)=lower(?2))
+               AND NOT EXISTS(SELECT 1 FROM task_usage_links WHERE session_id<>?1 AND lower(harness_id)=lower(?2))",
             params![&config.session_id, resume_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if resume_id.trim().is_empty() || !exclusively_owned {
@@ -14650,6 +14652,21 @@ mod tests {
         // prevents the task from reading the prior private conversation.
         store.resume(&other.id, "replacement-harness-id").unwrap();
         assert!(guard_prepared_provider_launch(&store, &config).is_err());
+
+        // Native UUIDs can be represented with upper-case hex digits.
+        // A current or historical case alias must not borrow another chat.
+        let task_uuid = "aaaa1111-b222-4c33-8d44-555566667777";
+        store.resume(&sid, task_uuid).unwrap();
+        config.resume_id = Some(task_uuid.into());
+        assert!(guard_prepared_provider_launch(&store, &config).is_ok());
+        store.db.execute("UPDATE sessions SET resume_id=?2 WHERE id=?1",
+            params![&other.id, task_uuid.to_uppercase()]).unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err(),
+            "Current case alias is not exclusive native authority");
+        store.resume(&other.id, &task_uuid.to_uppercase()).unwrap();
+        store.resume(&other.id, "replacement-harness-id").unwrap();
+        assert!(guard_prepared_provider_launch(&store, &config).is_err(),
+            "Historical case alias is not exclusive native authority");
 
         store.db.execute("UPDATE sessions SET resume_id='unattributed-harness-id' WHERE id=?1",
             [&sid]).unwrap();

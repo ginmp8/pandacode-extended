@@ -747,8 +747,13 @@ mod tests {
             &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
         ).is_ok(), "Historical native identity survives restart");
         assert_eq!(assignment_usage_scope(&reopened, &session_id).unwrap(), expected_scope);
-        assert_eq!(demand_usage_snapshot(&reopened, &team.id, &ticket.id).unwrap(),
-            usage_snapshot, "Attribution identity survives reopening the database");
+        let recovered_usage = demand_usage_snapshot(&reopened, &team.id, &ticket.id).unwrap();
+        assert_eq!(recovered_usage.assignments, usage_snapshot.assignments,
+            "Attribution identity survives reopening the database");
+        assert_eq!(recovered_usage.revision, usage_snapshot.revision + 1,
+            "Restart recovery interrupts the running Ticket and advances its revision");
+        assert_ne!(recovered_usage, usage_snapshot,
+            "A usage snapshot captured before restart must not remain current");
         let audit_before: i64 = reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
         ).unwrap();

@@ -2071,6 +2071,56 @@ fn forced_s2_cannot_approve_uncorrected_high_severity_or_count_severe_rounds() {
 }
 
 #[test]
+fn flat_s2_historical_reviewer_authority_violation_blocks_further_dispatch_and_approval() {
+    let mut config = on(9.0, 5, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    let mut team = team_with(config.clone(), vec![
+        seat("original-a", 1, Some(8.0), SINCE + 1),
+        seat("original-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    // A legitimate executor correction permits fresh native reviews after
+    // the stale first score. Forced S2 requires two clean rounds.
+    team.changed_at = SINCE + 3;
+    for round in 2..=3 {
+        let mut a = seat(&format!("fresh-a-{round}"), round, Some(9.8),
+            SINCE + (round as i64) * 2 + 1);
+        a.council.as_mut().unwrap().lens = "lens original-a".into();
+        let mut b = seat(&format!("fresh-b-{round}"), round, Some(9.9),
+            SINCE + (round as i64) * 2 + 2);
+        b.council.as_mut().unwrap().lens = "lens original-b".into();
+        team.workers.extend([a, b]);
+    }
+    for forced in [false, true] {
+        let mut valid = team.clone();
+        let mut policy = config.clone();
+        policy.force_escalation = forced;
+        valid.config.council = Some(policy.clone());
+        if !forced {
+            valid.workers.truncate(4);
+        }
+        assert_eq!(council::status(&valid).unwrap().state, "passed");
+        assert!(finish_refusal(&valid).is_none());
+
+        // The stale first wave is not exempt from the native read-only
+        // boundary. Later valid reports cannot sanitize the violation.
+        for violation in ["writable", "wrote", "files"] {
+            let mut invalid = valid.clone();
+            match violation {
+                "writable" => invalid.workers[0].read_only = false,
+                "wrote" => invalid.workers[0].wrote_at = SINCE + 2,
+                _ => invalid.workers[0].files.push("src".into()),
+            }
+            assert_eq!(council::status(&invalid).unwrap().state, "blocked",
+                "forced={forced}: {violation}");
+            assert!(finish_refusal(&invalid).unwrap().contains("reviewer_policy_violation"));
+            assert!(council::round_for(&invalid, &policy, None).unwrap_err()
+                .contains("reviewer_policy_violation"));
+        }
+    }
+}
+
+#[test]
 fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_source() {
     let mut config = on(9.0, 4, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;

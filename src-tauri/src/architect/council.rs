@@ -1942,6 +1942,9 @@ fn s3_phase_one_preflight(team: &TeamSnapshot, config: &CouncilConfig, view: &Ro
 pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: Option<&str>) -> Result<usize> {
     let view = Rounds::of(team, config);
     let latest = view.latest;
+    if flat_s2_unsafe_scored_history(team, config, latest) {
+        return Err(S2_REVIEWER_POLICY_VIOLATION.into());
+    }
     if !flat_s2_history_has_triggers(team, config, &view) {
         return Err("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into());
     }
@@ -2212,6 +2215,18 @@ fn independent_review_attempts(team: &TeamSnapshot, through_round: usize) -> boo
     })
 }
 
+const S2_REVIEWER_POLICY_VIOLATION: &str = "reviewer_policy_violation: a scored S2 reviewer violated the native read-only boundary; start a new task cycle.";
+
+/// An unsafe scored reviewer cannot be laundered by later clean waves. Even
+/// stale scores are part of this cycle's review history and remain auditable.
+fn flat_s2_unsafe_scored_history(team: &TeamSnapshot, config: &CouncilConfig, through_round: usize) -> bool {
+    config.strategy == CouncilExecutionStrategy::Escalated
+        && config.nested_bot_reviewers.is_empty()
+        && (1..=through_round).flat_map(|round| in_round(team, round))
+            .any(|(worker, seat)| counts(worker, seat) && seat.score.is_some()
+                && (!worker.read_only || worker.wrote_at != 0 || !worker.files.is_empty()))
+}
+
 /// A user-forced S2 escalation needs two fresh, independent native Council rounds
 /// passing on the same artifact. Each round retains the existing source, score,
 /// required-criterion and independently verified skill-evidence gates.
@@ -2231,7 +2246,8 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     {
         return false;
     }
-    if !independent_review_attempts(team, view.latest) { return false; }
+    if !independent_review_attempts(team, view.latest)
+        || flat_s2_unsafe_scored_history(team, config, view.latest) { return false; }
     // Two passing rounds must have distinct worker identities AND native sessions.
     // A renamed persisted worker cannot masquerade as a fresh independent review.
     let mut seen = std::collections::HashSet::new();
@@ -2320,10 +2336,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     if !independent_review_attempts(team, view.latest) { return false; }
     // A scored reviewer can never provide approval after recording file changes,
     // even when a later escalation wave is otherwise clean.
-    if (1..=view.latest).flat_map(|round| in_round(team, round))
-        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
-        .any(|(worker, _)| !worker.read_only || worker.wrote_at != 0 || !worker.files.is_empty())
-    {
+    if flat_s2_unsafe_scored_history(team, config, view.latest) {
         return false;
     }
     // Even when no escalation was triggered, a writable, abandoned or
@@ -2640,6 +2653,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     let needed = required_reviewers(team, config, round);
     if round == 0 {
         return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
+    }
+    if flat_s2_unsafe_scored_history(team, config, round) {
+        return Some((S2_REVIEWER_POLICY_VIOLATION.into(), false));
     }
     if !flat_s2_history_has_triggers(team, config, view) {
         return Some(("S2 on-demand Council has an unsupported historical review wave; start a new task cycle.".into(), false));
@@ -3347,6 +3363,8 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "accepted"
     } else if round == 0 {
         "waiting"
+    } else if flat_s2_unsafe_scored_history(team, config, round) {
+        "blocked"
     } else if asking {
         "asking"
     } else if live(team, round) {

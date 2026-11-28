@@ -12642,11 +12642,18 @@ fn nested_m7_forced_s2_requires_all_three_fresh_native_sources() {
 
 fn assert_nested_forced_s2_root_callbacks(mode: &str) {
     crate::providers::with_test_executable_override("codex", || {
-        run_nested_forced_s2_root_callbacks(mode);
+        run_nested_forced_s2_root_callbacks(mode, false);
     });
 }
 
-fn run_nested_forced_s2_root_callbacks(mode: &str) {
+#[test]
+fn forced_nested_s2_does_not_dispatch_child_escalation_for_below_criterion_root_wave() {
+    crate::providers::with_test_executable_override("codex", || {
+        run_nested_forced_s2_root_callbacks("m5", true);
+    });
+}
+
+fn run_nested_forced_s2_root_callbacks(mode: &str, criterion_deficit: bool) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -12671,6 +12678,14 @@ fn run_nested_forced_s2_root_callbacks(mode: &str) {
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
+        if criterion_deficit {
+            config.criteria_source = council::CouncilCriteriaSource::User;
+            config.criteria.push(council::CouncilCriterion {
+                id: "correctness".into(), lens: "correctness".into(),
+                required: true, target: 9.6,
+                evidence_required: false, native_evidence: None,
+            });
+        }
         assert_eq!(config.mode(), mode);
         config.validate().unwrap();
         root.config.council = Some(config);
@@ -12730,7 +12745,12 @@ fn run_nested_forced_s2_root_callbacks(mode: &str) {
         let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
             let store = state.store.lock().unwrap();
-            store.message(&action.sid, "assistant", "Independent child evidence.\nCouncil score: 9.5/10").unwrap();
+            let report = if criterion_deficit {
+                "Independent child criterion evidence.\nCouncil score: 9.7/10"
+            } else {
+                "Independent child evidence.\nCouncil score: 9.5/10"
+            };
+            store.message(&action.sid, "assistant", report).unwrap();
         }
         completed_state(&state, &action.sid, Some(&action.admission), true, false, &mut |_| {});
     }
@@ -12784,12 +12804,37 @@ fn run_nested_forced_s2_root_callbacks(mode: &str) {
         assert!(run.config.reviewer_boundary);
         assert!(root_sessions.insert(run.config.session_id.clone()),
             "the forced S2 root wave must use fresh native sessions");
-        finish(&state, &run, "Independent follow-up root review.\nCouncil score: 9.8/10", true);
+        let report = if criterion_deficit {
+            "Global target met, required criterion missed.\nCouncil score: 9.5/10"
+        } else {
+            "Independent follow-up root review.\nCouncil score: 9.8/10"
+        };
+        finish(&state, &run, report, true);
     }
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
     assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), root_count);
     let config = root.config.council.as_ref().unwrap();
+    if criterion_deficit {
+        assert!(root.workers.iter().any(|worker| worker.council.as_ref()
+            .is_some_and(|seat| seat.round == 2 && seat.score == Some(9.5))));
+        assert!(!child_council::fresh_s2_root_reviewers(&store, &root, config),
+            "an authenticated global passing score cannot authorize child escalation when the required criterion is below target");
+        assert!(!verified_council_pass(&store, &root));
+        drop(store);
+        let (waiting, _) = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"Do not spend child review budget on a deficient root wave"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(waiting["completed"], false);
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let child = child_council::inspect(&store, &root).unwrap();
+        assert_eq!(child[0].leaf_attempts.len(), 2,
+            "no second child wave may be issued before the required root criterion passes");
+        assert!(child[0].verified_escalation_receipt.is_none());
+        assert!(!verified_council_pass(&store, &root));
+        return;
+    }
     assert!(child_council::fresh_s2_root_reviewers(&store, &root, config));
     // A previous cycle's second-wave report is historical, not an extra
     // current reviewer. The same row in the live cycle must block admission.

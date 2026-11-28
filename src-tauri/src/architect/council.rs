@@ -1645,6 +1645,15 @@ fn unverified_required_skill_checks(team: &TeamSnapshot, round: usize) -> Vec<St
     }
     missing
 }
+/// The root wave must meet every assigned required criterion and native skill
+/// check before dependent child work is admitted. Unassigned lenses are
+/// covered by the independently authenticated child receipts, not this gate.
+pub(super) fn root_wave_evidence_satisfied(
+    team: &TeamSnapshot, config: &CouncilConfig, round: usize,
+) -> bool {
+    criterion_blockers(team, config, round).is_empty()
+        && unverified_required_skill_checks(team, round).is_empty()
+}
 fn live(team: &TeamSnapshot, round: usize) -> bool {
     in_round(team, round).any(|(w, _)| unsettled(&w.status))
 }
@@ -2967,8 +2976,7 @@ pub(super) fn status_for_authenticated_triggered_s2_roots(
         || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
         || team.workers.iter().filter(|worker| worker.created_at >= team.council_since
             && worker.council.is_some()).count() != 2 * required
-        || !criterion_blockers(team, config, 2).is_empty()
-        || !unverified_required_skill_checks(team, 2).is_empty()
+        || !root_wave_evidence_satisfied(team, config, 2)
     {
         return None;
     }
@@ -3144,8 +3152,7 @@ pub(super) fn status_for_authenticated_children_s2(
     let second = in_round(team, 2).filter(|(worker, seat)| counts(worker, seat))
         .collect::<Vec<_>>();
     if second.len() != required
-        || !criterion_blockers(team, config, 2).is_empty()
-        || !unverified_required_skill_checks(team, 2).is_empty()
+        || !root_wave_evidence_satisfied(team, config, 2)
     {
         return None;
     }
@@ -3279,8 +3286,7 @@ pub(super) fn status_for_authenticated_children_s3(
         .filter(|(worker, seat)| counts(worker, seat))
         .collect::<Vec<_>>();
     if second.len() != required_root
-        || !criterion_blockers(team, config, 2).is_empty()
-        || !unverified_required_skill_checks(team, 2).is_empty()
+        || !root_wave_evidence_satisfied(team, config, 2)
     {
         return None;
     }

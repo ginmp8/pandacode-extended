@@ -2680,7 +2680,11 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
         worker.created_at >= root.council_since
             && worker.council.as_ref().is_some_and(|seat| seat.round == 2)
     ).collect::<Vec<_>>();
-    if second.len() != expected { return false; }
+    if second.len() != expected
+        || !super::council::root_wave_evidence_satisfied(root, config, 2)
+    {
+        return false;
+    }
     let mut sessions = HashSet::new();
     let mut direct = HashSet::new();
     let mut automatic = 0usize;

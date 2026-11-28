@@ -196,6 +196,79 @@ pub(super) fn page_for_demand(
 }
 
 
+/// A provider log may be reported for a native Assignment only while its
+/// original thread, frozen provider and exclusively owned harness IDs agree.
+/// Unknown is deliberately distinct from an ordinary, non-SuperAgent session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AssignmentUsageScope {
+    Ordinary,
+    Unknown,
+    Bound {
+        assignment_id: String,
+        ticket_id: String,
+        agent: crate::usage_ledger::Agent,
+        links: Vec<String>,
+    },
+}
+
+pub(crate) fn assignment_usage_scope(
+    store: &Store, session_id: &str,
+) -> Result<AssignmentUsageScope> {
+    use crate::usage_ledger::Agent;
+    let assignment: Option<(String, String, String, Option<String>)> = store.db.query_row(
+        "SELECT a.id,a.ticket_id,a.bot_id,s.provider
+         FROM sa_assignments a LEFT JOIN sessions s ON s.id=a.session_id
+         WHERE a.session_id=?1",
+        [session_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((assignment_id, ticket_id, bot_id, provider)) = assignment else {
+        return Ok(AssignmentUsageScope::Ordinary);
+    };
+    if !super::assignment_thread_current(store, session_id, &ticket_id)? {
+        return Ok(AssignmentUsageScope::Unknown);
+    }
+    let Some(profile) = super::roster::ticket_profile(store, &ticket_id)? else {
+        return Ok(AssignmentUsageScope::Unknown);
+    };
+    let Some(member) = profile.members.iter().find(|member| member.bot_id == bot_id) else {
+        return Ok(AssignmentUsageScope::Unknown);
+    };
+    if provider.as_deref() != Some(member.provider.as_str()) {
+        return Ok(AssignmentUsageScope::Unknown);
+    }
+    let agent = match member.provider.as_str() {
+        "claude" => Agent::Claude,
+        "codex" => Agent::Codex,
+        _ => return Ok(AssignmentUsageScope::Unknown),
+    };
+    let links = store.usage_links(session_id)?;
+    if links.is_empty() {
+        return Ok(AssignmentUsageScope::Unknown);
+    }
+    for link in &links {
+        // A short suffix or differently formatted UUID is not sufficient log
+        // identity. Both supported native harnesses use canonical UUIDs.
+        if !uuid::Uuid::parse_str(link).is_ok_and(|id| id.to_string() == *link) {
+            return Ok(AssignmentUsageScope::Unknown);
+        }
+        let shared: bool = store.db.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM task_usage_links
+               WHERE session_id<>?1 AND lower(harness_id)=lower(?2)
+               UNION ALL
+               SELECT 1 FROM sessions
+               WHERE id<>?1 AND lower(resume_id)=lower(?2)
+             )",
+            params![session_id, link], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if shared {
+            return Ok(AssignmentUsageScope::Unknown);
+        }
+    }
+    Ok(AssignmentUsageScope::Bound { assignment_id, ticket_id, agent, links })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignmentChatLink {
@@ -496,10 +569,47 @@ mod tests {
         ).is_err());
         let assignment_id = item.assignment_id.clone();
         let session_id = item.session_id.clone();
+        let harness_id = "aaaa1111-b222-4c33-8d44-555566667777";
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "No provider logs are not zero usage");
+        store.resume(&session_id, harness_id).unwrap();
+        let expected_scope = AssignmentUsageScope::Bound {
+            assignment_id: assignment_id.clone(),
+            ticket_id: ticket.id.clone(),
+            agent: crate::usage_ledger::Agent::Codex,
+            links: vec![harness_id.into()],
+        };
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(), expected_scope);
+        store.db.execute(
+            "INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at,resume_id)
+             VALUES('ordinary-usage','chat-project','Ordinary','codex','default','plan','idle',0,0,?1)",
+            [harness_id.to_uppercase()],
+        ).unwrap();
+        assert_eq!(assignment_usage_scope(&store, "ordinary-usage").unwrap(),
+            AssignmentUsageScope::Ordinary);
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "A shared current resume ID is ambiguous");
+        store.db.execute(
+            "UPDATE sessions SET resume_id=NULL WHERE id='ordinary-usage'", [],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO task_usage_links(session_id,harness_id,created_at)
+             VALUES('ordinary-usage',?1,0)", [harness_id],
+        ).unwrap();
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "A shared historical ID is ambiguous");
+        store.db.execute("DELETE FROM sessions WHERE id='ordinary-usage'", []).unwrap();
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(), expected_scope);
+        store.db.execute("UPDATE sessions SET provider='claude' WHERE id=?1", [&session_id]).unwrap();
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "Mutable provider cannot replace the frozen one");
+        store.db.execute("UPDATE sessions SET provider='codex' WHERE id=?1", [&session_id]).unwrap();
         store.db.execute(
             "UPDATE bot_threads SET external_id='unrelated-ticket' WHERE session_id=?1",
             [&session_id],
         ).unwrap();
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "A remapped native thread cannot report usage");
         assert!(!page(&store, &team.id, "chat-worker", None, 25).unwrap()
             .items[0].chat_available);
         assert!(assignment_chat_link(
@@ -524,6 +634,7 @@ mod tests {
         assert!(assignment_chat_link(
             &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
         ).is_ok(), "Historical native identity survives restart");
+        assert_eq!(assignment_usage_scope(&reopened, &session_id).unwrap(), expected_scope);
         let audit_before: i64 = reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
         ).unwrap();
@@ -531,6 +642,8 @@ mod tests {
         assert!(assignment_chat_link(
             &reopened, &team.id, &ticket.id, &assignment_id, "chat-worker",
         ).is_err(), "A removed session is not a navigable historical chat");
+        assert_eq!(assignment_usage_scope(&reopened, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown);
         assert!(!page(&reopened, &team.id, "chat-worker", None, 25).unwrap()
             .items[0].chat_available);
         let audit_after: i64 = reopened.db.query_row(

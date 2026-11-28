@@ -10,6 +10,21 @@
 
 mod parse;
 mod pricing;
+/// Read only the frozen provider's exact native Assignment log identities.
+/// Unlike ordinary task history this does not combine different harness types.
+pub(crate) async fn assignment_task_usage(
+    dir: PathBuf, agent: Agent, links: Vec<String>, since_ms: Option<i64>,
+) -> crate::Result<TaskUsage> {
+    let mut state = state().lock().await;
+    let since_scan = crate::storage::now() - HISTORY_DAYS * 86_400_000;
+    with_cache(&mut state, &dir, move |cache| {
+        let keep = |actual, path: &Path| assignment_log_matches(agent, &links, actual, path);
+        let changed = refresh_matching(cache, &agent_roots(), since_scan, &keep);
+        let since_hour = since_ms.map_or(0, |ms| ms.div_euclid(3_600_000));
+        (changed, task_usage_from_matching_cache(cache, since_hour, &keep))
+    }).await
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -486,11 +501,32 @@ fn file_belongs_to(link: &str, agent: Agent, path: &Path) -> bool {
 /// Sums the cached records of every log file belonging to one of `links`, keeping
 /// only records from `since_hour` on. Pure so tests can build the cache by hand.
 fn task_usage_from_cache(cache: &Cache, links: &[String], since_hour: i64) -> TaskUsage {
+    task_usage_from_matching_cache(cache, since_hour, &|agent, path| {
+        links.iter().any(|link| file_belongs_to(link, agent, path))
+    })
+}
+
+fn assignment_log_matches(expected: Agent, links: &[String], agent: Agent, path: &Path) -> bool {
+    if expected != agent {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else { return false };
+    links.iter().any(|link| match agent {
+        Agent::Claude => stem == link,
+        Agent::Codex => stem.strip_suffix(link.as_str()).is_some_and(|prefix| {
+            prefix.starts_with("rollout-") && prefix.ends_with('-')
+        }),
+    })
+}
+
+fn task_usage_from_matching_cache(
+    cache: &Cache, since_hour: i64, keep: &dyn Fn(Agent, &Path) -> bool,
+) -> TaskUsage {
     let mut usage = TaskUsage::default();
     let mut replies = HashSet::new();
     for (path, entry) in &cache.files {
         let Some(agent) = entry.agent else { continue };
-        if !links.iter().any(|link| file_belongs_to(link, agent, Path::new(path))) {
+        if !keep(agent, Path::new(path)) {
             continue;
         }
         for record in &entry.records {

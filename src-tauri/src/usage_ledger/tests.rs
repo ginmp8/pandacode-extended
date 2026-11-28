@@ -176,6 +176,38 @@ fn task_usage_sums_only_linked_session_logs_and_honors_since() {
 }
 
 #[test]
+fn assignment_usage_excludes_other_providers_and_noncanonical_rollout_names() {
+    let id = "aaaa1111-b222-4c33-8d44-555566667777";
+    let links = vec![id.to_owned()];
+    let mut cache = Cache { version: CACHE_VERSION, files: HashMap::new() };
+    for (path, agent, input) in [
+        (format!("/logs/{id}.jsonl"), Agent::Claude, 100),
+        (format!("/logs/rollout-2026-09-26T08-58-01-{id}.jsonl"), Agent::Codex, 7),
+        (format!("/logs/rollout-2026-09-26T08-58-01-x{id}.jsonl"), Agent::Codex, 999),
+        (format!("/logs/unrelated-{id}.jsonl"), Agent::Codex, 999),
+    ] {
+        cache.files.insert(path, FileEntry {
+            agent: Some(agent),
+            records: vec![Record {
+                key: None, hour: 2, model: "m".into(), class: 0, input,
+                cache_read: 0, cache_write: 0, cache_write_1h: 0, output: 1,
+            }],
+            ..FileEntry::default()
+        });
+    }
+    let codex = task_usage_from_matching_cache(&cache, 0, &|agent, path| {
+        assignment_log_matches(Agent::Codex, &links, agent, path)
+    });
+    assert_eq!((codex.input, codex.output), (7, 1));
+    let claude = task_usage_from_matching_cache(&cache, 0, &|agent, path| {
+        assignment_log_matches(Agent::Claude, &links, agent, path)
+    });
+    assert_eq!((claude.input, claude.output), (100, 1));
+    // Ordinary task usage retains its pre-existing behavior.
+    assert_eq!(task_usage_from_cache(&cache, &links, 0).input, 2105);
+}
+
+#[test]
 fn model_names_are_shared_between_records_and_survive_a_cache_round_trip() {
     let first = parse::claude_line(&claude("msg_1", "req_1", "2026-09-26T08:58:01Z", json!({"input_tokens":1}))).unwrap();
     let second = parse::claude_line(&claude("msg_2", "req_2", "2026-09-26T08:58:02Z", json!({"input_tokens":1}))).unwrap();

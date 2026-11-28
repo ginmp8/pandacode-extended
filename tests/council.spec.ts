@@ -2211,6 +2211,7 @@ test('Council criteria editor authors native file checks without granting execut
   const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
   await criteria.getByRole('button', { name: 'Review criteria' }).click();
   await criteria.getByLabel('Criteria source').selectOption('user');
+  await expect(criteria.getByLabel('Minimum score')).toHaveValue('9.5');
   await criteria.getByLabel('Criterion ID').fill('manifest');
   await criteria.getByLabel('Review lens').fill('Manual lens');
   await criteria.getByLabel('Native file check').selectOption('reviewed_file_json_valid');
@@ -2234,7 +2235,7 @@ test('Council criteria editor authors native file checks without granting execut
   await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   expect((await calls(page))[0].criteria).toEqual([{
-    id: 'manifest', lens: 'File SHA-256: package.json', target: 9, required: true, evidenceRequired: true,
+    id: 'manifest', lens: 'File SHA-256: package.json', target: 9.5, required: true, evidenceRequired: true,
     nativeEvidence: { kind: 'reviewed_file_sha256', path: 'package.json', expectedSha256: digest },
   }]);
 });

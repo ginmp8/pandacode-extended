@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, resolveSharedChannelCouncilFocus, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -2867,10 +2867,8 @@ function renderComposer(): void {
     const oldCouncilPanel = oldChannelComposer?.querySelector<HTMLElement>('.bc-council-panel');
     const councilWasOpen = oldChannelComposer?.dataset.channelId === state.sharedChannelId
       && (oldCouncilPanel?.matches(':popover-open') ?? false);
-    const councilControls = 'button, input, select, textarea, summary';
-    const councilFocusedIndex = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
-      ? [...oldCouncilPanel.querySelectorAll<HTMLElement>(councilControls)].indexOf(document.activeElement as HTMLElement)
-      : -1;
+    const councilFocusedControl = councilWasOpen && oldCouncilPanel?.contains(document.activeElement)
+      && document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const councilScrollTop = councilWasOpen ? oldCouncilPanel?.scrollTop ?? 0 : 0;
     // A channel event can replace a text field while the user edits the middle
     // of a criterion or file scope. Retain the caret as well as the focus.
@@ -2903,8 +2901,8 @@ function renderComposer(): void {
       const nextPanel = channelComposer.querySelector<HTMLElement>('.bc-council-panel');
       if (nextTrigger && nextPanel) {
         toggleSharedChannelCouncil(nextTrigger);
-        if (councilFocusedIndex >= 0) {
-          const focus = [...nextPanel.querySelectorAll<HTMLElement>(councilControls)][councilFocusedIndex];
+        if (oldCouncilPanel && councilFocusedControl) {
+          const focus = resolveSharedChannelCouncilFocus(oldCouncilPanel, nextPanel, councilFocusedControl);
           if (focus?.getClientRects().length && !focus.matches(':disabled')) {
             focus.focus({ preventScroll: true });
             // A roster change may shift the numeric Tab position to a different

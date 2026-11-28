@@ -284,6 +284,61 @@ test.describe('shared bot channels', () => {
     await expect(panel).toBeHidden();
   });
 
+  test('Channel roster changes preserve criterion focus without transferring a removed reviewer focus', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview-bots.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /(\.\.\.structuredClone\(channel\),\s*)(messages:\s*structuredClone\(channel\.messages\.slice\(-limit\)\))/,
+        (_match, before, messages) => before +
+          "memberIds: channel.id === 'sample-launch' ? channel.memberIds.filter((_, index) => !(window.__channelRemovedRosterIndexes ?? []).includes(index)) : channel.memberIds, " +
+          messages,
+      );
+      if (body === source) throw new Error('Channel roster fixture was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const reviewers = panel.locator('input[name="councilReviewer"]');
+    await expect(reviewers).toHaveCount(4);
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    const lens = panel.getByRole('textbox', { name: 'Review lens' });
+    await lens.fill('Permission boundary');
+    await lens.focus();
+    await lens.evaluate(element => (element as HTMLInputElement).setSelectionRange(2, 7));
+
+    await page.evaluate(() => {
+      (window as any).__channelRemovedRosterIndexes = [1];
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
+    });
+    await expect(reviewers).toHaveCount(3);
+    await expect(panel).toBeVisible();
+    await expect(lens).toBeFocused();
+    await expect(lens).toHaveValue('Permission boundary');
+    expect(await lens.evaluate(element => {
+      const input = element as HTMLInputElement;
+      return [input.selectionStart, input.selectionEnd];
+    })).toEqual([2, 7]);
+
+    await reviewers.nth(1).check();
+    await reviewers.nth(1).focus();
+    await page.evaluate(() => {
+      (window as any).__channelRemovedRosterIndexes = [1, 2];
+      (window as any).__previewEmit('bot-shared-channel-changed', { channelId: 'sample-launch' });
+    });
+    await expect(reviewers).toHaveCount(2);
+    await expect(panel).toBeVisible();
+    await expect(panel.getByRole('switch', { name: 'Council' })).toBeFocused();
+    await expect(panel.getByRole('alert')).toContainText('A selected Council reviewer is no longer available');
+    await expect(panel.locator('input[name="councilReviewer"]:checked')).toHaveCount(0);
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
     test.setTimeout(60_000);

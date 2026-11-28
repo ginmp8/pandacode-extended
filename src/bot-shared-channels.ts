@@ -210,6 +210,26 @@ export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | nu
   }
 }
 
+/** Preserve the focused Council control without transferring it to another bot on roster changes. */
+export function resolveSharedChannelCouncilFocus(previous: HTMLElement, next: HTMLElement, focused: HTMLElement): HTMLElement | null {
+  const selector = 'button, input, select, textarea, summary';
+  if (!previous.contains(focused)) return null;
+  const reviewer = focused.closest<HTMLElement>('.bc-council-reviewer');
+  if (reviewer) {
+    const botId = reviewer.dataset.botId;
+    if (!botId) return null;
+    const replacement = [...next.querySelectorAll<HTMLElement>('.bc-council-reviewer')]
+      .find(row => row.dataset.botId === botId);
+    const index = [...reviewer.querySelectorAll<HTMLElement>(selector)].indexOf(focused);
+    return replacement?.querySelectorAll<HTMLElement>(selector)[index] ?? null;
+  }
+  // The remaining settings retain their order when reviewer rows are removed,
+  // added or reordered. Criterion rows are restored before focus resolution.
+  const settings = (panel: HTMLElement) => [...panel.querySelectorAll<HTMLElement>(selector)]
+    .filter(control => !control.closest('.bc-council-reviewer'));
+  return settings(next)[settings(previous).indexOf(focused)] ?? null;
+}
+
 export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
   const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));

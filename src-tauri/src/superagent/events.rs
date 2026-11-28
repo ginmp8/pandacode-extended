@@ -1871,6 +1871,14 @@ fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Resu
         {
             return Err("GitHub Events feed contains a foreign or missing repository; cursor unchanged.".into());
         }
+        // Common event metadata is part of the authenticated feed identity,
+        // even when an event does not match the selected actor or action.
+        if let Some(value) = item.pointer("/repo/url") {
+            let expected = format!("https://api.github.com/repos/{repository}");
+            if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+                return Err("GitHub Events feed contains a conflicting repository URL; cursor unchanged.".into());
+            }
+        }
         let current_repository_id = item.pointer("/repo/id")
             .map(|value| value.as_u64().filter(|id| *id > 0)
                 .ok_or("GitHub Events feed has an invalid repository ID."))
@@ -2012,6 +2020,11 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
             if event_repo_id.is_none() || event_repo_id != base_repo_id {
                 return Err("GitHub PR base repository differs from the authenticated event repository.".into());
             }
+            if let Some(name) = base_repo.get("full_name") {
+                if !name.as_str().is_some_and(|value| value.eq_ignore_ascii_case(&source.repository)) {
+                    return Err("GitHub PR base repository name conflicts with its authenticated identity.".into());
+                }
+            }
             if let Some(url) = base_repo.get("url") {
                 let expected = format!("https://api.github.com/repos/{}", source.repository);
                 if !url.as_str().is_some_and(|value| value.eq_ignore_ascii_case(&expected)) {
@@ -2065,6 +2078,12 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
                 }
                 require_matching_github_thread_url(raw, "/payload/issue/pull_request/url",
                     &source.repository, "pulls", number)?;
+                if let Some(value) = raw.pointer("/payload/issue/pull_request/html_url") {
+                    let expected = format!("https://github.com/{}/pull/{number}", source.repository);
+                    if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+                        return Err("GitHub PR comment marker conflicts with authenticated thread identity.".into());
+                    }
+                }
             }
         }
     }
@@ -4420,7 +4439,8 @@ mod tests {
             "actor": {"login": "trusted-bot"},
             "payload": {"action": "opened", "number": 42,
                 "pull_request": {"number": 42, "base": {"repo": {
-                    "id": 101, "url": "https://api.github.com/repos/owner/repo"
+                    "id": 101, "url": "https://api.github.com/repos/owner/repo",
+                    "full_name": "Owner/Repo"
                 }}}}
         }]);
         let mut wrong_number = valid.clone();
@@ -4442,9 +4462,15 @@ mod tests {
         let mut wrong_browser_url = valid.clone();
         wrong_browser_url[0]["payload"]["pull_request"]["html_url"] =
             serde_json::json!("https://github.com/foreign/repo/pull/42");
+        let mut wrong_base_name = valid.clone();
+        wrong_base_name[0]["payload"]["pull_request"]["base"]["repo"]["full_name"] =
+            serde_json::json!("foreign/repo");
+        let mut malformed_base_name = valid.clone();
+        malformed_base_name[0]["payload"]["pull_request"]["base"]["repo"]["full_name"] =
+            serde_json::Value::Null;
         for invalid in [&wrong_number, &wrong_base, &malformed_number,
                         &missing_base_id, &malformed_base_id, &wrong_base_url,
-                        &wrong_browser_url] {
+                        &wrong_browser_url, &wrong_base_name, &malformed_base_name] {
             assert!(poll_authenticated_events_with_repository_id(
                 &store, &observed, 0, invalid, "operator", 1, 101,
             ).is_err());
@@ -4890,6 +4916,20 @@ mod tests {
 
         feed[0]["created_at"] = serde_json::json!("2026-11-12T09:00:00Z");
         assert!(combine_github_pages(&[feed.clone()], 0, 0).is_ok());
+        // A foreign common repository URL on an unrelated event must not
+        // anchor the cursor or cause an otherwise eligible issue to be lost.
+        feed[0]["repo"]["url"] = serde_json::json!("https://api.github.com/repos/foreign/repo");
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &feed, "operator", 1, 101,
+        ).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, None);
+        feed[0]["repo"]["url"] = serde_json::Value::Null;
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &feed, "operator", 1, 101,
+        ).is_err());
+        feed[0]["repo"]["url"] = serde_json::json!("https://api.github.com/repos/Test/Fixture");
         let result = poll_authenticated_events_with_repository_id(
             &store, &observed, 0, &feed, "operator", 1, 101,
         ).unwrap();
@@ -6817,8 +6857,19 @@ mod tests {
         wrong_pr_browser["payload"]["issue"]["html_url"] =
             serde_json::json!("https://github.com/owner/repo/issues/42");
         assert!(authenticated_event(&source, &wrong_pr_browser).is_err());
+        let mut wrong_marker_url = pr.clone();
+        wrong_marker_url["payload"]["issue"]["pull_request"]["html_url"] =
+            serde_json::json!("https://github.com/foreign/repo/pull/42");
+        assert!(authenticated_event(&source, &wrong_marker_url).is_err());
+        assert!(poll_authenticated_events(&store, &source, 0,
+            &serde_json::json!([wrong_marker_url, issue.clone()])).is_err());
+        assert_eq!(super::source(&store, &source.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &source.id, 10).unwrap().is_empty());
+        let mut valid_marker = pr;
+        valid_marker["payload"]["issue"]["pull_request"]["html_url"] =
+            serde_json::json!("https://github.com/Owner/Repo/pull/42");
 
-        let poll = poll_authenticated_events(&store, &source, 0, &serde_json::json!([pr, issue])).unwrap();
+        let poll = poll_authenticated_events(&store, &source, 0, &serde_json::json!([valid_marker, issue])).unwrap();
         assert_eq!(poll.recorded, 2);
         let entries = list_decisions(&store, &source.id, 10).unwrap();
         assert_eq!(entries.iter().map(|entry| entry.subject_key.as_str()).collect::<Vec<_>>(),

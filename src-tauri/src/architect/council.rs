@@ -937,24 +937,31 @@ fn complete_reported_findings(report: &str) -> Option<Vec<ReportedFindingDraft>>
 pub(super) fn current_finding_origin_is_authorized(
     store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
 ) -> bool {
-    // Only the original automatic M1 Council retains its historical unbound
-    // reviewer projection. Every composed/selected-bot mode requires a real
-    // task-issued reviewer binding before accessing any session's report text.
-    // A forged unbound M3-M7 worker must never read another bot or channel.
+    // Only the original automatic M1 Council retains the legacy grant
+    // fallback. A native-shaped binding does not prove that a composed,
+    // criteria-bound or multi-phase reviewer was actually admitted.
+    let legacy_automatic = team.config.council.as_ref().is_some_and(|config|
+        config.mode() == "m1"
+            && config.strategy == CouncilExecutionStrategy::Parallel
+            && config.criteria_source == CouncilCriteriaSource::Architect
+            && config.criteria.is_empty()
+    );
     if !worker.read_only {
         return false;
     }
     if let Some(binding) = worker.reviewer_binding.as_ref() {
-        if binding.validate(team, worker).is_err()
-            || super::reviewer_security::validate_issued_authority(
-                store, &team.session_id, binding,
-            ).is_err()
-        {
+        if binding.validate(team, worker).is_err() {
             return false;
         }
-    } else if !team.config.council.as_ref()
-        .is_some_and(|config| config.mode() == "m1")
-    {
+        let authority = if legacy_automatic {
+            super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)
+        } else {
+            super::reviewer_security::validate_recorded_authority(store, &team.session_id, binding)
+        };
+        if authority.is_err() {
+            return false;
+        }
+    } else if !legacy_automatic {
         return false;
     }
     // Legacy M1 snapshots lack modern seat bindings but still require a

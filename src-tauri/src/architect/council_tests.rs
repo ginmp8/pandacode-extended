@@ -163,6 +163,61 @@ fn legacy_automatic_findings_require_a_real_native_reviewer_session_link() {
 }
 
 #[test]
+fn nonlegacy_findings_require_recorded_reviewer_authority() {
+    use council::CouncilExecutionStrategy;
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let report = "Council findings JSON: [{\"severity\":\"low\",\"category\":\"quality\",\"title\":\"Review note\",\"explanation\":\"Independent reviewer observation\"}]\nCouncil score: 9.5/10";
+    for (name, mixed, strategy, expected_without_grant) in [
+        ("legacy", false, CouncilExecutionStrategy::Parallel, 1),
+        ("mixed", true, CouncilExecutionStrategy::Parallel, 0),
+        ("escalated", false, CouncilExecutionStrategy::Escalated, 0),
+        ("two-phase", false, CouncilExecutionStrategy::TwoPhase, 0),
+    ] {
+        let mut config = on(9.0, 3, if mixed { 0 } else { 2 });
+        config.strategy = strategy;
+        if mixed {
+            config.reviewer_bot_ids = vec!["direct-reviewer".into()];
+            config.automatic_reviewers = 1;
+        }
+        config.validate().unwrap();
+        let mut team = team_with(config, Vec::new());
+        team.session_id = sid.clone();
+        let mut reviewer = seat(&format!("findings-{name}"), 1, Some(9.5), SINCE + 1);
+        let session = store.create_session(&project, &reviewer.provider, &reviewer.model, "plan").unwrap();
+        reviewer.session_id = session.id.clone();
+        store.message(&session.id, "assistant", report).unwrap();
+        team.workers.push(reviewer);
+        link_native_root_reviewers(&store, &sid, &team.workers);
+        assert_eq!(council::reported_findings(&store, &team).len(), expected_without_grant,
+            "{name}: an unbound worker must not acquire nonlegacy report authority");
+
+        let worker = &team.workers[0];
+        let binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+            worker.council.as_ref().unwrap(),
+        );
+        team.workers[0].reviewer_binding = Some(binding.clone());
+        assert_eq!(council::reported_findings(&store, &team).len(), expected_without_grant,
+            "{name}: a native-shaped binding is not a recorded grant");
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        assert_eq!(council::reported_findings(&store, &team).len(), 1,
+            "{name}: the exact issued reviewer can expose its report");
+
+        store.message(&session.id, "coordination", "New turn").unwrap();
+        assert!(council::reported_findings(&store, &team).is_empty());
+        assert_eq!(council::historical_reported_findings(&store, &team).len(), 1);
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND worker_id=?2 AND kind='reviewer_authority'",
+            rusqlite::params![&sid, &team.workers[0].id],
+        ).unwrap();
+        assert_eq!(council::historical_reported_findings(&store, &team).len(), expected_without_grant,
+            "{name}: missing recorded authority must also deny same-cycle history");
+    }
+}
+
+#[test]
 fn unbound_selected_and_composed_reviewers_cannot_expose_foreign_session_findings() {
     let (state, sid) = state_fixture();
     let store = state.store.lock().unwrap();

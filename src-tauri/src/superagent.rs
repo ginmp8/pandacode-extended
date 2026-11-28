@@ -5395,6 +5395,7 @@ fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Optio
             "SELECT EXISTS(
                  SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
                    AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                     OR t.active_assignment_id IS NOT NULL
                      OR EXISTS(SELECT 1 FROM sa_assignments a
                                WHERE a.ticket_id=t.id AND a.state='running'))
              )",
@@ -5539,6 +5540,7 @@ fn change_enabled(
            AND (?2=0 OR NOT EXISTS(
              SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
                AND (t.state IN ('queued','running','waiting_approval','waiting_review')
+                 OR t.active_assignment_id IS NOT NULL
                  OR EXISTS(SELECT 1 FROM sa_assignments a
                            WHERE a.ticket_id=t.id AND a.state='running'))
            ))",
@@ -15261,13 +15263,15 @@ mod tests {
         let terminal = get_ticket(&store, &ticket.id).unwrap();
         assert_eq!(terminal.state, "stopped");
 
-        // A damaged legacy settlement can leave a running Assignment even
-        // on a terminal Ticket. Off does not fabricate provider termination.
+        let disabled = change_enabled(&store, &team.id, team.policy_revision, false).unwrap();
+        // Model an unreconciled legacy orphan already present while Off.
+        // Explicit Off now quarantines existing orphans; the dedicated Off
+        // regression covers that path separately. Keep this fixture focused
+        // on denial before the operator's explicit quarantine.
         store.db.execute(
             "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
             [&ticket.id],
         ).unwrap();
-        let disabled = change_enabled(&store, &team.id, team.policy_revision, false).unwrap();
         assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).is_err());
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
         assert_eq!(configuration(&store, &team.id).unwrap().policy_revision, disabled.policy_revision);
@@ -15296,6 +15300,41 @@ mod tests {
             "Verified quarantine must release the stale checkout lease");
         assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).unwrap().enabled);
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+    }
+
+    #[test]
+    fn disabled_team_rejects_terminal_active_pointer_without_running_assignment() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Recover dangling active pointer", "reenable-pointer", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let disabled = change_enabled(&store, &team.id, team.policy_revision, false).unwrap();
+        let terminal = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(terminal.state, "stopped");
+        store.db.execute(
+            "UPDATE sa_tickets SET active_assignment_id=(
+                SELECT id FROM sa_assignments WHERE ticket_id=?1
+             ) WHERE id=?1", [&ticket.id],
+        ).unwrap();
+        assert!(assignments(&store, &ticket.id, 10).unwrap().iter()
+            .all(|assignment| assignment.state != "running"));
+
+        let blocker = manual_enable_blocker(&store, &disabled).unwrap().unwrap();
+        assert!(blocker.contains("orphaned"));
+        assert!(change_enabled(&store, &team.id, disabled.policy_revision, true).is_err());
+        assert!(!configuration(&store, &team.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &team.id).unwrap().policy_revision, disabled.policy_revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, terminal.revision);
+
+        let repaired = change_enabled(&store, &team.id, disabled.policy_revision, false).unwrap();
+        let settled = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(settled.state, "stopped");
+        assert!(settled.active_assignment_id.is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert!(change_enabled(&store, &team.id, repaired.policy_revision, true).unwrap().enabled);
     }
 
     #[test]

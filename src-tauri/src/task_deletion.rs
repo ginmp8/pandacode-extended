@@ -18,7 +18,7 @@ fn deletion_state(store: &Store, id: &str) -> Result<(String, Option<String>)> {
         .prepare_cached("SELECT status,goal_state FROM sessions WHERE id=?1")
         .and_then(|mut query| query.query_row([id], |row| Ok((row.get(0)?, row.get(1)?))).optional())
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| String::from("Conversation not found."))
+        .ok_or_else(|| String::from(crate::storage::SESSION_NOT_FOUND))
 }
 
 fn ensure_deletable((status, goal): &(String, Option<String>)) -> Result<()> {

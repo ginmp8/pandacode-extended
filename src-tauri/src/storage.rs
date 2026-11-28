@@ -165,6 +165,8 @@ type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
 pub const SCHEMA_VERSION: i64 = 38;
+/// The error every lookup of a task that has no row returns.
+pub(crate) const SESSION_NOT_FOUND: &str = "Conversation not found.";
 /// A team snapshot's `status` parsed from its row, NULL for a corrupt snapshot.
 macro_rules! team_status_sql {
     () => { "CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END" };

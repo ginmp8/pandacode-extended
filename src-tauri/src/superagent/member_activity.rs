@@ -252,17 +252,23 @@ pub(crate) fn assignment_usage_scope(
         if !uuid::Uuid::parse_str(link).is_ok_and(|id| id.to_string() == *link) {
             return Ok(AssignmentUsageScope::Unknown);
         }
-        let shared: bool = store.db.query_row(
+        // Ordinary usage supports imported/forked resume IDs without a
+        // durable link. A native Assignment must have the recorded link, as
+        // required by the prepared provider admission boundary.
+        let owned: bool = store.db.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM task_usage_links
+               WHERE session_id=?1 AND harness_id=?2
+             ) AND NOT EXISTS(
+               SELECT 1 FROM task_usage_links
                WHERE session_id<>?1 AND lower(harness_id)=lower(?2)
-               UNION ALL
+             ) AND NOT EXISTS(
                SELECT 1 FROM sessions
                WHERE id<>?1 AND lower(resume_id)=lower(?2)
              )",
             params![session_id, link], |r| r.get(0),
         ).map_err(|e| e.to_string())?;
-        if shared {
+        if !owned {
             return Ok(AssignmentUsageScope::Unknown);
         }
     }
@@ -572,6 +578,12 @@ mod tests {
         let harness_id = "aaaa1111-b222-4c33-8d44-555566667777";
         assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
             AssignmentUsageScope::Unknown, "No provider logs are not zero usage");
+        store.db.execute(
+            "UPDATE sessions SET resume_id=?2 WHERE id=?1",
+            params![&session_id, harness_id],
+        ).unwrap();
+        assert_eq!(assignment_usage_scope(&store, &session_id).unwrap(),
+            AssignmentUsageScope::Unknown, "An unrecorded resume ID cannot attribute logs");
         store.resume(&session_id, harness_id).unwrap();
         let expected_scope = AssignmentUsageScope::Bound {
             assignment_id: assignment_id.clone(),

@@ -216,13 +216,18 @@ fn frozen_with_recovery_status(
 }
 
 fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Result<Option<FrozenChildReservation>> {
-    let row: Option<(String, String)> = store.db.query_row(
-        "SELECT content,worker_id FROM architect_requests
-         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child'",
+    // The request key is unique across all kinds. An occupied foreign kind
+    // is a conflict, not permission to allocate another native child session.
+    let row: Option<(String, String, String)> = store.db.query_row(
+        "SELECT content,worker_id,kind FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2",
         params![root.session_id, key(root, &child.bot_id)],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((body, child_session_id)) = row else { return Ok(None) };
+    let Some((body, child_session_id, kind)) = row else { return Ok(None) };
+    if kind != "council_child" {
+        return Err("child_council_stale: reservation key has conflicting native kind.".into());
+    }
     let record: FrozenChildReservation = serde_json::from_str(&body)
         .map_err(|_| "child_council_stale: malformed frozen child reservation.")?;
     if record.child_session_id != child_session_id ||
@@ -3193,12 +3198,17 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         return Err("child_council_denied: child reservation requires a started root objective.".into());
     }
     let parent = store.session(&root.session_id)?;
-    // Validate the entire coordinator roster before allocating any child.
+    // Validate every occupied reservation slot before allocating any child.
+    // In particular, a conflict on a later seat must not allocate an earlier
+    // missing seat or replace the conflicting record on an idempotent retry.
+    let mut missing = Vec::new();
     for child in &council.nested_bot_reviewers {
         require_independent_coordinator(store, &root.session_id, &child.bot_id)?;
+        if read(store, root, child)?.is_none() {
+            missing.push(child);
+        }
     }
-    for child in &council.nested_bot_reviewers {
-        if read(store, root, child)?.is_some() { continue; }
+    for child in missing {
         let bot = bots::get(store, &child.bot_id)
             .map_err(|_| "child_council_unavailable: selected bot no longer exists.")?;
         if bot.project_id != parent.project_id {

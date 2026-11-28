@@ -6357,6 +6357,82 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
 
 
 #[test]
+fn native_child_reservation_preflights_conflicting_kind_before_allocating_missing_seats() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let root = store.session(&sid).unwrap();
+        let mut config = on(9.0, 3, 0);
+        for id in ["child-first", "child-second"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![id, root.project_id, storage::now()],
+            ).unwrap();
+            config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+                escalation_policy: Default::default(),
+                bot_id: id.into(), child_reviewers: 2, child_target: 9.5,
+                child_max_rounds: 2,
+            });
+        }
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.council = Some(config);
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review the source artifact", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let first = format!("native-council-child:{}:child-first", started.council_since);
+    let second = format!("native-council-child:{}:child-second", started.council_since);
+    let original = child_council::inspect(&store, &started).unwrap();
+    assert_eq!(original.len(), 2);
+    let first_record: (String, String) = store.db.query_row(
+        "SELECT content,worker_id FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, first], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, first],
+    ).unwrap();
+    store.db.execute(
+        "UPDATE architect_requests SET kind='dispatch' WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second],
+    ).unwrap();
+    let counts = || -> (i64, i64, i64) {
+        store.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions),
+                    (SELECT COUNT(*) FROM architect_workers),
+                    (SELECT COUNT(*) FROM architect_requests)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap()
+    };
+    let before = counts();
+    let error = child_council::reserve(&store, &started).unwrap_err();
+    assert_eq!(counts(), before, "conflicting later slot must not allocate an earlier missing seat");
+    assert!(error.contains("reservation key has conflicting native kind"), "{error}");
+    let kind: String = store.db.query_row(
+        "SELECT kind FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(kind, "dispatch");
+    // Restoring the original records allows a normal idempotent retry without
+    // allocating a replacement session or changing either composite identity.
+    store.db.execute(
+        "UPDATE architect_requests SET kind='council_child' WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second],
+    ).unwrap();
+    record_request(&store, &sid, &first, "council_child", &first_record.0, &first_record.1).unwrap();
+    let restored = counts();
+    child_council::reserve(&store, &started).unwrap();
+    assert_eq!(counts(), restored);
+    let views = child_council::inspect(&store, &started).unwrap();
+    for (view, prior) in views.iter().zip(&original) {
+        assert_eq!(view.child_session_id, prior.child_session_id);
+    }
+}
+
+#[test]
 fn explicit_native_recovery_replaces_only_unstarted_interrupted_children_in_same_cycle() {
     let (state, sid) = state_fixture();
     {

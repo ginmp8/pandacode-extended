@@ -4509,6 +4509,7 @@ pub fn run() {
                 superagent::superagent_activity_page,
                 superagent::member_activity::superagent_member_activity_page,
                 superagent::member_activity::superagent_demand_usage,
+                superagent::member_activity::superagent_team_usage,
                 superagent::member_activity::superagent_member_assignment_chat_link,
                 superagent::superagent_snapshot,
                 superagent::superagent_plan_work_item,

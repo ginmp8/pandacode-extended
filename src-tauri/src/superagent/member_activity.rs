@@ -367,6 +367,108 @@ pub(crate) async fn superagent_demand_usage(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TeamUsageSnapshot {
+    policy_revision: i64,
+    demands: Vec<(String, i64)>,
+    assignments: Vec<(String, String, AssignmentUsageScope)>,
+}
+
+fn team_usage_snapshot(store: &Store, orchestration_id: &str) -> Result<TeamUsageSnapshot> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let policy_revision = tx.query_row(
+        "SELECT policy_revision FROM sa_orchestrations WHERE id=?1",
+        [orchestration_id], |r| r.get::<_, i64>(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("Team does not exist.")?;
+    let demands = {
+        let mut stmt = tx.prepare(
+            "SELECT id,revision FROM sa_tickets WHERE orchestration_id=?1 ORDER BY id LIMIT 101",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([orchestration_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    if demands.len() > 100 {
+        return Err("Team usage exceeds the 100-Demand scan limit; totals unavailable.".into());
+    }
+    let attempts = {
+        let mut stmt = tx.prepare(
+            "SELECT a.id,a.session_id,a.ticket_id FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id
+             WHERE t.orchestration_id=?1 ORDER BY a.id LIMIT 101",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([orchestration_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        }).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    if attempts.len() > 100 {
+        return Err("Team usage exceeds the 100-assignment scan limit; totals unavailable.".into());
+    }
+    let mut assignments = Vec::with_capacity(attempts.len());
+    for (id, session_id, ticket_id) in attempts {
+        let scope = assignment_usage_scope(store, &session_id)?;
+        match &scope {
+            AssignmentUsageScope::Bound { assignment_id, ticket_id: owner, .. }
+                if assignment_id == &id && owner == &ticket_id => {}
+            AssignmentUsageScope::Unknown => {}
+            _ => return Err("Native Team assignment identity changed; refresh usage.".into()),
+        }
+        assignments.push((id, session_id, scope));
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(TeamUsageSnapshot { policy_revision, demands, assignments })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamUsage {
+    orchestration_id: String,
+    policy_revision: i64,
+    demand_count: usize,
+    assignment_count: usize,
+    observed_assignment_count: usize,
+    usage: Option<crate::usage_ledger::TaskUsage>,
+}
+
+/// Bounded historical observation across native Team Tickets, including archived work.
+/// Unknown logs are not zero usage, and observed tokens are not billing receipts.
+#[tauri::command]
+pub(crate) async fn superagent_team_usage(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    orchestration_id: String,
+) -> Result<TeamUsage> {
+    use tauri::Manager;
+    require_main_window(&window)?;
+    let snapshot = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        team_usage_snapshot(&store, &orchestration_id)?
+    };
+    let links = snapshot.assignments.iter().filter_map(|(_, _, scope)| {
+        match scope {
+            AssignmentUsageScope::Bound { agent, links, .. } => Some((*agent, links.clone())),
+            _ => None,
+        }
+    }).collect::<Vec<_>>();
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Scan once across the full set, so matching files are never summed twice.
+    let (usage, observed_assignment_count) =
+        crate::usage_ledger::demand_task_usage(dir, links).await?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    if team_usage_snapshot(&store, &orchestration_id)? != snapshot {
+        return Err("Native Team usage identity changed during scan; refresh usage.".into());
+    }
+    Ok(TeamUsage {
+        orchestration_id, policy_revision: snapshot.policy_revision,
+        demand_count: snapshot.demands.len(), assignment_count: snapshot.assignments.len(),
+        observed_assignment_count, usage: usage.last_used.map(|_| usage),
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignmentChatLink {
@@ -687,6 +789,13 @@ mod tests {
         let usage_snapshot = demand_usage_snapshot(&store, &team.id, &ticket.id).unwrap();
         assert_eq!(usage_snapshot.assignments.len(), 1);
         assert_eq!(usage_snapshot.assignments[0].2, expected_scope);
+        let team_snapshot = team_usage_snapshot(&store, &team.id).unwrap();
+        assert_eq!(team_snapshot.demands, vec![(ticket.id.clone(), usage_snapshot.revision)]);
+        assert_eq!(team_snapshot.assignments, usage_snapshot.assignments);
+        let foreign_snapshot = team_usage_snapshot(&store, &foreign.id).unwrap();
+        assert!(foreign_snapshot.demands.is_empty());
+        assert!(foreign_snapshot.assignments.is_empty(), "Shared bot does not expose foreign Team logs");
+        assert!(team_usage_snapshot(&store, "missing-team").is_err());
         assert!(demand_usage_snapshot(&store, &foreign.id, &ticket.id).is_err(),
             "A shared bot cannot expose another Team's usage");
         store.db.execute(
@@ -701,6 +810,9 @@ mod tests {
         let ambiguous = demand_usage_snapshot(&store, &team.id, &ticket.id).unwrap();
         assert_ne!(usage_snapshot, ambiguous, "In-flight usage scan must become stale");
         assert_eq!(ambiguous.assignments[0].2, AssignmentUsageScope::Unknown);
+        let ambiguous_team = team_usage_snapshot(&store, &team.id).unwrap();
+        assert_ne!(team_snapshot, ambiguous_team);
+        assert_eq!(ambiguous_team.assignments[0].2, AssignmentUsageScope::Unknown);
         store.db.execute(
             "UPDATE sessions SET resume_id=NULL WHERE id='ordinary-usage'", [],
         ).unwrap();
@@ -754,6 +866,9 @@ mod tests {
             "Restart recovery interrupts the running Ticket and advances its revision");
         assert_ne!(recovered_usage, usage_snapshot,
             "A usage snapshot captured before restart must not remain current");
+        let recovered_team = team_usage_snapshot(&reopened, &team.id).unwrap();
+        assert_eq!(recovered_team.assignments, team_snapshot.assignments);
+        assert_ne!(recovered_team, team_snapshot, "Restart invalidates a prior Team scan");
         let audit_before: i64 = reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0),
         ).unwrap();

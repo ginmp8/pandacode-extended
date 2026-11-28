@@ -53,6 +53,10 @@ interface DemandUsage {
   assignmentCount: number; observedAssignmentCount: number;
   usage: {input:number; cacheRead:number; cacheWrite:number; output:number} | null;
 }
+interface TeamUsage {
+  orchestrationId: string; policyRevision: number; demandCount: number;
+  assignmentCount: number; observedAssignmentCount: number; usage: DemandUsage['usage'];
+}
 interface AssignmentInsight {
   assignmentId: string; currentAssignment: boolean; hasResult: boolean;
   mandateRevoked: boolean; runBudgetExpired: boolean; remainingRunBudgetMs: number | null;
@@ -211,6 +215,7 @@ let demandArchived = false;
   let olderActivity: Activity[] = [], olderActivityTicketId = '', olderActivityHasMore = true;
   let ticketDetails: TicketDetails | null = null;
   let demandUsage: DemandUsage | null = null;
+  let teamUsage: TeamUsage | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
@@ -1397,6 +1402,18 @@ let demandArchived = false;
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
             effectivePolicy) +
         '</section>' : '';
+    if (teamUsage && (teamUsage.orchestrationId !== chosen?.id ||
+      teamUsage.policyRevision !== chosen.policyRevision)) teamUsage = null;
+    const teamUsagePanel = '<section role="region" aria-label="Team usage"><h4>Team usage</h4>' +
+      '<p>Last loaded observation across historical Demands, including archived work. ' +
+      'Scan limited to 100 Demands and 100 assignments; missing logs and financial costs are unknown.</p>' +
+      '<button type="button" data-sa-load-team-usage>Load Team usage</button>' +
+      (teamUsage ? '<p>' + (teamUsage.usage ?
+        safe(teamUsage.usage.input) + ' input · ' + safe(teamUsage.usage.output) + ' output · ' +
+        safe(teamUsage.usage.cacheRead) + ' cache read · ' + safe(teamUsage.usage.cacheWrite) + ' cache write'
+        : 'Token usage unknown') + '</p><p>' + safe(teamUsage.demandCount) + ' Demands · Linked log evidence: ' +
+        safe(teamUsage.observedAssignmentCount) + ' / ' + safe(teamUsage.assignmentCount) +
+        ' assignments · Cost unknown</p>' : '') + '</section>';
     const overview = chosen
       ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
         '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Manual read-only' : 'Disabled / Off') +
@@ -1407,7 +1424,7 @@ let demandArchived = false;
         '<dt>Current native support</dt><dd>Explicit manual Worker selection; scoped writes, configured Council review and automatic GitHub intake unsupported.</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-open-runs>Assign demand / Open runs</button>' +
         '<button type="button" data-sa-duplicate="' + safe(chosen.id) +
-        '">Duplicate as new Team</button></div></section>'
+        '">Duplicate as new Team</button></div>' + teamUsagePanel + '</section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     // Capture mutable UI state once so native review row predicates remain type-safe.
     const capturedRejection = globalRejection;
@@ -1844,6 +1861,7 @@ let demandArchived = false;
   }
 
   async function loadNativeSnapshot(): Promise<void> {
+    teamUsage = null;
     loading = true;
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
@@ -2415,6 +2433,27 @@ let demandArchived = false;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
         preflightWorkerId = workerId;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-team-usage')) {
+      const chosen = current();
+      if (chosen) void work(async () => {
+        teamUsage = null;
+        const result = await call<TeamUsage>('superagent_team_usage', {orchestrationId:chosen.id});
+        if (current()?.id !== chosen.id) return;
+        const count = (n: number) => Number.isSafeInteger(n) && n >= 0;
+        if (!result || result.orchestrationId !== chosen.id ||
+            result.policyRevision !== current()?.policyRevision ||
+            !count(result.demandCount) || result.demandCount > 100 ||
+            !count(result.assignmentCount) || result.assignmentCount > 100 ||
+            !count(result.observedAssignmentCount) || result.observedAssignmentCount > result.assignmentCount ||
+            (result.usage === null ? result.observedAssignmentCount !== 0 :
+              !result.usage || ![result.usage.input, result.usage.cacheRead,
+                result.usage.cacheWrite, result.usage.output].every(count))) {
+          throw new Error('Invalid or stale Team usage; refresh the Team.');
+        }
+        teamUsage = result;
       });
       return;
     }

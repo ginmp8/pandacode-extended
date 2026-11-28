@@ -98,6 +98,12 @@ test(`explicit secondary Worker selection uses native preflight and read-only ta
       } as never;
       }
       if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_team_usage') return {
+        orchestrationId:(window as unknown as {saTamperTeamUsage?:boolean}).saTamperTeamUsage
+          ? 'another-team' : 'team',
+        policyRevision:2,demandCount:2,assignmentCount:3,observedAssignmentCount:1,
+        usage:{input:30,cacheRead:0,cacheWrite:0,output:7},
+      } as never;
       if(command==='superagent_demand_usage') return {
         orchestrationId: (window as unknown as {saTamperUsage?:boolean}).saTamperUsage
           ? 'another-team' : 'team',
@@ -127,6 +133,20 @@ test(`explicit secondary Worker selection uses native preflight and read-only ta
     });
   });
   const host=page.locator('#sa-direct-worker-test');
+  await host.locator('[data-sa-select="team"]').click();
+  await page.evaluate(() => {
+    (window as unknown as {saTamperTeamUsage:boolean}).saTamperTeamUsage=true;
+  });
+  await host.getByRole('button',{name:'Load Team usage'}).click();
+  await expect(host.getByRole('alert')).toContainText('Invalid or stale Team usage');
+  await expect(host.getByRole('region',{name:'Team usage'})).not.toContainText('30 input');
+  await page.evaluate(() => {
+    (window as unknown as {saTamperTeamUsage:boolean}).saTamperTeamUsage=false;
+  });
+  await host.getByRole('button',{name:'Load Team usage'}).click();
+  await expect(host.getByRole('region',{name:'Team usage'})).toContainText('30 input');
+  await expect(host.getByRole('region',{name:'Team usage'})).toContainText('1 / 3');
+  await expect(host.getByRole('region',{name:'Team usage'})).toContainText('Cost unknown');
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await host.getByRole('button',{name:'Load configured Workers'}).click();

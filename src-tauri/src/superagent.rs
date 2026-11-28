@@ -3254,7 +3254,7 @@ fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> 
     let mut errors = Vec::new();
     collect_watchdog_settlements(store, now, &mut sessions, &mut errors)?;
     if !errors.is_empty() {
-        return Err(errors.join("; ").into());
+        return Err(errors.join("; "));
     }
     Ok(sessions)
 }

@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 62;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -689,6 +689,175 @@ impl Store {
                 migration.execute_batch(crate::superagent::effects::SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=43;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 44 {
+                // Additive, non-authorizing Team member configuration sidecar.
+                migration.execute_batch(crate::superagent::roster::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 45 {
+                // Additive observed Check Run outcome, never task authority.
+                // Previous receipt identities stay intact, with unknown results.
+                migration.execute_batch(crate::superagent::events::CHECK_RESULT_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=45;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 46 {
+                // Immutable task-effective bot profiles for newly admitted Demands.
+                // Legacy Tickets retain a missing/unknown profile, never a fabricated grant.
+                migration.execute_batch(crate::superagent::roster::TICKET_PROFILE_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=46;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 47 {
+                // Different project IDs may refer to the same checkout.
+                // Replace both native lease triggers within the migration transaction.
+                migration.execute_batch(
+                    "DROP TRIGGER IF EXISTS sa_project_lease_insert;
+                     DROP TRIGGER IF EXISTS sa_project_lease_update;",
+                ).map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::PROJECT_LEASE)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=47;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 48 {
+                // Pin authenticated GitHub repository IDs across Observe polls.
+                // Existing source receipts remain intact and historically unverified.
+                migration.execute_batch(crate::superagent::events::REPOSITORY_ID_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=48;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 49 {
+                // Configurable native worker-attempt ceiling, never an implicit grant.
+                // Existing Tickets retain the original fixed two-attempt budget.
+                migration.execute_batch(crate::superagent::roster::ATTEMPT_POLICY_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch(
+                    "INSERT OR IGNORE INTO sa_ticket_attempt_limits(ticket_id,policy_revision,max_worker_attempts)
+                     SELECT id,policy_revision,2 FROM sa_tickets;
+                     PRAGMA user_version=49;",
+                ).map_err(|e|e.to_string())?;
+            }
+            if version < 50 {
+                // Additive descriptive Team scenario and immutable per-Ticket
+                // strategy snapshot. Historical Tickets remain unknown.
+                migration.execute_batch(crate::superagent::roster::TEAM_STRATEGY_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=50;")
+                    .map_err(|e|e.to_string())?;
+            }
+            if version < 51 {
+                // An Observe window can lose its durable event boundary without
+                // moving the source cursor. Preserve this independent diagnostic
+                // across restarts; older source receipts remain unchanged.
+                migration.execute_batch(crate::superagent::events::HISTORY_GAP_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=51;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 52 {
+                // Preserve the incident and record only subsequent bounded
+                // verification; never infer or recreate missing GitHub events.
+                // Legacy databases and selectively rebuilt fixtures may already
+                // contain one or both columns despite an older user_version.
+                // Check each independently so partial upgrades remain recoverable.
+                for (name, definition) in
+                    crate::superagent::events::HISTORY_GAP_RECONCILIATION_COLUMNS
+                {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1)",
+                        [name],
+                        |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!(
+                            "ALTER TABLE sa_source_history_gaps ADD COLUMN {name} {definition};"
+                        )).map_err(|e| e.to_string())?;
+                    }
+                }
+                migration.execute_batch("PRAGMA user_version=52;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 53 {
+                // Additive, non-authorizing GitHub Events actor identity pin.
+                // Legacy decisions remain preserved without a fabricated actor ID.
+                migration.execute_batch(crate::superagent::events::ACTOR_ID_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=53;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 54 {
+                // Durable operator-planned child WorkItems; no new provider,
+                // authorization, or legacy task execution is implied.
+                migration.execute_batch(crate::superagent::work_items::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=54;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 55 {
+                // Immutable cancellation evidence retains original WorkItem plans
+                // and only changes their effective read-only status projection.
+                migration.execute_batch(crate::superagent::work_items::CANCELLATION_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=55;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 56 {
+                // Do not backfill authority from historical prompt-only context.
+                migration.execute_batch(crate::superagent::work_items::EXECUTION_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=56;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 57 {
+                // Local operator dispatch intents are not grants and are
+                // consumed atomically with existing native Assignment admission.
+                migration.execute_batch(crate::superagent::headless_dispatch::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=57;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 58 {
+                // Preserve historical WorkItems; no routing rationale is inferred.
+                migration.execute_batch(crate::superagent::work_items::ROUTING_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=58;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 59 {
+                // Preserve the original Ticket and immutable attempts; only
+                // explicitly reviewed WorkItem routes can select another Worker.
+                migration.execute_batch(crate::superagent::work_items::MULTI_WORKER_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=59;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 60 {
+                // Explicit reviewed-plan progression; never backfill authorization.
+                migration.execute_batch(crate::superagent::headless_dispatch::PLAN_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=60;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 61 {
+                // Never promote an existing CLI intent to Desktop authority.
+                migration.execute_batch(crate::superagent::headless_dispatch::DESKTOP_PLAN_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=61;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 62 {
+                // Widen authenticated Check Run outcomes without changing receipts.
+                migration.execute_batch(crate::superagent::events::CHECK_RESULT_V62_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=62;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
@@ -1304,8 +1473,13 @@ impl Store {
             .canonicalize()
             .map_err(|e| format!("Worktree folder is unavailable: {e}"))?;
         let changed = self.db.execute(
-            "UPDATE sessions SET worktree_path=?2,worktree_branch=?3,updated_at=?4 WHERE id=?1 AND worktree_path IS NULL AND resume_id IS NULL AND status NOT IN ('running','waiting') AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=?1)",
-            params![sid, path.to_string_lossy(), branch, now()],
+            "UPDATE sessions SET worktree_path=?2,worktree_branch=?3,updated_at=?4
+             WHERE id=?1 AND worktree_path IS NULL AND resume_id IS NULL
+               AND status NOT IN ('running','waiting')
+               AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM sa_assignments WHERE session_id=?1)
+               AND NOT EXISTS (SELECT 1 FROM bot_threads WHERE session_id=?1 AND channel_id=?5)",
+            params![sid, path.to_string_lossy(), branch, now(), crate::superagent::CHANNEL],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err("This conversation already started. Create a new task in a worktree instead.".into());
@@ -1318,6 +1492,11 @@ impl Store {
     }
     /// Whether a task can still be converted in place.
     pub fn worktree_attachable(&self, sid: &str) -> Result<bool> {
+        // The generic task conversion must not create a Git checkout for a
+        // native assignment, even before its first provider message arrives.
+        if crate::superagent::has_task_assignment_history(self, sid)? {
+            return Ok(false);
+        }
         let session = self.session(sid)?;
         if session.worktree_path.is_some() || session.resume_id.is_some() || ["running", "waiting"].contains(&session.status.as_str()) {
             return Ok(false);
@@ -3673,6 +3852,43 @@ mod tests {
         assert_eq!(reopened.session(&session_id).unwrap().id, session_id);
         drop(reopened);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn history_gap_v52_reopen_skips_columns_already_present_at_v51() {
+        let directory = std::env::temp_dir().join(format!(
+            "pandacode-sa-gap-columns-{}", uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        {
+            let store = Store::open(&path).unwrap();
+            for name in ["verified_at", "verified_sequence"] {
+                let present: bool = store.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1)",
+                    [name], |row| row.get(0),
+                ).unwrap();
+                assert!(present);
+            }
+            // Reproduce older import/fixture versions whose additive columns
+            // already exist. Migration must not fail with duplicate columns.
+            store.db.pragma_update(None, "user_version", 51).unwrap();
+        }
+        for _ in 0..2 {
+            let reopened = Store::open(&path).unwrap();
+            let version: i64 = reopened.db.pragma_query_value(
+                None, "user_version", |row| row.get(0),
+            ).unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+            for name in ["verified_at", "verified_sequence"] {
+                let count: i64 = reopened.db.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('sa_source_history_gaps') WHERE name=?1",
+                    [name], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(count, 1, "{name} must never be added twice");
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

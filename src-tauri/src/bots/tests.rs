@@ -1043,6 +1043,67 @@ fn profile_changes_reconfigure_existing_idle_threads() {
 }
 
 #[test]
+fn superagent_session_profile_is_immutable_across_bot_edits_and_redelivery() {
+    let f = fixture();
+    let scout = bot(&f);
+    let (task, created) = thread_session(
+        &f.store, &scout, crate::superagent::CHANNEL, "ticket-one", "SuperAgent worker",
+    ).unwrap();
+    assert!(created);
+    let (web, _) = thread_session(&f.store, &scout, "web", "customer", "Scout customer").unwrap();
+    let original = f.store.session(&task).unwrap();
+    assert_eq!(
+        (original.provider.as_str(), original.model.as_str(), original.mode.as_str()),
+        ("claude", "default", "ask"),
+    );
+    assert_eq!(original.reasoning_effort, None);
+
+    // A bot can be reused by ordinary conversations and multiple future demands.
+    // Editing its default model/mode must not rewrite an admitted task's profile.
+    let mut changed = input("Scout");
+    changed.provider = "codex".into();
+    changed.model = "gpt-5".into();
+    changed.mode = "full".into();
+    changed.reasoning_effort = "high".into();
+    let updated = update(&f.store, &scout.id, &changed).unwrap();
+    let pinned = f.store.session(&task).unwrap();
+    assert_eq!(
+        (pinned.provider.as_str(), pinned.model.as_str(), pinned.mode.as_str()),
+        ("claude", "default", "ask"),
+    );
+    assert_eq!(pinned.reasoning_effort, None);
+    let ordinary = f.store.session(&web).unwrap();
+    assert_eq!(
+        (ordinary.provider.as_str(), ordinary.model.as_str(), ordinary.mode.as_str()),
+        ("codex", "gpt-5", "full"),
+    );
+
+    // Re-resolving the gateway thread must not silently re-authorize a different
+    // provider or permission mode, even when the old task session is idle.
+    let (same, created) = thread_session(
+        &f.store, &updated, crate::superagent::CHANNEL, "ticket-one", "SuperAgent worker",
+    ).unwrap();
+    assert_eq!((same.as_str(), created), (task.as_str(), false));
+    assert_eq!(f.store.session(&task).unwrap().provider, "claude");
+    assert_eq!(f.store.session(&task).unwrap().mode, "ask");
+
+    let current = set_mode(&f.store, &scout.id, "plan").unwrap();
+    assert_eq!(f.store.session(&task).unwrap().mode, "ask");
+    assert_eq!(f.store.session(&web).unwrap().mode, "plan");
+    let (next, created) = thread_session(
+        &f.store, &current, crate::superagent::CHANNEL, "ticket-two", "SuperAgent next task",
+    ).unwrap();
+    assert!(created);
+    assert_ne!(next, task);
+    let newer = f.store.session(&next).unwrap();
+    assert_eq!(
+        (newer.provider.as_str(), newer.model.as_str(), newer.mode.as_str()),
+        ("codex", "gpt-5", "plan"),
+    );
+    assert_eq!(newer.reasoning_effort.as_deref(), Some("high"));
+}
+
+#[test]
 fn desktop_model_pick_survives_followups_without_changing_channel_defaults() {
     let f = fixture();
     let scout = bot(&f);

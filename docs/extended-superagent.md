@@ -38,6 +38,8 @@ intentionally distinguishes **source inspection** from **executed acceptance**.
 | S1 — Manual native MVP | Implement durable Task, Mandate and Assignment identity, manual admission, correlated existing-bot execution, bounded authorization, stop and terminal settlement. Council remains Off by default. |
 | S2 — Presets and UI | Add Bots → Orchestrations, preset CRUD, backups/import/export, status/progress and attention controls with regression coverage. |
 | S3 — Council | Reuse the actual native Council cycle/revision/approval contract without making Shared Channels compulsory. Deny stale, unavailable, failed or unauthorized review. |
+
+An admitted Ticket with reviewer roles in its immutable Team profile remains review-required even when the native Council team or reviewer bot is unavailable. A malformed admitted profile also denies legacy manual acceptance. This is a finalization guard, not native reviewer launch or a verified verdict; Council-required execution remains unsupported until the task-bound native contract is connected.
 | S4 — Sources and policies | Add policy-driven GitHub/event/schedule subscriptions with Off/Observe/Auto, filtering, cursor deduplication and bounded authorizations. |
 | S5 — Recovery/headless | Prove restart, idempotent external effects, concurrency, cancellation, budget/watchdog and desktop/serve consistency. |
 | S6 — Verification and docs | Trace AC-01–AC-31 to implementation, executable tests, commit SHA, CI evidence, and honest gaps. Preserve optional manual cases as deferred. |
@@ -106,3 +108,110 @@ must be chosen explicitly, and the created preset is disabled.
 ### Explicit GitHub thread references (partial S4)
 
 The trusted local Bots → Orchestrations Ticket detail can now link an exact `issue:NUMBER` or `pull:NUMBER` to a configured Off/Observe GitHub source from the same orchestration. Native SQLite v42 stores at most 16 source-thread references per Ticket, rejects foreign tasks and conflicting owners, preserves links across restart, and does not modify task authorization or launch a provider. This is **manual context metadata only**, not authenticated GitHub event delivery, subscription notifications, Auto policy, or authorization for write tools. Those integration steps remain pending.
+
+## Checkout identity and native admission (S1)
+
+SQLite v47 refreshes the native SuperAgent assignment lease triggers. Local
+projects with the **same stored checkout path** share an exclusive running
+assignment lease even when project IDs and selected bots differ. Manual
+preflight, ordinary-session conflict checks and provider admission use
+matching exact-path protection. A rejected admission creates no tool grant.
+
+New Demands pin each configured Team member's project checkout path in the
+immutable admission profile. Reassigning that path under the same project ID
+denies provider admission and prevents late callbacks from becoming approvable
+evidence. Existing read-only task profiles without this field remain readable.
+
+Immediately before native SuperAgent provider launch, a prepared resume ID must
+match the current task session. A nonempty ID must have a native usage link for
+that exact session and no current or historical link belonging to any other
+session. Ambiguous or unattributed history is denied without exposing the
+provider identifier. Ordinary chats retain their existing resume behavior.
+This is a read-only task isolation fence, not a scoped-write grant.
+
+This protection compares stored checkout path strings. It does **not** claim
+equivalence for symlink targets, relative aliases or case-folded paths.
+Writable tools and remote effects still require separate task-scoped native
+tool/provider grants; this change does not enable them.
+
+Linked PR Check Run observations, including empty and pending-only windows, must match the numeric repository identity of every previously attested same-name source linked to the Ticket. A conflicting repository incarnation is rejected without creating a receipt, pinning the Check Run source, advancing its cursor, or issuing authority. A compatible empty/pending-only window remains observational only; it is not completed CI evidence.
+
+### Recovery of unsettled native assignment pointers
+
+Both live watchdog recovery and explicit headless quarantine retire unconsumed dispatch intents against the superseded Ticket revision in the same transaction as Mandate revocation, Assignment interruption, effect quarantine and audit. If the dispatch rejection audit cannot be persisted, the recovery transaction rolls back; an admitted dispatch receipt is never modified. This prevents a stale pending intent from remaining in the offline queue after recovery and does not authorize any provider replay or remote reconciliation.
+
+A non-running Demand must not retain an active Assignment pointer, even if its underlying attempt is already finished or missing. Native finalization and the Desktop inspector deny human acceptance until recovery; the headless recovery inbox exposes the fault without mutating it. Startup recovery, the live watchdog, or revision-bound terminal quarantine revoke the Mandate, clear the pointer, preserve finished evidence and terminal verdicts, and never infer a remote effect outcome. Nonterminal inconsistent Demands are interrupted rather than approved or automatically replayed. A trusted local headless operator can explicitly run `pandacode serve --quarantine-inactive-orphan <ticket-id> <revision>` for a queued, blocked, waiting_approval or waiting_review Ticket with a running Assignment or stale active pointer. This mirrors the live watchdog's interruption semantics, rejects a stale revision or healthy Ticket, preserves unresolved effects as uncertain and does not claim that a remote provider stopped. Terminal Tickets retain their separate quarantine command. This does not implement a provider-effect dispatcher or remote reconciliation.
+
+### Bounded structured Coordinator proposals
+
+Successful structured Coordinator responses are retained up to the native 16 KiB
+reviewed-plan byte budget rather than the generic 4,096-character evidence
+preview. The whole response is classified before truncation, so a late JSON
+route cannot silently become unreviewed free-text advice. Oversized structured
+responses retain an explicit native diagnostic and audit event, not a partial
+JSON plan. The operator must still save a bounded reviewed plan before native
+Worker dispatch. Every item in the initial reviewed dependency plan must
+explicitly identify an admitted Worker and routing rationale; a single-item
+default route or a mixed routed/unrouted batch cannot resolve pending review.
+The native transaction rejects the entire invalid batch without advancing the
+Demand revision, and the Desktop plan editor explains the requirement. The
+original role, revision, dependency and attempt-budget checks remain mandatory.
+Worker and ordinary advisory evidence retain their
+existing preview limit. This is not an automatic write or Council grant.
+
+### WorkItem correction feedback on explicit retry
+
+A native human rejection of a finished WorkItem records the exact WorkItem,
+Assignment and rejected Ticket revision with the operator's reason. An explicit
+retry of that same item receives the reason in its bounded native packet before
+the next provider admission, even when optional Coordinator advice is truncated.
+The feedback is correction context, not a grant or approval. Accepted items,
+other items and older unbound rejection history are not reused as instructions.
+Rejection never schedules a retry by itself; existing authorization, attempt
+budget and read-only execution limits still apply.
+
+### Unsettled assignment pointers in effect recovery views
+
+The Ticket effect history and global/Team reconciliation queues require live
+host verification when an unresolved receipt belongs to a Ticket with an
+unsettled active Assignment pointer, even if the attempt row is no longer
+running. This matches the native recovery inspector. Explicit revision-bound
+quarantine can clear the pointer but cannot attest that a provider stopped or
+that the remote effect succeeded. The receipt remains unresolved and must be
+independently reconciled; no automatic replay is permitted.
+
+### Conflicting running Assignment recovery
+
+Native provider authority requires exactly one running Assignment for a Ticket, not merely a matching active pointer. If a legacy or damaged database contains competing running attempts, the active provider is denied further native admission and its completion callback cannot contribute a plan or result. Callback settlement revokes the Mandate, records the rejected result without retaining provider output, and leaves the other attempt's lease visible for native recovery; it does not claim that the other provider was stopped. Ordinary session policy classification is unchanged. This is a read-only admission and recovery fence, not positive Worker write authority or authenticated remote reconciliation.
+
+The shared native provider approval response also rejects positive approvals for task-owned read-only Assignments, even if an unexpected permission card is pending or the bot thread was detached. Explicit denials and ordinary chat approvals remain available. This is an additional transport boundary, not a new grant mode.
+
+A provider that is still registered as running after a native Assignment settles keeps its original Assignment bot and Ticket project fenced, even if its mutable bot thread has been removed or its session metadata has changed. Manual preflight and the ordinary/native run-admission boundaries consult this durable identity until the provider actually exits. Unrelated ordinary chats remain unaffected by the native fence. This does not issue writable Worker authority.
+
+### Typed issue intake before Demand staging
+
+Authenticated issue lifecycle receipts cannot carry a pull-request marker.
+When an issue or PR-comment payload supplies an issue browser URL, that URL
+must match the exact repository, typed thread and number verified by the
+native Events adapter. Contradictory metadata rejects the observation before
+receipt, cursor or Ticket context writes. This preserves explicit native
+staging of permitted issue receipts; Observe does not launch providers or
+confer Auto execution authority.
+
+## Admission-pinned Worker Skill reference delivery (partial S2 / #148)
+
+The read-only Worker launch path now supports bounded, admission-pinned Skill
+reference text for the known Claude and Codex harnesses as well as the existing
+prompt-based harnesses. This uses the same verified package/dependency closure
+and prompt budget, not the native Skill tool. Text supporting files are included
+only within the existing bounds; an unsupported binary or oversized package is
+unavailable, not silently truncated. At launch, the exact package is rechecked
+against the admitted digest and session-level disable switches. A previously
+unsupported or unavailable admission snapshot is not upgraded retrospectively;
+new delivery requires a newly admitted Demand.
+
+No checkout, harness-home or Council staging directory is created or modified
+by this Worker reference path. Council reviewer file staging is unchanged.
+The reference prompt is not an invocation or executed-check receipt and does
+not confer a tool grant. Native file-based Skill invocation and its isolated
+lifecycle remain unimplemented. Ordinary bot Skill activation is unchanged.

@@ -87,7 +87,7 @@ pub(super) fn bind_finished(
         "SELECT EXISTS(SELECT 1 FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          WHERE a.id=?1 AND a.ticket_id=?2 AND a.session_id=?3
-           AND a.bot_id=t.worker_bot_id AND a.state='finished'
+           AND a.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id) AND a.state='finished'
            AND a.result=t.evidence
            AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=?2))",
         params![assignment_id, ticket_id, session_id], |r| r.get(0),
@@ -117,6 +117,33 @@ pub(super) fn bind_finished(
     Ok(())
 }
 
+/// Existing Council-enabled worker sessions are not eligible for legacy
+/// Council-Off manual acceptance. The persisted review target remains binding
+/// even if the underlying Architect team is later removed or its Council
+/// toggle changed. This is a denial guard, not reviewer invocation, verification
+/// or an exception-grant mechanism.
+pub(super) fn requires_task_review(
+    store: &Store, ticket_id: &str, worker_session_id: &str,
+) -> Result<bool> {
+    let frozen: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_council_targets WHERE ticket_id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if frozen { return Ok(true); }
+    // A configured reviewer is part of the admitted Ticket policy, not the
+    // current Team roster or the presence of an Architect session. Missing
+    // reviewer infrastructure must never downgrade a review-required Ticket.
+    // Reuse the native validated immutable profile; malformed snapshots deny
+    // acceptance instead of silently defaulting to Council Off.
+    if super::roster::ticket_profile(store, ticket_id)?.is_some_and(|profile|
+        profile.members.iter().any(|member| member.role == "reviewer")
+    ) {
+        return Ok(true);
+    }
+    Ok(architect::load(store, worker_session_id)?
+        .is_some_and(|team| team.config.council.is_some()))
+}
+
 /// Only the latest, finished, exactly correlated worker evidence is eligible
 /// for a Council lookup. A different session, coordinator plan, stale attempt
 /// or remapped bot thread cannot borrow Council status from another task.
@@ -131,7 +158,7 @@ pub(super) fn inspect(store: &Store, ticket: &Ticket) -> Result<Option<CouncilOb
     let assignment: Option<(String, String)> = store.db.query_row(
         "SELECT a.id,a.session_id FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
-         WHERE t.id=?1 AND a.bot_id=t.worker_bot_id
+         WHERE t.id=?1 AND a.bot_id=(SELECT authority.worker_bot_id FROM sa_assignment_worker_authority authority WHERE authority.assignment_id=a.id)
            AND a.state='finished' AND a.result=t.evidence
            AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments
                           WHERE ticket_id=?1)",
@@ -347,6 +374,114 @@ mod tests {
             [&session],
         ).unwrap();
         assert!(inspect(&store,&first).unwrap().is_none());
+    }
+
+    #[test]
+    fn council_required_manual_accept_denies_unbound_and_forged_pass_without_changing_ticket() {
+        let mut store = fixture();
+        let (ticket, session) = settled(&mut store, "required-no-gate");
+        attach_native_council(&store, &session);
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        let denied = superagent::accept(&store, &ticket.id, ticket.revision).unwrap_err();
+        assert!(denied.contains("Native Council review is required"));
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+
+        // A status that merely claims pass must never authorize terminal
+        // acceptance, even when there is no frozen Ticket artifact.
+        store.db.execute(
+            "UPDATE architect_teams SET content=json_set(content,
+              '$.councilStatus.state','passed','$.councilStatus.round',1)
+             WHERE session_id=?1", [&session],
+        ).unwrap();
+        assert!(superagent::accept(&store, &ticket.id, ticket.revision).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind='human_accepted'", [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn frozen_council_target_never_becomes_council_off_when_team_disappears() {
+        let mut store = fixture();
+        let cfg = superagent::create_configuration(&store, NewOrchestration {
+            name: "Frozen review must remain required".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id=?1", [&cfg.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit(
+            &mut store, &cfg.id, "Review actual artifact", "frozen-review", false,
+        ).unwrap();
+        assert!(launched);
+        let session = superagent::assignment_session(&store, &ticket.id).unwrap().unwrap();
+        attach_native_council(&store, &session);
+        assert!(superagent::on_run_finished(
+            &store, &session, true, "Worker artifact",
+        ).unwrap());
+        let waiting = superagent::get_ticket(&store, &ticket.id).unwrap();
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        // Removing the native team must not downgrade the task to legacy
+        // Council-Off approval while the original frozen target remains.
+        store.db.execute(
+            "DELETE FROM architect_teams WHERE session_id=?1", [&session],
+        ).unwrap();
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        assert!(superagent::accept(&store, &ticket.id, waiting.revision).is_err());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state,
+            "waiting_approval");
+    }
+
+    #[test]
+    fn admitted_reviewer_policy_cannot_fall_back_to_council_off_without_native_team() {
+        let mut store = fixture();
+        let (ticket, session) = settled(&mut store, "pinned-reviewer-policy");
+        // Exercise a persisted review-required policy independently of native
+        // reviewer launch, which the manual runner does not yet support.
+        // A removed reviewer must not erase the original review requirement.
+        let raw: String = store.db.query_row(
+            "SELECT profiles_json FROM sa_ticket_profiles WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut members: Vec<superagent::roster::AdmittedMemberProfile> =
+            serde_json::from_str(&raw).unwrap();
+        let mut reviewer = members.iter().find(|member| member.role == "worker")
+            .unwrap().clone();
+        reviewer.role = "reviewer".into();
+        reviewer.position = 0;
+        reviewer.bot_id = "retired-reviewer".into();
+        members.push(reviewer);
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![&ticket.id, serde_json::to_string(&members).unwrap()],
+        ).unwrap();
+        assert!(architect::load(&store, &session).unwrap().is_none());
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        let snapshot = superagent::ticket_snapshot(&store, &ticket.id, 1).unwrap();
+        assert_eq!(snapshot.finalization_gate, "council_required");
+        assert!(snapshot.council.is_none());
+        let denied = superagent::accept(&store, &ticket.id, ticket.revision).unwrap_err();
+        assert!(denied.contains("Native Council review is required"));
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state,
+            "waiting_approval");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='human_accepted'",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn invalid_admitted_review_policy_cannot_authorize_manual_completion() {
+        let mut store = fixture();
+        let (ticket, _) = settled(&mut store, "invalid-review-policy");
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json='[]' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(superagent::accept(&store, &ticket.id, ticket.revision).is_err());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state,
+            "waiting_approval");
     }
 
     #[test]

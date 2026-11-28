@@ -52,6 +52,34 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedMessage> {
 
 const COLUMNS: &str = "id,session_id,position,text,attachments,created_at,updated_at";
 
+/// The ordinary task queue and steer commands are not native SuperAgent
+/// admission surfaces. A task-owned session must be managed through its Ticket
+/// and immutable Mandate, not through the general chat composer/queue APIs.
+/// This also refuses stale, revoked and detached assignments.
+fn require_regular_queue_session(store: &Store, session_id: &str) -> Result<()> {
+    if crate::superagent::read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent queue changes require native Demand controls.".into());
+    }
+    Ok(())
+}
+
+fn require_regular_queue_entry(store: &Store, id: &str) -> Result<()> {
+    let entry = get(store, id)?;
+    require_regular_queue_session(store, &entry.session_id)
+}
+
+/// Do not expose internal Ticket messages in the generic queue, including in
+/// the global view. Native gateway delivery still uses the unfiltered queue.
+fn regular_queue_list(store: &Store, session_id: Option<&str>) -> Result<Vec<QueuedMessage>> {
+    if let Some(session_id) = session_id {
+        require_regular_queue_session(store, session_id)?;
+        return list(store, Some(session_id));
+    }
+    Ok(list(store, None)?.into_iter().filter(|entry| {
+        matches!(crate::superagent::read_only_policy(store, &entry.session_id), Ok(None))
+    }).collect())
+}
+
 pub(crate) fn list(store: &Store, session_id: Option<&str>) -> Result<Vec<QueuedMessage>> {
     let mut statement = store
         .db
@@ -152,7 +180,7 @@ pub async fn queue_list(
     session_id: Option<String>,
 ) -> Result<Vec<QueuedMessage>> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list(&store, session_id.as_deref())
+    regular_queue_list(&store, session_id.as_deref())
 }
 
 /// The session's harness and folder when `text` types a command, for the typed-command guard.
@@ -198,8 +226,13 @@ pub async fn queue_add(
     text: String,
     attachments: Option<serde_json::Value>,
 ) -> Result<QueuedMessage> {
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        require_regular_queue_session(&store, &session_id)?;
+    }
     refuse_switched_off_skill(&state, &session_id, &text).await?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_session(&store, &session_id)?;
     add(
         &store,
         &session_id,
@@ -215,11 +248,16 @@ pub async fn queue_update(
     text: String,
     attachments: Option<serde_json::Value>,
 ) -> Result<QueuedMessage> {
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        require_regular_queue_entry(&store, &id)?;
+    }
     if crate::skill_manager::typed_command(&text).is_some() {
         let session_id = get(&*state.store.lock().map_err(|e| e.to_string())?, &id)?.session_id;
         refuse_switched_off_skill(&state, &session_id, &text).await?;
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_entry(&store, &id)?;
     update(
         &store,
         &id,
@@ -231,24 +269,28 @@ pub async fn queue_update(
 #[tauri::command]
 pub async fn queue_remove(state: State<'_, AppState>, id: String) -> Result<()> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_entry(&store, &id)?;
     remove(&store, &id)
 }
 
 #[tauri::command]
 pub async fn queue_reorder(state: State<'_, AppState>, session_id: String, ids: Vec<String>) -> Result<Vec<QueuedMessage>> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_session(&store, &session_id)?;
     reorder(&store, &session_id, &ids)
 }
 
 #[tauri::command]
 pub async fn queue_take(state: State<'_, AppState>, id: String) -> Result<QueuedMessage> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_entry(&store, &id)?;
     take(&store, &id)
 }
 
 #[tauri::command]
 pub async fn queue_restore(state: State<'_, AppState>, entry: QueuedMessage) -> Result<QueuedMessage> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
+    require_regular_queue_session(&store, &entry.session_id)?;
     restore(&store, &entry)
 }
 
@@ -268,6 +310,11 @@ pub async fn steer_task(
     if text.is_empty() {
         return Err("Write a message to steer with.".into());
     }
+    // Check native authority before even attempting a remote steer.
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        require_regular_queue_session(&store, &session_id)?;
+    }
     // A task on another computer steers there and saves the message in its own history.
     if let Some(reply) = crate::remote::route(
         &app,
@@ -281,6 +328,10 @@ pub async fn steer_task(
         return Ok(reply);
     }
     refuse_switched_off_skill(&state, &session_id, &text).await?;
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        require_regular_queue_session(&store, &session_id)?;
+    }
     let reply = {
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let agent = agents
@@ -325,6 +376,45 @@ mod tests {
         let project = store.add_project(&std::env::temp_dir()).unwrap();
         let task = store.create_session(&project.id, "claude", "sonnet", "full").unwrap();
         (store, task.id)
+    }
+
+    #[test]
+    fn native_superagent_queues_are_isolated_from_ordinary_chat_controls() {
+        let (store, regular_session) = store();
+        let root = std::env::temp_dir();
+        let bot = crate::bots::create(&store, &crate::bots::BotInput {
+            name: "Queue isolation worker".into(),
+            role: "Worker".into(),
+            provider: "claude".into(),
+            model: "default".into(),
+            mode: "ask".into(),
+            ..Default::default()
+        }, &root).unwrap();
+        let (native_session, _) = crate::bots::thread_session(
+            &store, &bot, crate::superagent::CHANNEL, "unadmitted-native-ticket",
+            "Internal Demand",
+        ).unwrap();
+
+        // Internal delivery is still supported, but the generic UI cannot
+        // inspect, edit, reorder, remove, take or restore this task's messages.
+        let native_entry = add(&store, &native_session, "Private Demand data", &json!([])).unwrap();
+        assert!(require_regular_queue_session(&store, &native_session).is_err());
+        assert!(require_regular_queue_entry(&store, &native_entry.id).is_err());
+        assert!(regular_queue_list(&store, Some(&native_session)).is_err());
+        assert!(regular_queue_list(&store, None).unwrap().is_empty());
+        assert_eq!(list(&store, Some(&native_session)).unwrap().len(), 1);
+
+        // Ordinary bot queue operations are unchanged, including the global view.
+        assert!(require_regular_queue_session(&store, &regular_session).is_ok());
+        let regular_entry = add(&store, &regular_session, "Normal queued message", &json!([])).unwrap();
+        assert!(require_regular_queue_entry(&store, &regular_entry.id).is_ok());
+        assert_eq!(regular_queue_list(&store, None).unwrap().len(), 1);
+        update(&store, &regular_entry.id, "Edited message", &json!([])).unwrap();
+        reorder(&store, &regular_session, std::slice::from_ref(&regular_entry.id)).unwrap();
+        let taken = take(&store, &regular_entry.id).unwrap();
+        restore(&store, &taken).unwrap();
+        assert_eq!(regular_queue_list(&store, Some(&regular_session)).unwrap()[0].text, "Edited message");
+        assert_eq!(list(&store, Some(&native_session)).unwrap()[0].text, "Private Demand data");
     }
 
     #[test]

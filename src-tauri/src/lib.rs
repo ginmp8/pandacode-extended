@@ -168,6 +168,12 @@ impl RunningAgent {
             .ok_or("This approval belongs to an earlier run.")?
             .to_string();
         let store = store.lock().map_err(|error| error.to_string())?;
+        // Approval cards and ambient bot rules are not task-scoped grants.
+        // Recheck durable ownership at the shared native response boundary,
+        // including detached or revoked Assignments. Explicit denial is safe.
+        if approved && superagent::read_only_policy(&store, session_id)?.is_some() {
+            return Err("policy_unsupported: SuperAgent read-only assignments cannot approve provider effects.".into());
+        }
         self.send(RunInput::Approval {
             request_id: original_id,
             approved,
@@ -1585,6 +1591,7 @@ struct RunAdmission<'a> {
 
 struct PreparedRun {
     config: RunConfig,
+    superagent_session: bool,
     restore_stage: Option<String>,
     turn_message_id: i64,
     turn_started: std::time::Instant,
@@ -1768,6 +1775,7 @@ fn prepare_task_run_in_project(
     } else {
         context_recovery::prepare(&store, &session, &prompt)?
     };
+    let worker_skill_suffix=superagent::roster::worker_skill_suffix(&store,&session_id)?;
     let turn_started = std::time::Instant::now();
     let turn_message_id = if admission.goal.is_some() {
         if matches!(admission.goal, Some(goal_state::GoalRequest::Set { .. })) {
@@ -1810,8 +1818,11 @@ fn prepare_task_run_in_project(
         }
         error
     };
-    let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
-    let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
+    let mut prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    if let Some(suffix)=worker_skill_suffix { prompt.push_str(&suffix); }
+    let superagent_policy = superagent::read_only_policy(&store, &session_id).map_err(restore)?;
+    let superagent_session = superagent_policy.is_some();
+    let reviewer_policy = match superagent_policy {
         Some(policy) => Some(policy),
         None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
     };
@@ -1845,6 +1856,7 @@ fn prepare_task_run_in_project(
     agents.insert(session_id.clone(), agent);
     Ok(PreparedRun {
         config,
+        superagent_session,
         restore_stage: maintenance.then_some(session.task_stage),
         turn_message_id,
         turn_started,
@@ -1869,6 +1881,10 @@ fn prepare_cloud_attach(
     stopped: Arc<AtomicBool>,
 ) -> Result<PreparedRun> {
     let session_id = session.id.clone();
+    // Cloud reattachment is a separate provider entrypoint from normal run
+    // preparation. Never let a task-owned SuperAgent session reattach through
+    // this unrestricted path (reviewer_boundary=false, reviewer_policy=None).
+    superagent::guard_cloud_attach(store, &session_id)?;
     let cloud = cloud_agents::load(store, &session_id)?
         .filter(|cloud| cloud.active())
         .ok_or("This cloud run already ended.")?;
@@ -1895,6 +1911,7 @@ fn prepare_cloud_attach(
     let agent = RunningAgent::new(tx, stopped);
     let prepared = PreparedRun {
         config,
+        superagent_session: false,
         restore_stage: None,
         turn_message_id: cloud.turn_message,
         turn_started: std::time::Instant::now(),
@@ -2138,6 +2155,7 @@ async fn launch_operation_admitted(
     let stopped = Arc::new(AtomicBool::new(false));
     let PreparedRun {
         mut config,
+        superagent_session,
         restore_stage,
         turn_message_id,
         turn_started,
@@ -2460,15 +2478,27 @@ async fn launch_operation_admitted(
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
         let managed_worker = team.as_ref().is_some_and(|admission| admission.parent != session_id);
-        let warm_next = (providers::warms(&config) && !managed_worker && !cloud).then(|| {
+        // Task-owned sessions may not start a spare after their Assignment settles.
+        let warm_next = (!superagent_session && providers::warms(&config) && !managed_worker && !cloud).then(|| {
             let tools = host.as_ref().map(|host| (host.tools.clone(), host.approval_tools.clone())).unwrap_or_default();
             (config.clone(), tools)
         });
         // The harness and model this run used, for model health.
         let ran = (config.provider.clone(), config.model.clone());
         let reached_harness = Arc::new(AtomicBool::new(false));
+        let superagent_launch = if superagent_session {
+            // Drop any spare created by an older build; revalidate after all
+            // asynchronous preparation and before handing the turn to the provider.
+            providers::discard_warm_agent(&session_id);
+            store.lock().map_err(|e| e.to_string())
+                .and_then(|db| superagent::guard_prepared_provider_launch(&db, &config))
+        } else {
+            Ok(())
+        };
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
+        } else if let Err(error) = superagent_launch {
+            Err(error)
         } else if let Some(error) = reviewer_host_error {
             Err(error)
         } else if team_tools_missing {
@@ -3856,7 +3886,7 @@ async fn start_run_script_terminal(
         let state = app.state::<AppState>();
         let _admission = state.agents.lock().map_err(|_| "Agent state is unavailable.")?;
         agent_updates::ensure_not_installing()?;
-        if request_id.is_some_and(|id| !agent_tools::agent_ui_request_active(app.state(), id)) {
+        if request_id.is_some_and(|id| !agent_tools::agent_ui_request_active(app.state(), app.state(), id)) {
             return Err("Run request was cancelled before the script could start.".into());
         }
         terminal::start_script(app.clone(), terms, &root, cols, rows)
@@ -4088,6 +4118,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Activated GitHub Observe sources are polled by the local desktop/serve
+    // host only. They cannot infer work or bypass native source admission.
+    superagent::events::start_observe_subscriptions(app.handle().clone());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
@@ -4207,6 +4240,7 @@ pub fn run() {
             agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             vm::watch_idle(app.handle().clone());
+            superagent::start_dispatch_poll(app.handle().clone(), true);
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("Menu bar item is unavailable: {error}");
             }
@@ -4437,26 +4471,61 @@ pub fn run() {
                 bots::bot_project_ids,
                 bots::bot_message,
                 superagent::superagent_create,
+                superagent::superagent_duplicate,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,
+                superagent::events::superagent_source_integrity,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_poll_authenticated,
+                superagent::events::superagent_source_poll_team_authenticated,
+                superagent::events::superagent_source_observe_check_run,
+                superagent::events::superagent_source_observe_linked_pr_checks,
                 superagent::events::superagent_source_link_thread,
+                superagent::events::superagent_source_link_issue_pull,
+                superagent::events::superagent_source_verify_link_issue_pull,
+                superagent::events::superagent_source_unlink_thread,
                 superagent::events::superagent_source_thread_links,
+                superagent::events::superagent_source_thread_activity,
+                superagent::events::superagent_source_thread_activity_page,
                 superagent::superagent_list,
+                superagent::roster::superagent_roster,
+                superagent::roster::superagent_roster_update,
+                superagent::roster::superagent_worker_attempt_limit_update,
+                superagent::roster::superagent_team_strategy_update,
+                superagent::roster::superagent_effective_team,
                 superagent::superagent_set_enabled,
                 superagent::superagent_update,
                 superagent::superagent_delete,
                 superagent::superagent_ticket,
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
+                superagent::superagent_all_demands,
+                superagent::superagent_review_inbox,
+                superagent::superagent_team_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
+                superagent::superagent_activity_page,
+                superagent::member_activity::superagent_member_activity_page,
+                superagent::member_activity::superagent_demand_usage,
+                superagent::member_activity::superagent_team_usage,
+                superagent::member_activity::superagent_member_assignment_chat_link,
                 superagent::superagent_snapshot,
+                superagent::superagent_plan_work_item,
+                superagent::superagent_plan_work_items,
+                superagent::superagent_cancel_work_item,
+                superagent::superagent_graph,
+                superagent::superagent_effect_receipts,
+                superagent::superagent_preflight,
+                superagent::superagent_preflight_worker,
+                superagent::superagent_stage_observed_issue,
+                superagent::superagent_submit_to_worker,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_reviewed_plan,
+                superagent::superagent_cancel_dispatch_request,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
@@ -4464,6 +4533,8 @@ pub fn run() {
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
                 superagent::superagent_stop,
+                superagent::superagent_archive_demand,
+                superagent::superagent_restore_demand,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
                 bots::shared_channels::bot_shared_channel_create,

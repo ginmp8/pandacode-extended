@@ -1,0 +1,461 @@
+# SuperAgent Teams and Demands workspace (issue #148, partial)
+
+The existing **Bots → Orchestrations** workspace offers native-backed, persistent views
+for reusable Teams and their Demands/Runs. One configured Team is one SuperAgent;
+each independent Demand is a durable Ticket bound to exactly one Team.
+
+## Direct or coordinated read-only assignment to a configured Worker (partial S2)
+
+For a Team with two or more configured Workers and **no Council Reviewers**, the
+trusted local operator may now explicitly enable the Team, open **Demands / Runs**,
+load its native Worker roster, select one Worker and choose **Worker directly**
+or **Coordinator, then worker**. A fresh native preflight shows the first
+dispatch role/bot and, for coordinated work, the pinned subsequent Worker,
+project, policy revision and zero tool/side-effect authority. Submission independently rechecks the
+selected roster member, immutable project scope, current policy and live checkout
+occupancy before atomically creating the Ticket, task-scoped Mandate, Assignment,
+native bot conversation and audit. The original role/profile snapshot includes
+the entire configured Team, while the Ticket pins the one explicitly selected
+Worker. Request-key replays cannot switch Workers or deliver another packet;
+busy selected Workers are denied rather than silently queued. In coordinated
+mode, the first native Assignment belongs to the Coordinator and only the
+operator-selected Worker can be dispatched after the current Coordinator
+result; the operator still explicitly dispatches that Worker. A roster change,
+paused Worker, revoked Mandate or unresolved effect prevents admission.
+Stopping revokes the same native Mandate and rejects late callbacks.
+Other ordinary bot chats are not modified.
+
+**This does not implement autonomous multi-Worker scheduling**, implicit worker
+selection, Council reviewer execution, delegated subagents, scoped write tools,
+or automatic retry. Teams with configured Council Reviewers remain unsupported
+for execution until the native task-bound review contract is available. The
+legacy single-Worker admission path does not silently select the first member
+of a multi-Worker Team. Native tests cover selection, prohibited identities,
+task profile persistence, current Coordinator evidence, no ambient tool grants,
+idempotency and revocation. Playwright scenarios cover both direct and
+coordinated preflight/submit with the explicit Worker ID. These tests require a
+passing exact-HEAD CI run before the slice is considered verified.
+
+## Serial native WorkItem attempts (partial S2)
+
+An operator can plan individual WorkItems on a blocked or queued manual Demand with a current, unexpired, non-revoked native read-only Mandate and matching enabled Team policy. New single-item and batch planning checks this inside the same SQLite write transaction as the revision change. Disabling and re-enabling a Team cannot authorize new plans for the original Demand. Identical historical request-key replays remain read-only; existing plan evidence and cancellation controls are preserved.
+The **Reviewed dependency plan (JSON)** form also applies an operator-reviewed
+array of up to 16 items atomically, using the same native transition as
+`--plan-work-items`. Supply stable `requestKey` and `summary` fields and an
+optional `parentRequestKey` referring to a preceding item in the same plan.
+Optional paired `workerBotId` and `routingReason` record the reviewed routing
+rationale (maximum 512 UTF-8 bytes) for an admitted same-project native Worker.
+An outsider, Coordinator, Reviewer, paused or drifted Worker is rejected;
+changing a route under an existing request key is rejected. Explicitly reviewed
+routes select the actual native recipient for that WorkItem, not verified
+capability claims, automatic reassignment or write grants. The original Ticket's
+default Worker remains unchanged; unrouted items keep that default.
+The native WorkItem receipt, Desktop inspector and headless batch response
+preserve the rationale; legacy plans remain valid without it.
+The 16 KiB payload limit, strict schema, original Ticket revision, remaining
+attempt budget, dependency ownership and idempotency are enforced natively;
+a rejected item rolls back the whole batch. Keep request keys unchanged when
+retrying an uncertain acknowledgement. This is manual planning only, not a
+Coordinator-triggered dispatch, tool grant, or Council verdict.
+
+The existing **Dispatch worker** or **Retry** confirmation authorizes the current
+Ticket revision and selects exactly one ready item, prioritizing an attempted
+but unaccepted item before new items. A child becomes ready only after its
+parent's explicit acceptance. SQLite schema v56 binds the selected item to its
+actual native Assignment in the same admission transaction; historical v55
+prompt-only context is not backfilled into execution receipts. Schema v59 uses
+the exact attempt and reviewed route to resolve Worker identity at provider
+admission, callback, watchdog, human acceptance and Council observation.
+All Worker attempts share one frozen Demand budget, irrespective of recipient.
+This enables serial work across distinct configured Workers within one Demand
+through Desktop or headless dispatch, with explicit review and read-only scope;
+it does not provide autonomous progression, parallel execution or scoped writes.
+
+A finished Worker turn is still only evidence awaiting operator acceptance.
+**Accept evidence** records the matching WorkItem receipt after the original
+mandate, session, Council and external-effect guards pass. The Demand remains
+queued (coordinated path) or blocked (manual retry path) while additional items
+remain; exhausted immutable attempt budgets also leave it blocked. Only when
+all planned items have been accepted or cancelled can the current native
+acceptance transition complete the Demand. Unattempted plans can be cancelled;
+attempted ones retain their Assignment history and use native Demand recovery
+or Stop. Existing no-item Council-Off behavior is unchanged.
+
+This is a serial read-only, human-confirmed slice, not autonomous scheduling,
+verified code changes, positive tool grants, native task Council, or independent
+engineering delivery. A v55 waiting-approval Demand with unresolved plans but
+only prompt-context evidence must reject that evidence and dispatch a current
+item rather than retroactively accepting every plan.
+
+### Headless dispatch intent expiry
+
+An explicit `pandacode serve --dispatch-ticket <ticket-id> <revision> <request-key>`
+request atomically settles expired pending intents with an audit record before
+checking queue capacity, even when the live serve host was offline. An expired
+key remains a rejected receipt; it cannot be used to launch a provider. Confirm
+a new request key against the current Ticket revision. Admitted Assignment
+receipts remain immutable and require the existing native Stop/recovery path;
+expiry never cancels an Assignment, refreshes a Mandate or replays an effect.
+
+Creating or cancelling a WorkItem changes the Ticket revision and atomically
+rejects any unconsumed dispatch intent bound to an older revision. The
+rejection and audit commit with the plan change; an audit failure rolls back
+the plan edit. No automatic replacement request is created: an explicit new
+confirmation and key must reference the revised plan. Replaying the old key
+returns its historical rejected receipt. A plan replay does not invalidate a
+current confirmation, and already admitted Assignment receipts remain intact.
+
+## Native-backed surfaces
+
+The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.
+
+
+- **Duplicate Team:** the native `superagent_duplicate` command checks the source
+  Team's exact policy revision and clones its ordered Worker/Reviewer roles
+  within one SQLite transaction. A stale source, invalid roster or paused bot
+  aborts without leaving a partial Team. The new Team is disabled and never
+  copies Tickets, Mandates, source subscriptions, Council results or grants.
+  The renderer does not attempt to assemble authority from separate reads.
+
+- **Teams:** saved policy revisions, coordinator/worker bot identity and native task counters.
+  The read-only effective policy inspector shows each member's configured provider,
+  model, mode and reasoning effort alongside Skill Library status; these are
+  configuration observations, not provider eligibility, grants or proof of execution.
+  Native roster reads reject non-contiguous Worker/Reviewer positions and role
+  aliases to the Coordinator or primary Worker rather than silently remapping authority.
+  The directory shows native correlated member counts (one Coordinator,
+  configured Workers and Reviewers) without inflating Ticket totals when a
+  Team has multiple roles. Search and Off/Manual status filters operate only
+  on the native-loaded Team directory and do not change the selected Team,
+  stored policies, permissions or execution. Older fixtures without counts
+  are marked unavailable rather than inferred.
+  A separate native **needs attention** counter includes blocked, failed,
+  interrupted and inconclusive durable Tickets, not just blocked; it is
+  computed across the entire Team in SQLite (not from loaded page rows).
+  Council-pending and human-approval states remain separate, and no status
+  count implies a verified review or task completion.
+- **Demands/Runs:** a read-only native Ticket index with stable 200-row
+  cursor pages and an explicit **All Teams / specific Team** filter. The Team
+  filter is enforced by the native SQL query **before pagination**, so sparse
+  Teams are not omitted merely because other Teams have newer Tickets.
+  Changing Team resets the pagination cursor and loaded Board/List rows;
+  refresh queries current native state. The board buckets Working, Awaiting
+  decision, Needs attention and Finished or stopped. All column counts represent
+  **only loaded pages for the selected Team scope**, not complete totals.
+  Unknown or malformed Team IDs fail closed instead of showing false empty results.
+  Search objectives submits an explicit native SQLite substring query (ASCII
+  case-insensitive and literal, including percent/underscore) before pagination;
+  results do not depend on which pages were previously loaded. Search is
+  restricted to the Ticket objective and does not expose request keys, actor,
+  provider messages, private evidence or session IDs. The form accepts Enter
+  or its Search button; an empty search restores the unfiltered native index.
+  Searches are bounded to 128 UTF-8 bytes and cannot authorize an action.
+- **Review inbox:** a separate native, bounded cross-Team query shows actual
+  `waiting_approval` (human decision) and `waiting_review` (native Council
+  pending, **not** a verified pass) Tickets, even when they fall outside the
+  general Demand index's most recent 200 rows. Open Demand resolves the
+  original Team before offering native task controls.
+- **Open demand:** resolves the original Team, fetches the exact Ticket
+  when outside the Team's latest 50, verifies its Team ownership, then offers
+  the established native Ticket controls.
+- **Admitted Team configuration:** the native Ticket snapshot compares its original
+  Mandate policy revision with the current Team policy inside one read transaction,
+  while retaining the frozen original role identities, models and assigned Skill IDs.
+  The Demand inspector displays both revisions and the original configuration,
+  not current bot names or local checkout paths. Drift never changes admission
+  authority, authorizes a tool or establishes actual Skill invocation. Legacy
+  Tickets without a recorded profile explicitly show unavailable provenance.
+- **Native Assignment inspector:** the Ticket snapshot includes transactional
+  native Assignment insights: current linkage, recorded result presence, revocation,
+  bounded attempt budget and timestamps. No provider result content is displayed.
+  A persisted running assignment is **not proof of live provider execution**.
+
+## Non-authority and recovery
+
+The views never issue Mandates, spawn sessions, infer task approval, start source
+Auto, execute GitHub effects or authorize tools. Source events do not create
+Demands. Coordinator and Council remain read-only; existing task admission must
+repeat native guards. Automatic multi-Worker delegation, scoped writes, recursive subagents and production
+external-effect dispatch remain unavailable. Explicit operator-selected direct
+and coordinated read-only Worker admission has the limited native boundary
+described above. Retry and coordinated dispatch refuse pending or uncertain
+external-effect receipts before reserving a new Assignment.
+Ticket selection is discarded on Team change and when a native reload finds
+the Assignment missing. Board uses ordinary keyboard-focusable native buttons
+and the same theme tokens for desktop, narrow, light and dark views.
+
+## Executable evidence and limitations
+
+- Rust: native_ticket_snapshot_inspects_attempt_budget_and_revocation_without_grants.
+- Playwright: native-backed attempt inspector shows recorded sessions and run
+  budgets without granting effects.
+- Playwright: cross-Team Demands index checks Board/List presentation while
+  opening only the immutable Ticket's original Team.
+- Rust: native_team_filtered_demand_pages_are_complete_isolated_and_restart_safe
+  checks 205-Ticket Team pagination, other-Team isolation, invalid filters and restart reads.
+- Playwright: native Team filter pages independently and resets pagination when changing Teams;
+  its calls retain the exact selected native Team and page cursor without admitting work.
+- Rust: native_demand_search_is_pre_paginated_scoped_literal_and_restart_safe
+  validates >200 newer nonmatches, literal wildcard and SQL-injection text,
+  native Team/state intersection, cursor stability, invalid input and restart.
+- Playwright: native objective search invokes the indexed native Ticket projection,
+  supports Enter/clear, retains Board/List parity and issues no write commands.
+
+These tests must pass at the exact current SHA. This partial feature does not
+close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,
+source Auto, safely scoped worker writes, headless parity and recovery remain.
+
+
+### GitHub Issue lifecycle observation
+
+Sources can explicitly observe `issues.closed` and `issues.reopened` from
+GitHub's REST Events `IssuesEvent`, alongside existing issue-open, comment
+and PR/review/Check Run classes. The configured repository and exact actor,
+signed-in operator identity and native Observe revision are verified before a
+decision receipt is stored. Closing or reopening an issue changes no Ticket
+state, starts no Demand and grants no Worker privilege. Event body content is
+not persisted or interpreted as a task instruction. Replays are idempotent
+across application restart. This extends observation only; Auto remains
+unavailable.
+
+### Authenticated Observe: self-event loops and bounded pagination
+
+The operator-issued **Poll authenticated GitHub** command resolves the current
+account with native `gh api user`, then reads up to three chronological
+`repos/{owner}/{repo}/events` pages (100 events each). It validates ordered
+numeric event IDs and a persisted-cursor or source-activation boundary before
+committing any decision. An incomplete or changing feed, failed request or
+invalid identity is an error: the previous cursor is not silently advanced.
+A source can still miss events that GitHub no longer retains, so this is **not**
+a guaranteed subscription or permission to enable Auto.
+
+An event authored by the authenticated operator is durably recorded as
+`ignored_filter` even when its configured actor matches the source; such
+self-authored events are never `observed_permitted`. The UI reports new
+self-authored denials separately. Only bounded metadata is stored; issue and
+comment bodies are not included in decision receipts. Off performs no network
+polling, and linked source events remain context only, not task grants or tool
+instructions. This intentionally reuses the existing policy-denial receipt
+schema without a destructive migration.
+
+
+### Native execution graph (bounded ownership view)
+
+In the Demand inspector, **Inspect graph** reads `superagent_graph`
+from the same native Ticket/Assignment storage and displays a revision-bound
+Ticket root, its latest 50 real assignment attempts and any explicitly
+pending human or Council decision state. Edges mean **Ticket owns attempt**
+or **Ticket awaits decision**, not proof of agent-to-agent delegation or
+Council approval. The response omits objectives, authorization tokens,
+worker results and private transcripts. The graph is loaded on demand,
+fails closed when the Ticket revision has changed, and creates no work or
+grants. Keyboard users and screen readers receive a semantic ordered
+list; a non-SVG layout keeps narrow and high-contrast modes legible.
+
+
+## Admission-pinned Worker Skill prompt delivery (partial S2 / AC-10)
+
+For native prompt-based harnesses, new Worker profiles can pin the digest of
+their assigned, trusted Skills and complete required dependency closure during
+Demand admission. The native provider preparation supplies those exact bounded
+reference instructions, and the final launch guard rejects missing, changed,
+disabled or differently composed pinned inputs. The package is never installed,
+activated or copied to the checkout; no extra tool permission is issued.
+Historical snapshots, missing/untrusted packages and file-based harnesses
+(Claude/Codex) do not silently acquire new inputs. The admitted configuration
+reports pinned, unavailable or unsupported prompt delivery separately from
+actual invocation or execution evidence. The conventional application database
+and adjacent Skills Library must be available; arbitrary detached database copies
+do not guess a library location. This is not a native Skill invocation receipt
+and does not satisfy task-owned file staging, autonomous writes or Council review.
+
+## Effective Team policy and Skills inspection (partial S2 / AC-10)
+
+From **Configure Team roles**, load the existing native roster and select **Inspect
+effective policy and Skills**. The main-window-only `superagent_effective_team`
+command reads the Team's policy revision and actual existing bot profiles
+(Coordinator, ordered Workers and optional Reviewers), including the bot's
+configured harness/provider, model, mode, project and paused state.
+
+The configured-role editor preserves the operator's explicit order for additional
+Workers with keyboard-focusable Up/Down controls; the revision-guarded native
+roster commit stores that order and reloads it from SQLite. This is configuration
+only, not task delegation or permission to execute multiple Workers.
+
+The command inspects the **existing PandaCode Skills Library** and each bot's
+assigned skill IDs without importing, installing, activating, executing or granting
+anything. It reports library presence and native package-scan safety state
+(`clean`, `findings_acknowledged` or `review_required`) separately. Missing
+assigned IDs remain visible. The native verifier also checks each assigned
+package's required transitive dependencies without staging or activating
+them. It reports `dependency_unavailable` for a missing, unsafe, or changed
+dependency, `dependency_cycle` for a cycle, and `dependency_limit` when the
+read-side closure exceeds 64 distinct packages (including the assigned root).
+These states are actionable configuration findings; dependencies are not added
+to the bot's assignments, and a successful inspection does not supply a
+Skill to any task or prove its invocation. A native, per-member local configuration check
+reports paused bots, missing assigned Skills and unresolved Skill safety findings
+with actionable remediation in the existing Bots / Skills Manager screens.
+It also detects Workers whose project changed after Team configuration; a
+Coordinator may intentionally have a separate project. An out-of-scope Worker
+is a configuration problem, never a grant or a reason to substitute a bot.
+These checks do not infer a live provider capability, do not change any stored
+bot or Team policy, and never grant execution rights. **Harness eligibility and actual invocation/evidence
+are explicitly `not_verified`** until a task-bound provider and evidence contract
+can establish them; a known package is not a verified reviewer skill.
+
+The UI rejects mismatched Team/policy revisions and clears the snapshot when
+refreshing or switching Teams. This is a **read-only configuration inspection**,
+not an admission, task-effective immutable policy snapshot, provider liveness
+proof, positive permission grant, or completed S2-UX wizard. Multi-role execution
+remains disabled until native scoped role admission is implemented.
+
+### Editing reusable Teams after completed demands
+
+Disabled Teams can rename themselves and change their configured additional Worker/Reviewer roster after all previous Tickets reach terminal states and every external-effect receipt is reconciled. These operations increment the native policy revision and retain every historical Ticket's admitted revision, original Worker, objective, audit and evidence. Primary Coordinator/Worker/project identity changes remain forbidden once a Team has Ticket history; create a separate Team to change those identities. The native SQL guards also reject active/reviewable Tickets, running assignments, pending/uncertain effects and stale revisions at the moment of mutation. The UI enables role editing for settled history, but native validation remains authoritative even if the visible list is incomplete. No such edit starts a Worker or grants access.
+
+### Portable bot-profile drift preflight (schema v4, partial S2)
+
+The native companion export now includes schema version 4 and an **ordered,
+configuration-only bot profile** for every Coordinator, Worker and Reviewer:
+portable bot display name, configured provider/harness, model, bot mode,
+reasoning effort and assigned Skill IDs. It does **not** export provider credentials, local bot IDs,
+task grants, objectives, session history or Skill contents. Legacy imports remain accepted under their original
+conservative policy.
+
+A v4 preview/confirmed import requires the target installation to already
+contain an unambiguous existing bot for each role with the same configuration.
+Missing/changed model, harness, mode, reasoning effort or Skill assignment
+rejects the entire preflight **before a private backup or any SQLite mutation**.
+Earlier v1/v2/v3 manifests remain importable under their original conservative
+checks; v3 did not pin reasoning effort. Merely changing a v4 document's
+schema version to v3 cannot bypass that check while retaining v4 fields.
+A destination may use different local bot IDs. Successful imports remain **disabled and Off** and do not
+install Skills, change existing bots, issue a grant, or prove provider
+availability/Skill invocation. Native execution capability still requires
+independent task-scoped admission checks.
+
+
+### Immutable admitted Team profiles (schema v46; partial DD-13 / S2)
+
+At the point of each native manual/headless Demand admission, the SQLite
+transaction now captures its Team policy revision and a bounded, configuration-only
+profile for the selected Coordinator, ordered Workers and optional Reviewers:
+existing bot identity, project, provider/harness, model, mode, reasoning effort
+and assigned Skill IDs. It saves the profile atomically with the Ticket, Mandate,
+Assignment and admission audit. The task inspector returns the historical
+`admittedProfile` even when bot defaults subsequently change. Existing pre-v46
+Tickets report no profile rather than fabricated historical values.
+
+A **new worker session** initiated by retry or after a coordinated plan must
+match the captured worker profile. If the bot changes, native admission stops
+without dispatching a more privileged or different model; the operator must
+create a new explicitly authorized Demand. Already admitted sessions retain
+their pinned session profiles, and ordinary chats are unaffected. This snapshot
+is **not** a tool grant, a verified Skill invocation, a working multi-worker
+scheduler, or a substitute for native Council/effect-time authorization.
+
+Rust regressions cover replay, changed bot profile denial, fresh-Demand profiles,
+restart persistence and schema-v45 upgrade preserving historical Tickets.
+
+
+## Atomic multi-role Team creation (partial UX-P2)
+
+The native `superagent_create` IPC accepts an optional ordered `roster` with `workerBotIds` and `reviewerBotIds`. It also accepts optional `maxWorkerAttempts` (1–4); a provided cap is saved transactionally with the disabled Team and its roles, while omission preserves the legacy default of two. Example templates suggest a bounded cap but never select bots or enable retries, permissions or work. Existing callers without this argument retain the one-Worker contract. With a roster, the Team and all role rows are created in one SQLite transaction. Duplicate, paused, missing, over-limit and cross-project Worker roles fail without leaving a partially created Team. All roles reuse existing bot IDs. New Teams remain disabled/Off. Explicit read-only selection of one Worker is supported as described above; autonomous multi-Worker scheduling and reviewer-backed execution remain unavailable. The workspace exposes these optional members before Save and disables unsupported execution. Rust rollback/restart and Playwright creation regressions are authored, but their execution requires verification on the published SHA.
+
+
+### Native Ticket activity paging (desktop)
+
+The Ticket inspector begins with a bounded latest-50 native audit snapshot. The user can
+explicitly load older pages through `superagent_activity_page`, with an exclusive audit-ID
+cursor, a 1–100 item limit, Ticket identity checks and descending durable event order.
+All/Compact/JSON views and the text filter operate on the loaded native events only;
+there is no inferred history or implicit provider action. The main-window IPC guard
+protects full private audit details. Headless activity inspection remains separately
+redacted and read-only. Missing or invalid Tickets and cursors fail closed.
+
+Validation: `native_desktop_activity_pages_are_ticket_scoped_strict_and_restart_durable`
+(Rust) and `desktop native Ticket activity pages are keyset-bound` (Playwright).
+These tests do not constitute proof of native Council or tool authorization.
+
+## Versioned Team purpose and strategy (v50, partial UX-P2)
+
+The native Team roster now stores a bounded purpose (up to 400 characters)
+and one of `balanced`, `economy`, `performance`, `security_critical`
+or `custom`. The disabled Team's **Save Team purpose and strategy** action
+uses the same main-window authorization, policy-revision compare-and-swap,
+unsettled-Demand prohibition and transaction boundary as the Worker attempt
+budget. Invalid or stale edits fail before changing the saved intent.
+
+An admitted Demand freezes the effective Team purpose and strategy in a
+revision-bound `sa_ticket_strategies` record **in the same transaction** as
+its Ticket, role profile, Mandate and first Assignment. Subsequent Team edits
+do not rewrite that snapshot. Pre-v50 Tickets deliberately show unavailable
+strategy provenance; their authorization and provider behavior remain unchanged.
+Duplicating a Team includes the strategy, but never copies runtime state.
+
+Portable SuperAgent manifest **v6** carries both fields, validates them before
+import, rejects conflicts with existing Teams and imports new Teams disabled.
+Versions 1–5 remain importable with empty purpose and balanced strategy.
+Version 6 shares the native roster capacity: 1–16 Workers (including the
+compatibility primary Worker) and 0–8 Reviewers. Versions 2–5 retain their
+original limits of 8 Workers and 4 Reviewers; version 1 remains single-worker.
+This is portable configuration capacity only, not permission to execute
+parallel Workers or native Council reviews.
+No strategy value grants tools, changes existing bot models, selects providers,
+infers costs, initiates GitHub work, supplies a Council verdict or launches a
+multi-worker runtime. An actual optimization scheduler remains out of scope for
+this validated configuration slice.
+
+Evidence targets: `team_strategy_is_versioned_portable_and_pinned_per_demand_after_restart`,
+`portable_v6_strategy_roundtrip_rejects_conflicting_and_legacy_metadata`
+(Rust), and `Team strategy changes through native CAS and persists after
+refresh` (Playwright). Execution results must be checked on the **exact
+published commit**, not inferred from these test declarations.
+
+
+### Team member native history counters
+
+Each member's Team-scoped Activity inspector displays native totals for recorded
+Assignments, distinct Demands and distinct Demands in blocked, failed, interrupted
+or inconclusive states. The counts are computed from all persisted assignments
+before pagination and are not inferred from loaded rows or provider messages.
+Retries of a Demand count as additional Assignments, not additional Demands.
+Counts are observational only: they grant no tools and imply no verified Council
+approval. Team and bot identity filters are applied in SQLite; cursor pages,
+including the final empty page, retain the full-history summary.
+
+The read-only headless equivalent accepts
+`--list-team-member-activity <team-id> <bot-id> --demand <ticket-id>` and
+the existing optional `--before <created-ms> <assignment-id>` cursor in
+either order. Omitting `--demand` preserves the unfiltered history.
+The native query checks Team, bot, Demand and cursor ownership before
+pagination; counts describe the filtered scope, even on its final empty page.
+The JSON response includes `demandId`, `assignmentCount`, `demandCount`
+and `attentionDemandCount`. No task, audit, chat or provider state is changed.
+
+### Team activity chat navigation boundary
+
+Team member Activity uses the immutable native Team, Ticket, Assignment and bot
+identities to obtain a fresh task-bound session link immediately before opening
+a chat. The backend checks the original native thread route and surviving
+session; moved, deleted, stale or fabricated thread mappings are unavailable.
+Historical audit rows remain inspectable without recreating conversations.
+The read-only link lookup never grants tools, launches workers, changes approvals
+or changes ordinary bot chats.
+
+### Structured Coordinator proposals
+
+When the original native Coordinator finishes with a complete JSON dependency plan, the Demand inspector can prefill the reviewed-plan editor with that untrusted proposal. Native inspection checks the original assignment and thread, current read-only mandate, Team revision, admitted Worker profiles, ordered dependency keys, route rationale and attempt budget. Invalid, stale, paused or unstructured proposals do not prefill the editor; ordinary advisory evidence remains inspectable. The operator must still review and explicitly save the plan using the existing transactional planning command. This creates no new assignment, permission, external effect or Council verdict. It is not automatic execution or autonomous acceptance.
+
+An original Coordinator response shaped as a JSON array or object (including malformed containers, Markdown JSON fences, bare fenced containers, or a plan-shaped line following a preamble) cannot be dispatched through the original Worker fallback before a plan is explicitly saved. Only an entire valid raw JSON array can prefill the reviewed-plan editor; wrappers are not silently extracted or repaired. The same native guard applies to desktop dispatch and new headless dispatch requests. Both Ticket inspection surfaces expose `coordinatorPlanReviewRequired` (true/false, or null when the read-side check is unavailable). The Desktop inspector explains the required action and disables the matching manual dispatch button until a plan is saved. This is not a grant; native admission still rechecks all guards. After saving, only the selected persisted WorkItem and its accepted parent evidence are forwarded from a structured plan; the original unreviewed response stays in the Coordinator Assignment history. Free-text advisory responses retain their legacy manual read-only dispatch path.
+
+### Native assignment checkout ownership (S1)
+
+Current native Assignments reserve the admitted project root. The ordinary task
+worktree conversion is unavailable for native SuperAgent sessions (including
+settled or detached assignment history). A persisted session worktree or branch
+override invalidates native provider admission and result settlement even when
+the project ID still matches. Ordinary unstarted tasks retain their worktree
+conversion. Explicitly authorized assignment-owned worktrees remain a future
+scoped-write capability; this guard does not enable writes.

@@ -1,7 +1,8 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
-  projectId:string; enabled:boolean; policyRevision:number };
+  projectId:string; enabled:boolean; policyRevision:number;
+  workerCount?:number; reviewerCount?:number };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type Activity = { id:number; kind:string; detail:string; at:number };
@@ -9,14 +10,16 @@ type Assignment = { id:string; botId:string; sessionId:string; attempt:number; s
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
 const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
+const rosters = new Map<string,{workerBotIds:string[];reviewerBotIds:string[]}>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
 ):Promise<T> {
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
-  const needsBots=['superagent_create','superagent_update',
-    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
+  const needsBots=['superagent_create','superagent_update','superagent_duplicate',
+    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import',
+    'superagent_preflight'].includes(command);
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
@@ -24,12 +27,27 @@ export async function invokeSuperagent<T>(
   switch(command){
     case 'superagent_list': value=[...configs.values()].map(config=>({
       ...config,
+      workerCount:rosters.get(config.id)?.workerBotIds.length??1,
+      reviewerCount:rosters.get(config.id)?.reviewerBotIds.length??0,
       ticketCount:(tickets.get(config.id)||[]).length,
       runningCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='running').length,
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_review_inbox':
+      // Preview never creates an authentic native human/Council pending decision.
+      value=[];break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId),members=rosters.get(c.id)??{
+        workerBotIds:[c.workerBotId],reviewerBotIds:[],
+      };
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...members.workerBotIds],
+        reviewerBotIds:[...members.reviewerBotIds],
+        executionReady:members.workerBotIds.length===1&&!members.reviewerBotIds.length};
+      break;
+    }
     case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':
@@ -47,18 +65,84 @@ export async function invokeSuperagent<T>(
       else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
+    case 'superagent_activity_page': {
+      const t=[...tickets.values()].flat().find(item=>item.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      const limit=Number(args.limit??50), beforeId=args.beforeId===undefined?null:Number(args.beforeId);
+      if(!Number.isInteger(limit)||limit<1||limit>100||
+          (beforeId!==null&&(!Number.isSafeInteger(beforeId)||beforeId<=0)))
+        throw Error('Invalid native activity pagination input.');
+      const eligible=[...(activity.get(t.id)||[])].filter(entry=>beforeId===null||entry.id<beforeId)
+        .sort((a,b)=>b.id-a.id);
+      const items=eligible.slice(0,limit), hasMore=eligible.length>limit;
+      value={ticketId:t.id,items,hasMore,nextCursor:hasMore?items[items.length-1].id:null};
+      break;
+    }
     case 'superagent_source_thread_links':
       value=threadLinks.get(args.ticketId)||[];break;
     // These are preview-only references. Real native code verifies source and
     // Ticket orchestration ownership and rejects conflicting thread reuse.
     case 'superagent_source_link_thread':
       throw Error('Source linking requires a native trusted event source.');
+    case 'superagent_source_observe_linked_pr_checks':
+      throw Error('Linked PR Checks require a signed-in native GitHub adapter.');
     case 'superagent_create':{
       const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
       if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');
+      const workers:string[]=args.roster?.workerBotIds??[b.id];
+      const reviewers:string[]=args.roster?.reviewerBotIds??[];
+      if(!Array.isArray(workers)||!Array.isArray(reviewers)||workers[0]!==b.id||
+          workers.length<1||workers.length>8||reviewers.length>4)
+        throw Error('Invalid Team role limits.');
+      if(new Set([a.id,...workers,...reviewers]).size!==1+workers.length+reviewers.length)
+        throw Error('A bot cannot occupy multiple Team roles.');
+      for(const id of workers) {
+        const member=find(id);
+        if(member.paused||member.projectId!==b.projectId)throw Error('Worker project or availability mismatch.');
+      }
+      for(const id of reviewers)if(find(id).paused)throw Error('Paused reviewer bot.');
       const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:a.id,
-        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1};
-      configs.set(c.id,c);value=c;break;
+        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1,
+        workerCount:workers.length,reviewerCount:reviewers.length};
+      configs.set(c.id,c);
+      rosters.set(c.id,{workerBotIds:[...workers],reviewerBotIds:[...reviewers]});
+      value=c;break;
+    }
+    case 'superagent_duplicate':{
+      // The browser fixture mirrors the native single-transaction CAS API;
+      // it is never an authorization or a substitute for Rust acceptance.
+      const source=get(args.sourceId);
+      if(source.policyRevision!==args.expectedRevision)
+        throw Error('Source Team policy revision changed; reload before duplicating.');
+      if(typeof args.name!=='string'||!args.name.trim()||
+          new TextEncoder().encode(args.name).length>120||configName(args.name))
+        throw Error('Invalid or duplicate Team name.');
+      const members=rosters.get(source.id)??{
+        workerBotIds:[source.workerBotId],reviewerBotIds:[],
+      };
+      const workers=[...members.workerBotIds],reviewers=[...members.reviewerBotIds];
+      const coordinator=find(source.coordinatorBotId),primary=find(source.workerBotId);
+      if(coordinator.paused||primary.paused||
+          workers[0]!==primary.id||workers.length<1||workers.length>8||
+          reviewers.length>4||
+          new Set([coordinator.id,...workers,...reviewers]).size!==1+workers.length+reviewers.length)
+        throw Error('Source Team roles are no longer eligible for duplication.');
+      for(const id of workers){
+        const member=find(id);
+        if(member.paused||member.projectId!==primary.projectId)
+          throw Error('Source Worker project or availability changed.');
+      }
+      for(const id of reviewers)if(find(id).paused)
+        throw Error('Source Reviewer is paused.');
+      const copy:Config={
+        id:crypto.randomUUID(),name:args.name,coordinatorBotId:coordinator.id,
+        workerBotId:primary.id,projectId:primary.projectId,
+        enabled:false,policyRevision:1,
+        workerCount:workers.length,reviewerCount:reviewers.length,
+      };
+      configs.set(copy.id,copy);
+      rosters.set(copy.id,{workerBotIds:workers,reviewerBotIds:reviewers});
+      value=copy;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
@@ -72,13 +156,37 @@ export async function invokeSuperagent<T>(
     }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
+      if(args.enabled && ((c.workerCount??1)>1||(c.reviewerCount??0)>0))
+        throw Error('Multi-member execution requires native scoped admission.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}
       value=c;break;
     }
     case 'superagent_delete':{
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
-      configs.delete(c.id);value=null;break;
+      configs.delete(c.id);rosters.delete(c.id);value=null;break;
+    }
+    case 'superagent_preflight': {
+      // Sample-mode UI testing only: never claim provider permission or
+      // create a Ticket. Production preflight lives in native Rust.
+      const c=get(args.orchestrationId);
+      const objective=typeof args.objective==='string'?args.objective.trim():'';
+      if(!objective||new TextEncoder().encode(objective).length>16000||objective.includes('\0'))
+        throw Error('A nonempty, bounded objective is required.');
+      const coordinator=find(c.coordinatorBotId),worker=find(c.workerBotId);
+      const coordinated=args.coordinated===true;
+      const selected=coordinated?coordinator:worker;
+      const reason=!c.enabled?'Team is disabled or bots are globally paused.':
+        coordinator.paused||worker.paused||worker.projectId!==c.projectId
+          ?'Selected bot is paused or outside the Team project.':
+        (c.workerCount??1)>1||(c.reviewerCount??0)>0
+          ?'Multi-member execution requires native scoped role admission; manual runner is single-worker.':null;
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        projectId:c.projectId,selectedBotId:selected.id,
+        selectedRole:coordinated?'coordinator':'worker',
+        eligible:reason===null,reason,canStageBlocked:false,
+        allowedTools:[],allowedSideEffects:false,attemptBudgetMs:4*60*60*1000};
+      break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{
@@ -132,18 +240,26 @@ export async function invokeSuperagent<T>(
     case 'superagent_manifest_import':{
       const doc=args.document;if(doc?.schemaVersion!==1||!Array.isArray(doc.orchestrations))throw Error('Invalid manifest.');
       const pending:string[]=[],unchanged:string[]=[];
+      const localRoles:Array<{coordinatorId:string;workerId:string;existingId:string|null}>=[];
       for(const preset of doc.orchestrations){
         const found=configName(preset.name);
         if(preset.autonomy!=='off'||preset.council?.enabled||preset.maxConcurrentTasks!==1)throw Error('Unsupported policy.');
         const a=bots.filter(b=>b.name.toLowerCase()===String(preset.coordinatorBot).toLowerCase());
         const b=bots.filter(b=>b.name.toLowerCase()===String(preset.workerBot).toLowerCase());
         if(a.length!==1||b.length!==1||a[0].id===b[0].id)throw Error('Invalid portable bot reference.');
+        localRoles.push({coordinatorId:a[0].id,workerId:b[0].id,existingId:found?.id??null});
         if(found){if(found.coordinatorBotId!==a[0].id||found.workerBotId!==b[0].id)throw Error('Conflicting preset.');
           unchanged.push(preset.name);
         }else pending.push(preset.name);
       }
+      // Preview-only counterpart to the native review identity contract.
+      // It is intentionally not a real native receipt or authorization.
+      const input=new TextEncoder().encode(JSON.stringify({document:doc,localRoles,pending,unchanged}));
+      const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',input));
+      const reviewDigest=Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');
       if(command==='superagent_manifest_import'){
         if(args.confirmed!==true)throw Error('Confirmation required.');
+        if(args.reviewDigest!==reviewDigest)throw Error('Portable Team preview is stale; review it again.');
         for(const name of pending){
           const preset=doc.orchestrations.find((item:any)=>item.name===name);
           const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
@@ -151,7 +267,7 @@ export async function invokeSuperagent<T>(
             projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
         }
         value={created:pending,unchanged};
-      }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};
+      }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true,reviewDigest};
       break;
     }
     default: throw Error('Unknown preview SuperAgent command: '+command);

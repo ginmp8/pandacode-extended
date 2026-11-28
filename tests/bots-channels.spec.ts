@@ -517,6 +517,62 @@ test.describe('shared bot channels', () => {
     });
   }
 
+  test('Channel Council authors mandatory native file criteria and retains drafts across refresh', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const body = source.replace(
+        /if\s*\(\s*command\s*===\s*['"]bots_list['"]\s*\|\|\s*command\.startsWith\(\s*['"]bot_['"]\s*\)\s*\)/,
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      if (body === source) throw new Error('Channel Council preview command interceptor was not installed.');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const trigger = composer.locator('.bc-council-trigger');
+    await trigger.click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByLabel('Criteria source').selectOption('user');
+    const row = panel.locator('[data-council-criterion-row]').first();
+    await row.getByLabel('Criterion ID').fill('policy');
+    await row.getByLabel('Review lens').fill('Manual lens');
+    await row.getByLabel('Native file check').selectOption('reviewed_file_text_contains');
+    await expect(row.getByLabel('Review lens')).toBeHidden();
+    await row.getByLabel('Repository-relative file').fill('../policy.txt');
+    await row.getByLabel('Expected text').fill('line one\nline two');
+    await composer.getByLabel('Message channel').fill('Review this policy.');
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+    await expect(page.getByText('Choose one repository-relative file with a valid review lens (at most 80 characters).', { exact: true })).toBeVisible();
+    await row.getByLabel('Repository-relative file').fill('policy.txt');
+    await panel.getByRole('button', { name: 'Add criterion' }).click();
+    const second = panel.locator('[data-council-criterion-row]').last();
+    await expect(second.getByLabel('Native file check')).toHaveValue('');
+    await expect(second.locator('[data-file-check-text]')).toHaveValue('');
+    await second.getByRole('button', { name: 'Remove criterion' }).click();
+    await page.keyboard.press('Escape');
+    await refreshUnchangedChannel(page);
+    await trigger.click();
+    await expect(row.getByLabel('Native file check')).toHaveValue('reviewed_file_text_contains');
+    await expect(row.getByLabel('Repository-relative file')).toHaveValue('policy.txt');
+    await expect(row.getByLabel('Expected text')).toHaveValue('line one\nline two');
+    await row.getByLabel('Native file check').selectOption('');
+    await expect(row.getByLabel('Review lens')).toHaveValue('Manual lens');
+    await row.getByLabel('Native file check').selectOption('reviewed_file_text_contains');
+    await composer.evaluate(form => (form as HTMLFormElement).requestSubmit());
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted.criteria).toEqual([{
+      id: 'policy', lens: 'File contains: policy.txt', target: 9, required: true, evidenceRequired: true,
+      nativeEvidence: { kind: 'reviewed_file_text_contains', path: 'policy.txt', expectedText: 'line one\nline two' },
+    }]);
+    expect(posted.reviewPermissions).toBeUndefined();
+  });
+
   test('Channel Council denies the implicit lead executor before dispatch but permits explicit other executors', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {

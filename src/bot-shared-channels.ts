@@ -1,4 +1,6 @@
 import type { Bot } from './bots';
+import type { CouncilCriterion } from './architect-types';
+import { FILE_CHECK_FIELDS, fileCheckLens, readFileCheck } from './council-criteria-editor';
 import { botAvatarHtml } from './bot-avatars';
 import { escape, icon } from './dom';
 import { WORKING_LABELS } from './bot-thread';
@@ -173,6 +175,49 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
 }
 
 
+/** Keep the manual criterion draft separate from an explicitly selected native check. */
+function syncSharedChannelFileCheckFields(row: HTMLElement, inactive: boolean): void {
+  const kind = row.querySelector<HTMLSelectElement>('[data-file-check-kind]')!;
+  const path = row.querySelector<HTMLInputElement>('[data-file-check-path]')!;
+  const sha = row.querySelector<HTMLInputElement>('[data-file-check-sha]')!;
+  const fragment = row.querySelector<HTMLTextAreaElement>('[data-file-check-text]')!;
+  const lens = row.querySelector<HTMLInputElement>('input[name="councilCriterionLens"]')!;
+  const evidence = row.querySelector<HTMLInputElement>('input[name="councilCriterionEvidence"]')!;
+  const preview = row.querySelector<HTMLElement>('[data-channel-file-check-preview]')!;
+  const active = kind.value !== '';
+  kind.disabled = inactive;
+  row.querySelector<HTMLElement>('[data-file-check-fields]')!.hidden = !active;
+  row.querySelector<HTMLElement>('[data-file-check-sha-field]')!.hidden = kind.value !== 'reviewed_file_sha256';
+  row.querySelector<HTMLElement>('[data-file-check-text-field]')!.hidden = kind.value !== 'reviewed_file_text_contains';
+  path.disabled = inactive || !active;
+  sha.disabled = inactive || kind.value !== 'reviewed_file_sha256';
+  fragment.disabled = inactive || kind.value !== 'reviewed_file_text_contains';
+  for (const manual of [lens, evidence]) {
+    manual.disabled = inactive || active;
+    manual.closest('label')!.hidden = active;
+  }
+  preview.hidden = !active;
+  preview.textContent = active ? `${fileCheckLens(kind.value, path.value)} (required native evidence)` : '';
+}
+
+/** Read the actual task criteria; native evidence is never an execution grant. */
+export function readSharedChannelCriteria(form: HTMLFormElement): CouncilCriterion[] {
+  return [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => {
+    const nativeEvidence = readFileCheck(row);
+    const lens = nativeEvidence && 'path' in nativeEvidence
+      ? fileCheckLens(nativeEvidence.kind, nativeEvidence.path)
+      : row.querySelector<HTMLInputElement>('input[name="councilCriterionLens"]')?.value.trim() ?? '';
+    return {
+      id: row.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.value.trim() ?? '',
+      lens,
+      target: Number(row.querySelector<HTMLInputElement>('input[name="councilCriterionTarget"]')?.value ?? NaN),
+      required: true,
+      evidenceRequired: Boolean(nativeEvidence) || (row.querySelector<HTMLInputElement>('input[name="councilCriterionEvidence"]')?.checked ?? false),
+      ...(nativeEvidence ? { nativeEvidence } : {}),
+    };
+  });
+}
+
 /** Preserve unsent, per-message Council inputs across a channel refresh only. */
 export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
   if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
@@ -193,10 +238,12 @@ export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | nu
   // the saved bot roster if the user switches back to Bots after a refresh.
   const lostReviewer = [...previous.querySelectorAll<HTMLInputElement>('input[name="councilReviewer"]:checked')].some(input => !nextReviewerIds.has(input.value));
   if (lostReviewer || previous.dataset.councilRosterChanged === 'true') next.dataset.councilRosterChanged = 'true';
-  const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
-  const nextInputs = [...next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
+  type CouncilDraftControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+  const selector = 'input[name^="council"], select[name^="council"], textarea[name^="council"]';
+  const oldInputs = [...previous.querySelectorAll<CouncilDraftControl>(selector)];
+  const nextInputs = [...next.querySelectorAll<CouncilDraftControl>(selector)];
   for (const input of nextInputs) {
-    const match = (item: HTMLInputElement | HTMLSelectElement): boolean =>
+    const match = (item: CouncilDraftControl): boolean =>
       item.name === input.name && item.dataset.botId === input.dataset.botId
       && (!(item instanceof HTMLInputElement) || (item.type !== 'checkbox' && item.type !== 'radio')
         || item.value === input.value);
@@ -276,6 +323,7 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
                 <label>Review lens<input name="councilCriterionLens" type="text" maxlength="80" autocomplete="off"></label>
                 <label>Minimum criterion score<input name="councilCriterionTarget" type="number" min="1" max="10" step="0.1" value="9"></label>
                 <label><input name="councilCriterionEvidence" type="checkbox"> Require independently verified native evidence</label>
+                ${FILE_CHECK_FIELDS}<small data-channel-file-check-preview hidden></small>
                 <button type="button" class="secondary-button" data-council-criterion-remove disabled>Remove criterion</button>
               </fieldset>
             </div>
@@ -335,8 +383,11 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;
     const criterionFields = panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!;
     criterionFields.hidden = source === 'architect';
-    for (const input of criterionFields.querySelectorAll<HTMLInputElement>('input')) {
+    for (const input of criterionFields.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea')) {
       input.disabled = criterionFields.hidden;
+    }
+    for (const row of criterionFields.querySelectorAll<HTMLElement>('[data-council-criterion-row]')) {
+      syncSharedChannelFileCheckFields(row, criterionFields.hidden);
     }
     panel.querySelector<HTMLInputElement>('input[name="councilAutomaticReviewers"]')!.disabled = !selected;
     const rows = panel.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
@@ -372,8 +423,8 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
           return;
         }
         const next = first.cloneNode(true) as HTMLElement;
-        for (const input of next.querySelectorAll<HTMLInputElement>('input')) {
-          if (input.type === 'checkbox') input.checked = false;
+        for (const input of next.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea')) {
+          if (input instanceof HTMLInputElement && input.type === 'checkbox') input.checked = false;
           else if (input.name === 'councilCriterionTarget') input.value = form.querySelector<HTMLInputElement>('input[name="councilTarget"]')?.value ?? '9';
           else input.value = '';
         }

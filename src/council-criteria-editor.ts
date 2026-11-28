@@ -2,18 +2,18 @@ import { escape } from './dom';
 import type { CouncilConfig, CouncilCriterion, CouncilCriteriaSource, CouncilCriterionNativeEvidence } from './architect-types';
 
 // These are existing native read-only evidence types, not local proof of execution.
-const FILE_CHECK_FIELDS = '<label>Native file check<select data-file-check-kind>' +
+export const FILE_CHECK_FIELDS = '<label>Native file check<select data-file-check-kind name="councilFileCheckKind">' +
   '<option value="">None (review evidence only)</option>' +
   '<option value="reviewed_file_sha256">File SHA-256</option>' +
   '<option value="reviewed_file_text_contains">File contains exact text</option>' +
   '<option value="reviewed_file_json_valid">Valid JSON file</option>' +
   '<option value="reviewed_file_toml_valid">Valid TOML file</option></select></label>' +
-  '<div data-file-check-fields hidden><label>Repository-relative file<input data-file-check-path type="text" maxlength="240" autocomplete="off"></label>' +
-  '<div data-file-check-sha-field hidden><label>Expected SHA-256<input data-file-check-sha type="text" maxlength="64" autocomplete="off"></label></div>' +
-  '<div data-file-check-text-field hidden><label>Expected text<textarea data-file-check-text maxlength="256" rows="2"></textarea></label></div>' +
+  '<div data-file-check-fields hidden><label>Repository-relative file<input data-file-check-path name="councilFileCheckPath" type="text" maxlength="240" autocomplete="off"></label>' +
+  '<div data-file-check-sha-field hidden><label>Expected SHA-256<input data-file-check-sha name="councilFileCheckSha" type="text" maxlength="64" autocomplete="off"></label></div>' +
+  '<div data-file-check-text-field hidden><label>Expected text<textarea data-file-check-text name="councilFileCheckText" maxlength="256" rows="2"></textarea></label></div>' +
   '<small>The native host must verify this check against the reviewed revision. No command execution is authorized.</small></div>';
 
-function fileCheckLens(kind: string, path: string): string {
+export function fileCheckLens(kind: string, path: string): string {
   switch (kind) {
     case 'reviewed_file_sha256': return `File SHA-256: ${path}`;
     case 'reviewed_file_text_contains': return `File contains: ${path}`;
@@ -56,7 +56,7 @@ function bindFileCheckFields(row: HTMLElement): void {
   sync();
 }
 
-function readFileCheck(row: HTMLElement): CouncilCriterionNativeEvidence | undefined {
+export function readFileCheck(row: HTMLElement): CouncilCriterionNativeEvidence | undefined {
   const kind = row.querySelector<HTMLSelectElement>('[data-file-check-kind]')?.value;
   if (!kind) return undefined;
   const path = row.querySelector<HTMLInputElement>('[data-file-check-path]')!.value;

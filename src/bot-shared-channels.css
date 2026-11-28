@@ -166,3 +166,6 @@
 .bc-council-panel .bc-council-criterion-row input[type=checkbox]{flex:none}
 .bc-council-panel .bc-council-criterion-row button,.bc-council-panel [data-council-criterion-add]{justify-self:start}
 .bc-council-panel .bc-council-criterion-row button:disabled{opacity:.5;cursor:not-allowed}
+.bc-council-panel .bc-council-criterion-row [hidden]{display:none!important}
+.bc-council-panel .bc-council-criterion-row [data-file-check-fields] label{display:grid;gap:5px;min-width:0}
+.bc-council-panel .bc-council-criterion-row [data-file-check-text]{box-sizing:border-box;max-width:100%;width:100%;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit;resize:vertical}

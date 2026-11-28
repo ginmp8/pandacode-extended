@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, resolveSharedChannelCouncilFocus, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { readSharedChannelDetail, sharedChannelActionsHtml, sharedChannelComposerHtml, readSharedChannelCriteria, restoreSharedChannelCouncilInputs, resolveSharedChannelCouncilFocus, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -7540,13 +7540,15 @@ document.addEventListener('submit', event => {
     }
     const forceEscalation = strategy === 'escalated' && data.get('councilForceEscalation') === 'on';
     const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
-    const criteria = [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => ({
-      id: row.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.value.trim() ?? '',
-      lens: row.querySelector<HTMLInputElement>('input[name="councilCriterionLens"]')?.value.trim() ?? '',
-      target: Number(row.querySelector<HTMLInputElement>('input[name="councilCriterionTarget"]')?.value ?? NaN),
-      required: true,
-      evidenceRequired: row.querySelector<HTMLInputElement>('input[name="councilCriterionEvidence"]')?.checked ?? false,
-    }));
+    let criteria: ReturnType<typeof readSharedChannelCriteria> = [];
+    if (councilEnabled && criteriaSource !== 'architect') {
+      try {
+        criteria = readSharedChannelCriteria(form);
+      } catch (cause) {
+        showCouncilError(cause instanceof Error ? cause.message : String(cause));
+        return;
+      }
+    }
     const criteriaValid = criteriaSource === 'architect' || (
       criteria.length >= 1 && criteria.length <= 8
       && criteria.every(criterion => /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id)

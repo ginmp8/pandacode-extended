@@ -5355,11 +5355,9 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
         // revoked transactionally before any asynchronous provider cancellation.
         let sessions = if enabled { Vec::new() } else {
             let mut stmt = store.db.prepare(
-                "SELECT a.session_id FROM sa_assignments a
+                "SELECT DISTINCT a.session_id FROM sa_assignments a
                  JOIN sa_tickets t ON t.id=a.ticket_id
-                 WHERE t.orchestration_id=?1
-                   AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')
-                   AND a.state='running'"
+                 WHERE t.orchestration_id=?1 AND a.state='running'"
             ).map_err(|e| e.to_string())?;
             let sessions = stmt.query_map([&orchestration_id], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?
@@ -5519,8 +5517,19 @@ fn change_enabled(
              )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
+        let terminal_orphans: bool = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+                  AND t.state IN ('completed','failed','stopped','interrupted','inconclusive')
+                  AND (t.active_assignment_id IS NOT NULL OR EXISTS(
+                      SELECT 1 FROM sa_assignments a
+                      WHERE a.ticket_id=t.id AND a.state='running'))
+             )", [orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
         let pending_dispatches = headless_dispatch::team_has_pending(&store.db, orchestration_id)?;
-        if !unsettled && !pending_effects && !pending_dispatches { return Ok(current); }
+        if !unsettled && !pending_effects && !terminal_orphans && !pending_dispatches {
+            return Ok(current);
+        }
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
@@ -5577,11 +5586,35 @@ fn change_enabled(
                SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING})"
         );
         tx.execute(&grants, [orchestration_id]).map_err(|e| e.to_string())?;
+        // Match the watchdog's terminal-orphan containment at explicit Off,
+        // including repeated Off. Preserve the terminal verdict, but revoke
+        // its stale native attempt before releasing its durable lease.
+        const TERMINAL_ORPHANS: &str = "SELECT t.id FROM sa_tickets t
+            WHERE t.orchestration_id=?1
+              AND t.state IN ('completed','failed','stopped','interrupted','inconclusive')
+              AND (t.active_assignment_id IS NOT NULL OR EXISTS(
+                SELECT 1 FROM sa_assignments a
+                WHERE a.ticket_id=t.id AND a.state='running'))";
+        let audit = format!(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT id,'orchestration_disabled_terminal_orphan',
+               'Terminal Ticket retained an Assignment; authority revoked without replay',?2
+             FROM ({TERMINAL_ORPHANS})"
+        );
+        tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        let revoke = format!(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN ({TERMINAL_ORPHANS})"
+        );
+        tx.execute(&revoke, [orchestration_id]).map_err(|e| e.to_string())?;
+        let clear = format!(
+            "UPDATE sa_tickets SET active_assignment_id=NULL,
+               revision=revision+1,updated_at=?2 WHERE id IN ({TERMINAL_ORPHANS})"
+        );
+        tx.execute(&clear, params![orchestration_id,now]).map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE sa_assignments SET state='interrupted',updated_at=?2
              WHERE ticket_id IN (
-               SELECT id FROM sa_tickets WHERE orchestration_id=?1
-               AND state IN ('queued','running','waiting_approval','waiting_review','blocked'))
+               SELECT id FROM sa_tickets WHERE orchestration_id=?1)
                AND state='running'",
             params![orchestration_id,now],
         ).map_err(|e| e.to_string())?;
@@ -15443,6 +15476,83 @@ mod tests {
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
         assert!(read_only_policy(&store, &session).is_err());
         assert!(!on_run_finished(&store, &session, true, "late result").unwrap());
+    }
+
+    #[test]
+    fn team_off_quarantines_terminal_orphan_assignments_atomically() {
+        for (already_off, pending_effect) in [(false, true), (true, true), (true, false)] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Terminal orphan", "off-terminal-orphan", false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            stop(&store, &ticket.id).unwrap();
+            let policy = if already_off {
+                change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap()
+            } else { cfg };
+            let terminal = get_ticket(&store, &ticket.id).unwrap();
+            store.db.execute(
+                "UPDATE sa_assignments SET state='running' WHERE ticket_id=?1",
+                [&ticket.id],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sa_mandates SET revoked=0 WHERE ticket_id=?1",
+                [&ticket.id],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sa_tickets SET active_assignment_id=(
+                    SELECT id FROM sa_assignments WHERE ticket_id=?1
+                 ) WHERE id=?1", [&ticket.id],
+            ).unwrap();
+            if pending_effect {
+                store.db.execute(
+                    "INSERT INTO sa_effect_receipts
+                     (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                     VALUES(?1,'legacy-orphan','digest','pending',?2,?2)",
+                    params![&ticket.id,storage::now()],
+                ).unwrap();
+            }
+            store.db.execute_batch(
+                "CREATE TEMP TRIGGER reject_terminal_orphan_off BEFORE INSERT ON sa_audit
+                 WHEN NEW.kind='orchestration_disabled_terminal_orphan'
+                 BEGIN SELECT RAISE(ABORT,'injected orphan audit failure'); END;",
+            ).unwrap();
+            assert!(change_enabled(&store, &policy.id, policy.policy_revision, false).is_err());
+            let unchanged = configuration(&store, &policy.id).unwrap();
+            assert_eq!(unchanged.enabled, policy.enabled);
+            assert_eq!(unchanged.policy_revision, policy.policy_revision);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, terminal.revision);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+            assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+            if pending_effect {
+                assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state, "pending");
+            }
+            store.db.execute_batch("DROP TRIGGER reject_terminal_orphan_off").unwrap();
+
+            let off = change_enabled(&store, &policy.id, policy.policy_revision, false).unwrap();
+            let settled = get_ticket(&store, &ticket.id).unwrap();
+            assert!(!off.enabled);
+            assert_eq!(settled.state, "stopped");
+            assert_eq!(settled.revision, terminal.revision + 1);
+            assert!(settled.active_assignment_id.is_none());
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            if pending_effect {
+                assert_eq!(effects::receipt_history(&store, &ticket.id, 5).unwrap()[0].state, "uncertain");
+            } else {
+                assert!(effects::receipt_history(&store, &ticket.id, 5).unwrap().is_empty());
+            }
+            assert!(read_only_policy(&store, &session).is_err());
+            assert!(!on_run_finished(&store, &session, true, "Late result").unwrap());
+            let audit_count = history(&store, &ticket.id, 100).unwrap().iter()
+                .filter(|row| row.kind == "orchestration_disabled_terminal_orphan").count();
+            assert_eq!(audit_count, 1);
+            let same = change_enabled(&store, &off.id, off.policy_revision, false).unwrap();
+            assert_eq!(same.policy_revision, off.policy_revision);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, settled.revision);
+        }
     }
 
     #[test]

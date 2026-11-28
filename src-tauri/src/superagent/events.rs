@@ -1736,6 +1736,28 @@ fn verified_github_event_timestamp(stamp: &str) -> Result<i64> {
     Ok(at)
 }
 
+/// GitHub documents an integer event ID, while Events responses also use
+/// decimal strings. Both representations share one canonical durable key.
+/// Reject aliases (leading zeroes), non-integers and out-of-range IDs before
+/// they can anchor a cursor or create an additional receipt for the same event.
+fn github_event_sequence(raw: &serde_json::Value) -> Result<i64> {
+    let value = raw.get("id").ok_or("Authenticated GitHub Event has no numeric identity.")?;
+    let sequence = if let Some(id) = value.as_str() {
+        if id.is_empty() || id.len() > 19 || id.starts_with('0')
+            || !id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("Authenticated GitHub Event identity is invalid.".into());
+        }
+        id.parse::<i64>().map_err(|_| "GitHub Event identity is out of range.")?
+    } else {
+        value.as_i64().ok_or("Authenticated GitHub Event identity is invalid.")?
+    };
+    if sequence <= 0 {
+        return Err("Authenticated GitHub Event identity is invalid.".into());
+    }
+    Ok(sequence)
+}
+
 /// Verify descending GitHub event identities within a finite pagination window.
 /// The first poll may use a short page or a pre-activation timestamp as its
 /// boundary. Once a cursor is persisted, the exact prior event identity must
@@ -1751,13 +1773,8 @@ fn github_page_complete(
     }
     let mut anchored = false;
     for item in events {
-        let id = item.get("id").and_then(|v| v.as_str())
-            .ok_or("Authenticated GitHub Event has no numeric identity.")?;
-        if id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit()) {
-            return Err("Authenticated GitHub Event identity is invalid.".into());
-        }
-        let sequence: i64 = id.parse().map_err(|_| "GitHub Event identity is out of range.")?;
-        if sequence <= 0 || previous_id.is_some_and(|previous| sequence >= previous) {
+        let sequence = github_event_sequence(item)?;
+        if previous_id.is_some_and(|previous| sequence >= previous) {
             return Err("GitHub Events ordering changed during pagination; retry without advancing cursor.".into());
         }
         *previous_id = Some(sequence);
@@ -1865,14 +1882,8 @@ fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Resu
         } else {
             feed_repository_id = Some(current_repository_id);
         }
-        let id = item.get("id").and_then(|v| v.as_str())
-            .ok_or("GitHub Events feed has no numeric identity.")?;
-        if id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit()) {
-            return Err("GitHub Events feed has an invalid identity.".into());
-        }
-        let sequence: i64 = id.parse()
-            .map_err(|_| "GitHub Events feed identity is out of range.")?;
-        if sequence <= 0 || previous.is_some_and(|last| sequence >= last) {
+        let sequence = github_event_sequence(item)?;
+        if previous.is_some_and(|last| sequence >= last) {
             return Err("GitHub Events feed order is invalid; cursor unchanged.".into());
         }
         let stamp = item.get("created_at").and_then(|v| v.as_str())
@@ -1965,13 +1976,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     // A source's exact actor filter is not a broad account subscription.
     // Do not retain event metadata about other actors in this task source.
     if !actor.eq_ignore_ascii_case(&source.actor_filter) { return Ok(None); }
-    let raw_id = raw.get("id").and_then(|v| v.as_str())
-        .ok_or("Authenticated GitHub event has no delivery identity.")?;
-    if raw_id.is_empty() || raw_id.len() > 19 || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("Invalid authenticated GitHub delivery identity.".into());
-    }
-    let sequence: i64 = raw_id.parse().map_err(|_| "GitHub delivery identity exceeded native cursor range.")?;
-    if sequence <= 0 { return Err("Invalid authenticated GitHub delivery identity.".into()); }
+    let sequence = github_event_sequence(raw)?;
     // Every recognized PR lifecycle/review/diff-comment event is keyed by
     // payload.pull_request.number. Only Issues/IssueComment Events have an
     // issue object. Never fall back across types: that would misassociate an
@@ -2096,7 +2101,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     };
     let event = EventEnvelope {
         source_id:source.id.clone(),
-        delivery_id:raw_id.to_string(),
+        delivery_id:sequence.to_string(),
         repository:source.repository.to_ascii_lowercase(),
         actor:actor.to_string(),
         event_kind:kind.into(),
@@ -2212,9 +2217,7 @@ fn poll_authenticated_events_with_repository_id_scoped(
         }
         if current_cursor > 0
             && feed_watermark.is_some_and(|newest| newest > current_cursor)
-            && !events.iter().any(|event| event.get("id")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|id| id.parse::<i64>().ok()) == Some(current_cursor))
+            && !events.iter().any(|event| github_event_sequence(event).ok() == Some(current_cursor))
         {
             return Err(if current_cursor > expected.last_sequence {
                 "GitHub Observe cursor changed during request; fetch a fresh anchored window before advancing."
@@ -6483,6 +6486,63 @@ mod tests {
             [], |row| row.get(0)
         ).unwrap();
         assert_eq!(receipts, cases.len() as i64, "A restart preserves exact receipt identity");
+    }
+
+    #[test]
+    fn authenticated_review_event_numeric_identity_replays_once_after_restart() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "review-ticket", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &active.id, "review-ticket", "pull:42").unwrap();
+        let event = |id: serde_json::Value, number: u64| serde_json::json!({
+            "id": id, "type": "PullRequestReviewEvent",
+            "created_at": "2026-11-12T08:59:00Z",
+            "actor": {"login": "trusted-bot", "id": 202},
+            "repo": {"name": "test/fixture", "id": 101},
+            "payload": {"action": "created", "pull_request": {"number": number},
+                "review": {"body": "untrusted text"}}
+        });
+        let identity = ObserveFeedContext {
+            repository_id: 101, operator_id: Some(303), background_team_revision: None,
+        };
+        let first = serde_json::json!([event(serde_json::json!(5_000_007_401_i64), 42)]);
+        assert!(github_page_complete(&first, 0, 0, &mut None).unwrap());
+        let initial = poll_authenticated_events_with_repository_id_scoped(
+            &store, &active, 0, &first, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((initial.recorded, initial.last_sequence), (1, 5_000_007_401));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let current = source(&reopened, &active.id).unwrap();
+        // A numeric ID and its canonical decimal string are one event, even
+        // when the representation changes across polling and restart.
+        let next = serde_json::json!([
+            event(serde_json::json!(5_000_007_402_i64), 99),
+            event(serde_json::json!("5000007401"), 42)
+        ]);
+        assert!(github_page_complete(&next, 0, current.last_sequence, &mut None).unwrap());
+        let replay = poll_authenticated_events_with_repository_id_scoped(
+            &reopened, &current, 0, &next, "operator", 1, identity,
+        ).unwrap();
+        assert_eq!((replay.recorded, replay.duplicates), (1, 1));
+        assert_eq!(replay.last_sequence, 5_000_007_402);
+        let malformed = serde_json::json!([event(serde_json::json!("05000007402"), 99)]);
+        assert!(github_page_complete(&malformed, 0, replay.last_sequence, &mut None).is_err());
+        assert!(poll_authenticated_events_with_repository_id_scoped(
+            &reopened, &current, 0, &malformed, "operator", 1, identity,
+        ).is_err());
+        assert_eq!(source(&reopened, &active.id).unwrap().last_sequence, replay.last_sequence);
+        assert_eq!(list_decisions(&reopened, &active.id, 10).unwrap().len(), 2);
+        let linked = linked_decisions(&reopened, "review-ticket", 10).unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].delivery_id, "5000007401");
+        assert!(!serde_json::to_string(&linked).unwrap().contains("untrusted text"));
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

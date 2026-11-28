@@ -56,6 +56,7 @@ fn setup() -> TeamSetup {
             workspace: "shared".into(),
             summary_limit: 1500,
             lead_guidance: None,
+            council: None,
         },
     }
 }
@@ -148,6 +149,7 @@ fn new_user_tasks_default_to_full_without_overriding_requested_modes_or_saved_ta
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "cline",
@@ -155,6 +157,7 @@ fn new_user_tasks_default_to_full_without_overriding_requested_modes_or_saved_ta
             "github-copilot",
             "devin",
             "hermes",
+            "cursor",
         ] {
             let existing = store
                 .create_session(&source.project_id, provider, "default", "plan")

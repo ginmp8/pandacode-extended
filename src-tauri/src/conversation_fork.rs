@@ -29,25 +29,31 @@ fn copy(store: &Store, source_id: &str, message_id: i64, exclusive: bool) -> Res
     // Resolve before writing so a missing worktree never becomes a main-folder
     // task. Team workers may also fork, but receive no team execution identity.
     store.workspace_root(&source.project_id, Some(source_id))?;
+    // A worker's full access never carries into the user's own chat: a fork of a worker's
+    // transcript takes its lead's mode.
+    let mode = crate::architect::fork_mode(store, &source);
     let target = store.create_session(
         &source.project_id,
         &source.provider,
         &source.model,
-        &source.mode,
+        &mode,
     )?;
     let title: String = format!(
         "{} (fork)",
         source.title.chars().take(193).collect::<String>()
     );
-    store.db.execute(
+    store.db.prepare_cached(
         "UPDATE sessions SET title=?2,worktree_path=?3,reasoning_effort=?4,codex_settings=?5,task_stage='in_progress',worktree_branch=?6 WHERE id=?1",
+    ).and_then(|mut update| update.execute(
         params![target.id, title, source.worktree_path, source.reasoning_effort, source.codex_settings.map(|v| v.to_string()), source.worktree_branch],
-    ).map_err(|e| e.to_string())?;
+    )).map_err(|e| e.to_string())?;
     {
         // Read raw storage rather than the paginated, display-truncated API.
         // Runtime durations and source checkout change records are not copied:
         // they can describe execution after the chosen message boundary.
-        let mut query = store.db.prepare(
+        // Both statements are prepared once for the whole copy (and cached across forks);
+        // every row is written inside the one transaction opened above.
+        let mut query = store.db.prepare_cached(
             "SELECT id,role,content,created_at FROM messages WHERE session_id=?1 AND id<=?2 AND role NOT IN ('internal','changes') ORDER BY id",
         ).map_err(|e| e.to_string())?;
         let rows = query
@@ -60,12 +66,19 @@ fn copy(store: &Store, source_id: &str, message_id: i64, exclusive: bool) -> Res
                 ))
             })
             .map_err(|e| e.to_string())?;
+        let mut insert = store
+            .db
+            .prepare_cached(
+                "INSERT INTO messages(session_id,role,content,created_at,tool_id) VALUES(?1,?2,?3,?4,?5)",
+            )
+            .map_err(|e| e.to_string())?;
+        // Legacy coordination prompts are recognized from the row text alone; the source's team
+        // facts are read at most once for the whole copy, and only if such a prompt appears.
+        let mut legacy = crate::architect::internal_turns::LegacyScan::new(&store.db, source_id);
         for row in rows {
             let (id, mut role, mut content, created_at) = row.map_err(|e| e.to_string())?;
             if role == "user" {
-                if let Some(kind) =
-                    crate::architect::internal_turns::legacy_kind(store, source_id, id, &content)?
-                {
+                if let Some(kind) = legacy.kind(id, &content)? {
                     content = crate::architect::internal_turns::encode(kind, &content)?;
                     role = "coordination".into();
                 }
@@ -75,10 +88,9 @@ fn copy(store: &Store, source_id: &str, message_id: i64, exclusive: bool) -> Res
             } else {
                 None
             };
-            store.db.execute(
-                "INSERT INTO messages(session_id,role,content,created_at,tool_id) VALUES(?1,?2,?3,?4,?5)",
-                params![target.id, role, content, created_at, tool_id],
-            ).map_err(|e| e.to_string())?;
+            insert
+                .execute(params![target.id, role, content, created_at, tool_id])
+                .map_err(|e| e.to_string())?;
         }
     }
     if boundary_provider != source.provider {
@@ -90,10 +102,9 @@ fn copy(store: &Store, source_id: &str, message_id: i64, exclusive: bool) -> Res
         });
         store.message(&target.id, "handoff", &notice.to_string())?;
     }
-    store.db.execute(
+    store.db.prepare_cached(
         "UPDATE sessions SET task_description=COALESCE((SELECT content FROM messages WHERE session_id=?1 AND role='user' ORDER BY id LIMIT 1),'') WHERE id=?1",
-        [&target.id],
-    ).map_err(|e| e.to_string())?;
+    ).and_then(|mut update| update.execute([&target.id])).map_err(|e| e.to_string())?;
     // Keep this explicit even though no resume ID also triggers recovery. The
     // queued boundary survives a failed first start after a provider issues ID.
     crate::context_recovery::queue(store, &target.id)?;

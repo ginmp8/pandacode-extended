@@ -17,9 +17,99 @@ async function render(page: Page, markdown: string): Promise<void> {
 }
 const probe = (page: Page) => page.locator('#markdown-probe');
 
-test.beforeEach(async ({ page }) => { await page.goto('/'); });
+test.beforeEach(async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('.workspace')).toBeVisible({ timeout: 15_000 });
+});
 
 test.describe('enriched markdown', () => {
+  test('transcript headings keep the same relative hierarchy with and without a trace', async ({ page }) => {
+    await render(page, Array.from({ length: 6 }, (_, index) => `${'#'.repeat(index + 1)} Heading ${index + 1}`).join('\n\n'));
+    await probe(page).evaluate(el => {
+      const message = document.createElement('article');
+      message.className = 'agent-message';
+      el.before(message);
+      message.append(el);
+      el.classList.add('message-content');
+    });
+    for (const traced of [false, true]) {
+      await probe(page).evaluate((el, value) => el.parentElement!.classList.toggle('after-trace', value), traced);
+      for (let level = 1; level <= 6; level++) {
+        const heading = probe(page).getByRole('heading', { level });
+        const size = level <= 2 ? 19.04 : 16;
+        const style = await heading.evaluate(el => {
+          const cs = getComputedStyle(el);
+          return [parseFloat(cs.fontSize), parseFloat(cs.lineHeight)];
+        });
+        expect(style[0]).toBeCloseTo(size, 2);
+        expect(style[1]).toBeCloseTo(size * 1.25, 2);
+        await expect(heading).toHaveCSS('font-weight', '600');
+        await expect(heading).toHaveCSS('letter-spacing', 'normal');
+        await expect(heading).toHaveCSS('margin-bottom', traced ? '8px' : level === 6 ? '0px' : '10px');
+      }
+    }
+  });
+
+  for (const fallback of [false, true]) test(`Arabic and English prose blocks keep independent direction${fallback ? ' in fallback Markdown' : ''}`, async ({ page }) => {
+    if (fallback) {
+      await page.route('**/src/vendor/enriched-markdown/md4c.js*', route => route.fulfill({ contentType: 'text/javascript', body: 'export default async () => { window.__fallbackUsed = true; throw new Error("No WebAssembly"); };' }));
+      await page.reload();
+      await expect(page.locator('.workspace')).toBeVisible({ timeout: 15_000 });
+    }
+    const source = '## النتيجة!\n\nمرحبا بالعالم!\n\nHello, world!\n\n`npm test` مرحبا!\n\n- عنصر عربي!\n- English item!\n  - عنصر متداخل!\n\n1. خطوة!\n2. Next!\n\n- فقرة عربية!\n\n  Another paragraph!\n\n| الاسم | Name |\n| --- | --- |\n| أحمد! | Alice! |\n\n```js\nconst label = "مرحبا!";\n```';
+    await render(page, source);
+    if (fallback) expect(await page.evaluate(() => (window as any).__fallbackUsed)).toBe(true);
+    const root = probe(page);
+    await expect(root.locator('h2')).toHaveCSS('direction', 'rtl');
+    await expect(root.locator(':scope > p').nth(0)).toHaveCSS('direction', 'rtl');
+    await expect(root.locator(':scope > p').nth(1)).toHaveCSS('direction', 'ltr');
+    await expect(root.locator(':scope > p').nth(2)).toHaveCSS('direction', 'rtl');
+    for (const [text, direction] of [['عنصر عربي!', 'rtl'], ['English item!', 'ltr'], ['عنصر متداخل!', 'rtl'], ['خطوة!', 'rtl'], ['Next!', 'ltr'], ['فقرة عربية!', 'rtl']] as const) {
+      await expect(root.locator('li').filter({ hasText: new RegExp(`^${text}`) }).last()).toHaveCSS('direction', direction);
+    }
+    await expect(root.locator('li p').filter({ hasText: 'Another paragraph!' })).toHaveCSS('direction', 'ltr');
+    for (const tag of ['th', 'td']) {
+      await expect(root.locator(tag).nth(0)).toHaveCSS('direction', 'rtl');
+      await expect(root.locator(tag).nth(0)).toHaveCSS('text-align', 'start');
+      await expect(root.locator(tag).nth(1)).toHaveCSS('direction', 'ltr');
+    }
+    await render(page, '| يسار | وسط | يمين |\n| :--- | :---: | ---: |\n| عربي | عربي | عربي |');
+    for (const tag of ['th', 'td']) for (const [index, align] of ['left', 'center', 'right'].entries()) await expect(root.locator(tag).nth(index)).toHaveCSS('text-align', align);
+    await render(page, source);
+    await expect(root.locator('pre, code').first()).toHaveCSS('direction', 'ltr');
+    expect(await root.locator('pre code').textContent()).toBe('const label = "مرحبا!";\n');
+    const punctuation = await root.locator(':scope > p').evaluateAll(nodes => nodes.slice(0, 2).map(node => {
+      const text = node.firstChild!;
+      const rect = (at: number) => { const range = document.createRange(); range.setStart(text, at); range.setEnd(text, at + 1); return range.getBoundingClientRect().x; };
+      return rect(text.textContent!.length - 1) < rect(0);
+    }));
+    expect(punctuation).toEqual([true, false]);
+    expect(await page.evaluate(async value => {
+      const { markdownHtml, markdownNodes } = await import('/src/dom.ts');
+      const template = document.createElement('template'); template.innerHTML = await markdownHtml(value, false);
+      return (await markdownNodes(value)).innerHTML === template.innerHTML;
+    }, source)).toBe(true);
+    await expect(page.locator('body')).toHaveCSS('direction', 'ltr');
+    await expect(page.locator('.message-meta').first()).toHaveCSS('direction', 'ltr');
+    await page.screenshot({ path: test.info().outputPath(`arabic-${fallback ? 'fallback' : 'primary'}.png`) });
+  });
+
+  test('Arabic prose isolates inline code and math without changing source content', async ({ page }) => {
+    await render(page, '`npm test` $x+1$ مرحبا!\n\n$$x+1$$\n\nمرحبا <img src=x onerror="window.__owned = 1">!');
+    const root = probe(page);
+    await expect(root.locator('p').first()).toHaveCSS('direction', 'rtl');
+    for (const selector of ['p > code', '.katex', '.md-math-block']) {
+      for (const node of await root.locator(selector).all()) {
+        await expect(node).toHaveCSS('direction', 'ltr');
+        await expect(node).toHaveCSS('unicode-bidi', 'isolate');
+      }
+    }
+    await expect(root.locator('p > code')).toHaveText('npm test');
+    await expect(root.locator('annotation')).toHaveText(['x+1', 'x+1']);
+    await expect(root.locator('img, script, [onerror]')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__owned)).toBeUndefined();
+  });
+
   test('renders CommonMark and GitHub extensions', async ({ page }) => {
     await render(page, '# Title\n\nSome **bold**, *em*, `code` and ~~gone~~ with a [link](https://example.com "Example").\n\n3. three\n4. four\n\n- tight\n- list\n\n> quoted\n\n---\n\n```ts\nconst x = 1 < 2;\n```');
     await expect(probe(page).locator('h1')).toHaveText('Title');
@@ -51,11 +141,28 @@ test.describe('enriched markdown', () => {
     await expect(probe(page).locator('th.md-align-center')).toHaveText('Middle');
     await expect(probe(page).locator('td.md-align-right')).toHaveText('c');
     await expect(probe(page).locator('td').first()).toHaveClass('md-align-left');
+    for (const header of await probe(page).getByRole('columnheader').all()) {
+      const metrics = await header.evaluate(el => {
+        const cs = getComputedStyle(el);
+        return { size: parseFloat(cs.fontSize), leading: parseFloat(cs.lineHeight) };
+      });
+      expect(metrics.size).toBeCloseTo(11, 1);
+      await expect(header).toHaveCSS('font-weight', '500');
+      expect(metrics.leading).toBeCloseTo(14.3, 1);
+    }
+    await expect(probe(page).locator('th.md-align-center')).toHaveCSS('text-align', 'center');
+    await expect(probe(page).locator('th.md-align-right')).toHaveCSS('text-align', 'right');
+    const cellSize = await probe(page).locator('td').first().evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+    expect(cellSize).toBeCloseTo(16, 1);
+    await expect(probe(page).locator('td').first()).toHaveCSS('font-weight', '400');
+
   });
 
   test('typesets inline and display math, but leaves prices alone', async ({ page }) => {
     await render(page, 'Energy is $E=mc^2$, which costs $5 and $10.\n\n$$\\int_0^1 x\\,dx = \\tfrac{1}{2}$$');
     await expect(probe(page).locator('p .katex')).toHaveCount(1);
+    const katexSize = await probe(page).locator('p .katex').evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+    expect(katexSize).toBeCloseTo(16.8, 1);
     await expect(probe(page).locator('p .katex-mathml annotation')).toHaveText('E=mc^2');
     await expect(probe(page).locator('p')).toContainText('costs $5 and $10.');
     await expect(probe(page).locator('.md-math-block .katex-display')).toHaveCount(1);
@@ -170,7 +277,8 @@ test.describe('streamed markdown', () => {
       for (const [from] of patches) expect(source).toContain(from);
       await route.fulfill({ response, body: patches.reduce((body, [from, to]) => body.replace(from, to), source) });
     });
-    await page.reload();
+    await page.goto('/?trace');
+    await expect(page.locator('.workspace')).toBeVisible({ timeout: 15_000 });
     await page.evaluate(reply => { (window as any).__markdownReply = reply; }, REPLY);
     await page.getByRole('button', { name: 'New task ⌘ N', exact: true }).click();
     // Type only once the New task page has drawn; before that the prompt still belongs to the thread that was open.
@@ -200,7 +308,11 @@ test.describe('streamed markdown', () => {
     }, REPLY);
     expect(cached).toBe(expected);
     const task = await page.locator('.task-item.selected').getAttribute('data-id');
-    await page.locator('.task-item:not(.selected)').first().click();
+    // Visit three other non-empty threads to evict leftRowsCache (limit 2), so returning redraws from markdownCache.
+    for (const [id, marker] of [['session-1', 'Search feels a little slow'], ['session-7', 'Show every kind of tool you can run.'], ['session-5', 'Make search ignore case and accents']] as const) {
+      await page.locator(`.task-item[data-id="${id}"]`).click();
+      await expect(transcript).toContainText(marker);
+    }
     await expect(reply).toHaveCount(0);
     await page.locator(`.task-item[data-id="${task}"]`).click();
     await expect.poll(() => reply.evaluate(node => node.innerHTML)).toBe(`${expected}<!--from-cache-->`);

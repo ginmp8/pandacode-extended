@@ -530,10 +530,11 @@ test('layout preferences keep the left sidebar button clear of Mac controls and 
     const button = (await toggle.boundingBox())!;
     const sidebar = (await page.locator('.sidebar').boundingBox())!;
     expect(button.x - sidebar.x).toBeGreaterThanOrEqual(104);
-    // The wordmark is whole or absent, never ellipsized: a sidebar too narrow for it hides it.
-    const name = page.locator('.brand-name');
-    if (width < 280) await expect(name).toBeHidden();
+    // The narrowest sidebar keeps its panda; wider sidebars show the whole wordmark.
+    const name = page.locator('.brand-name .desktop-brand-word');
+    if (width === 190) await expect(name).toBeHidden();
     else {
+      await expect(name).toBeVisible();
       const brand = (await name.boundingBox())!;
       expect(button.x + button.width).toBeLessThanOrEqual(brand.x);
       expect(brand.x + brand.width).toBeLessThanOrEqual(sidebar.x + sidebar.width);
@@ -778,15 +779,24 @@ test('the title bar row keeps its on-screen height under interface zoom so it st
   await page.goto('/');
   await page.locator('#navigation .task-item').first().waitFor();
   const heights = () => page.evaluate(() => ['.workspace-header', '.sidebar>.brand'].map(selector => Math.round(document.querySelector(selector)!.getBoundingClientRect().height * 10) / 10));
-  // The conversation panel is inset 8px from the window's top, so its header is the title bar less
-  // 8px above and below: both rows centre on the same line as the window buttons.
+  // The frame gap is a native point, so the conversation panel sits 8pt inside the window's top at
+  // every interface size and its header is the title bar less 8pt above and below: both rows centre
+  // on the same line as the window buttons. The corner stays the card role, so it scales with the
+  // cards the panels hold instead of holding a point size.
   const middles = () => page.evaluate(() => ['.workspace-header', '.sidebar>.brand'].map(selector => { const box = document.querySelector(selector)!.getBoundingClientRect(); return Math.round((box.top + box.height / 2) * 10) / 10; }));
+  const frame = () => page.evaluate(() => { const style = getComputedStyle(document.querySelector('.main-pane')!); return [style.marginTop, style.borderTopLeftRadius].map(value => Math.round(parseFloat(value) * 100) / 100); });
   expect(await heights()).toEqual([39, 55]);
   expect(await middles()).toEqual([27.5, 27.5]);
-  // In the app, ⌘+ zooms the webview by --page-zoom; the row shrinks in CSS pixels by the same factor.
+  expect(await frame()).toEqual([8, 16]);
+  // In the app, ⌘+ zooms the webview by --page-zoom: CSS pixels shrink by that factor, points do not.
   await page.evaluate(() => document.documentElement.style.setProperty('--page-zoom', '1.25'));
-  expect(await heights()).toEqual([28, 44]);
+  expect((await heights()).map(value => Math.round(value * 1.25 * 10) / 10)).toEqual([39, 55]);
   expect(await middles()).toEqual([22, 22]);
+  expect(await frame()).toEqual([6.4, 16]);
+  await page.evaluate(() => document.documentElement.style.setProperty('--page-zoom', '1.6'));
+  expect(await frame()).toEqual([5, 16]);
+  await page.evaluate(() => document.documentElement.style.removeProperty('--page-zoom'));
+  expect(await frame()).toEqual([8, 16]);
 });
 
 for (const wallpaper of [false, true]) {
@@ -811,7 +821,7 @@ for (const wallpaper of [false, true]) {
       };
     });
     const open_ = await shell();
-    expect(open_).toMatchObject({ mainRadius: '12px', mainBorder: '0px', inspectorRadius: '12px', mainTop: 8, mainBottom: 8, mainLeft: 0, inspectorTop: 8, inspectorRight: 8, inspectorBottom: 8, overflow: 'hidden' });
+    expect(open_).toMatchObject({ mainRadius: '16px', mainBorder: '0px', inspectorRadius: '16px', mainTop: 8, mainBottom: 8, mainLeft: 0, inspectorTop: 8, inspectorRight: 8, inspectorBottom: 8, overflow: 'hidden' });
     // The inspector is its own inset panel, a gap to the right of the main pane.
     expect(open_.gap).toBe(8);
     // The sidebar has no fill: it is the window frame's tone, which the panels sit on.
@@ -872,7 +882,7 @@ test('layout preferences run the main pane full-bleed at the top left while the 
   await page.locator('#sidebar-toggle').click();
   await expect(page.locator('.sidebar')).toBeVisible();
   await expect.poll(async () => (await geometry()).top).toBe(8);
-  expect((await geometry()).radii).toEqual(['12px', '12px', '12px', '12px']);
+  expect((await geometry()).radii).toEqual(['16px', '16px', '16px', '16px']);
 });
 
 test('layout preferences hand focus to the inspector toggle when the inspector is closed from inside it', async ({ page }) => {

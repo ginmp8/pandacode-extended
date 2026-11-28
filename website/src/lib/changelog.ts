@@ -1,13 +1,24 @@
 /* Release notes for /changelog, read at build time from the repository's releases/X.Y.Z.md
  * (the same files the release runbook publishes). Notes use a small subset of Markdown:
- * an optional "# Heading", paragraphs, "- " bullets (an indented "- " nests one level) with
+ * an optional "# Heading", "## Section" and "### Subsection" headings, paragraphs, "- " bullets (an indented "- " nests one level) with
  * wrapped continuation lines, **bold**, `code` and [links](https://…) (http/https only). The signing boilerplate repeated on every release is dropped here
  * and stated once on the page. */
 import dates from '../data/release-dates.json';
+import { bundledInVersion, publicationStatus, publishedReleaseSummary, type PublicationStatus } from './changelog-meta';
 
 export type Item = { html: string; children: readonly string[] };
-export type Block = { kind: 'paragraph'; html: string } | { kind: 'list'; items: readonly Item[] };
-export type Release = { version: string; date?: string; title?: string; blocks: readonly Block[] };
+export type Block =
+  | { kind: 'heading'; level: 2 | 3; html: string }
+  | { kind: 'paragraph'; html: string }
+  | { kind: 'list'; items: readonly Item[] };
+export type Release = {
+  version: string;
+  date?: string;
+  publicationStatus: PublicationStatus;
+  bundledIn?: string;
+  title?: string;
+  blocks: readonly Block[];
+};
 
 const sources = import.meta.glob('../../../releases/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const BOILERPLATE = /^This is an (?:Apple silicon )?Alpha preview\b/;
@@ -38,7 +49,7 @@ function listItems(chunk: string): Item[] {
   return raw.map(item => ({ html: inline(item.text), children: item.children.map(inline) }));
 }
 
-/** Groups lines into blocks: blank lines end a block, and so does the start of a list. */
+/** Section headings stand alone, even without blank lines around them. */
 export function parse(source: string): { title?: string; blocks: Block[] } {
   const lines = source.replace(/\r\n/g, '\n').trim().split('\n');
   const heading = lines[0]?.match(/^#\s+(.+)$/)?.[1];
@@ -48,9 +59,12 @@ export function parse(source: string): { title?: string; blocks: Block[] } {
     const at = chunk.search(/\n- /);
     return at > 0 && !chunk.startsWith('- ') ? [chunk.slice(0, at), chunk.slice(at + 1)] : [chunk];
   };
-  const chunks = (heading ? lines.slice(1) : lines).join('\n').split(/\n\s*\n/)
+  const chunks = (heading ? lines.slice(1) : lines).join('\n').split(/(^#{2,3}[ \t]+\S[^\n]*)/m)
+    .flatMap(chunk => chunk.split(/\n\s*\n/))
     .map(chunk => chunk.trim()).filter(Boolean).flatMap(leadIn);
   const blocks = chunks.flatMap((chunk): Block[] => {
+    const section = chunk.match(/^(#{2,3})[ \t]+(.+)$/);
+    if (section) return [{ kind: 'heading', level: section[1] === '##' ? 2 : 3, html: inline(section[2]) }];
     if (chunk.startsWith('- ')) return [{ kind: 'list', items: listItems(chunk) }];
     const text = chunk.replace(/\s*\n\s*/g, ' ');
     return BOILERPLATE.test(text) ? [] : [{ kind: 'paragraph', html: inline(text) }];
@@ -61,9 +75,19 @@ export function parse(source: string): { title?: string; blocks: Block[] } {
 export const releases: readonly Release[] = Object.entries(sources)
   .map(([path, source]) => {
     const version = path.match(/(\d+\.\d+\.\d+)\.md$/)?.[1] ?? '';
-    return { version, date: (dates as Record<string, string>)[version], ...parse(source) };
+    const bundledIn = bundledInVersion(version);
+    return {
+      version,
+      date: (dates as Record<string, string>)[version],
+      publicationStatus: publicationStatus(version),
+      ...(bundledIn ? { bundledIn } : {}),
+      ...parse(source),
+    };
   })
   .filter(release => release.version)
   .sort((a, b) => compare(b.version, a.version));
+
+const { latest: latestPublished, publishedCount: publishedReleaseCount } = publishedReleaseSummary(releases);
+export { latestPublished, publishedReleaseCount };
 
 export const formatDate = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });

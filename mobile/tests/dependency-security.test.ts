@@ -45,3 +45,18 @@ test('updated zod and node-forge retain basic validation and hashing', () => {
   digest.update('test');
   assert.equal(digest.digest().toHex(), '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08');
 });
+
+
+test('minimatch override resolves the existing patched brace-expansion lock entry', () => {
+  const manifest = require('../package.json') as { overrides: { minimatch: { '.': string; 'brace-expansion': string } } };
+  const lock = require('../package-lock.json') as { packages: Record<string, { version?: string; dependencies?: Record<string, string> }> };
+  const rule = manifest.overrides.minimatch;
+  assert.equal(rule['.'], '11.0.3');
+  assert.equal(rule['brace-expansion'], '5.0.12');
+  assert.equal(lock.packages['node_modules/brace-expansion']?.version, rule['brace-expansion']);
+  for (const [path, record] of Object.entries(lock.packages)) {
+    if (path.endsWith('/minimatch') && record.version === rule['.']) {
+      assert.equal(record.dependencies?.['brace-expansion'], '^5.0.12', `${path} must accept the pinned brace-expansion`);
+    }
+  }
+});

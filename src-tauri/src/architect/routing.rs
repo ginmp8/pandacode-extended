@@ -9,7 +9,7 @@ use tauri::Manager;
 
 use rusqlite::{params, OptionalExtension};
 
-use super::{active, load, text, Assignment, TeamConfig, TeamSnapshot, WorkerProfile, HARNESSES, PAGE_BYTES};
+use super::{active, load, model_efforts, text, Assignment, TeamConfig, TeamSnapshot, WorkerProfile, HARNESSES, PAGE_BYTES};
 use crate::model_routing::{self, Job};
 use crate::model_health;
 use crate::panda_router::{Mode, PoolModel, Route, Routed, TaskContext};
@@ -29,6 +29,8 @@ pub(crate) struct AutoRoute {
     decided_by: String,
     /// Models that failed this assignment before (escalation input).
     failed: Vec<PoolModel>,
+    /// The ladder entry Council diversity moved this reviewer to, in place of the usual opener.
+    pinned: Option<Routed>,
     difficulty: u8,
     category: String,
     profiler: &'static str,
@@ -136,9 +138,36 @@ pub(super) fn chains(store: &storage::Store, team: &TeamSnapshot, args: &Value) 
     Ok(chains)
 }
 
-/// The team's config, its checkout's main languages (cached per checkout) and failed workers' chains, for routing.
-pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: u64, args: &Value) -> Result<(TeamConfig, Vec<String>, Chains)> {
-    let (config, root, chains) = {
+/// A dispatch's Council reviewers for `diversify`: routed reviewers' keys in order (a replacement that
+/// inherits its lens included), and the models of reviewers staffed explicitly, which count as taken.
+#[derive(Default)]
+pub(crate) struct Reviewers {
+    keys: Vec<String>,
+    taken: Vec<(String, String)>,
+}
+fn reviewers(team: &TeamSnapshot, args: &Value) -> Reviewers {
+    let mut out = Reviewers::default();
+    let default = by_default(&team.config);
+    for a in args["assignments"].as_array().into_iter().flatten() {
+        let inherits = a["replaces"].as_str().is_some_and(|id| team.workers.iter().any(|w| w.id == id && w.council.is_some()));
+        if team.config.council.is_none() || !(a["councilLens"].is_string() || inherits) {
+            continue;
+        }
+        if routes(a, default) {
+            out.keys.extend(a["key"].as_str().map(String::from));
+        } else if let (Some(provider), Some(model)) = (a["provider"].as_str(), a["model"].as_str()) {
+            out.taken.push((provider.into(), model.into()));
+        } else if let Some(profile) = a["profileId"].as_str().and_then(|id| team.config.workers.iter().find(|p| p.id == id)) {
+            out.taken.push((profile.provider.clone(), profile.model.clone()));
+        }
+    }
+    out
+}
+
+/// The team's config, its checkout's main languages (cached per checkout), failed workers' chains and
+/// the dispatch's reviewers, for routing.
+pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: u64, args: &Value) -> Result<(TeamConfig, Vec<String>, Chains, Reviewers)> {
+    let (config, root, chains, reviewers) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let team = load(&store, sid)?.ok_or("Team unavailable.")?;
@@ -147,13 +176,14 @@ pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: 
         }
         let lead = store.session(sid)?;
         let chains = chains(&store, &team, args)?;
-        (team.config, store.workspace_root(&lead.project_id, Some(sid)).ok(), chains)
+        let reviewers = reviewers(&team, args);
+        (team.config, store.workspace_root(&lead.project_id, Some(sid)).ok(), chains, reviewers)
     };
     let langs = match root {
         Some(root) => tokio::task::spawn_blocking(move || model_routing::repo_languages(&root)).await.unwrap_or_default(),
         None => Vec::new(),
     };
-    Ok((config, langs, chains))
+    Ok((config, langs, chains, reviewers))
 }
 
 /// Worker assignments run as tool-using coding agents in the team's checkout.
@@ -191,7 +221,7 @@ pub(super) fn auto_from(keys: Vec<String>, routes: Option<std::result::Result<Ve
             .into_iter()
             .zip(routes)
             .map(|(key, r)| {
-                let route = AutoRoute { pick: r.pick, ladder: r.ladder, mode, decided_by: r.decided_by, failed: r.failed, difficulty: r.difficulty, category: r.category, profiler: r.profiler };
+                let route = AutoRoute { pick: r.pick, ladder: r.ladder, mode, decided_by: r.decided_by, failed: r.failed, pinned: None, difficulty: r.difficulty, category: r.category, profiler: r.profiler };
                 (key, Ok(route))
             })
             .collect(),
@@ -203,18 +233,52 @@ pub(super) fn auto_from(keys: Vec<String>, routes: Option<std::result::Result<Ve
     }
 }
 
-pub(super) async fn auto_routes(config: &TeamConfig, langs: &[String], chains: &Chains, args: &Value) -> AutoRoutes {
+pub(super) async fn auto_routes(config: &TeamConfig, langs: &[String], chains: &Chains, reviewers: &Reviewers, args: &Value) -> AutoRoutes {
     let (keys, jobs) = auto_jobs(args, langs, chains, by_default(config));
     if keys.is_empty() {
         return AutoRoutes::default();
     }
     // One mode for routing and staffing, even if Settings changes it meanwhile.
     let mode = model_routing::mode();
-    auto_from(keys, model_routing::route_jobs(pool(config), jobs, Some(mode)).await, mode)
+    let mut routes = auto_from(keys, model_routing::route_jobs(pool(config), jobs, Some(mode)).await, mode);
+    diversify(&reviewers.keys, reviewers.taken.clone(), &mut routes);
+    routes
 }
 
-pub(super) fn effort(provider: &str, effort: Option<&String>) -> Option<String> {
-    effort.filter(|e| crate::providers::validate_reasoning_effort(provider, Some(e)).is_ok()).cloned()
+/// The rung a route opens on: Cheap keeps its contract (it must clear the minimum lower bound, else
+/// the policy pick), Best and escalations take the policy's pick, and others take the first rung.
+fn opening_rung<'a>(pinned: Option<&'a Routed>, failed: &[PoolModel], mode: Mode, ladder: &'a [Routed]) -> Option<&'a Routed> {
+    match mode {
+        _ if pinned.is_some() => pinned,
+        _ if !failed.is_empty() => None,
+        Mode::Quality => None,
+        Mode::Cheapest => ladder.iter().find(|m| m.p_success_lower >= model_routing::min_p()),
+        _ => ladder.first(),
+    }
+}
+
+/// A council of one model is weak: a reviewer whose pick repeats a provider and model an earlier
+/// reviewer in this batch took moves to the next unused entry of its ladder, and keeps the duplicate
+/// if there is none. Weaker rungs come last, only where the route could open on them: never below
+/// Cheap's minimum, and never for an escalation. `reviewers` are the batch's Council keys in order;
+/// other routes are untouched.
+pub(super) fn diversify(reviewers: &[String], mut taken: Vec<(String, String)>, routes: &mut AutoRoutes) {
+    for key in reviewers {
+        let Some(Ok(route)) = routes.get_mut(key) else { continue };
+        let Some(current) = opening_rung(None, &route.failed, route.mode, &route.ladder).or(route.pick.as_ref()).cloned() else { continue };
+        let free = |m: &&Routed| !taken.iter().any(|(provider, model)| *provider == m.provider && *model == m.model);
+        let mut chosen = current.clone();
+        if !free(&&current) {
+            let at = route.ladder.iter().position(|m| m.card_id == current.card_id).map_or(0, |i| i + 1);
+            let earlier = if route.failed.is_empty() { &route.ladder[..at] } else { &[] };
+            let opens = |m: &&Routed| route.mode != Mode::Cheapest || m.p_success_lower >= model_routing::min_p();
+            if let Some(next) = route.ladder[at..].iter().chain(earlier).filter(opens).find(free) {
+                chosen = next.clone();
+                route.pinned = Some(next.clone());
+            }
+        }
+        taken.push((chosen.provider, chosen.model));
+    }
 }
 
 fn money(usd: f64) -> String {
@@ -226,34 +290,61 @@ pub(super) fn usable(profile: &WorkerProfile) -> bool {
     model_routing::allowed(&profile.provider, &profile.model) && crate::model_health::is_healthy(&profile.provider, &profile.model)
 }
 
+/// The model a route staffs (`opening_rung`): a Council pin first; Cheap keeps its contract (the
+/// opener must clear the minimum lower bound, else the policy pick); Best mode and escalations take
+/// the policy's pick.
+fn opener(route: &AutoRoute) -> Option<&Routed> {
+    opening_rung(route.pinned.as_ref(), &route.failed, route.mode, &route.ladder)
+}
+
+/// The harness an assignment will run on, before staffing it, so only that catalog is looked up.
+pub(super) fn planned_provider(config: &TeamConfig, lead: &storage::Session, key: &str, routes: &AutoRoutes) -> String {
+    match routes.get(key) {
+        Some(Ok(route)) if route.pick.is_some() => opener(route).or(route.pick.as_ref()).map(|m| m.provider.clone()).unwrap_or_default(),
+        _ => unrouted(config, lead).provider,
+    }
+}
+
+/// An unrouted assignment's model: the lead's own in an open auto team; otherwise the lead's
+/// entry, else the first usable one, else the lead's own model. Its effort is the default.
+fn unrouted(config: &TeamConfig, lead: &storage::Session) -> WorkerProfile {
+    let own = || WorkerProfile {
+        id: AUTO.into(),
+        name: lead.model.clone(),
+        provider: lead.provider.clone(),
+        model: lead.model.clone(),
+        reasoning_effort: lead.reasoning_effort.clone(),
+    };
+    if config.auto && !config.roster_only {
+        return own();
+    }
+    let entries = || config.workers.iter().filter(|p| usable(p));
+    entries().find(|p| p.provider == lead.provider && p.model == lead.model).or_else(|| entries().next()).cloned().unwrap_or_else(own)
+}
+
 /// Staffs a `profileId: "auto"` assignment, or the lead's own model when unrouted (a configured or named
 /// team without the lead's usable model uses its first usable entry, else the lead's own model), and says which in one line. A fresh assignment
 /// in Cheap or Balanced mode opens on the ladder's first (cheapest safe) rung and escalates from there;
 /// Best mode and escalations take the policy's pick.
-pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, String)> {
+/// Returns the profile, the routing note, and how the effort was fitted to the model.
+pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, String, Option<String>)> {
     if assignment.provider.is_some() || assignment.model.is_some() {
         return Err("Use either profileId or provider and model, not both.".into());
     }
     let wanted = assignment.reasoning_effort.as_ref();
     let route = routes.get(&assignment.key).cloned().unwrap_or(Err("routing is off"));
-    let reason = match route {
-        Ok(AutoRoute { pick: Some(policy), ladder, mode, decided_by, failed, difficulty, category, profiler }) => {
-            // Cheap keeps its contract: the opener must clear the minimum lower bound, else the policy pick.
-            let opener = match mode {
-                _ if !failed.is_empty() => None,
-                Mode::Quality => None,
-                Mode::Cheapest => ladder.iter().find(|m| m.p_success_lower >= model_routing::min_p()),
-                _ => ladder.first(),
-            };
+    let reason = match &route {
+        Ok(routed @ AutoRoute { pick: Some(policy), ladder, decided_by, failed, difficulty, category, profiler, .. }) => {
+            let opener = opener(routed);
             let pick = opener.cloned().unwrap_or_else(|| policy.clone());
             let roster = config.workers.iter().find(|p| p.provider == pick.provider && p.model == pick.model);
             if config.roster_only && roster.is_none() {
                 return Err("Panda Router picked a model outside this team.".into());
             }
-            let reasoning_effort = effort(&pick.provider, wanted).or_else(|| roster.and_then(|p| p.reasoning_effort.clone()));
+            let (reasoning_effort, adjusted) = model_efforts::apply(&pick.provider, &pick.model, wanted, roster.and_then(|p| p.reasoning_effort.as_ref()));
             let label = if pick.name.contains('·') { pick.name.clone() } else { format!("{} · {}", pick.name, pick.provider) };
             // The keyword heuristic stands in while the profiler downloads; say so.
-            let rough = if profiler == "heuristic" { ", heuristic" } else { "" };
+            let rough = if *profiler == "heuristic" { ", heuristic" } else { "" };
             // The rung the opener sits on (Cheap may skip rungs below min P).
             let rung = opener.and_then(|o| ladder.iter().position(|m| m.card_id == o.card_id)).map_or(1, |i| i + 1);
             let step = match opener {
@@ -274,35 +365,15 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 model: pick.model,
                 reasoning_effort,
             };
-            return Ok((profile, note));
+            return Ok((profile, note, adjusted));
         }
         Ok(_) => "no rated model fits",
         Err(reason) => reason,
     };
-    let profile = if config.auto && !config.roster_only {
-        WorkerProfile {
-            id: AUTO.into(),
-            name: lead.model.clone(),
-            provider: lead.provider.clone(),
-            model: lead.model.clone(),
-            reasoning_effort: effort(&lead.provider, wanted).or_else(|| lead.reasoning_effort.clone()),
-        }
-    } else {
-        // The lead's entry, else the first usable one; with none usable, the lead's own model.
-        let entries = || config.workers.iter().filter(|p| usable(p));
-        match entries().find(|p| p.provider == lead.provider && p.model == lead.model).or_else(|| entries().next()) {
-            Some(entry) => WorkerProfile { reasoning_effort: effort(&entry.provider, wanted).or_else(|| entry.reasoning_effort.clone()), ..entry.clone() },
-            None => WorkerProfile {
-                id: AUTO.into(),
-                name: lead.model.clone(),
-                provider: lead.provider.clone(),
-                model: lead.model.clone(),
-                reasoning_effort: effort(&lead.provider, wanted).or_else(|| lead.reasoning_effort.clone()),
-            },
-        }
-    };
+    let profile = unrouted(config, lead);
+    let (reasoning_effort, adjusted) = model_efforts::apply(&profile.provider, &profile.model, wanted, profile.reasoning_effort.as_ref());
     let note = format!("not routed ({reason}), using {} · {}", profile.name, profile.provider);
-    Ok((profile, note))
+    Ok((WorkerProfile { reasoning_effort, ..profile }, note, adjusted))
 }
 
 #[derive(Deserialize)]
@@ -412,4 +483,110 @@ pub(super) async fn route_models(config: &TeamConfig, langs: &[String], args: Va
         .await
         .ok_or_else(|| format!("{} Choose models yourself.", model_routing::OFF))??;
     Ok(route_summary(config, &routes))
+}
+
+#[cfg(test)]
+mod council_diversity_tests {
+    use super::*;
+
+    fn rung(provider: &str, model: &str) -> Routed {
+        Routed { provider: provider.into(), model: model.into(), name: model.into(), card_id: format!("{provider}/{model}"), p_success: 0.9, p_success_lower: 0.9, est_cost_usd: 0.0, expected_cost_usd: 0.0, est_latency_ms: 0.0, tier: None, tier_p: None }
+    }
+    fn route(mode: Mode, pick: Routed, ladder: Vec<Routed>) -> std::result::Result<AutoRoute, &'static str> {
+        Ok(AutoRoute { pick: Some(pick), ladder, mode, decided_by: "policy".into(), failed: vec![], pinned: None, difficulty: 1, category: "code".into(), profiler: "heuristic" })
+    }
+    fn pinned(routes: &AutoRoutes, key: &str) -> Option<String> {
+        routes[key].as_ref().unwrap().pinned.as_ref().map(|m| m.card_id.clone())
+    }
+    fn diversify_all(keys: &[String], routes: &mut AutoRoutes) {
+        diversify(keys, vec![], routes);
+    }
+    fn keys(names: &[&str]) -> Vec<String> {
+        names.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn reviewers_move_up_their_ladder_past_taken_models() {
+        let ladder = vec![rung("a", "1"), rung("b", "2"), rung("c", "3")];
+        let mut routes = AutoRoutes::new();
+        for key in ["r1", "r2", "r3", "r4", "writer"] {
+            routes.insert(key.into(), route(Mode::Balanced, rung("c", "3"), ladder.clone()));
+        }
+        diversify_all(&keys(&["r1", "r2", "r3", "r4"]), &mut routes);
+        assert_eq!(pinned(&routes, "r1"), None, "the first keeps its pick");
+        assert_eq!(pinned(&routes, "r2").as_deref(), Some("b/2"));
+        assert_eq!(pinned(&routes, "r3").as_deref(), Some("c/3"));
+        assert_eq!(pinned(&routes, "r4"), None, "nothing left: it keeps the duplicate");
+        assert_eq!(pinned(&routes, "writer"), None, "other assignments are untouched");
+    }
+
+    #[test]
+    fn explicitly_staffed_reviewers_count_as_taken() {
+        let mut routes = AutoRoutes::new();
+        routes.insert("r1".to_string(), route(Mode::Balanced, rung("a", "1"), vec![rung("a", "1"), rung("b", "2")]));
+        diversify(&keys(&["r1"]), vec![("a".into(), "1".into())], &mut routes);
+        assert_eq!(pinned(&routes, "r1").as_deref(), Some("b/2"));
+    }
+
+    #[test]
+    fn a_replacement_that_inherits_its_lens_is_a_reviewer_and_explicit_ones_are_taken() {
+        let mut team = crate::architect::new_team("lead".into(), TeamConfig {
+            auto: false, roster_only: false, name: None,
+            workers: vec![WorkerProfile { id: "fast".into(), name: "Fast".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None }],
+            catalog: vec![], max_parallel: 0, max_rounds: 0, max_assignments: 0, workspace: "shared".into(), summary_limit: 0, lead_guidance: None,
+            council: Some(Default::default()),
+        });
+        let mut old: crate::architect::Worker = serde_json::from_value(json!({"id":"old","sessionId":"s","name":"n","profileId":"auto","provider":"codex","model":"m","reasoningEffort":null,"status":"failed","assignment":"a","summary":"","error":null,"dependsOn":[],"files":[],"attempt":1,"createdAt":1,"updatedAt":1})).unwrap();
+        old.council = Some(Default::default());
+        team.workers.push(old);
+        let args = json!({"assignments":[
+            {"key":"again","profileId":"auto","replaces":"old"},
+            {"key":"pinned","profileId":"fast","councilLens":"ux"},
+            {"key":"direct","provider":"claude","model":"x","councilLens":"ux"},
+            {"key":"writer","profileId":"auto"},
+        ]});
+        let found = reviewers(&team, &args);
+        assert_eq!(found.keys, ["again"]);
+        assert_eq!(found.taken, [("codex".to_string(), "m".to_string()), ("claude".to_string(), "x".to_string())]);
+        team.config.council = None;
+        assert!(reviewers(&team, &args).keys.is_empty());
+    }
+
+    #[test]
+    fn the_same_model_on_another_harness_is_not_a_repeat() {
+        let mut routes = AutoRoutes::new();
+        routes.insert("r1".to_string(), route(Mode::Balanced, rung("a", "1"), vec![rung("a", "1")]));
+        routes.insert("r2".to_string(), route(Mode::Balanced, rung("b", "1"), vec![rung("b", "1"), rung("c", "2")]));
+        diversify_all(&keys(&["r1", "r2"]), &mut routes);
+        assert_eq!(pinned(&routes, "r2"), None);
+    }
+
+    #[test]
+    fn best_mode_falls_back_to_a_weaker_rung_but_an_escalation_does_not() {
+        let ladder = vec![rung("a", "1"), rung("b", "2")];
+        let mut routes = AutoRoutes::new();
+        routes.insert("r1".to_string(), route(Mode::Quality, rung("b", "2"), ladder.clone()));
+        routes.insert("r2".to_string(), route(Mode::Quality, rung("b", "2"), ladder.clone()));
+        diversify_all(&keys(&["r1", "r2"]), &mut routes);
+        assert_eq!(pinned(&routes, "r2").as_deref(), Some("a/1"));
+        let mut routes = AutoRoutes::new();
+        routes.insert("r1".to_string(), route(Mode::Quality, rung("b", "2"), ladder.clone()));
+        let mut escalation = route(Mode::Quality, rung("b", "2"), ladder).unwrap();
+        escalation.failed = vec![PoolModel { provider: "a".into(), model: "1".into(), name: "1".into() }];
+        routes.insert("r2".to_string(), Ok(escalation));
+        diversify_all(&keys(&["r1", "r2"]), &mut routes);
+        assert_eq!(pinned(&routes, "r2"), None);
+    }
+
+    #[test]
+    fn staffing_opens_on_the_pinned_rung() {
+        let ladder = vec![rung("codex", "1"), rung("claude", "2")];
+        let mut routes = AutoRoutes::new();
+        routes.insert("r1".to_string(), route(Mode::Balanced, rung("codex", "1"), ladder.clone()));
+        routes.insert("r2".to_string(), route(Mode::Balanced, rung("codex", "1"), ladder));
+        diversify_all(&keys(&["r1", "r2"]), &mut routes);
+        let route = routes["r2"].as_ref().unwrap();
+        let open = opening_rung(route.pinned.as_ref(), &route.failed, route.mode, &route.ladder).unwrap();
+        assert_eq!((open.provider.as_str(), open.model.as_str()), ("claude", "2"));
+    }
 }

@@ -216,6 +216,53 @@ export function preloadDiffViewer(): Promise<unknown> {
   return engine;
 }
 
+export async function mountCodeFile(host: HTMLElement, path: string, contents: string, wrap: boolean): Promise<() => void> {
+  engine ??= startEngine();
+  const { lib, pool, highlighter } = await engine;
+  if (!host.isConnected) return () => {};
+  const options = () => ({ theme: THEMES, themeType: themeType(), preferredHighlighter: highlighter, disableFileHeader: true, overflow: wrap ? 'wrap' as const : 'scroll' as const, tokenizeMaxLineLength: 2000, unsafeCSS: ':host{--diffs-font-family:var(--mono);--diffs-font-size:var(--mono-size);--diffs-line-height:calc(var(--mono-size) * 1.6);--diffs-bg:var(--bg)}[data-gutter]{user-select:none}' });
+  const file = new lib.File(options(), pool);
+  host.replaceChildren();
+  file.render({ file: { name: path, contents, cacheKey: patchKey(path, contents) }, containerWrapper: host });
+  const observer = new MutationObserver(() => { file.setOptions(options()); file.rerender(); });
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-vsix'] });
+  return () => { observer.disconnect(); file.cleanUp(); };
+}
+
+export type SelectedCode = { text: string; startLine: number; endLine: number; buffer: string };
+export type CodeSelection = SelectedCode & { action: 'ask' | 'fix'; question: string };
+
+export async function mountCodeEditor(host: HTMLElement, path: string, contents: string, stateKey: string, change: (content: string) => void, select: (selection: SelectedCode | undefined) => void) {
+  engine ??= startEngine();
+  const [{ lib, pool, highlighter }, { Editor }] = await Promise.all([engine, import('@pierre/diffs/edit')]);
+  if (!host.isConnected) return;
+  const options = () => ({ theme: THEMES, themeType: themeType(), preferredHighlighter: highlighter, disableFileHeader: true, tokenizeMaxLineLength: 2000, unsafeCSS: ':host{--diffs-font-family:var(--mono);--diffs-font-size:var(--mono-size);--diffs-line-height:calc(var(--mono-size) * 1.6);--diffs-bg:var(--ds-card-inner);--diffs-editor-cursor-fg:var(--text);--diffs-editor-selection-bg:var(--accent-tint);--diffs-editor-bracket-match-bg:var(--accent-tint);--diffs-editor-bracket-match-border:var(--accent)}[data-gutter]{user-select:none}' });
+  const file = new lib.File({ ...options(), onEditComplete: event => { event.file.cacheKey = crypto.randomUUID(); return 'accept'; } }, pool);
+  let selectionFrame = 0;
+  const editor = new Editor('file', { ownsVerticalViewport: true, onChange: event => { change(event.file.contents); select(undefined); scheduleSelection(); } }, stateKey);
+  host.replaceChildren();
+  file.render({ file: { name: path, contents, cacheKey: patchKey(path, contents) }, containerWrapper: host });
+  editor.edit(file);
+  function captureSelection(clear = false): void {
+    if (!host.contains(document.activeElement)) return;
+    const range = editor.getViewState().selections?.at(-1), textDocument = editor.getEditState()?.document;
+    const text = range && textDocument?.getText(range);
+    const selection = range && text ? { text, startLine: range.start.line + 1, endLine: Math.max(range.start.line + 1, range.end.line + (range.end.character ? 1 : 0)), buffer: editor.getText() } : undefined;
+    if (selection || clear) select(selection);
+  }
+  function scheduleSelection(): void {
+    if (!selectionFrame) selectionFrame = requestAnimationFrame(() => { selectionFrame = 0; captureSelection(); });
+  }
+  function selectionEnded(): void { captureSelection(true); scheduleSelection(); }
+  function selectionChanged(): void { if (host.contains(document.activeElement)) scheduleSelection(); }
+  host.addEventListener('pointerup', selectionEnded);
+  host.addEventListener('keyup', selectionEnded);
+  document.addEventListener('selectionchange', selectionChanged);
+  const observer = new MutationObserver(() => { file.setOptions({ ...file.options, ...options() }); file.rerender(); });
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-vsix'] });
+  return { focus: () => editor.focus(), dispose: () => { observer.disconnect(); cancelAnimationFrame(selectionFrame); host.removeEventListener('pointerup', selectionEnded); host.removeEventListener('keyup', selectionEnded); document.removeEventListener('selectionchange', selectionChanged); editor.cleanUp(); file.cleanUp(); } };
+}
+
 /** Read-only, bounded diff rendering. Replacing a viewer cancels its old mount. */
 export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): DiffViewerController {
   mountedViewers.get(host)?.dispose();
@@ -291,7 +338,7 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
     enableLineSelection: false,
     // This CSS is constant; no patch content is ever interpolated into it.
     // Pierre adds it to every container it creates, including hunk groups mounted later.
-    unsafeCSS: ':host { --diffs-font-family: var(--mono, monospace); --diffs-font-size: 0.86rem; --diffs-line-height: 1.45rem; }' + (input.shadowCSS ?? ''),
+    unsafeCSS: ':host { --diffs-font-family: var(--mono); --diffs-font-size:var(--mono-size); }' + (input.shadowCSS ?? ''),
   });
 
   // Distance in pixels from the viewport to a virtualized renderer (0 when visible).
@@ -464,17 +511,27 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
       }
       updateControls();
       let list: HTMLElement = content;
+      let rowSize: HTMLElement | undefined;
+      let observedRowHeight = 0;
+      const metrics = { ...lib.DEFAULT_VIRTUAL_FILE_METRICS, hunkLineCount: RENDER_BATCH_LINES };
+      const applyRowHeight = (height: number) => {
+        metrics.lineHeight = height;
+        // Use the same layout-rounded length for the rows, spacer heights, and Pierre's estimates.
+        root.style.setProperty('--diff-row-pitch', `${height}px`);
+      };
       if (lines > VIRTUALIZE_LINES) {
         list = element('div', 'diff-viewer-list');
         content.append(list);
+        rowSize = element('div', 'diff-viewer-row-size');
+        list.append(rowSize);
+        applyRowHeight(parseFloat(getComputedStyle(rowSize).height) || metrics.lineHeight);
         virtualizer = acquireVirtualizer(lib, scroller);
       }
       // Every chunk gets a frame now, sized from its line count until it mounts, so the
-      // scroll height is right from the first frame. CSS resolves the row height, which
-      // the host may set (--diff-line-height), so no layout is read here.
+      // scroll height is estimated from the first frame without measuring each chunk.
       const frames = chunks.map(chunk => {
         const frame = element('div', chunk.continued ? 'diff-viewer-file diff-viewer-continued' : 'diff-viewer-file');
-        if (chunks.length > 1) frame.style.minHeight = `calc(${chunk.lines} * var(--diff-line-height))`;
+        if (chunks.length > 1) frame.style.minHeight = `calc(${chunk.lines} * var(--diff-row-pitch))`;
         list.append(frame);
         return frame;
       });
@@ -489,7 +546,7 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
           if (index) { const extra = element('div', 'diff-viewer-file'); target.after(extra); target = extra; }
           target.setAttribute('aria-label', file.name);
           const header = !chunk.continued && (sections > 1 || files.length > 1);
-          const view = virtualizer ? new lib.VirtualizedFileDiff(options(header), virtualizer, { hunkLineCount: RENDER_BATCH_LINES }, pool) : new lib.FileDiff(options(header), pool);
+          const view = virtualizer ? new lib.VirtualizedFileDiff(options(header), virtualizer, metrics, pool) : new lib.FileDiff(options(header), pool);
           renderers.push({ view, header, file });
           mounted.push(file);
           view.render({ fileDiff: file, containerWrapper: target });
@@ -531,6 +588,7 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
       resizeObserver = new ResizeObserver(entries => {
         for (const entry of entries) {
+          if (entry.target === rowSize) { observedRowHeight = entry.contentRect.height; continue; }
           if (entry.target === scroller) { viewHeight = entry.contentRect.height; continue; }
           width = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
         }
@@ -538,6 +596,20 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
         resizeFrame = requestAnimationFrame(() => {
           resizeFrame = 0;
           if (disposed) return;
+          if (observedRowHeight > 0 && observedRowHeight !== metrics.lineHeight) {
+            applyRowHeight(observedRowHeight);
+            for (const { view, file } of renderers) {
+              if (!(view instanceof lib.VirtualizedFileDiff)) continue;
+              // Recompute even offscreen: setMetrics alone leaves an existing placeholder at its old height.
+              view.updateCodeViewLayout(file, view.top ?? 0, {
+                metrics,
+                resetFileLayoutCache: false,
+                resetDiffLayoutCache: true,
+                includeEstimatedDiffHeights: true,
+              });
+              view.rerender();
+            }
+          }
           const previousLayout = layout;
           updateControls();
           if (layout !== previousLayout) rerender();
@@ -545,6 +617,7 @@ export function mountDiffViewer(host: HTMLElement, input: DiffViewerInput): Diff
       });
       resizeObserver.observe(root);
       resizeObserver.observe(scroller);
+      if (rowSize) resizeObserver.observe(rowSize);
     } catch {
       fail();
     }

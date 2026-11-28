@@ -148,12 +148,12 @@ function drawStencil(context: CanvasRenderingContext2D, shape: Shape, b: { x: nu
   switch (shape.stencil) {
     case 'heading': label(context, text || 'Heading', b.x, b.y, b.w, b.h, Math.max(size, Math.min(b.h * 0.7, 40)), shape.stroke, 'left', 700); break;
     case 'button': box(8, fill ?? tint(shape.stroke, 0.12)); label(context, text || 'Button', b.x, b.y, b.w, b.h, size, shape.stroke); break;
-    case 'input': box(7, fill ?? '#ffffff'); label(context, text || 'Placeholder', b.x + 12, b.y, b.w - 24, b.h, size, muted, 'left', 500); break;
-    case 'checkbox': { const s = Math.min(20, b.h); roundRect(context, b.x, b.y + (b.h - s) / 2, s, s, 4); context.stroke(); context.beginPath(); context.moveTo(b.x + s * 0.25, b.y + b.h / 2); context.lineTo(b.x + s * 0.45, b.y + b.h / 2 + s * 0.2); context.lineTo(b.x + s * 0.78, b.y + b.h / 2 - s * 0.25); context.stroke(); label(context, text || 'Option', b.x + s + 10, b.y, b.w - s - 10, b.h, size, shape.stroke, 'left', 500); break; }
+    case 'input': box(8, fill ?? '#ffffff'); label(context, text || 'Placeholder', b.x + 12, b.y, b.w - 24, b.h, size, muted, 'left', 500); break;
+    case 'checkbox': { const s = Math.min(20, b.h); roundRect(context, b.x, b.y + (b.h - s) / 2, s, s, 2); context.stroke(); context.beginPath(); context.moveTo(b.x + s * 0.25, b.y + b.h / 2); context.lineTo(b.x + s * 0.45, b.y + b.h / 2 + s * 0.2); context.lineTo(b.x + s * 0.78, b.y + b.h / 2 - s * 0.25); context.stroke(); label(context, text || 'Option', b.x + s + 10, b.y, b.w - s - 10, b.h, size, shape.stroke, 'left', 500); break; }
     case 'toggle': { const h = Math.min(24, b.h), w = h * 1.8; roundRect(context, b.x, b.y + (b.h - h) / 2, w, h, h / 2); context.fillStyle = tint(shape.stroke, 0.18); context.fill(); context.stroke(); context.beginPath(); context.arc(b.x + w - h / 2, b.y + b.h / 2, h / 2 - 3, 0, Math.PI * 2); context.fillStyle = shape.stroke; context.fill(); label(context, text || 'Setting', b.x + w + 10, b.y, b.w - w - 10, b.h, size, shape.stroke, 'left', 500); break; }
-    case 'image': box(6, fill ?? tint(shape.stroke, 0.06)); context.save(); context.beginPath(); context.rect(b.x, b.y, b.w, b.h); context.clip(); line(b.x, b.y, b.x + b.w, b.y + b.h); line(b.x + b.w, b.y, b.x, b.y + b.h); context.restore(); break;
+    case 'image': box(6, fill ?? tint(shape.stroke, 0.06)); context.save(); roundRect(context, b.x, b.y, b.w, b.h, 6); context.clip(); line(b.x, b.y, b.x + b.w, b.y + b.h); line(b.x + b.w, b.y, b.x, b.y + b.h); context.restore(); break;
     case 'card': {
-      box(10, fill ?? '#ffffff');
+      box(16, fill ?? '#ffffff');
       label(context, text || 'Card title', b.x + 16, b.y + 12, b.w - 32, size * 1.6, size, shape.stroke, 'left', 650);
       const top = b.y + 16 + size * 1.8; context.strokeStyle = muted;
       for (let i = 0; i < 3 && top + i * 14 + 6 < b.y + b.h - 8; i++) line(b.x + 16, top + i * 14, b.x + b.w - 16 - (i === 2 ? b.w * 0.3 : 0), top + i * 14);
@@ -161,7 +161,7 @@ function drawStencil(context: CanvasRenderingContext2D, shape: Shape, b: { x: nu
     }
     case 'navbar': {
       box(0, fill ?? '#ffffff');
-      const pad = 16, logoW = Math.min(90, b.w * 0.2); roundRect(context, b.x + pad, b.y + b.h / 2 - 12, logoW, 24, 5); context.fillStyle = tint(shape.stroke, 0.16); context.fill(); context.stroke();
+      const pad = 16, logoW = Math.min(90, b.w * 0.2); roundRect(context, b.x + pad, b.y + b.h / 2 - 12, logoW, 24, 6); context.fillStyle = tint(shape.stroke, 0.16); context.fill(); context.stroke();
       label(context, text || 'Logo', b.x + pad, b.y + b.h / 2 - 12, logoW, 24, Math.min(size, 14), shape.stroke, 'center', 700);
       const items = ['Home', 'Features', 'Pricing']; let x = b.x + b.w - pad;
       for (const item of items.reverse()) { const w = context.measureText(item).width + 34; x -= w; if (x < b.x + pad + logoW) break; label(context, item, x, b.y, w, b.h, Math.min(size, 14), muted, 'center', 500); }
@@ -323,7 +323,7 @@ export function showSketch(options: SketchOptions): void {
       if (value !== shape.text) { shape.text = value; if (shape.type === 'text') { context.font = `500 ${shape.fontSize}px ${FONT}`; const lines = wrapText(context, value || 'Text', Math.max(20, bounds(shape).w)); shape.h = Math.max(shape.fontSize * 1.3, lines.length * shape.fontSize * 1.3); } commit(); } else render();
     };
     area.addEventListener('keydown', event => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !isImeKey(event)) {
         // Chrome reports Escape as a dialog close request after this event; WebKit does not
         // once the key is handled. Either way the edit ends and the sketch stays open.
         event.preventDefault(); event.stopPropagation();
@@ -455,10 +455,11 @@ export function showSketch(options: SketchOptions): void {
     commit(); fit();
   });
   editor.addEventListener('keydown', event => {
-    if ((event.target as HTMLElement).matches('textarea, select, input')) return;
+    if (isImeKey(event) || event.altKey || (event.target as HTMLElement).matches('textarea, select, input')) return;
     const command = event.metaKey || event.ctrlKey;
-    if (command && event.key.toLowerCase() === 'z') { event.preventDefault(); event.stopPropagation(); if (event.shiftKey) redo(); else undo(); return; }
-    if (command && event.key.toLowerCase() === 'd') { event.preventDefault(); event.stopPropagation(); duplicate(); return; }
+    const key = event.code.replace(/^Key/, '').toLowerCase();
+    if (command && key === 'z') { event.preventDefault(); event.stopPropagation(); if (event.shiftKey) redo(); else undo(); return; }
+    if (command && key === 'd') { event.preventDefault(); event.stopPropagation(); duplicate(); return; }
     if (command) return;
     if (event.key === 'Backspace' || event.key === 'Delete') { if (current()) { event.preventDefault(); event.stopPropagation(); remove(); } return; }
     if (event.key === 'Enter' && current()) { event.preventDefault(); event.stopPropagation(); edit(current()!); return; }
@@ -467,8 +468,8 @@ export function showSketch(options: SketchOptions): void {
       const step = event.shiftKey ? 10 : 1, shape = current()!, dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
       shape.x += dx; shape.y += dy; if (shape.points) shape.points = shape.points.map((v, i) => v + (i % 2 === 0 ? dx : dy)); commit(); return;
     }
-    const shortcut = TOOLS.find(t => t.key.toLowerCase() === event.key.toLowerCase());
-    if (shortcut && !event.altKey) { event.preventDefault(); event.stopPropagation(); setTool(shortcut.id); }
+    const shortcut = TOOLS.find(t => t.key.toLowerCase() === key);
+    if (shortcut) { event.preventDefault(); event.stopPropagation(); setTool(shortcut.id); }
   });
   canvas.tabIndex = 0;
 

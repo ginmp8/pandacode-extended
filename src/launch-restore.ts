@@ -1,0 +1,560 @@
+/* What a launch restores after any exit, clean or abrupt (a crash restart included): composer
+ * drafts per task and the thread that was open. Local storage only.
+ *
+ * Drafts: one key per task (`pandacode.draft:<id>` → `{"t":savedAt,"text":…,"a":[…]}`), so a keystroke
+ * rewrites only its own draft. The `a` array keeps the draft's prompt attachments beside the text:
+ * their references and chip thumbnails, never a file's bytes, sharing the text's age, size budget,
+ * Keep unsent drafts switch, Clear saved drafts, New-task key moves and deletion rules. A New task
+ * (a native draft session, discarded at the next launch while it has no messages) keeps its text
+ * under one key per project instead (`pandacode.draft:new:<project id>`), which the next New task
+ * in that project takes over. A shared
+ * bot channel's composer text is kept the same way under `pandacode.draft:channel:<channel id>`.
+ * Without a write timer every change is written at once. The app passes one (`DraftWriteTimer`): the
+ * first change of a burst is written at once, later ones at most every DRAFT_WRITE_DELAY (a draft
+ * can be 100 KB, too much to rewrite on every keystroke), and `flush()` writes what is waiting
+ * (window hidden, pagehide, app-quitting, a thread switch). Removing one (sending it, clearing it)
+ * is always written at once, so a crash never brings a sent prompt back. A draft is dropped only when
+ * it is older than DRAFT_MAX_AGE or dated more than a day ahead (at launch, then daily and when the window shows again),
+ * malformed, too large, pushed out by DRAFTS_BYTE_BUDGET (oldest first; a full store drops more
+ * and retries once), or its thread is deleted (also while the app was closed: `dropDeletedDrafts`); a project's New task
+ * text goes when the project is removed in the window, or at the next boot whose project list lacks it (`dropRemovedProjectDrafts`);
+ * a channel's text when it is sent, or once a launch's channel list lacks it (`dropRemovedChannelDrafts`). Dropped drafts stay in memory for the running launch.
+ * With Settings' Keep unsent drafts off (KEEP_DRAFTS_KEY) nothing is written and every stored
+ * draft goes, at once and at each launch; text already typed stays in memory for the running launch.
+ *
+ * Open thread: remembered once its messages have loaded (a New task as its project). Every thread
+ * opened (by boot or the user) is marked until its messages have painted (or, in a window that
+ * paints nothing, PAINT_WAIT after they rendered or once it is hidden); a failed or superseded
+ * load clears its own mark, and an orderly exit (`leavePage`) clears any; a mark still there at the next boot, when that boot follows a crash,
+ * means opening that thread may have taken the app down, so boot opens the thread that was open
+ * before it (kept with the mark) or, when that is gone or archived, the newest one, and forgets both. After repeated crashes (restarts paused) boot opens no thread by itself.
+ *
+ * Window deaths: a first reload after the window's content died (often macOS ending it under memory
+ * pressure) holds back only the marked thread; with no mark the remembered thread reopens as usual.
+ * Either is noted in `pandacode.windowDied` until the page has lived
+ * WINDOW_STABLE_AFTER or closes in an orderly way. A boot that finds the note (the window died
+ * again: another reload, or the launch after the native dialog's Restart PandaCode) opens no
+ * thread by itself and names the noted one. */
+
+import { attachmentsBytes, fromStored, toStored } from './draft-attachments.ts';
+import type { PromptAttachment } from './attachments.ts';
+
+export type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key'> & { readonly length: number };
+type Schedule = (run: () => void, ms: number) => unknown;
+
+export const DRAFT_PREFIX = 'pandacode.draft:';
+/** 'off' when Settings' Keep unsent drafts is off; absent (on, the default) otherwise. */
+export const KEEP_DRAFTS_KEY = 'pandacode.keepDrafts';
+export const OPEN_THREAD_KEY = 'pandacode.openThread';
+/** Set when the open thread at exit was a New task (its draft session does not outlive the launch);
+ * its project is the saved current project, which follows a New task moved to another project. */
+export const OPEN_NEW_TASK_KEY = 'pandacode.openNewTask';
+/** Drafts key prefix (after DRAFT_PREFIX) of a project's New task text. */
+export const NEW_TASK_DRAFT = 'new:';
+/** Drafts key prefix (after DRAFT_PREFIX) of a shared bot channel's composer text. */
+export const CHANNEL_DRAFT = 'channel:';
+/** The drafts key of a shared channel's composer text. */
+export const channelDraftKey = (channelId: string): string => CHANNEL_DRAFT + channelId;
+export const RESTORING_KEY = 'pandacode.restoringThread';
+/** The thread remembered as open when the marked one began to open (absent when it is the same),
+ * kept and cleared with the mark: boot reopens it when the marked thread is held back. */
+export const PREVIOUS_THREAD_KEY = 'pandacode.restoringPrevious';
+/** Written at load, cleared on pagehide: still there at a reload means the window's content died. */
+export const PAGE_ALIVE_KEY = 'pandacode.pageAlive';
+/** The thread suspected when the window's content died ('' when none), kept until the page proves
+ * stable (`windowStable`) or closes in an orderly way; see `threadToReopen`. */
+export const WINDOW_DIED_KEY = 'pandacode.windowDied';
+/** A page that has lived this long is past the native reload budget (60 s, crash_guard/webview.rs). */
+export const WINDOW_STABLE_AFTER = 90_000;
+/** A larger draft stays for this launch only. */
+export const MAX_DRAFT_CHARS = 50_000;
+/** Drafts untouched this long are dropped (at launch, daily, and when the window shows again). */
+export const DRAFT_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+/** A draft saved later than this past now (the clock ran ahead) is dropped too, or it would outlive DRAFT_MAX_AGE. */
+export const DRAFT_FUTURE_SLACK = 24 * 60 * 60 * 1000;
+/** Stored drafts in total (UTF-16, two bytes a character); WebKit allows about 5 MB an origin, shared by everything. */
+export const DRAFTS_BYTE_BUDGET = 1_000_000;
+/** How often a running app drops expired drafts, besides when its window shows again. */
+export const EXPIRE_EVERY = 24 * 60 * 60 * 1000;
+/** With a write timer, changes after the first of a burst are written at most this often (ms). */
+export const DRAFT_WRITE_DELAY = 300;
+/** Schedules the coalesced draft writes; `cancel` takes what `wait` returned. */
+export interface DraftWriteTimer { wait: Schedule; cancel: (handle: unknown) => void }
+/** The browser's timers, for the app's drafts. */
+export const browserDraftTimer: DraftWriteTimer = { wait: (run, ms) => setTimeout(run, ms), cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>) };
+
+const bytes = (text: string) => text.length * 2;
+/** A draft is kept when it is within the size cap and has text or at least one attachment. */
+const keepsDraft = (text: string, attachments: number) => text.length <= MAX_DRAFT_CHARS && (Boolean(text.trim()) || attachments > 0);
+
+function safeRead(store: Pick<Store, 'getItem'>, key: string): string | null {
+  try { return store.getItem(key); } catch { return null; }
+}
+function safeRemove(store: Pick<Store, 'removeItem'>, key: string): void {
+  try { store.removeItem(key); } catch { /* this launch only */ }
+}
+function storedKeys(store: Store): string[] {
+  try { return Array.from({ length: store.length }, (_, index) => store.key(index)).filter((key): key is string => key?.startsWith(DRAFT_PREFIX) ?? false); }
+  catch { return []; }
+}
+
+/** One stored draft, or null when it is malformed. */
+export function decodeDraft(raw: string | null): { t: number; text: string } | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object') return null;
+    const { t, text } = value as Record<string, unknown>;
+    return typeof t === 'number' && Number.isFinite(t) && typeof text === 'string' ? { t, text } : null;
+  } catch { return null; }
+}
+
+/** A draft's stored attachments, validated; empty when the record or its `a` array is malformed. */
+export function decodeDraftAttachments(raw: string | null): PromptAttachment[] {
+  if (!raw) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object') return [];
+    return fromStored((value as Record<string, unknown>).a);
+  } catch { return []; }
+}
+
+/** The drafts map, written through to storage (see the file comment). `newTaskKey` names the
+ * project key (`new:<project id>`) of a task that is a New task, undefined for any other task. */
+export class PersistedDrafts extends Map<string, string> {
+  newTaskKey: (id: string) => string | undefined = () => undefined;
+  private readonly savedAt = new Map<string, number>();
+  /** The prompt attachments kept beside each draft's text. */
+  private readonly attached = new Map<string, PromptAttachment[]>();
+  /** Bytes of each draft as stored; absent when it is not in storage. */
+  private readonly stored = new Map<string, number>();
+  /** A New task's id → the project key it is stored under (the latest one typed in owns the key). */
+  private readonly claimed = new Map<string, string>();
+  /** Changed drafts waiting for the write timer. */
+  private readonly pending = new Set<string>();
+  /** The running write window; undefined when the next change may be written at once. */
+  private window: unknown;
+  private loaded = false;
+  private keeping: boolean;
+  private readonly store: Store;
+  private readonly now: () => number;
+  private readonly timer: DraftWriteTimer | undefined;
+
+  /** `timer`: coalesce writes (see the file comment); without one every change is written at once. */
+  constructor(store: Store, now: () => number = Date.now, timer?: DraftWriteTimer) {
+    super();
+    this.store = store; this.now = now; this.timer = timer;
+    this.keeping = safeRead(store, KEEP_DRAFTS_KEY) !== 'off';
+    for (const key of storedKeys(store)) {
+      if (!this.keeping) { safeRemove(store, key); continue; }
+      const raw = safeRead(store, key), draft = decodeDraft(raw), id = key.slice(DRAFT_PREFIX.length);
+      if (!id || id === NEW_TASK_DRAFT || id === CHANNEL_DRAFT || !draft || this.expired(draft.t)) { safeRemove(store, key); continue; }
+      const attachments = decodeDraftAttachments(raw);
+      if (!keepsDraft(draft.text, attachments.length)) { safeRemove(store, key); continue; }
+      super.set(id, draft.text); this.savedAt.set(id, draft.t);
+      if (attachments.length) this.attached.set(id, attachments);
+      this.stored.set(id, bytes(draft.text) + attachmentsBytes(attachments));
+    }
+    this.loaded = true;
+  }
+
+  /** A New task with no text of its own takes over its project's kept text. */
+  override get(id: string): string | undefined { return super.get(id) ?? this.adopt(id); }
+
+  override set(id: string, text: string): this {
+    if (!this.loaded) return super.set(id, text);
+    this.claim(id);
+    if (super.get(id) === text) return this;
+    super.set(id, text);
+    this.savedAt.set(id, this.now());
+    if (!keepsDraft(text, this.attached.get(id)?.length ?? 0)) { this.pending.delete(id); this.unstore(id); }
+    else if (this.timer && this.window !== undefined) this.pending.add(id);
+    else { this.write(id); this.openWindow(); }
+    return this;
+  }
+
+  /** The prompt attachments kept beside the task's draft text; empty when there are none. */
+  attachments(id: string): PromptAttachment[] {
+    if (this.loaded && !super.has(id)) this.adopt(id);
+    return this.attached.get(id) ?? [];
+  }
+
+  /** Replaces a draft's attachments. Written like `set`, at once or within the open write window;
+   * a draft left with no text and no attachments is removed from storage. */
+  setAttachments(id: string, items: readonly PromptAttachment[]): this {
+    if (!this.loaded) {
+      if (items.length) this.attached.set(id, [...items]); else this.attached.delete(id);
+      return this;
+    }
+    // Nothing left to keep (a send or a discard cleared the last chip): never resurrect a draft here.
+    if (!super.has(id) && !items.length) {
+      this.pending.delete(id);
+      this.unstore(id);
+      this.savedAt.delete(id);
+      return this;
+    }
+    // A New task that has not read its project's kept draft yet takes it over with the attachments.
+    if (!super.has(id)) this.adopt(id);
+    this.claim(id);
+    if (items.length) this.attached.set(id, [...items]); else this.attached.delete(id);
+    const had = super.has(id), text = super.get(id) ?? '';
+    this.savedAt.set(id, this.now());
+    if (!keepsDraft(text, items.length)) {
+      this.pending.delete(id);
+      this.unstore(id);
+      if (!had) this.savedAt.delete(id);
+      return this;
+    }
+    if (!had) super.set(id, '');
+    if (this.timer && this.window !== undefined) this.pending.add(id);
+    else { this.write(id); this.openWindow(); }
+    return this;
+  }
+
+  /** Writes every change still waiting for the write timer, at once. */
+  flush(): void {
+    if (this.window !== undefined) { this.timer?.cancel(this.window); this.window = undefined; }
+    this.writePending();
+  }
+
+  /** Changes in the next DRAFT_WRITE_DELAY wait for the timer; a window that wrote something stays open one more. */
+  private openWindow(): void {
+    if (!this.timer) return;
+    this.window = this.timer.wait(() => {
+      this.window = undefined;
+      if (this.writePending()) this.openWindow();
+    }, DRAFT_WRITE_DELAY);
+  }
+
+  private writePending(): boolean {
+    if (!this.pending.size) return false;
+    const ids = [...this.pending];
+    this.pending.clear();
+    for (const id of ids) if (super.has(id)) this.write(id);
+    return true;
+  }
+
+  override delete(id: string): boolean {
+    this.pending.delete(id);
+    this.savedAt.delete(id);
+    this.attached.delete(id);
+    this.unstore(id);
+    this.claimed.delete(id);
+    return super.delete(id);
+  }
+  override clear(): void { for (const id of [...this.keys()]) this.delete(id); }
+
+  /** Settings' Clear saved drafts: removes every stored draft (thread, New task and channel text,
+   * attachments included, also any this launch never loaded) and drops them from memory, except
+   * `keep`'s: the text and attachments shown in an open composer stay on screen, unstored until
+   * their next change. */
+  clearStored(keep: (id: string) => boolean = () => false): void {
+    this.pending.clear();
+    for (const key of storedKeys(this.store)) safeRemove(this.store, key);
+    this.stored.clear(); this.claimed.clear();
+    for (const id of [...this.keys()]) if (!keep(id)) { super.delete(id); this.savedAt.delete(id); this.attached.delete(id); }
+  }
+
+  /** Whether drafts are written to storage (Settings' Keep unsent drafts). */
+  get keepsDrafts(): boolean { return this.keeping; }
+
+  /** Settings' Keep unsent drafts. Off: every stored draft goes at once (`clearStored`), all text
+   * stays in memory for this launch, and nothing is written. On again: each draft is stored from its next change. */
+  setKeeping(on: boolean): void {
+    this.keeping = on;
+    try { if (on) this.store.removeItem(KEEP_DRAFTS_KEY); else this.store.setItem(KEEP_DRAFTS_KEY, 'off'); }
+    catch (error) { console.warn('Could not save the Keep unsent drafts setting:', error); }
+    if (!on) this.clearStored(() => true);
+  }
+
+  /** Drops drafts untouched for DRAFT_MAX_AGE, or dated more than DRAFT_FUTURE_SLACK ahead, from storage and memory. */
+  expire(): void {
+    for (const [id, at] of [...this.savedAt]) if (this.expired(at)) this.delete(id);
+  }
+
+  private expired(at: number): boolean {
+    const now = this.now();
+    return at < now - DRAFT_MAX_AGE || at > now + DRAFT_FUTURE_SLACK;
+  }
+
+  private keyOf(id: string): string { return DRAFT_PREFIX + (this.claimed.get(id) ?? id); }
+
+  /** Moves the project's kept text and attachments (loaded, not yet taken) to this New task. */
+  private adopt(id: string): string | undefined {
+    const key = this.newTaskKey(id), text = key === undefined ? undefined : super.get(key);
+    if (key === undefined || text === undefined) return undefined;
+    super.set(id, text); this.savedAt.set(id, this.savedAt.get(key) ?? this.now());
+    const size = this.stored.get(key);
+    if (size !== undefined) this.stored.set(id, size);
+    const attachments = this.attached.get(key);
+    if (attachments) { this.attached.set(id, attachments); this.attached.delete(key); }
+    super.delete(key); this.savedAt.delete(key); this.stored.delete(key);
+    this.claimed.set(id, key);
+    return text;
+  }
+
+  /** The task's New task state may have changed (a delivered queued message published it, or a
+   * failed first send left it a New task again): its text follows, as on its next keystroke. */
+  reclaim(id: string): void { if (this.loaded) this.claim(id); }
+
+  /** `reclaim` for every thread draft: call after the session list (or a task's draft flag) changed. */
+  reclaimAll(): void {
+    for (const id of [...this.keys()]) if (!id.startsWith(NEW_TASK_DRAFT) && !id.startsWith(CHANNEL_DRAFT)) this.reclaim(id);
+  }
+
+  /** A New task typed in owns its project's key; one that owned it before keeps its text in memory
+   * only. A task that stopped being a New task (published) drops the project key and keeps its
+   * text under its own id, and one that became a New task again (its first send failed) moves its
+   * text back to the project key. `rewrite`: write the moved text (false when a write is under way). */
+  private claim(id: string, rewrite = true): void {
+    const key = this.newTaskKey(id), previous = this.claimed.get(id);
+    if (previous === key) return;
+    const moved = this.stored.has(id) || this.pending.has(id);
+    safeRemove(this.store, DRAFT_PREFIX + (previous ?? id)); this.stored.delete(id);
+    if (key === undefined) this.claimed.delete(id);
+    else {
+      if (super.has(key)) { super.delete(key); this.savedAt.delete(key); this.stored.delete(key); this.pending.delete(key); }
+      for (const [other, owned] of this.claimed) if (owned === key) { this.claimed.delete(other); this.stored.delete(other); this.pending.delete(other); }
+      this.claimed.set(id, key);
+    }
+    // Moved to another project, published, or a New task again: its text moves to the new key.
+    if (rewrite && (previous !== undefined || moved) && super.has(id)) this.write(id);
+  }
+
+  private unstore(id: string): void {
+    this.stored.delete(id);
+    safeRemove(this.store, this.keyOf(id));
+  }
+
+  private write(id: string): void {
+    this.pending.delete(id);
+    // Its New task state may have changed since the change was typed.
+    this.claim(id, false);
+    if (!this.keeping) return;
+    const text = super.get(id), storedAttachments = toStored(this.attached.get(id) ?? []);
+    if (text === undefined || !keepsDraft(text, storedAttachments?.length ?? 0)) { this.unstore(id); return; }
+    const attachments = storedAttachments ?? [], size = bytes(text) + attachmentsBytes(attachments);
+    this.stored.delete(id);
+    this.evictOldest(DRAFTS_BYTE_BUDGET - size);
+    const record: { t: number; text: string; a?: PromptAttachment[] } = { t: this.savedAt.get(id) ?? this.now(), text };
+    if (attachments.length) record.a = attachments;
+    const value = JSON.stringify(record), key = this.keyOf(id);
+    try { this.store.setItem(key, value); }
+    catch {
+      // Full: make room by dropping the older half of what is stored, then try once more.
+      this.evictOldest(Math.floor(this.storedTotal() / 2));
+      try { this.store.setItem(key, value); }
+      catch (error) { console.warn('Could not keep a composer draft:', error); safeRemove(this.store, key); return; }
+    }
+    this.stored.set(id, size);
+  }
+
+  private storedTotal(): number { let total = 0; for (const size of this.stored.values()) total += size; return total; }
+
+  /** Removes the oldest stored drafts (they stay in memory) until the stored total fits `limit`. */
+  private evictOldest(limit: number): void {
+    const byAge = [...this.stored.keys()].sort((a, b) => (this.savedAt.get(a) ?? 0) - (this.savedAt.get(b) ?? 0));
+    let total = this.storedTotal();
+    for (const id of byAge) {
+      if (total <= limit) return;
+      total -= this.stored.get(id) ?? 0;
+      this.stored.delete(id);
+      safeRemove(this.store, this.keyOf(id));
+    }
+  }
+}
+
+/** Most ids `sessions_missing` takes in one call, and the longest id it accepts. */
+export const MISSING_BATCH = 2000, MAX_SESSION_ID = 128;
+
+/** The thread ids with a draft (not a project's New task text or a channel's), in batches for `sessions_missing`;
+ * an id the command would refuse is left out rather than failing its whole batch. */
+export function draftThreadBatches(ids: Iterable<string>): string[][] {
+  const threads = [...ids].filter(id => id && id.length <= MAX_SESSION_ID && !id.startsWith(NEW_TASK_DRAFT) && !id.startsWith(CHANNEL_DRAFT));
+  return Array.from({ length: Math.ceil(threads.length / MISSING_BATCH) }, (_, index) => threads.slice(index * MISSING_BATCH, (index + 1) * MISSING_BATCH));
+}
+
+/** At boot, after the task list: drops the drafts of threads deleted while the app was closed
+ * (`missing` returns the asked ids that have no session at all). A failing check is logged once
+ * and changes nothing more. */
+export async function dropDeletedDrafts(drafts: Pick<Map<string, string>, 'keys' | 'delete'>, missing: (ids: string[]) => Promise<unknown>): Promise<void> {
+  for (const batch of draftThreadBatches(drafts.keys())) {
+    let gone: unknown;
+    try { gone = await missing(batch); } catch (error) { console.warn('Could not check for drafts of deleted threads:', error); return; }
+    if (!Array.isArray(gone)) { console.warn('Could not check for drafts of deleted threads: unexpected answer', gone); return; }
+    const asked = new Set(batch);
+    for (const id of gone) if (typeof id === 'string' && asked.has(id)) drafts.delete(id);
+  }
+}
+
+/** At boot, once `list_projects` has answered (never after a failed load): drops the New task text
+ * of projects that no longer exist, such as one removed by another window or a remote client. */
+export function dropRemovedProjectDrafts(drafts: Pick<Map<string, string>, 'keys' | 'delete'>, projectIds: readonly string[]): void {
+  const live = new Set(projectIds);
+  for (const id of [...drafts.keys()]) if (id.startsWith(NEW_TASK_DRAFT) && !live.has(id.slice(NEW_TASK_DRAFT.length))) drafts.delete(id);
+}
+
+/** Once a launch, after `bot_shared_channels` has answered (never after a failed load; the list
+ * includes archived channels): drops the composer text of channels that no longer exist. */
+export function dropRemovedChannelDrafts(drafts: Pick<Map<string, string>, 'keys' | 'delete'>, channelIds: readonly string[]): void {
+  const live = new Set(channelIds);
+  for (const id of [...drafts.keys()]) if (id.startsWith(CHANNEL_DRAFT) && !live.has(id.slice(CHANNEL_DRAFT.length))) drafts.delete(id);
+}
+
+/** Drops expired drafts while the app runs: once a day and whenever the window shows again. */
+export function expireDraftsWhileRunning(drafts: Pick<PersistedDrafts, 'expire'>, doc: Pick<Document, 'addEventListener' | 'visibilityState'> = document): void {
+  setInterval(() => drafts.expire(), EXPIRE_EVERY);
+  doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'visible') drafts.expire(); });
+}
+
+/** Writes drafts waiting for the write timer when the window is hidden or the page goes away
+ * (main.ts also flushes on `app-quitting` and before a thread switch). */
+export function flushDraftsOnLeave(drafts: Pick<PersistedDrafts, 'flush'>, doc: Pick<Document, 'addEventListener' | 'visibilityState'> = document, win: Pick<Window, 'addEventListener'> = window): void {
+  doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') drafts.flush(); });
+  win.addEventListener('pagehide', () => drafts.flush());
+}
+
+/** Remembers the open thread; an empty id forgets it (nothing selected). `newTask`: the thread is
+ * a New task, which the next launch opens again (in the saved project) unless it was sent. */
+export function rememberOpenThread(store: Pick<Store, 'setItem' | 'removeItem'>, id: string, newTask = false): void {
+  try {
+    if (id) store.setItem(OPEN_THREAD_KEY, id); else store.removeItem(OPEN_THREAD_KEY);
+    if (id && newTask) store.setItem(OPEN_NEW_TASK_KEY, '1'); else store.removeItem(OPEN_NEW_TASK_KEY);
+  } catch { /* this launch only */ }
+}
+
+/** What boot knows about how the last run ended. */
+export interface LaunchAfter {
+  /** This launch follows a crash (a crash notice). */
+  crashed: boolean;
+  /** Restarts were paused after repeated crashes. */
+  paused: boolean;
+  /** This page is a reload after the window's content died (`windowContentDied`). */
+  windowDied?: boolean;
+}
+
+/** What boot opens: `task`, the remembered thread; `newTask`, the saved project's New task (it was
+ * open; its draft session is gone, its text kept); `stuck`, a thread boot must not open;
+ * `fallback`, whether boot may open the project's newest thread when there is neither (also
+ * with `newTask`, for when its project no longer exists);
+ * `windowDiedAgain`, the window's content died a second time before it proved stable;
+ * `stuckNotLast`, the stuck thread is not the user's last place (the New task reopened is). */
+export interface Reopen<T> { task?: T; newTask?: true; stuck?: string; stuckNotLast?: true; fallback: boolean; windowDiedAgain?: true }
+
+/** At boot: the thread open at the last exit (`task`), unless it is archived or gone, or this
+ * launch follows a crash that may be that thread's fault. A restoring mark only counts after a
+ * crash: a quit during the last launch's thread restore leaves one too, and is just cleared. After
+ * a crash the marked thread is `stuck`, boot must not open it again, and the keys are forgotten.
+ * A first reload after the window's content died holds back only the marked thread too: a single
+ * death is usually harmless, so the remembered one reopens. It notes the mark or, with none, the
+ * remembered thread in WINDOW_DIED_KEY. A boot that
+ * finds that note opens nothing by itself, like paused restarts (any thread may be the one), and
+ * suspects the noted thread; a boot that is not such a reload (the launch after the native
+ * dialog's Restart PandaCode) honours the note once and removes it.
+ * When restarts are paused boot opens nothing by itself; the suspect is the marked thread or,
+ * with no mark (the crash came after the thread loaded), the remembered one, so the notice can
+ * name it. An unsent New task open at exit is the exception in every case: it has no transcript,
+ * so its project's New task page reopens with the kept text (`newTask`), and stays remembered. */
+export function threadToReopen<T extends { id: string; archived: boolean }>(store: Pick<Store, 'getItem' | 'setItem' | 'removeItem'>, tasks: readonly T[], launch: LaunchAfter): Reopen<T> {
+  const mark = safeRead(store, RESTORING_KEY) || undefined;
+  const previous = safeRead(store, PREVIOUS_THREAD_KEY) || undefined;
+  safeRemove(store, PREVIOUS_THREAD_KEY);
+  const id = safeRead(store, OPEN_THREAD_KEY) || undefined;
+  const newTask = Boolean(safeRead(store, OPEN_NEW_TASK_KEY));
+  const noted = safeRead(store, WINDOW_DIED_KEY);
+  const windowDied = launch.windowDied ?? false, again = noted !== null;
+  if (mark) safeRemove(store, RESTORING_KEY);
+  if (again && !windowDied) safeRemove(store, WINDOW_DIED_KEY);
+  // A New task that was sent since is an ordinary thread now and reopens as one; an unsent one
+  // (an empty draft session, no transcript) is no crash suspect, so its page and kept text come back
+  // even when boot holds threads back.
+  const unsentNewTask = newTask && Boolean(id) && !tasks.some(item => item.id === id);
+  const remembered = unsentNewTask ? undefined : id;
+  const closed = launch.paused || again;
+  const stuck = closed ? noted || mark || remembered
+    : windowDied || launch.crashed ? mark : undefined;
+  if (windowDied && !again) { try { store.setItem(WINDOW_DIED_KEY, mark ?? remembered ?? ''); } catch { /* this launch only */ } }
+  if (closed || stuck) {
+    const suspect = unsentNewTask && stuck === id ? undefined : stuck;
+    if (unsentNewTask) {
+      // `fallback` is for a New task whose project is gone: as for any thread, unless boot holds all back.
+      const reopen: Reopen<T> = suspect ? { newTask: true, stuck: suspect, stuckNotLast: true, fallback: !closed } : { newTask: true, stuck: suspect, fallback: !closed };
+      return again ? { ...reopen, windowDiedAgain: true } : reopen;
+    }
+    safeRemove(store, OPEN_THREAD_KEY); safeRemove(store, OPEN_NEW_TASK_KEY);
+    if (again) return { stuck, fallback: false, windowDiedAgain: true };
+    // The marked thread is held back: the one open before it comes back instead of the newest.
+    const back = !closed && previous && previous !== stuck ? tasks.find(item => item.id === previous && !item.archived) : undefined;
+    return back ? { task: back, stuck, fallback: true } : { stuck, fallback: !closed };
+  }
+  const task = id ? tasks.find(item => item.id === id && !item.archived) : undefined;
+  if (unsentNewTask) return { newTask: true, fallback: true };
+  return { task, fallback: true };
+}
+
+/** The page was reloaded (not a fresh launch). */
+export function reloadedPage(): boolean {
+  const entry = globalThis.performance?.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined;
+  return entry?.type === 'reload';
+}
+
+/** Once, at load: whether this page reloads a window whose content died (the last page's alive
+ * mark survived, so it never reached pagehide), then marks this page alive until `pageClosed`. A
+ * fresh launch after a quit or crash is not a reload; an orderly reload ran pagehide. */
+export function windowContentDied(store: Pick<Store, 'getItem' | 'setItem'>, reloaded = reloadedPage()): boolean {
+  const died = reloaded && safeRead(store, PAGE_ALIVE_KEY) !== null;
+  try { store.setItem(PAGE_ALIVE_KEY, '1'); } catch { /* this launch only */ }
+  return died;
+}
+
+/** The page is going away in an orderly way, so its window did not die (see leavePage). */
+export function pageClosed(store: Pick<Store, 'removeItem'>): void { safeRemove(store, PAGE_ALIVE_KEY); safeRemove(store, WINDOW_DIED_KEY); }
+
+/** The page has lived WINDOW_STABLE_AFTER: an earlier window death is no longer held against a thread. */
+export function windowStable(store: Pick<Store, 'removeItem'>): void { safeRemove(store, WINDOW_DIED_KEY); }
+
+/** A thread is about to open; until finishThreadRestore, a crash leaves it marked stuck. The thread
+ * remembered as open until now is kept beside the mark, for boot to reopen instead. */
+export function beginThreadRestore(store: Pick<Store, 'getItem' | 'setItem' | 'removeItem'>, id: string): void {
+  const previous = safeRead(store, OPEN_THREAD_KEY);
+  try {
+    if (previous && previous !== id) store.setItem(PREVIOUS_THREAD_KEY, previous); else store.removeItem(PREVIOUS_THREAD_KEY);
+    store.setItem(RESTORING_KEY, id);
+  } catch { /* this launch only */ }
+}
+
+/** The thread `id` painted, failed to open without taking the app down, or was superseded: its mark
+ * goes, and a later thread's mark stays. Without `id` (the page is going away) any mark goes. */
+export function finishThreadRestore(store: Pick<Store, 'getItem' | 'removeItem'>, id?: string): void {
+  if (id === undefined || safeRead(store, RESTORING_KEY) === id) { safeRemove(store, RESTORING_KEY); safeRemove(store, PREVIOUS_THREAD_KEY); }
+}
+
+/** The page is going away in an orderly way: pagehide, or the native `app-quitting` event once a
+ * deliberate exit is committed (WKWebView may not fire pagehide on Cmd+Q). No thread is being
+ * opened and the window did not die (main.ts flushes waiting drafts first: `PersistedDrafts.flush`). */
+export function leavePage(store: Pick<Store, 'getItem' | 'removeItem'>): void {
+  finishThreadRestore(store); pageClosed(store);
+}
+
+type Frame = (run: () => void) => unknown;
+type PaintDocument = Pick<Document, 'addEventListener' | 'removeEventListener' | 'visibilityState'>;
+/** A rendered thread's mark goes after this long even without a paint (a covered or minimised
+ * window may run no animation frames), so a later, unrelated crash does not hold it back. */
+export const PAINT_WAIT = 5000;
+
+/** The thread `id` rendered: its mark goes once that has been laid out and painted (the second
+ * animation frame from here), so a transcript that takes the app down while painting stays marked;
+ * a thread opened meanwhile keeps its own. A window that paints nothing (covered, minimised, hidden)
+ * clears it after PAINT_WAIT, or as soon as the document becomes hidden, whichever comes first. */
+export function finishThreadRestoreAfterPaint(store: Pick<Store, 'getItem' | 'removeItem'>, id: string, frame: Frame = run => requestAnimationFrame(run), wait: Schedule = (run, ms) => setTimeout(run, ms), cancel: (handle: unknown) => void = handle => clearTimeout(handle as ReturnType<typeof setTimeout>), doc: PaintDocument = document): void {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true; cancel(timer); doc.removeEventListener('visibilitychange', hidden);
+    finishThreadRestore(store, id);
+  };
+  const hidden = () => { if (doc.visibilityState === 'hidden') finish(); };
+  const timer = wait(finish, PAINT_WAIT);
+  doc.addEventListener('visibilitychange', hidden);
+  frame(() => frame(finish));
+}

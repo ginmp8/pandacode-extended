@@ -41,16 +41,19 @@ fn discovery_command(path: &Path, provider: &str) -> Result<Command, String> {
         "--permission-prompt-tool",
         "stdio",
         "--no-session-persistence",
+        // Project `.mcp.json` servers would start inside the task folder; none are needed.
+        "--strict-mcp-config",
     ]);
-    if matches!(provider, "glm" | "mimo") {
+    if matches!(provider, "glm" | "mimo" | "alibaba") {
         let mut args = if provider == "glm" {
             crate::providers::glm_arguments()
-        } else {
+        } else if provider == "mimo" {
             crate::providers::mimo_arguments()?
+        } else {
+            crate::providers::alibaba_arguments()
         };
-        let mut settings: Value = serde_json::from_str(args.last().unwrap()).unwrap();
-        settings["disableAllHooks"] = json!(true);
-        *args.last_mut().unwrap() = settings.to_string();
+        let settings = discovery_settings(args.last().map(String::as_str));
+        *args.last_mut().unwrap() = settings;
         command.args(args);
         // Metadata initialization requires no account. In particular, never
         // forward the user's regular Claude credential to the Z.AI endpoint.
@@ -60,6 +63,7 @@ fn discovery_command(path: &Path, provider: &str) -> Result<Command, String> {
             "CLAUDE_CODE_OAUTH_TOKEN",
             "ZAI_API_KEY",
             "MIMO_API_KEY",
+            "ALIBABA_TOKEN_PLAN_API_KEY",
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
             "CLAUDE_CODE_USE_FOUNDRY",
@@ -67,9 +71,21 @@ fn discovery_command(path: &Path, provider: &str) -> Result<Command, String> {
             command.env_remove(name);
         }
     } else {
-        command.args(["--settings", r#"{"disableAllHooks":true}"#]);
+        // Only the user's own settings: the task folder's `.claude/settings*.json` (hooks,
+        // statusLine, apiKeyHelper, env) never loads during discovery.
+        command.args(["--setting-sources", "user"]);
+        command.arg("--settings").arg(discovery_settings(None));
     }
     Ok(command)
+}
+
+/// The `--settings` JSON of every Claude-family discovery: the provider's own settings (if
+/// any) with `disableAllHooks`, since discovery starts `claude -p` inside the task folder,
+/// whose `.claude/settings.json` hooks would otherwise run (from a phone, too).
+fn discovery_settings(base: Option<&str>) -> String {
+    let mut settings: Value = base.and_then(|text| serde_json::from_str(text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    settings["disableAllHooks"] = json!(true);
+    settings.to_string()
 }
 
 async fn discover_process(
@@ -265,6 +281,11 @@ pub(crate) struct Pipe {
     deadline: Instant,
     bytes: usize,
     frames: usize,
+    // Incomplete stdout line. A `read` timeout must keep this prefix: the
+    // remainder stays in `stdout`, and the next read appends to it.
+    frame: Vec<u8>,
+    // Non-JSON lines skipped since the last valid frame. Timeouts must not reset it.
+    stray_lines: usize,
     stderr_task: tokio::task::JoinHandle<String>,
     diagnostic: String,
 }
@@ -306,6 +327,8 @@ impl Pipe {
             deadline: Instant::now() + timeout,
             bytes: 0,
             frames: 0,
+            frame: Vec::new(),
+            stray_lines: 0,
             stderr_task,
             diagnostic: String::new(),
         })
@@ -340,7 +363,7 @@ impl Pipe {
     }
 
     async fn read_frame(&mut self) -> Result<Value, ()> {
-        let mut frame = Vec::new();
+        const MAX_STRAY_LINES: usize = 32;
         loop {
             let available = self.stdout.fill_buf().await.map_err(|_| ())?;
             if available.is_empty() {
@@ -349,23 +372,45 @@ impl Pipe {
             let end = available.iter().position(|byte| *byte == b'\n');
             let consumed = end.map_or(available.len(), |index| index + 1);
             self.bytes += consumed;
-            if self.bytes > 8 * 1024 * 1024 || frame.len() + consumed > 4 * 1024 * 1024 {
+            if self.bytes > 8 * 1024 * 1024 || self.frame.len() + consumed > 4 * 1024 * 1024 {
+                self.frame.clear();
                 return Err(());
             }
-            frame.extend_from_slice(&available[..consumed]);
+            self.frame.extend_from_slice(&available[..consumed]);
             self.stdout.consume(consumed);
             if end.is_none() {
                 continue;
             }
             self.frames += 1;
             if self.frames > 512 {
+                self.frame.clear();
                 return Err(());
             }
-            if frame.iter().all(u8::is_ascii_whitespace) {
-                frame.clear();
+            if self.frame.iter().all(u8::is_ascii_whitespace) {
+                self.frame.clear();
                 continue;
             }
-            return serde_json::from_slice(&frame).map_err(|_| ());
+            // Skip bounded non-JSON stdout banners/warnings printed before a JSON frame.
+            let first = self
+                .frame
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace());
+            if first != Some(b'{') {
+                self.stray_lines += 1;
+                self.frame.clear();
+                if self.stray_lines > MAX_STRAY_LINES {
+                    return Err(());
+                }
+                continue;
+            }
+            let value = serde_json::from_slice(&self.frame).map_err(|_| ());
+            // The line is consumed either way. Only a parsed frame resets the stray count.
+            self.frame.clear();
+            if value.is_ok() {
+                self.stray_lines = 0;
+            }
+            return value;
         }
     }
 
@@ -441,6 +486,31 @@ mod tests {
             .err()
             .unwrap()
             .contains("cluster"));
+    }
+
+    /// Round 8: every Claude-family discovery (plain Claude included) runs with hooks off,
+    /// through exactly one `--settings`.
+    #[test]
+    fn every_claude_family_discovery_disables_all_hooks() {
+        let path = Path::new(if cfg!(windows) { r"C:\claude.exe" } else { "/opt/custom/claude" });
+        for provider in ["claude", "glm"] {
+            let command = discovery_command(path, provider).unwrap();
+            let args: Vec<String> = command.as_std().get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+            assert!(args.iter().any(|arg| arg == "-p"), "{provider}");
+            let at: Vec<usize> = args.iter().enumerate().filter(|(_, arg)| *arg == "--settings").map(|(i, _)| i).collect();
+            assert_eq!(at.len(), 1, "{provider}: {args:?}");
+            let settings: Value = serde_json::from_str(&args[at[0] + 1]).unwrap();
+            assert_eq!(settings["disableAllHooks"], true, "{provider}");
+            // Round 11: no project MCP servers, and no project settings (glm already loads none).
+            assert!(args.iter().any(|arg| arg == "--strict-mcp-config"), "{provider}");
+            let sources: Vec<usize> = args.iter().enumerate().filter(|(_, arg)| *arg == "--setting-sources").map(|(i, _)| i).collect();
+            assert_eq!(sources.len(), 1, "{provider}: {args:?}");
+            let expected = if provider == "claude" { "user" } else { "" };
+            assert_eq!(args[sources[0] + 1], expected, "{provider}");
+        }
+        let merged: Value = serde_json::from_str(&discovery_settings(Some(r#"{"env":{"A":"1"},"disableAllHooks":false}"#))).unwrap();
+        assert_eq!(merged, json!({"env": {"A": "1"}, "disableAllHooks": true}));
+        assert_eq!(discovery_settings(Some("not json")), r#"{"disableAllHooks":true}"#);
     }
 
     #[test]
@@ -612,5 +682,82 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error, DISCOVERY_FAILED);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stray_stdout_lines_are_skipped_within_bounds_while_bad_json_still_fails() {
+        let _serial = crate::providers::concurrent_process_tests::process_test_lock()
+            .lock()
+            .await;
+
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            r#"
+            printf '%s\n' 'Update available: agy 1.6.0'
+            printf '%s\n' '  warning: checking environment'
+            printf '%s\n' '{"ok":true}'
+            "#,
+        ]);
+        let mut pipe =
+            Pipe::spawn(command, &std::env::temp_dir(), Duration::from_secs(2)).unwrap();
+        assert_eq!(pipe.read().await.unwrap(), json!({"ok": true}));
+        pipe.finish().await;
+
+        let mut bad_json = Command::new("/bin/sh");
+        bad_json.args(["-c", "printf '%s\\n' '{not valid json'"]);
+        let mut pipe =
+            Pipe::spawn(bad_json, &std::env::temp_dir(), Duration::from_secs(2)).unwrap();
+        assert!(pipe.read().await.is_err());
+        pipe.finish().await;
+
+        let mut too_many = Command::new("/bin/sh");
+        too_many.args([
+            "-c",
+            r#"
+            i=0
+            while [ "$i" -lt 33 ]; do
+                printf 'banner line %s\n' "$i"
+                i=$((i + 1))
+            done
+            printf '%s\n' '{"ok":true}'
+            "#,
+        ]);
+        let mut pipe =
+            Pipe::spawn(too_many, &std::env::temp_dir(), Duration::from_secs(2)).unwrap();
+        assert!(pipe.read().await.is_err());
+        pipe.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn partial_json_frame_survives_read_timeout() {
+        let _serial = crate::providers::concurrent_process_tests::process_test_lock()
+            .lock()
+            .await;
+        // One atomic write: the ready line and a JSON prefix with no trailing newline.
+        // The short read consumes that prefix, then times out waiting for the rest.
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            r#"perl -e 'syswrite STDOUT, "{\"ready\":true}\n{\"id\":9,\"result\":"; sysread STDIN, my $b, 1; syswrite STDOUT, "{\"closed\":true}}\n"; sysread STDIN, $b, 1;'"#,
+        ]);
+        let mut pipe = Pipe::spawn(command, &std::env::temp_dir(), Duration::from_secs(2)).unwrap();
+        assert_eq!(pipe.read().await.unwrap(), json!({"ready": true}));
+        pipe.set_deadline_after(Duration::from_millis(100));
+        assert!(pipe.read().await.is_err());
+        assert!(pipe.timed_out());
+        assert_eq!(pipe.frame.as_slice(), br#"{"id":9,"result":"# as &[u8]);
+        pipe.set_deadline_after(Duration::from_secs(2));
+        pipe.send(&json!({"continue": true})).await.unwrap();
+        let value = pipe
+            .read()
+            .await
+            .unwrap_or_else(|_| panic!("resumed frame: {}", String::from_utf8_lossy(&pipe.frame)));
+        assert_eq!(value, json!({"id": 9, "result": {"closed": true}}));
+        assert!(pipe.frame.is_empty());
+        assert_eq!(pipe.stray_lines, 0);
+        pipe.finish().await;
     }
 }

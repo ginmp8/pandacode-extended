@@ -6,10 +6,86 @@ const dialog = (page: Page) => page.getByRole('region', { name: 'Settings', exac
 const tab = (page: Page, name: string) => dialog(page).getByRole('tab', { name, exact: true });
 const panel = (page: Page, name: string) => dialog(page).getByRole('tabpanel', { name, exact: true });
 const back = (page: Page) => dialog(page).getByRole('button', { name: 'Back to the workspace', exact: true });
-const GROUPS = ['Recommended', 'General', 'Appearance', 'Agents', 'Schedules', 'Tools', 'Feature controls', 'Connections', 'About'];
+const GROUPS = ['Recommended', 'General', 'Appearance', 'Voice', 'Agents', 'Schedules', 'Tools', 'Feature controls', 'Connections', 'About'];
 const FIRST: Record<string,string> = { Agents: 'Harnesses', Tools: 'Add-ons', Connections: 'Cloud sandboxes' };
 const prompt = (page: Page) => page.getByRole('textbox', { name: 'Message your coding agent' });
 const providerCalls = (page: Page) => page.evaluate(() => (window as any).__settingsProviders.calls);
+
+for (const theme of ['dark', 'light']) for (const { width, scale } of [{ width: 460, scale: 1.4 }, { width: 540, scale: 1.6 }, { width: 1100, scale: 1 }]) {
+  test(`settings organization keeps full Agents tabs readable at ${width}px ${scale * 100}% ${theme}`, async ({ page }, testInfo) => {
+    test.slow();
+    await page.setViewportSize({ width, height: 740 });
+    await page.addInitScript(({ theme, scale }) => {
+      localStorage.setItem('pandacode.theme', theme);
+      localStorage.setItem('pandacode.uiScale', String(scale));
+    }, { theme, scale });
+    await open(page);
+    await settings(page);
+    await tab(page, 'Agents').click();
+    await tab(page, 'Providers').click();
+    const track = dialog(page).getByRole('tablist', { name: 'Agents', exact: true });
+    await expect(page.getByRole('region', { name: 'Claude Code accounts', exact: true })).toBeVisible();
+    const rows: number[] = [];
+    for (const name of ['Harnesses', 'Providers', 'Agent teams', 'Model routing']) {
+      const button = track.getByRole('tab', { name, exact: true });
+      const text = await button.evaluate(button => {
+        const range = document.createRange(); range.selectNodeContents(button);
+        const glyphs = range.getBoundingClientRect(), bounds = button.getBoundingClientRect();
+        return { left: glyphs.left - bounds.left, right: bounds.right - glyphs.right, width: glyphs.width, top: bounds.top };
+      });
+      expect(text.width, name).toBeGreaterThan(40);
+      expect(text.left, `${name} left inset`).toBeGreaterThanOrEqual(8);
+      expect(text.right, `${name} right inset`).toBeGreaterThanOrEqual(8);
+      rows.push(text.top);
+    }
+    if (width === 1100) expect(Math.max(...rows) - Math.min(...rows)).toBeLessThan(1);
+    for (const reducedMotion of ['no-preference', 'reduce'] as const) {
+      await page.emulateMedia({ reducedMotion });
+      await tab(page, 'Providers').focus();
+      for (const [key, name] of [['ArrowRight', 'Agent teams'], ['End', 'Model routing'], ['Home', 'Harnesses'], ['ArrowRight', 'Providers']]) {
+        await page.keyboard.press(key);
+        const selected = track.getByRole('tab', { name, exact: true });
+        await expect(selected).toBeFocused();
+        await expect(selected).toHaveAttribute('aria-selected', 'true');
+        const bounds = await selected.boundingBox();
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+        await expect.poll(() => track.evaluate(track => {
+          const selected = track.querySelector('[aria-selected="true"]')!.getBoundingClientRect();
+          const thumb = track.querySelector('.segment-thumb')!.getBoundingClientRect();
+          return Math.max(Math.abs(selected.x - thumb.x), Math.abs(selected.y - thumb.y), Math.abs(selected.width - thumb.width));
+        })).toBeLessThan(1.1);
+      }
+    }
+    await page.screenshot({ path: testInfo.outputPath('agents-providers.png') });
+    expect(await page.locator('.settings-content').evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.scrollingElement!.scrollLeft)).toBe(0);
+  });
+}
+
+for (const theme of ['dark', 'light']) test(`settings organization separates the account hint from its inner card at 140% ${theme}`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1100, height: 740 });
+  await page.addInitScript(theme => {
+    localStorage.setItem('pandacode.theme', theme);
+    localStorage.setItem('pandacode.uiScale', '1.4');
+  }, theme);
+  await open(page);
+  await settings(page);
+  await tab(page, 'Agents').click();
+  await tab(page, 'Providers').click();
+  const pool = page.getByRole('region', { name: 'Claude Code accounts', exact: true });
+  await expect(pool.locator('.account-pool-hint')).toBeVisible();
+  const gap = await pool.evaluate(pool => {
+    const hint = pool.querySelector('.account-pool-hint')!.getBoundingClientRect();
+    const inner = getComputedStyle(pool, '::before'), style = getComputedStyle(pool);
+    // Absolute grid children use their grid area as the containing block.
+    const gridOffset = inner.gridRowStart === 'auto' ? 0 : parseFloat(style.borderTopWidth) + parseFloat(style.paddingTop)
+      + style.gridTemplateRows.split(' ').slice(0, Number(inner.gridRowStart) - 1).reduce((sum, size) => sum + parseFloat(size), 0);
+    return pool.getBoundingClientRect().top + gridOffset + parseFloat(inner.top) - hint.bottom;
+  });
+  await page.screenshot({ path: testInfo.outputPath('account-heading.png') });
+  expect(gap).toBeGreaterThanOrEqual(8);
+});
 
 test('settings organization keeps long default model names clear of labels', async ({ page }) => {
   await page.addInitScript(() => {
@@ -118,6 +194,7 @@ async function open(page: Page): Promise<void> {
     `) });
   });
   await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('html[data-ready]')).toHaveCount(1, { timeout: 15_000 });
   await expect(prompt(page)).toBeEnabled();
   await expect(page.locator('.task-item.selected')).toHaveCount(1);
 }
@@ -164,7 +241,11 @@ test('support details recover from a fetch error and offer manual copying when c
 });
 
 async function settings(page: Page): Promise<void> {
-  await page.keyboard.press('Meta+,');
+  // Under load the first shortcut can land before the keymap is wired: retry until the page opens.
+  await expect(async () => {
+    if (!(await dialog(page).isVisible())) await page.keyboard.press('Meta+,');
+    await expect(dialog(page)).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
   await expect(dialog(page).getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   await expect(tab(page, 'Recommended')).toHaveAttribute('aria-selected', 'true');
   await expect(tab(page, 'Recommended')).toBeFocused();
@@ -253,11 +334,15 @@ test('settings organization shows General at once and supports keyboard groups d
   await expect(tab(page, 'Appearance')).toBeFocused();
   expect(await providerCalls(page)).toBe(startupCalls);
   await page.keyboard.press('ArrowDown');
+  await expect(tab(page, 'Voice')).toBeFocused();
+  expect(await providerCalls(page)).toBe(startupCalls);
+  await page.keyboard.press('ArrowDown');
   await expect(tab(page, 'Agents')).toBeFocused();
   await expect(tab(page, 'Agents')).toHaveAttribute('aria-selected', 'true');
   await expect(panel(page, 'Harnesses')).toBeVisible();
   await expect.poll(() => providerCalls(page)).toBe(startupCalls + 1);
   await expect(page.getByRole('button', { name: 'Refresh agents', exact: true })).toBeDisabled();
+  await page.keyboard.press('ArrowUp');
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('ArrowUp');
   await expect(tab(page, 'General')).toBeFocused();
@@ -435,6 +520,40 @@ for (const layout of [{ width: 860, scale: 1.4 }, { width: 540, scale: 1.6 }]) {
     expect(await dialog(page).locator('.settings-content').evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
     await back(page).click();
     await expect(dialog(page)).not.toBeVisible();
+  });
+}
+
+// `providers.rs` reports "ACP" only for the standalone server binary; an `agy` CLI that answers no
+// version reports "", so its row reads as any other installed agent.
+for (const { path, version, installed, reported } of [
+  { path: '/sample/bin/agy', version: '', installed: 'Installed', reported: 'Not reported' },
+  { path: '/sample/bin/agy_acp_server.par', version: 'ACP', installed: 'ACP installed', reported: 'ACP' },
+]) {
+  test(`settings organization lists Antigravity at ${path} as "${installed}"`, async ({ page }) => {
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const marker = /switch\s*\(command\)\s*\{/;
+      expect(source).toMatch(marker);
+      // Swap the sample entry rather than answering `list_providers` here, so the preview's version
+      // probe still reports it and the row stops showing "Checking…".
+      await route.fulfill({ response, body: source.replace(marker, `
+        if (command === 'list_providers') {
+          const index = providers.findIndex(provider => provider.id === 'antigravity');
+          providers[index] = {...providers[index], installed:true, path:${JSON.stringify(path)}, version:${JSON.stringify(version)}};
+        }
+        switch (command) {
+      `) });
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await tab(page, 'Agents').click();
+    const row = dialog(page).locator('.provider-diagnostic[data-provider="antigravity"]');
+    await expect(row.locator('.settings-installed')).toHaveText(installed);
+    await expect(row.locator('summary')).toHaveAttribute('aria-label', 'Antigravity details, Installed');
+    await row.locator('summary').click();
+    await expect(row.locator('.settings-provider-version')).toHaveText(reported);
+    await expect(row.locator('code')).toHaveText(path);
   });
 }
 

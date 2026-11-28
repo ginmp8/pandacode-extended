@@ -2,6 +2,7 @@ import type { GitFile, GitStatus } from './types';
 import type { DiffViewerController } from './diff-viewer';
 import { escape, fileIcon, icon } from './dom';
 import './changes-view.css';
+import { errorText } from './error-text';
 
 export interface ChangesViewDeps {
   loadDiff(path: string, staged: boolean): Promise<string>;
@@ -10,6 +11,7 @@ export interface ChangesViewDeps {
   openFile(path: string): void;
   refresh(): void;
   notify(message: string): void;
+  notifyError?(message: string): void;
   choose(anchor: HTMLElement, title: string, items: { id: string; label: string; icon?: string; danger?: boolean; disabled?: boolean; selected?: boolean }[], onSelect: (id: string) => void): void;
   /** When given, the … menu offers to move the work into an isolated worktree. */
   worktree?(): void;
@@ -41,15 +43,19 @@ const SHADOW_CSS = `
   pre[data-diff][data-overflow='wrap'] [data-line] { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
   pre[data-diff] [data-code] { scrollbar-gutter: stable; }
   pre[data-diff] [data-code]::-webkit-scrollbar { height: 10px; background: transparent; }
-  pre[data-diff] [data-code]::-webkit-scrollbar-thumb { background: color-mix(in srgb, currentColor 35%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+  pre[data-diff] [data-code]::-webkit-scrollbar-thumb { background: color-mix(in srgb, currentColor 35%, transparent); border-radius: var(--radius-chip); border: 2px solid transparent; background-clip: content-box; }
   pre[data-diff] [data-code]::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, currentColor 55%, transparent); background-clip: content-box; }
   [data-file-info] { border-block: 0; }
   pre[data-diff] [data-gutter] { background-color: color-mix(in srgb, var(--diffs-fg, currentColor) 5%, var(--diffs-bg)); }
-  pre[data-diff] [data-separator='metadata'] { height: 20px; }
+  pre[data-diff] [data-separator='metadata'] { height: calc(var(--mono-size) * 5 / 3); }
   pre[data-diff] [data-separator='metadata'] [data-separator-wrapper] {
-    font-size: .68rem; line-height: 20px; opacity: .8;
+    font-size:var(--type-caption); line-height:calc(var(--mono-size) * 5 / 3); opacity: .8;
     background-color: color-mix(in srgb, var(--diffs-bg-separator) 45%, var(--diffs-bg));
-  }`;
+  }
+  /* The vendor sheet is one @layer base block; these unlayered rules win and put its literal radii (3px, 4px, 6px) on the scale. */
+  [data-diff-span] { border-radius: var(--radius-hair); }
+  [data-utility-button] { border-radius: var(--ds-control-radius); }
+  [data-separator-content] { border-start-end-radius: var(--radius-chip); border-end-end-radius: var(--radius-chip); }`;
 const TRUNCATED = /\n*\[Preview truncated at [^\]]*\]\n*$/;
 const SCOPES: Record<Scope, string> = { all: 'All changes', unstaged: 'Unstaged', staged: 'Staged' };
 const STATUS: Record<string, string> = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', C: 'Copied', T: 'Modified', U: 'Conflict', '?': 'Untracked' };
@@ -107,14 +113,29 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   const addsLabel = q('.cv-adds'), delsLabel = q('.cv-dels'), branchLabel = q('.cv-branch'), foldButton = q<HTMLButtonElement>('[data-cv-action="fold-all"]');
   const commitBar = q<HTMLFormElement>('.cv-commit'), commitInput = q<HTMLInputElement>('.cv-commit-input'), commitSubmit = q<HTMLButtonElement>('.cv-commit-submit');
 
+  /** The list has a real box: a hidden or closed inspector gives it 0×0, where every row "intersects" the empty root.
+   *  Nothing loads or mounts then, so a closed inspector never starts the diff engine. */
+  const hasSize = (): boolean => {
+    if (!body.isConnected) return false;
+    const rect = body.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  /** Set when something was skipped for want of a size: the next resize with a size runs reveal(). */
+  let skipped = false;
+  /** Mounts parked while the list had no size: each runs once it has one. */
+  const parked = new Set<Entry>();
   const observer = new IntersectionObserver(records => {
+    if (!hasSize()) { skipped = true; return; }
     for (const record of records) {
       if (!record.isIntersecting) continue;
       const entry = entries.get((record.target as HTMLElement).dataset.path ?? '');
       if (entry && entry.load === 'idle') void load(entry);
     }
   }, { root: body, rootMargin: '800px 0px' });
-  const resizer = new ResizeObserver(() => scheduleFit());
+  const resizer = new ResizeObserver(() => {
+    scheduleFit();
+    if (skipped && hasSize()) reveal();
+  });
   resizer.observe(body);
 
   const files = (): GitFile[] => status?.isRepo ? status.files : [];
@@ -140,23 +161,40 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
     scheduleFit();
   }
 
-  /** Directories lose leading segments (`…/components`), never a mid-word fragment. */
-  function fitDir(el: HTMLElement): void {
-    const dir = el.dataset.dir ?? '';
-    el.textContent = dir;
-    if (!el.clientWidth || el.scrollWidth <= el.clientWidth) return;
-    const parts = dir.split('/');
-    for (let i = 1; i < parts.length; i++) {
-      el.textContent = `…/${parts.slice(i).join('/')}`;
-      if (el.scrollWidth <= el.clientWidth) return;
+  /** Directories lose leading segments (`…/components`), never a mid-word fragment. Every path is written, then every
+   *  width read in one layout; the shortened candidates are measured off-layout on a canvas in the paths' font. */
+  function fitDirs(els: readonly HTMLElement[]): void {
+    for (const el of els) el.textContent = el.dataset.dir ?? '';
+    // While a path overflows, flex shrinks its box to the room there is: its width is that room.
+    const over = els.flatMap(el => el.clientWidth && el.scrollWidth > el.clientWidth ? [{ el, room: el.clientWidth }] : []);
+    if (!over.length) return;
+    // The canvas measures only what its font shorthand says: spacing or font features it cannot see, or a shorthand the
+    // engine leaves empty, fall back to measuring each candidate in place.
+    const style = getComputedStyle(over[0].el);
+    const plain = Boolean(style.font) && (style.letterSpacing === 'normal' || parseFloat(style.letterSpacing) === 0) && (style.wordSpacing === 'normal' || parseFloat(style.wordSpacing) === 0) && style.fontFeatureSettings === 'normal' && (style.fontKerning === 'auto' || style.fontKerning === 'normal' || !style.fontKerning);
+    const context = plain ? document.createElement('canvas').getContext('2d') : null;
+    if (context) context.font = style.font;
+    for (const { el, room } of over) {
+      const parts = (el.dataset.dir ?? '').split('/');
+      const fits = (text: string): boolean => context ? Math.ceil(context.measureText(text).width) <= room : (el.textContent = text, el.scrollWidth <= el.clientWidth);
+      let shown = '';
+      for (let i = 1; i < parts.length && !shown; i++) if (fits(`…/${parts.slice(i).join('/')}`)) shown = `…/${parts.slice(i).join('/')}`;
+      // No room for even the last folder: the full path stays in the title.
+      el.textContent = shown;
     }
-    // No room for even the last folder: the full path stays in the title.
-    el.textContent = '';
   }
+  /** The paths last fitted, with their rows' text (a row's counts take room from its path) and the list's width: the
+   *  same nodes with the same text in the same width fit the same, so they are not measured again. */
+  let fitted: { els: HTMLElement[]; texts: string[]; width: number } | undefined;
+  const rowText = (el: HTMLElement): string => `${el.dataset.dir ?? ''}\n${el.closest('.cv-file-header')?.textContent ?? el.textContent}`;
   function scheduleFit(): void {
     fitFrame ||= requestAnimationFrame(() => {
       fitFrame = 0;
-      if (!disposed) for (const el of body.querySelectorAll<HTMLElement>('.cv-dir')) fitDir(el);
+      if (disposed) return;
+      const els = [...body.querySelectorAll<HTMLElement>('.cv-dir')], width = body.clientWidth, texts = els.map(rowText);
+      if (fitted && fitted.width === width && fitted.els.length === els.length && els.every((el, i) => el === fitted!.els[i] && texts[i] === fitted!.texts[i])) return;
+      fitDirs(els);
+      fitted = { els, texts: els.map(rowText), width };
     });
   }
 
@@ -197,6 +235,7 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   }
 
   function drop(entry: Entry): void {
+    parked.delete(entry);
     entry.viewer?.dispose();
     for (const old of entry.stale.splice(0)) old.viewer.dispose();
     entry.viewer = entry.slot = entry.shown = undefined;
@@ -253,6 +292,8 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   /** Mounts the patch, or swaps in a new viewer once it has rendered so the old one never flashes away. */
   function mountViewer(entry: Entry): void {
     if (entry.load !== 'loaded' || (entry.viewer && entry.shown === entry.raw)) return;
+    if (!hasSize()) { parked.add(entry); skipped = true; return; }
+    parked.delete(entry);
     const token = entry.token, raw = entry.raw;
     viewerModule ??= import('./diff-viewer');
     viewerModule.then(({ mountDiffViewer }) => {
@@ -272,6 +313,20 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
         slot.classList.remove('cv-diff-next');
       });
     }, () => { if (!disposed && token === entry.token) entry.body.innerHTML = `<pre class="cv-raw">${escape(entry.patch)}</pre>`; });
+  }
+
+  /** The list got a size: load the eager patches, mount the parked ones, and observe the idle rows again so the
+   *  IntersectionObserver reports the ones really in view (it reported them while the box was empty). */
+  function reveal(): void {
+    if (disposed) return;
+    skipped = false;
+    for (const entry of [...parked]) { parked.delete(entry); mountViewer(entry); }
+    for (const entry of entries.values()) {
+      if (entry.load !== 'idle') continue;
+      if (order.indexOf(entry.path) < EAGER) { void load(entry); continue; }
+      observer.unobserve(entry.el);
+      observer.observe(entry.el);
+    }
   }
 
   function refetch(): void {
@@ -344,7 +399,10 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
     });
     order = wanted.map(w => w.file.path);
     // The first few patches load right away; the rest load as they near the viewport.
-    for (const entry of fresh) if (order.indexOf(entry.path) < EAGER && entry.load === 'idle') void load(entry);
+    // With no size (inspector hidden) they wait for reveal().
+    const eager = fresh.filter(entry => order.indexOf(entry.path) < EAGER && entry.load === 'idle');
+    if (eager.length && !hasSize()) skipped = true;
+    else for (const entry of eager) void load(entry);
     if (fresh.length) scheduleFit();
   }
 
@@ -355,7 +413,7 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   }
 
   async function run(task: Promise<void>, failure: string): Promise<void> {
-    try { await task; } catch (reason) { deps.notify(reason instanceof Error && reason.message ? reason.message : failure); }
+    try { await task; } catch (reason) { (deps.notifyError ?? deps.notify)(errorText(reason, failure)); }
   }
 
   function openCommit(): void {
@@ -377,7 +435,7 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
       await deps.commit(text);
       if (!disposed) closeCommit();
     } catch (reason) {
-      deps.notify(reason instanceof Error && reason.message ? reason.message : 'Commit failed');
+      (deps.notifyError ?? deps.notify)(errorText(reason, 'Commit failed'));
     } finally {
       committing = false;
       if (!disposed) totals();
@@ -385,7 +443,7 @@ export function mountChangesView(host: HTMLElement, deps: ChangesViewDeps): Chan
   }
 
   function copy(path: string): void {
-    void navigator.clipboard.writeText(path).then(() => deps.notify('Copied path'), () => deps.notify('Unable to copy path'));
+    void navigator.clipboard.writeText(path).then(() => deps.notify('Copied path'), () => (deps.notifyError ?? deps.notify)('Unable to copy path'));
   }
 
   function fileMenu(anchor: HTMLElement, path: string): void {

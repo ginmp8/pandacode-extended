@@ -2,7 +2,7 @@ import type { Mode, ProviderId } from './types';
 
 export interface ApprovalMode { id: Mode; label: string; description: string; icon: string; disabled?: boolean; }
 
-const CLAUDE_FAMILY: ProviderId[] = ['claude', 'glm', 'mimo'];
+const CLAUDE_FAMILY: ProviderId[] = ['claude', 'glm', 'mimo', 'alibaba'];
 
 /** A mode's state tone (`--ds-tone-*`); Standard stays neutral. Harness labels differ, the risk class does not. */
 export const MODE_TONES: Record<Mode, string> = { ask: '', auto: 'edit', review: 'edit', plan: 'plan', full: 'full' };
@@ -21,6 +21,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'Grok asks before edits and commands, whatever its own config says.'
     : provider === 'devin'
     ? 'Devin’s Code mode: edits inside this project apply; commands it does not judge safe ask you.'
+    : provider === 'cursor'
+    ? 'Cursor’s Agent mode: edits apply; commands outside your Cursor allowlist ask you.'
     : pi
     ? `${pi} runs without its own approvals; PandaCode asks before edits, commands and other non-read tools.`
     : provider === 'deepseek'
@@ -35,9 +37,11 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'ZCode’s build mode: it works in this project and asks you when an action needs permission.'
     : provider === 'hermes'
     ? 'Hermes works in this project. Asks you before terminal commands or dangerous actions.'
+    : provider === 'antigravity'
+    ? 'Antigravity’s Default mode: works in this project and asks you before edits, commands and other actions that need permission.'
     : 'Use the harness’s normal rules. Ask you when approval is needed.' };
   const full: ApprovalMode = { id: 'full', label: 'Full access', icon: 'unlock', description: provider === 'antigravity'
-    ? 'Automatically approve permission requests. Server restrictions still apply.'
+    ? 'Antigravity’s Auto mode (when offered) with every permission request approved: runs tools without asking. Server restrictions still apply.'
     : provider === 'codex'
     ? 'Skip approval prompts and sandbox limits. Allow file and network access.'
     : provider === 'grok'
@@ -54,6 +58,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'Devin’s Bypass Permissions mode: every tool runs without asking, unless your organization requires approval.'
     : provider === 'hermes'
     ? 'Skip approval prompts: Hermes runs every tool without asking (equivalent to its --yolo).'
+    : provider === 'cursor'
+    ? 'Cursor’s Agent mode with every permission request approved: commands outside your allowlist run without asking.'
     : provider === 'github-copilot'
     ? 'Use Copilot Agent mode with Allow All on. Copilot automatically approves tool, path, and URL requests.'
     : provider === 'zcode'
@@ -72,15 +78,21 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
   if (provider === 'devin') return [standard,
     { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Devin’s Plan mode: it investigates and writes a plan; commands ask you, and edits wait until you approve the plan.' },
     ...review, full];
+  // Cursor's Agent mode applies edits without asking, so Accept edits would change nothing.
+  if (provider === 'cursor') return [standard,
+    { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Cursor’s Plan mode: it reads, searches and writes a plan; edits and commands that change state are declined.' },
+    ...review, full];
   return [standard, provider === 'muse'
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Work freely inside the sandbox. Muse asks only to leave it.' }
     : provider === 'deepseek'
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Like Standard, and edits outside this project are approved too. Other actions still ask.' }
-    : ['claude', 'glm', 'mimo', 'opencode', 'grok', 'pi', 'omp', 'commandcode', 'cline', 'kilo', 'zcode', 'hermes'].includes(provider)
+    : ['claude', 'glm', 'mimo', 'alibaba', 'opencode', 'grok', 'pi', 'omp', 'commandcode', 'cline', 'kilo', 'zcode', 'hermes'].includes(provider)
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Allow file edits automatically. Other actions may still ask you.' }
     : provider === 'kimi'
     ? { id: 'auto', label: 'Ask when needed', icon: 'spark', description: 'Allow routine tools automatically. Ask you about sensitive actions.' }
     : provider === 'codex' ? { id: 'auto', label: 'Approve for me', icon: 'spark', description: 'Let Codex review approval requests. Keep the workspace sandbox.' }
+    : provider === 'antigravity'
+    ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Antigravity’s Accept edits mode: file edits apply automatically; commands and other actions still ask you.' }
     : { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Automatically approve edit requests offered by the server.' },
   ...review,
   provider === 'codex'
@@ -107,6 +119,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan: reads and web lookups run, even outside this project; edits wait for implementation and commands ask you.' }
     : provider === 'opencode'
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan: reads and web lookups run; reading outside this project asks you; edits and commands are declined.' }
+    : provider === 'antigravity'
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Antigravity’s Plan mode: investigates and proposes a plan; edits and state-changing commands wait for implementation.' }
     : { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Explore and plan changes before implementation.' }, full];
 }
 

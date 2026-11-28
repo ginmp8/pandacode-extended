@@ -1,15 +1,97 @@
 //! Durable per-task message queues. Messages typed while an agent works are stored
-//! here and delivered in order once the run finishes; the app holds a queue after a
-//! restart, a failure or a stop until the user resumes it. Steering sends a message
-//! into the running turn instead, where the harness supports it.
+//! here and delivered in order at a settled team wake or once the run finishes.
+//! The app holds a queue after a restart, failure or stop until the user resumes it.
+//! Steering sends into the running turn where the harness supports it.
 
 use crate::{providers::RunInput, storage::Store, AppState, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex, PoisonError},
+};
+use tauri::{Emitter, State};
 
 const MAX_PER_TASK: i64 = 50;
 const MAX_ATTACHMENTS: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct HoldState {
+    // Allocate event sequence numbers in the same critical section as the hold change.
+    seq: u64,
+    holds: HashMap<String, String>,
+}
+
+static HELD_QUEUES: LazyLock<Mutex<HoldState>> = LazyLock::new(Default::default);
+
+pub(crate) fn normalize_hold_reason(reason: Option<&str>) -> &str {
+    match reason {
+        Some(reason @ ("stopped" | "failed" | "limited" | "restart" | "reset")) => reason,
+        _ => "stopped",
+    }
+}
+
+pub fn set_queue_hold_state(session_id: &str, held: bool, reason: Option<&str>) -> u64 {
+    let mut state = HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    if held {
+        state.holds.insert(session_id.to_owned(), normalize_hold_reason(reason).to_owned());
+    } else {
+        state.holds.remove(session_id);
+    }
+    state.seq += 1;
+    state.seq
+}
+
+pub fn transition_queue_hold_reason(session_id: &str, from: &str, to: &str) -> Option<u64> {
+    let mut state = HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = state.holds.get_mut(session_id)?;
+    let to = normalize_hold_reason(Some(to));
+    if current != from || current == to {
+        return None;
+    }
+    *current = to.to_owned();
+    state.seq += 1;
+    Some(state.seq)
+}
+
+pub fn clear_queue_hold_if(session_id: &str, reasons: &[&str]) -> Option<u64> {
+    let mut state = HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = state.holds.get(session_id)?;
+    if !reasons.contains(&current.as_str()) {
+        return None;
+    }
+    state.holds.remove(session_id);
+    state.seq += 1;
+    Some(state.seq)
+}
+
+pub fn hold_queue_if_unheld(session_id: &str, reason: &str) -> Option<u64> {
+    let mut state = HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    if state.holds.contains_key(session_id) {
+        return None;
+    }
+    state.holds.insert(session_id.to_owned(), normalize_hold_reason(Some(reason)).to_owned());
+    state.seq += 1;
+    Some(state.seq)
+}
+
+#[allow(dead_code)]
+pub fn set_queue_held(session_id: &str, held: bool) {
+    set_queue_hold_state(session_id, held, None);
+}
+
+pub fn is_queue_held(session_id: &str) -> bool {
+    HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner).holds.contains_key(session_id)
+}
+
+#[allow(dead_code)]
+pub fn queue_hold_reason(session_id: &str) -> Option<String> {
+    HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner).holds.get(session_id).cloned()
+}
+
+pub fn queue_holds_snapshot() -> HashMap<String, String> {
+    HELD_QUEUES.lock().unwrap_or_else(PoisonError::into_inner).holds.clone()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,15 +207,101 @@ pub(crate) fn reorder(store: &Store, session_id: &str, ids: &[String]) -> Result
 
 /// Removes and returns an entry for delivery, so it can only ever be sent once.
 pub(crate) fn take(store: &Store, id: &str) -> Result<QueuedMessage> {
+    let entry = withdraw(store, id)?;
+    record_deliveries(&entry.session_id, 1);
+    Ok(entry)
+}
+
+/// Takes the ready prefix in queue order. The caller records the delivery in the same
+/// transaction and updates the in-memory delivery count once the transaction commits.
+pub(crate) fn take_all_ready(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    mut ready: impl FnMut(&QueuedMessage) -> bool,
+) -> Result<Vec<QueuedMessage>> {
+    if is_queue_held(session_id) {
+        return Ok(Vec::new());
+    }
+    let blocked: bool = transaction.query_row(
+        "SELECT archived OR (limited_at IS NOT NULL AND COALESCE(limited_until > ?2, 1)) FROM sessions WHERE id=?1",
+        params![session_id, crate::storage::now()],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if blocked {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    {
+        let mut statement = transaction.prepare(&format!("SELECT {COLUMNS} FROM queued_messages WHERE session_id=?1 ORDER BY position,created_at")).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([session_id], row).map_err(|e| e.to_string())?;
+        for entry in rows {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !ready(&entry) {
+                break;
+            }
+            entries.push(entry);
+        }
+    }
+    let mut delete = transaction.prepare_cached("DELETE FROM queued_messages WHERE id=?1").map_err(|e| e.to_string())?;
+    for entry in &entries {
+        delete.execute([&entry.id]).map_err(|e| e.to_string())?;
+    }
+    Ok(entries)
+}
+
+/// Removes and returns an entry without counting a queue delivery: a sender that queued an
+/// entry and takes it straight back to send it itself (the run ended in between) is a direct
+/// send, not the queue moving on.
+pub(crate) fn withdraw(store: &Store, id: &str) -> Result<QueuedMessage> {
     let entry = get(store, id)?;
     remove(store, id)?;
     Ok(entry)
 }
 
+/// Round 22: removes an entry that left the queue for a run or on someone else's behalf (the
+/// desktop's steer took it into the running turn, a shared channel stopped its assignment, an
+/// agent removed it) and counts it like [`take`], so a phone's queue Undo held from before is
+/// refused rather than putting an entry back into a queue that moved on. An entry already gone
+/// is no error and counts nothing, as [`remove`]. The delete is one statement, so a racing
+/// [`take`] and this never both count.
+pub(crate) fn remove_delivered(store: &Store, id: &str) -> Result<()> {
+    let session: Option<String> = store.db.query_row("DELETE FROM queued_messages WHERE id=?1 RETURNING session_id", [id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    if let Some(session) = session {
+        record_deliveries(&session, 1);
+    }
+    Ok(())
+}
+
+/// How many entries each task's queue has handed out for delivery since launch. Taking queued
+/// entries for delivery moves it up and [`restore`] (a failed delivery) moves it back down, so a prompt sent
+/// straight to the task never does; PandaConnect's queue Undo compares it to refuse putting
+/// an entry back once the queue moved on.
+static DELIVERIES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn record_deliveries(session_id: &str, change: i64) {
+    // A poisoned lock still holds a usable map.
+    let mut counts = DELIVERIES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let count = counts.entry(session_id.to_owned()).or_default();
+    *count = count.saturating_add_signed(change);
+}
+
+/// The number of entries delivered from the task's queue since launch.
+pub(crate) fn deliveries(session_id: &str) -> u64 {
+    DELIVERIES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(session_id).copied().unwrap_or(0)
+}
+
 /// Puts a taken entry back at the front of its queue after a failed delivery, keeping
 /// its id, text, attachments and creation time. The queue limit does not apply: the
-/// entry already held its place.
+/// entry already held its place. The [`take`] it undoes no longer counts as a delivery.
 pub(crate) fn restore(store: &Store, entry: &QueuedMessage) -> Result<QueuedMessage> {
+    let restored = reinsert(store, entry)?;
+    record_deliveries(&entry.session_id, -1);
+    Ok(restored)
+}
+
+/// Puts a removed (never taken) entry back at the front of its queue, as [`restore`] does,
+/// without touching the delivery count: PandaConnect's queue Undo.
+pub(crate) fn reinsert(store: &Store, entry: &QueuedMessage) -> Result<QueuedMessage> {
     store.session(&entry.session_id)?;
     let encoded = validate(&entry.text, &entry.attachments)?;
     store
@@ -147,45 +315,161 @@ pub(crate) fn restore(store: &Store, entry: &QueuedMessage) -> Result<QueuedMess
 }
 
 #[tauri::command]
-pub async fn queue_list(state: State<'_, AppState>, session_id: Option<String>) -> Result<Vec<QueuedMessage>> {
+pub async fn queue_list(
+    state: State<'_, AppState>,
+    session_id: Option<String>,
+) -> Result<Vec<QueuedMessage>> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list(&store, session_id.as_deref())
 }
 
 #[tauri::command]
-pub async fn queue_add(state: State<'_, AppState>, session_id: String, text: String, attachments: Option<serde_json::Value>) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    add(&store, &session_id, &text, &attachments.unwrap_or_else(|| serde_json::json!([])))
+pub async fn queue_holds() -> Result<HashMap<String, String>> {
+    Ok(queue_holds_snapshot())
+}
+
+/// The session's harness and folder when `text` types a command, for the typed-command guard.
+fn guard_target(
+    store: &Store,
+    session_id: &str,
+    text: &str,
+) -> Result<Option<(String, std::path::PathBuf)>> {
+    if crate::skill_manager::typed_command(text).is_none() {
+        return Ok(None);
+    }
+    let session = store.session(session_id)?;
+    let cwd = match session.worktree_path {
+        Some(path) => path,
+        None => store.project(&session.project_id)?.path,
+    };
+    Ok(Some((session.provider, cwd.into())))
+}
+
+/// Refuses a steered or queued message that types a switched-off skill, with the error a new
+/// turn would get: a running agent's harness expands `/name` itself, past every other switch.
+/// The switches and the installed-skill scan are read off the async runtime.
+async fn refuse_switched_off_skill(state: &AppState, session_id: &str, text: &str) -> Result<()> {
+    let target = guard_target(
+        &*state.store.lock().map_err(|e| e.to_string())?,
+        session_id,
+        text,
+    )?;
+    let Some((provider, cwd)) = target else {
+        return Ok(());
+    };
+    let (session_id, text) = (session_id.to_owned(), text.to_owned());
+    crate::blocking(move || {
+        crate::skill_manager::check_session_prompt(&session_id, &provider, &cwd, &text)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn queue_update(state: State<'_, AppState>, id: String, text: String, attachments: Option<serde_json::Value>) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    update(&store, &id, &text, &attachments.unwrap_or_else(|| serde_json::json!([])))
+pub async fn queue_add(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    text: String,
+    attachments: Option<serde_json::Value>,
+) -> Result<QueuedMessage> {
+    refuse_switched_off_skill(&state, &session_id, &text).await?;
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        add(
+            &store,
+            &session_id,
+            &text,
+            &attachments.unwrap_or_else(|| serde_json::json!([])),
+        )?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    crate::headless::queue_changed(&app, &session_id);
+    Ok(entry)
 }
 
 #[tauri::command]
-pub async fn queue_remove(state: State<'_, AppState>, id: String) -> Result<()> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    remove(&store, &id)
+pub async fn queue_update(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    text: String,
+    attachments: Option<serde_json::Value>,
+) -> Result<QueuedMessage> {
+    if crate::skill_manager::typed_command(&text).is_some() {
+        let session_id = get(&*state.store.lock().map_err(|e| e.to_string())?, &id)?.session_id;
+        refuse_switched_off_skill(&state, &session_id, &text).await?;
+    }
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        update(
+            &store,
+            &id,
+            &text,
+            &attachments.unwrap_or_else(|| serde_json::json!([])),
+        )?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": entry.session_id }));
+    Ok(entry)
 }
 
 #[tauri::command]
-pub async fn queue_reorder(state: State<'_, AppState>, session_id: String, ids: Vec<String>) -> Result<Vec<QueuedMessage>> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    reorder(&store, &session_id, &ids)
+pub async fn queue_remove(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let session_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let session_id = get(&store, &id).ok().map(|e| e.session_id);
+        remove(&store, &id)?;
+        session_id
+    };
+    if let Some(session_id) = session_id {
+        let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    }
+    Ok(())
+}
+
+/// The desktop composer's steer of a queued entry: once the running turn took it, the entry
+/// leaves the queue as a delivery ([`remove_delivered`]); otherwise like `queue_remove`.
+#[tauri::command]
+pub async fn queue_take_steered(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    let session_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let session_id = get(&store, &id).ok().map(|e| e.session_id);
+        remove_delivered(&store, &id)?;
+        session_id
+    };
+    if let Some(session_id) = session_id {
+        let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn queue_take(state: State<'_, AppState>, id: String) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    take(&store, &id)
+pub async fn queue_reorder(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, ids: Vec<String>) -> Result<Vec<QueuedMessage>> {
+    let entries = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        reorder(&store, &session_id, &ids)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": session_id }));
+    Ok(entries)
 }
 
 #[tauri::command]
-pub async fn queue_restore(state: State<'_, AppState>, entry: QueuedMessage) -> Result<QueuedMessage> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    restore(&store, &entry)
+pub async fn queue_take(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<QueuedMessage> {
+    let entry = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        take(&store, &id)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": entry.session_id }));
+    Ok(entry)
+}
+
+#[tauri::command]
+pub async fn queue_restore(app: tauri::AppHandle, state: State<'_, AppState>, entry: QueuedMessage) -> Result<QueuedMessage> {
+    let restored = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        restore(&store, &entry)?
+    };
+    let _ = app.emit("queue-changed", serde_json::json!({ "sessionId": restored.session_id }));
+    Ok(restored)
 }
 
 /// Sends a message to the running agent without stopping it: into the current turn
@@ -194,21 +478,43 @@ pub async fn queue_restore(state: State<'_, AppState>, entry: QueuedMessage) -> 
 /// with that id report `delivered`, or `failed` if the run ends first. On an error the
 /// message should stay queued.
 #[tauri::command]
-pub async fn steer_task(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, text: String) -> Result<serde_json::Value> {
+pub async fn steer_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    text: String,
+) -> Result<serde_json::Value> {
     let text = text.trim().to_owned();
     if text.is_empty() {
         return Err("Write a message to steer with.".into());
     }
     // A task on another computer steers there and saves the message in its own history.
-    if let Some(reply) = crate::remote::route(&app, &state, &session_id, "task.steer", serde_json::json!({"text": text})).await? {
+    if let Some(reply) = crate::remote::route(
+        &app,
+        &state,
+        &session_id,
+        "task.steer",
+        serde_json::json!({"text": text}),
+    )
+    .await?
+    {
         return Ok(reply);
     }
+    refuse_switched_off_skill(&state, &session_id, &text).await?;
     let reply = {
-        let agents = state.agents.lock().map_err(|e| e.to_string())?;
-        let agent = agents.get(&session_id).ok_or("The agent is not running; the message stays queued.")?;
+        let agents = crate::run_requests::lock_agents(&state.agents).map_err(|e| e.to_string())?;
+        let agent = agents
+            .get(&session_id)
+            .ok_or("The agent is not running; the message stays queued.")?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let id = uuid::Uuid::new_v4().to_string();
-        agent.send(RunInput::Steer { id, text: text.clone(), reply: tx }).map_err(|_| "The agent has stopped.".to_string())?;
+        agent
+            .send(RunInput::Steer {
+                id,
+                text: text.clone(),
+                reply: tx,
+            })
+            .map_err(|_| "The agent has stopped.".to_string())?;
         rx
     };
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply)
@@ -242,6 +548,136 @@ mod tests {
     }
 
     #[test]
+    fn queue_hold_reasons_are_normalized_and_cleared() {
+        let session_id = crate::storage::id();
+        for reason in ["failed", "limited", "restart", "reset", "stopped"] {
+            set_queue_hold_state(&session_id, true, Some(reason));
+            assert!(is_queue_held(&session_id));
+            assert_eq!(queue_hold_reason(&session_id).as_deref(), Some(reason));
+            assert_eq!(queue_holds_snapshot().get(&session_id).map(String::as_str), Some(reason));
+        }
+
+        for invalid in [Some("unknown"), Some(""), None] {
+            set_queue_hold_state(&session_id, true, invalid);
+            assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+        }
+
+        set_queue_hold_state(&session_id, false, Some("failed"));
+        assert!(!is_queue_held(&session_id));
+        assert_eq!(queue_hold_reason(&session_id), None);
+        assert!(!queue_holds_snapshot().contains_key(&session_id));
+
+        set_queue_held(&session_id, true);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+        set_queue_held(&session_id, false);
+        assert!(!is_queue_held(&session_id));
+    }
+
+    #[test]
+    fn delayed_reset_keeps_its_sequence_after_resume() {
+        let session_id = crate::storage::id();
+        let limited_seq = set_queue_hold_state(&session_id, true, Some("limited"));
+        let reset_seq = transition_queue_hold_reason(&session_id, "limited", "reset").unwrap();
+        let clear_seq = set_queue_hold_state(&session_id, false, None);
+
+        // Resume can be emitted first if the reset notification was delayed after unlocking.
+        let emitted = [(false, clear_seq), (true, reset_seq)];
+        assert_eq!(emitted.iter().max_by_key(|event| event.1), Some(&(false, clear_seq)));
+        assert!(limited_seq < reset_seq && reset_seq < clear_seq);
+        assert!(!is_queue_held(&session_id));
+    }
+
+    #[test]
+    fn conditional_hold_mutations_sequence_only_successful_changes() {
+        let session_id = crate::storage::id();
+        assert_eq!(clear_queue_hold_if(&session_id, &["limited"]), None);
+
+        let hold_seq = hold_queue_if_unheld(&session_id, "limited").unwrap();
+        assert_eq!(hold_queue_if_unheld(&session_id, "failed"), None);
+        assert_eq!(clear_queue_hold_if(&session_id, &["failed"]), None);
+
+        let clear_seq = clear_queue_hold_if(&session_id, &["limited"]).unwrap();
+        assert_eq!(clear_queue_hold_if(&session_id, &["limited"]), None);
+        let next_hold_seq = hold_queue_if_unheld(&session_id, "failed").unwrap();
+        assert!(hold_seq < clear_seq && clear_seq < next_hold_seq);
+        set_queue_hold_state(&session_id, false, None);
+    }
+
+    #[test]
+    fn atomic_queue_hold_transitions_respect_current_state() {
+        let session_id = crate::storage::id();
+
+        // Unheld: transition and conditional clear are no-ops; hold_queue_if_unheld succeeds.
+        assert_eq!(transition_queue_hold_reason(&session_id, "limited", "reset"), None);
+        assert_eq!(queue_hold_reason(&session_id), None);
+        assert_eq!(clear_queue_hold_if(&session_id, &["limited", "reset", "restart"]), None);
+        assert_eq!(queue_hold_reason(&session_id), None);
+
+        assert!(hold_queue_if_unheld(&session_id, "limited").is_some());
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("limited"));
+        // Already held: hold_queue_if_unheld leaves existing reason untouched.
+        assert_eq!(hold_queue_if_unheld(&session_id, "failed"), None);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("limited"));
+
+        // Non-matching `from` leaves the hold unchanged.
+        assert_eq!(transition_queue_hold_reason(&session_id, "failed", "reset"), None);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("limited"));
+
+        // Matching `from` transitions to normalized `to`.
+        assert!(transition_queue_hold_reason(&session_id, "limited", "reset").is_some());
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("reset"));
+        assert_eq!(transition_queue_hold_reason(&session_id, "limited", "reset"), None);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("reset"));
+
+        // Unknown target reason normalizes to "stopped".
+        assert!(transition_queue_hold_reason(&session_id, "reset", "unknown").is_some());
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+
+        // clear_queue_hold_if ignores non-matching reasons and empty slices.
+        assert_eq!(clear_queue_hold_if(&session_id, &[]), None);
+        assert_eq!(clear_queue_hold_if(&session_id, &["limited", "reset", "restart"]), None);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+
+        // Matching reason clears the hold.
+        for reason in ["limited", "reset", "restart"] {
+            set_queue_hold_state(&session_id, true, Some(reason));
+            assert!(clear_queue_hold_if(&session_id, &["limited", "reset", "restart"]).is_some());
+            assert!(!is_queue_held(&session_id));
+            assert_eq!(queue_hold_reason(&session_id), None);
+        }
+
+        // hold_queue_if_unheld normalizes unknown reasons to "stopped".
+        assert!(hold_queue_if_unheld(&session_id, "unknown").is_some());
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+        assert_eq!(hold_queue_if_unheld(&session_id, "failed"), None);
+        assert_eq!(queue_hold_reason(&session_id).as_deref(), Some("stopped"));
+
+        set_queue_hold_state(&session_id, false, None);
+        assert!(!is_queue_held(&session_id));
+    }
+
+    #[test]
+    fn batch_take_respects_usage_limits_and_stays_within_its_session() {
+        let (store, task) = store();
+        let parent = store.session(&task).unwrap().project_id;
+        let other = store.create_session(&parent, "claude", "sonnet", "full").unwrap();
+        let queued = add(&store, &task, "steering", &json!([])).unwrap();
+        let elsewhere = add(&store, &other.id, "elsewhere", &json!([])).unwrap();
+        for until in [None, Some(crate::storage::now() + 60_000)] {
+            store.set_limited(&task, until).unwrap();
+            let transaction = store.db.unchecked_transaction().unwrap();
+            assert!(take_all_ready(&transaction, &task, |_| true).unwrap().is_empty());
+            transaction.commit().unwrap();
+            assert_eq!(list(&store, Some(&task)).unwrap(), std::slice::from_ref(&queued));
+        }
+        store.set_limited(&task, Some(crate::storage::now() - 1)).unwrap();
+        let transaction = store.db.unchecked_transaction().unwrap();
+        assert_eq!(take_all_ready(&transaction, &task, |_| true).unwrap(), [queued]);
+        transaction.commit().unwrap();
+        assert_eq!(list(&store, None).unwrap(), [elsewhere]);
+    }
+
+    #[test]
     fn queues_keep_order_and_survive_reorder_edit_and_take() {
         let (store, task) = store();
         let first = add(&store, &task, "first", &json!([])).unwrap();
@@ -253,9 +689,12 @@ mod tests {
         assert!(reorder(&store, &task, std::slice::from_ref(&first.id)).is_err(), "a partial order is refused");
         let edited = update(&store, &second.id, "second, edited", &json!([])).unwrap();
         assert_eq!(edited.attachments, json!([]));
+        assert_eq!(deliveries(&task), 0);
         let taken = take(&store, &third.id).unwrap();
         assert_eq!(taken.text, "third");
+        assert_eq!(deliveries(&task), 1, "a delivery is counted for its task");
         assert!(take(&store, &third.id).is_err(), "an entry is delivered once");
+        assert_eq!(deliveries(&task), 1, "a failed take is not a delivery");
         assert_eq!(list(&store, None).unwrap().len(), 2);
         // A new message goes to the end even after reordering.
         assert_eq!(add(&store, &task, "fourth", &json!([])).unwrap().position, 3);
@@ -279,6 +718,110 @@ mod tests {
         restore(&store, &taken).unwrap();
         assert_eq!(list(&store, Some(&task)).unwrap().iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["first", "third", "second"]);
         assert_eq!(add(&store, &task, "fourth", &json!([])).unwrap().position, 2);
+    }
+
+    /// Round 21: only real deliveries move the count queue Undo compares. A failed launch's
+    /// restore undoes its take, a sender taking back its own just-queued entry (the run ended
+    /// in between) counts nothing, and an Undo's reinsert leaves the count alone.
+    #[test]
+    fn only_real_deliveries_are_counted() {
+        let (store, task) = store();
+        let first = add(&store, &task, "first", &json!([])).unwrap();
+        let taken = take(&store, &first.id).unwrap();
+        assert_eq!(deliveries(&task), 1);
+        restore(&store, &taken).unwrap();
+        assert_eq!(deliveries(&task), 0, "a failed launch is not a delivery");
+        assert!(restore(&store, &taken).is_err());
+        assert_eq!(deliveries(&task), 0, "a refused restore changes nothing");
+        let raced = add(&store, &task, "raced", &json!([])).unwrap();
+        assert_eq!(withdraw(&store, &raced.id).unwrap().text, "raced");
+        assert_eq!(deliveries(&task), 0, "taking back a just-queued entry to send it directly is not a queue delivery");
+        assert!(withdraw(&store, &raced.id).is_err(), "withdrawn once");
+        let removed = list(&store, Some(&task)).unwrap().remove(0);
+        remove(&store, &removed.id).unwrap();
+        reinsert(&store, &removed).unwrap();
+        assert_eq!(deliveries(&task), 0, "an Undo's reinsert is not a delivery either");
+        take(&store, &first.id).unwrap();
+        assert_eq!(deliveries(&task), 1);
+        // The race fallbacks never count, and the desktop's failed launch goes through restore.
+        let host = include_str!("remote/host.rs");
+        let deliver = &host[host.find("async fn deliver_prompt").unwrap()..];
+        let deliver = &deliver[..deliver.find("\n}\n").unwrap()];
+        assert!(deliver.contains("message_queue::withdraw(") && !deliver.contains("message_queue::take("));
+        let tools = include_str!("remote/methods/tools.rs");
+        assert!(!tools.contains("message_queue::take("));
+        let source = include_str!("message_queue.rs");
+        let command = &source[source.find("pub async fn queue_restore").unwrap()..];
+        assert!(command[..command.find("\n}\n").unwrap()].contains("restore(&store, &entry)"));
+        let composer = include_str!("remote/methods/composer.rs");
+        assert!(composer.contains("message_queue::reinsert(store, &held.entry)") && !composer.contains("message_queue::restore("));
+    }
+
+    /// Round 22: a steered entry (the desktop's `queue_take_steered`), a stopped channel
+    /// assignment and an agent's removal leave the queue as deliveries; a plain remove does not.
+    #[test]
+    fn steered_and_other_takes_count_as_deliveries() {
+        let (store, task) = store();
+        let first = add(&store, &task, "first", &json!([])).unwrap();
+        let second = add(&store, &task, "second", &json!([])).unwrap();
+        remove_delivered(&store, &first.id).unwrap();
+        assert_eq!(deliveries(&task), 1);
+        assert_eq!(list(&store, Some(&task)).unwrap().iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), [second.id.as_str()]);
+        remove_delivered(&store, &first.id).expect("already gone is fine, as remove");
+        assert_eq!(deliveries(&task), 1, "and counts nothing");
+        remove(&store, &second.id).unwrap();
+        assert_eq!(deliveries(&task), 1, "a user's own remove is not a delivery");
+        let main = include_str!("../../src/main.ts");
+        let steer = &main[main.find("async function steerQueued(").unwrap()..];
+        let steer = &steer[..steer.find("\n}\n").unwrap()];
+        assert!(steer.contains("call('queue_take_steered', { id })") && !steer.contains("'queue_remove'"), "the desktop steer counts");
+        assert!(include_str!("lib.rs").contains("message_queue::queue_take_steered,"));
+        let channels = include_str!("bots/shared_channels.rs");
+        assert!(channels.contains("message_queue::remove_delivered(&store,&queued.id)") && !channels.contains("message_queue::remove(&store"));
+        let tools = include_str!("agent_tools.rs");
+        assert!(tools.contains("crate::message_queue::remove_delivered(&store, &id)?;") && !tools.contains("crate::message_queue::remove(&store"));
+    }
+
+    #[test]
+    fn steered_and_queued_messages_refuse_a_typed_switched_off_skill_on_claude_and_acp() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let folder = std::env::temp_dir();
+        let project = store.add_project(&folder).unwrap();
+        for provider in ["claude", "kimi"] {
+            let task = store
+                .create_session(&project.id, provider, "default", "ask")
+                .unwrap();
+            // Plain text never reaches the switches.
+            assert_eq!(
+                guard_target(&store, &task.id, "deploy it please").unwrap(),
+                None
+            );
+            let (harness, cwd) = guard_target(&store, &task.id, "/deploy staging")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (harness.as_str(), cwd.as_path()),
+                (provider, Path::new(&project.path))
+            );
+            let check = |text: &str| {
+                crate::skill_manager::check_session_prompt_with(
+                    &harness,
+                    text,
+                    || std::collections::BTreeSet::from(["deploy".into()]),
+                    || std::collections::BTreeSet::from(["deploy".into()]),
+                )
+            };
+            assert_eq!(
+                check("/deploy staging").unwrap_err(),
+                format!(
+                    "deploy is switched off in {}.",
+                    crate::skill_manager::SKILLS_SETTINGS
+                ),
+                "{provider}"
+            );
+            assert!(check("/other").is_ok(), "{provider}");
+        }
+        assert!(guard_target(&store, "missing", "/deploy").is_err());
     }
 
     #[test]

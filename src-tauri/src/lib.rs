@@ -1,12 +1,20 @@
+mod account_config;
 mod account_identity;
 mod account_pool;
 mod account_sign_in;
 mod agent_tools;
 mod agents_dock;
 mod agent_usage;
+mod agent_usage_claude;
+mod agent_usage_claude_env;
+mod agent_usage_claude_limits;
+mod agent_usage_claude_remote;
+mod agent_usage_claude_store;
 mod agent_updates;
 mod agent_usage_providers;
 mod memory;
+#[cfg(target_os = "macos")]
+mod app_menu;
 mod app_updates;
 mod appearance;
 mod architect;
@@ -17,12 +25,14 @@ mod child_env;
 mod checks;
 mod code_search;
 mod connections;
+mod crash_guard;
 mod command_operations;
 mod context_recovery;
 mod conversation_fork;
 mod conversation_import;
 mod design;
 mod progress;
+mod feature_controls;
 mod file_preview;
 mod run_script;
 mod github;
@@ -32,13 +42,16 @@ mod project_icon;
 mod simulator;
 mod vm;
 mod secret_store;
+mod voice;
 mod cloud;
 mod cloud_agents;
-mod feature_controls;
 mod capabilities;
 mod vsix_themes;
 mod token_saver;
+mod tool_images;
+mod tool_images_auth;
 mod task_usage;
+mod skill_manager;
 mod skills;
 mod goal_state;
 #[cfg(test)]
@@ -65,6 +78,7 @@ mod recipes;
 mod schedules;
 mod storage;
 mod subagent_state;
+mod debug_bundle;
 mod support;
 mod task_controls;
 mod task_deletion;
@@ -74,14 +88,22 @@ mod turn_changes;
 mod usage_keychain;
 mod usage_ledger;
 mod workspace;
+mod worker_approvals;
+mod run_requests;
+use run_requests::{lock_agents, record_request_event, run_end, settle_account_switch, show_settled_stop};
 mod jj;
 mod tray;
 mod headless;
+mod web_server;
+mod quit_guard;
 mod headless_bots;
 
 pub use usage_keychain::handle_usage_keychain_helper;
 pub use cloud_agents::handle_cloud_bridge;
 pub use headless::handle as handle_serve;
+pub use headless::handle_version;
+pub use crash_guard::handle as handle_crash_guard;
+pub use voice::local::handle_speech_worker;
 
 use providers::{AgentEvent, RunConfig, RunInput};
 use serde::Serialize;
@@ -98,6 +120,32 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 type Result<T> = std::result::Result<T, String>;
+
+/// Whether a command's caller is the workspace webview.
+///
+/// Commands that act on the workspace take the calling `tauri::Webview`, not a
+/// `WebviewWindow`: the in-app browser is a child webview of the main window, and
+/// Tauri refuses to resolve a `WebviewWindow` for a window that holds one (its
+/// `is_webview_window` wants every webview in the window to share its label). A
+/// command that asked for the window would fail with "current webview is not a
+/// WebviewWindow" for as long as the browser panel stays open.
+pub(crate) fn is_main_webview(label: &str) -> bool {
+    label == "main"
+}
+
+#[cfg(test)]
+mod main_webview_tests {
+    use super::*;
+
+    #[test]
+    fn the_in_app_browser_is_not_the_workspace_webview() {
+        assert!(is_main_webview("main"));
+        assert!(!is_main_webview("browser-guest"));
+        assert!(!is_main_webview("tray"));
+        assert!(!is_main_webview("launcher"));
+    }
+}
+
 struct RunningAgent {
     input: UnboundedSender<RunInput>,
     stopped: Arc<AtomicBool>,
@@ -111,6 +159,8 @@ struct RunningAgent {
     last_event: Arc<std::sync::atomic::AtomicI64>,
     /// A maintenance command on a team's lead: Stop ends this run and leaves the team alone.
     team_maintenance: bool,
+    /// A team worker's launch: only its stops are kept for the team's settle (`worker_approvals`).
+    team_worker: bool,
 }
 impl RunningAgent {
     fn new(input: UnboundedSender<RunInput>, stopped: Arc<AtomicBool>) -> Self {
@@ -119,6 +169,7 @@ impl RunningAgent {
             stopped,
             run_id: uuid::Uuid::new_v4().to_string(),
             team_maintenance: false,
+            team_worker: false,
             approvals: Arc::new(Mutex::new(HashSet::new())),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             started_at_ms: storage::now(),
@@ -183,6 +234,11 @@ impl RunningAgent {
     ) -> std::result::Result<(), tokio::sync::mpsc::error::SendError<RunInput>> {
         if matches!(input, RunInput::Stop) {
             self.stopped.store(true, Ordering::SeqCst);
+            // A user's or team's stop of a worker launch (the automatic worker stop sends on the
+            // input directly). Other agents never settle through the team, so they keep nothing.
+            if self.team_worker {
+                worker_approvals::stopped_by_owner(&self.run_id);
+            }
         } else {
             // An answered approval or question restarts the silence clock.
             self.last_event.store(storage::now(), Ordering::SeqCst);
@@ -202,12 +258,26 @@ fn save_approval(
     save_approval_with_pending(store, approvals, None, run_id, activity)
 }
 
+/// The pending-request save with the task status following it (tests use it directly).
+#[cfg(test)]
 fn save_approval_with_pending(
     store: &Mutex<Store>,
     approvals: &Mutex<HashSet<String>>,
     pending_requests: Option<&Mutex<HashMap<String, AgentEvent>>>,
     run_id: &str,
     activity: &mut AgentEvent,
+) -> Result<()> {
+    save_pending_request(store, approvals, pending_requests, run_id, activity, true)
+}
+
+/// `write_status`: whether the task's running/waiting status follows the pending list.
+fn save_pending_request(
+    store: &Mutex<Store>,
+    approvals: &Mutex<HashSet<String>>,
+    pending_requests: Option<&Mutex<HashMap<String, AgentEvent>>>,
+    run_id: &str,
+    activity: &mut AgentEvent,
+    write_status: bool,
 ) -> Result<()> {
     let request_id = activity
         .request_id
@@ -218,6 +288,9 @@ fn save_approval_with_pending(
     let mut approvals = approvals.lock().map_err(|error| error.to_string())?;
     let mut pending_requests = pending_requests.map(|requests| requests.lock().map_err(|error| error.to_string())).transpose()?;
     update_pending_request(&mut approvals, pending_requests.as_deref_mut(), &request_id, activity);
+    if !write_status {
+        return Ok(());
+    }
     store.lock().map_err(|error| error.to_string())?.status(
         &activity.session_id,
         if approvals.is_empty() {
@@ -226,6 +299,49 @@ fn save_approval_with_pending(
             "waiting"
         },
     )
+}
+
+/// What a run keeps outside its registry entry: its `worker_approvals` run state, its decline
+/// reasons and (for a team worker) its launch prompt. Dropped before the run settles (an early
+/// return, a cloud run left re-attachable at shutdown, a panic), it forgets all three, so no
+/// path out of the run task can leak them.
+struct RunLeftovers {
+    run_id: String,
+    session_id: String,
+    settled: bool,
+}
+
+impl RunLeftovers {
+    /// The run settles: `settle_run` takes its run state and the team's `completed` its launch
+    /// prompt; no decline reason can be claimed once the run has ended.
+    fn settle(&mut self, stopped: bool) -> worker_approvals::Settled {
+        self.settled = true;
+        let settled = worker_approvals::settle_run(&self.run_id, stopped);
+        providers::forget_decline_reasons(&self.session_id);
+        providers::clear_worker_run(&self.session_id, &self.run_id);
+        settled
+    }
+}
+
+impl Drop for RunLeftovers {
+    fn drop(&mut self) {
+        if !self.settled {
+            worker_approvals::forget_run(&self.run_id);
+            architect::forget_launch(&self.session_id);
+            providers::forget_decline_reasons(&self.session_id);
+            providers::clear_worker_run(&self.session_id, &self.run_id);
+        }
+    }
+}
+
+/// Whether a run is a team worker's: its team admission says so when there is one, otherwise
+/// (a re-attached cloud run) the session's own worker row does. The run's agent and its sink
+/// both use this one answer, so a worker's requests never wait on a person on any launch path.
+fn worker_launch(store: &Store, team: Option<&architect::Admission>, session_id: &str) -> Result<bool> {
+    match team {
+        Some(_) => Ok(worker_approvals::is_worker_launch(team, session_id)),
+        None => Ok(architect::parent_of(store, session_id)?.is_some()),
+    }
 }
 
 fn update_pending_request(
@@ -256,33 +372,8 @@ fn remove_pending_request(
 }
 
 #[cfg(test)]
-mod pending_request_tests {
-    use super::*;
-
-    #[test]
-    fn remote_pending_request_payloads_are_added_and_cancelled_with_the_approval_id() {
-        let request_id = "run-id:provider-id";
-        let mut approvals = HashSet::new();
-        let mut pending = HashMap::new();
-        let request = AgentEvent {
-            session_id: "task-id".into(),
-            kind: "input_request".into(),
-            text: "Choose one".into(),
-            request_id: Some(request_id.into()),
-            data: Some(serde_json::json!({"questions": [{"question": "Which?"}]})),
-            tool: None,
-        };
-        update_pending_request(&mut approvals, Some(&mut pending), request_id, &request);
-        assert!(approvals.contains(request_id));
-        assert_eq!(pending.get(request_id).unwrap().text, "Choose one");
-        assert_eq!(pending.get(request_id).unwrap().data, request.data);
-
-        let cancelled = AgentEvent { kind: "input_cancelled".into(), ..request };
-        update_pending_request(&mut approvals, Some(&mut pending), request_id, &cancelled);
-        assert!(!approvals.contains(request_id));
-        assert!(!pending.contains_key(request_id));
-    }
-}
+#[path = "lib_tests/pending_requests.rs"]
+mod pending_request_tests;
 
 #[cfg(test)]
 mod concurrent_task_tests;
@@ -322,6 +413,91 @@ fn reconcile_inactive_task(
 }
 
 #[cfg(test)]
+mod read_scan_tests {
+    use super::*;
+
+    /// `prompt_activity` and the task search read on their own read-only connection: the shared
+    /// store lock is free while the query runs, and the answers match the store's own.
+    #[test]
+    fn long_scans_run_on_a_read_only_connection_with_the_store_lock_free() {
+        let dir = std::env::temp_dir().join(format!("pandacode-read-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("pandacode.db")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.db.execute("UPDATE sessions SET draft=0 WHERE id=?1", [&task.id]).unwrap();
+        store.message(&task.id, "user", "Find the needle in the haystack.").unwrap();
+        let since = storage::now() - 86_400_000;
+        let expected_activity = store.prompt_activity(since).unwrap();
+        let expected_search = store.search_tasks(&project.id, "needle", 20).unwrap();
+        assert_eq!(expected_activity.len(), 1);
+        assert_eq!(expected_search.len(), 1);
+        let shared = Arc::new(Mutex::new(store));
+
+        let probe = shared.clone();
+        let activity = tauri::async_runtime::block_on(read_scan(shared.clone(), move |reader| {
+            assert!(probe.try_lock().is_ok(), "the store lock is free while the scan runs");
+            assert!(reader.db.is_readonly(rusqlite::MAIN_DB).unwrap(), "a read-only connection");
+            reader.prompt_activity(since)
+        }))
+        .unwrap();
+        assert_eq!(activity, expected_activity);
+
+        let probe = shared.clone();
+        let project_id = project.id.clone();
+        let found = tauri::async_runtime::block_on(read_scan(shared.clone(), move |reader| {
+            assert!(probe.try_lock().is_ok(), "the store lock is free while the search runs");
+            reader.search_tasks(&project_id, "needle", 20)
+        }))
+        .unwrap();
+        assert_eq!(found, expected_search);
+
+        // A writer holding the store lock does not stop a scan that already has its path.
+        let held = shared.lock().unwrap();
+        let path = held.path.clone();
+        let reader = Store::open_read_only(&path).unwrap();
+        assert_eq!(reader.prompt_activity(since).unwrap(), expected_activity);
+        drop(held);
+        drop(reader);
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app store's path is kept at startup: a scan runs while a writer holds the store lock.
+    #[test]
+    fn the_app_store_scans_while_a_writer_holds_its_lock() {
+        let dir = std::env::temp_dir().join(format!("pandacode-read-scan-held-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("pandacode.db")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "codex", "default", "ask").unwrap();
+        store.message(&task.id, "user", "Count me.").unwrap();
+        let since = storage::now() - 86_400_000;
+        let expected = store.prompt_activity(since).unwrap();
+        let path = store.path.clone();
+        let shared = Arc::new(Mutex::new(store));
+        // Stands in for the app store, which lives for the whole process: its address is never reused.
+        std::mem::forget(shared.clone());
+        assert!(remember_db_path(&shared, path), "only this test keeps a path");
+
+        let held = shared.lock().unwrap();
+        let (done, answer) = std::sync::mpsc::channel();
+        let scanning = shared.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(tauri::async_runtime::block_on(read_scan(scanning, move |reader| reader.prompt_activity(since))));
+        });
+        let activity = answer.recv_timeout(std::time::Duration::from_secs(30)).expect("the scan waited for the store lock");
+        drop(held);
+        assert_eq!(activity.unwrap(), expected);
+
+        // Any other store still finds its own path, under its lock.
+        let other = Arc::new(Mutex::new(Store::open(std::path::Path::new(":memory:")).unwrap()));
+        assert_eq!(db_path(&other).unwrap(), PathBuf::from(":memory:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod task_agent_tests {
     use super::*;
 
@@ -338,6 +514,62 @@ mod task_agent_tests {
         assert_eq!(listed(r#"{"status":"waiting"}"#), "waiting");
         assert_eq!(listed(r#"{"status":"paused"}"#), "idle");
         assert_eq!(listed("not json"), "idle");
+    }
+
+    #[test]
+    fn account_switch_notes_preserve_the_marker_and_body_in_message_pages() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+        let assistant = Mutex::new("Checking the project.".to_string());
+        let body = "Account switched\nThe default Claude account reached its usage limit, so this task continues on “Backup”.";
+        let mut switch = event(&task.id, "note", body);
+        switch.data = Some(serde_json::json!({"accountPool": {"connectionId": "b"}}));
+        save_agent_activity(&store, &assistant, &mut switch, None).unwrap();
+        let mut ordinary = event(&task.id, "note", "Waiting for a background task.");
+        save_agent_activity(&store, &assistant, &mut ordinary, None).unwrap();
+        let page = store.message_page(&task.id, None).unwrap();
+        let rows: Vec<_> = page.messages.iter().map(|message| (message.role.as_str(), message.content.as_str())).collect();
+        assert_eq!(rows, [
+            ("assistant", "Checking the project."),
+            ("system", body),
+            ("system", "Waiting for a background task."),
+        ]);
+        assert!(!page.has_older);
+        assert!(assistant.lock().unwrap().is_empty());
+        assert_eq!(switch.kind, "note");
+        assert_eq!(switch.text, body);
+        assert_eq!(switch.data.unwrap()["accountPool"]["connectionId"], "b");
+    }
+
+    #[test]
+    fn dismiss_error_event_carries_its_saved_row_id() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let task = store.create_session(&project.id, "claude", "sonnet", "ask").unwrap();
+        let assistant = Mutex::new(String::new());
+        let mut first = event(&task.id, "error", "boom");
+        save_agent_activity(&store, &assistant, &mut first, None).unwrap();
+        let mut repeat = event(&task.id, "error", "boom");
+        repeat.data = Some(serde_json::json!({"code": 7}));
+        save_agent_activity(&store, &assistant, &mut repeat, None).unwrap();
+        let mut odd = event(&task.id, "error", "boom");
+        odd.data = Some(serde_json::json!("opaque"));
+        save_agent_activity(&store, &assistant, &mut odd, None).unwrap();
+        let ids: Vec<i64> = store.message_page(&task.id, None).unwrap().messages.iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(first.data.unwrap()["messageId"], ids[0]);
+        let repeat = repeat.data.unwrap();
+        assert_eq!((repeat["messageId"].as_i64(), repeat["code"].as_i64()), (Some(ids[1]), Some(7)));
+        assert_eq!(odd.data, Some(serde_json::json!("opaque")));
+        // Only error events get an id; a failed write leaves the event without one.
+        let mut note = event(&task.id, "note", "fine");
+        save_agent_activity(&store, &assistant, &mut note, None).unwrap();
+        assert!(note.data.is_none());
+        store.db.execute_batch("CREATE TRIGGER reject_error BEFORE INSERT ON messages WHEN NEW.role='error' BEGIN SELECT RAISE(ABORT,'nope'); END;").unwrap();
+        let mut unsaved = event(&task.id, "error", "boom");
+        assert!(save_agent_activity(&store, &assistant, &mut unsaved, None).is_err());
+        assert!(unsaved.data.is_none());
     }
 
     #[test]
@@ -625,6 +857,42 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| e.to_string())?
 }
 
+/// The app's task database path, kept at startup beside its one shared store (`remember_db_path`)
+/// so a read-only scan never waits on the store lock (held by a long write) just to learn it.
+/// Keyed by that store's `Arc` address: the app store lives for the whole process, so the
+/// address is never reused, and any other store (tests, a second `AppState`) is not mistaken
+/// for it.
+static DB_PATH: std::sync::OnceLock<(usize, PathBuf)> = std::sync::OnceLock::new();
+
+/// Remembers `path` as `store`'s database. Once per process; a later call changes nothing.
+fn remember_db_path(store: &Arc<Mutex<Store>>, path: PathBuf) -> bool {
+    DB_PATH.set((Arc::as_ptr(store) as usize, path)).is_ok()
+}
+
+/// `store`'s database path: the one kept at startup for the app store, read without its lock;
+/// any other store's copied under its lock.
+fn db_path(store: &Arc<Mutex<Store>>) -> Result<PathBuf> {
+    match DB_PATH.get() {
+        Some((owner, path)) if *owner == Arc::as_ptr(store) as usize => Ok(path.clone()),
+        _ => Ok(store.lock().map_err(|e| e.to_string())?.path.clone()),
+    }
+}
+
+/// Runs a long read (a scan of the messages table) on its own read-only connection to the task
+/// database, never under the shared store lock: the app store's path is known without it.
+/// Call it on the blocking pool (`read_scan`).
+fn scan_read_only<T>(store: &Arc<Mutex<Store>>, scan: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+    scan(&Store::open_read_only(&db_path(store)?)?)
+}
+
+/// `scan_read_only` on the blocking pool.
+async fn read_scan<T: Send + 'static>(
+    store: Arc<Mutex<Store>>,
+    scan: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    blocking(move || scan_read_only(&store, scan)).await
+}
+
 #[tauri::command(rename = "delete_session")]
 async fn delete_session_with_attachment_cleanup(
     app: tauri::AppHandle,
@@ -632,6 +900,10 @@ async fn delete_session_with_attachment_cleanup(
     session_id: String,
 ) -> Result<task_deletion::DeletedSessions> {
     let deleted = task_deletion::delete_session(app.clone(), window, session_id).await?;
+    for sid in &deleted.deleted_session_ids {
+        cloud::colab::activity::forget_session(sid);
+        message_queue::set_queue_hold_state(sid, false, None);
+    }
     match app.path().app_data_dir() {
         Ok(data_dir) => {
             let sessions = deleted.deleted_session_ids.clone();
@@ -654,21 +926,25 @@ async fn delete_session_with_attachment_cleanup(
     Ok(deleted)
 }
 
+/// Store lock alone, on the blocking pool.
 #[tauri::command]
 async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>> {
-    state.store.lock().map_err(|e| e.to_string())?.projects()
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.projects()).await
 }
 #[tauri::command]
 async fn add_project(state: State<'_, AppState>, path: String) -> Result<Project> {
-    state
+    let project = state
         .store
         .lock()
         .map_err(|e| e.to_string())?
-        .add_project(&PathBuf::from(path))
+        .add_project(&PathBuf::from(path));
+    skill_manager::projects_changed();
+    project
 }
 #[tauri::command]
 async fn remove_project(state: State<'_, AppState>, project_id: String) -> Result<()> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     for session_id in agents.keys() {
         if store.session(session_id)?.project_id == project_id {
@@ -679,13 +955,28 @@ async fn remove_project(state: State<'_, AppState>, project_id: String) -> Resul
     if active_team {
         return Err("Stop this project's architect teams first.".into());
     }
-    store.remove_project(&project_id)
+    // Read before the project (and its threads) go, so their Colab runtime claims can be freed.
+    let session_ids = project_session_ids(&store, &project_id)?;
+    let removed = store.remove_project(&project_id);
+    drop(store);
+    if removed.is_ok() {
+        cloud::colab::activity::forget_sessions(&session_ids);
+    }
+    skill_manager::projects_changed();
+    removed
+}
+fn project_session_ids(store: &storage::Store, project_id: &str) -> Result<Vec<String>> {
+    let mut stmt = store.db.prepare("SELECT id FROM sessions WHERE project_id=?1").map_err(|e| e.to_string())?;
+    let ids = stmt.query_map([project_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+    ids.collect::<rusqlite::Result<Vec<String>>>().map_err(|e| e.to_string())
 }
 #[tauri::command]
 async fn relink_project(state: State<'_, AppState>, project_id: String, path: String) -> Result<Project> {
     let (project, worktrees) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let project = store.relink_project(&project_id, &PathBuf::from(path))?;
+        let project = store.relink_project(&project_id, &PathBuf::from(path));
+        skill_manager::projects_changed();
+        let project = project?;
         (project, store.project_worktrees(&project_id)?)
     };
     // Task worktrees stay where they are, but their `.git` files still name the old folder:
@@ -706,13 +997,21 @@ async fn relink_project(state: State<'_, AppState>, project_id: String, path: St
     }
     Ok(project)
 }
+/// Agents then store (`listed_sessions`), on the blocking pool.
 #[tauri::command]
-async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>> {
-    listed_sessions(&state)
+async fn list_sessions(app: tauri::AppHandle) -> Result<Vec<Session>> {
+    blocking(move || listed_sessions(&app.state::<AppState>())).await
+}
+/// The ids among `ids` with no task row at all (launch restore drops their saved drafts).
+/// Store lock alone, on the blocking pool.
+#[tauri::command]
+async fn sessions_missing(state: State<'_, AppState>, ids: Vec<String>) -> Result<Vec<String>> {
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.missing_sessions(&ids)).await
 }
 /// Tasks as the sidebar shows them, with stale running states settled.
 pub(crate) fn listed_sessions(state: &AppState) -> Result<Vec<Session>> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     Ok(store
         .sessions()?
@@ -727,14 +1026,30 @@ async fn set_resume_at_reset(state: State<'_, AppState>, session_id: String, ena
 #[tauri::command]
 async fn clear_usage_limit(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String) -> Result<()> {
     state.store.lock().map_err(|e| e.to_string())?.clear_limited(&session_id)?;
+    headless::release_limited_hold_to_reset(&session_id, |id, reason, seq| headless::emit_queue_hold(&app, id, reason, seq));
     // A team held on this limit goes now, not at the next watchdog tick.
     architect::wake(app);
     Ok(())
 }
 #[tauri::command]
+fn set_queue_hold(app: tauri::AppHandle, session_id: String, held: bool, reason: Option<String>) {
+    let effective = message_queue::normalize_hold_reason(reason.as_deref());
+    let seq = message_queue::set_queue_hold_state(&session_id, held, held.then_some(effective));
+    let event = if held {
+        serde_json::json!({ "sessionId": session_id, "held": true, "reason": effective, "holdSeq": seq })
+    } else {
+        serde_json::json!({ "sessionId": session_id, "held": false, "holdSeq": seq })
+    };
+    let _ = app.emit("queue-changed", event);
+    if !held {
+        crate::headless::queue_changed(&app, &session_id);
+    }
+}
+/// Scans a year of messages: on its own read-only connection (`read_scan`), without the store lock.
+#[tauri::command]
 async fn prompt_activity(state: State<'_, AppState>) -> Result<Vec<(i64, String, u64)>> {
     let since = storage::now() - 366 * 86_400_000;
-    state.store.lock().map_err(|e| e.to_string())?.prompt_activity(since)
+    read_scan(state.store.clone(), move |store| store.prompt_activity(since)).await
 }
 #[tauri::command]
 async fn pin_session(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, pinned: bool) -> Result<Session> {
@@ -743,21 +1058,27 @@ async fn pin_session(app: tauri::AppHandle, state: State<'_, AppState>, session_
     Ok(task)
 }
 #[tauri::command]
+async fn dismiss_error_messages(state: State<'_, AppState>, session_id: String, ids: Vec<i64>) -> Result<usize> {
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.dismiss_error_messages(&session_id, &ids)).await
+}
+#[tauri::command]
 async fn reorder_sessions(app: tauri::AppHandle, state: State<'_, AppState>, session_ids: Vec<String>) -> Result<Vec<Session>> {
     let store = state.store.clone();
     let tasks = blocking(move || store.lock().map_err(|e| e.to_string())?.reorder_sessions(&session_ids)).await?;
     let _ = app.emit("sessions-changed", ());
     Ok(tasks)
 }
+/// Agents then store (the existing order), on the blocking pool.
 #[tauri::command]
-async fn get_task(state: State<'_, AppState>, session_id: String) -> Result<Session> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    Ok(reconcile_inactive_task(
-        &store,
-        &agents,
-        store.session(&session_id)?,
-    ))
+async fn get_task(app: tauri::AppHandle, session_id: String) -> Result<Session> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        Ok(reconcile_inactive_task(&store, &agents, store.session(&session_id)?))
+    })
+    .await
 }
 #[tauri::command]
 async fn configure_window_appearance(
@@ -774,6 +1095,8 @@ async fn configure_window_appearance(
     )
     .await
 }
+// Each argument is a field of the `create_session` IPC call.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn create_session(
     state: State<'_, AppState>,
@@ -782,16 +1105,19 @@ async fn create_session(
     model: String,
     mode: Option<String>,
     draft: Option<bool>,
+    team: Option<bool>,
+    main_session_id: Option<String>,
 ) -> Result<Session> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    let task = architect::profiles::create_user_task(
-        &store,
-        &project_id,
-        &provider,
-        &model,
-        mode.as_deref(),
-        None,
-    )?;
+    // A /btw side thread names its main thread, so a team worker's full access stays out of it.
+    let mode = architect::side_thread_mode(&store, main_session_id.as_deref(), mode)?;
+    // `team: false` (a /btw side thread) skips the saved default team.
+    let create = if team.unwrap_or(true) {
+        architect::profiles::create_user_task
+    } else {
+        architect::profiles::create_task_without_team
+    };
+    let task = create(&store, &project_id, &provider, &model, mode.as_deref(), None)?;
     if draft.unwrap_or(false) {
         store.mark_draft(&task.id)
     } else {
@@ -842,7 +1168,7 @@ async fn update_task_details(
     title: String,
     description: String,
 ) -> Result<Session> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before editing its task details.".into());
     }
@@ -860,7 +1186,7 @@ async fn set_task_stage(
     stage: String,
 ) -> Result<Session> {
     let task = {
-        let agents = state.agents.lock().map_err(|e| e.to_string())?;
+        let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
         if agents.contains_key(&session_id) {
             return Err("Stop the agent before changing its task stage.".into());
         }
@@ -887,7 +1213,7 @@ async fn configure_session(
         remote::catalog::check_mirror(&app, &state, &session_id, &provider, &model)?;
         remote::route(&app, &state, &session_id, "task.configure", serde_json::json!({"provider": provider, "model": model})).await?;
     }
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its project, provider, or model.".into());
     }
@@ -908,7 +1234,7 @@ async fn set_reasoning_effort(
     remote::route(&app, &state, &session_id, "task.configure", serde_json::json!({"effort": reasoning_effort})).await?;
     // Match send/configure's lock order so a send cannot capture the old
     // configuration halfway through a settings change.
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     if agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its reasoning effort.".into());
     }
@@ -945,7 +1271,7 @@ async fn update_session(
             return task_controls::rename_task(&state, &session_id, title).await;
         }
     }
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     if (model.is_some() || mode.is_some()) && agents.contains_key(&session_id) {
         return Err("Stop the agent before changing its model or permissions.".into());
     }
@@ -967,11 +1293,9 @@ async fn get_messages(
     session_id: String,
     before_id: Option<i64>,
 ) -> Result<MessagePage> {
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .message_page(&session_id, before_id)
+    // Store lock alone, on the blocking pool.
+    let store = state.store.clone();
+    blocking(move || store.lock().map_err(|e| e.to_string())?.message_page(&session_id, before_id)).await
 }
 
 #[tauri::command]
@@ -993,7 +1317,7 @@ async fn get_subagent(
 }
 
 fn live_subagents(state: &AppState, session_id: &str) -> Result<Option<Arc<Mutex<subagent_state::SubagentState>>>> {
-    Ok(state.agents.lock().map_err(|error| error.to_string())?.get(session_id).map(|agent| agent.subagents.clone()))
+    Ok(lock_agents(&state.agents).map_err(|error| error.to_string())?.get(session_id).map(|agent| agent.subagents.clone()))
 }
 
 /// A task's children as list rows. Live snapshots are read after the store, so stale disk data
@@ -1001,7 +1325,7 @@ fn live_subagents(state: &AppState, session_id: &str) -> Result<Option<Arc<Mutex
 fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<subagent_state::SubagentRow>> {
     let live = {
         // Held only when no run owns the task, so none can start while its children are settled.
-        let agents = state.agents.lock().map_err(|error| error.to_string())?;
+        let agents = lock_agents(&state.agents).map_err(|error| error.to_string())?;
         let live = agents.get(session_id).map(|agent| agent.subagents.clone());
         if live.is_none() {
             let store = state.store.lock().map_err(|error| error.to_string())?;
@@ -1045,13 +1369,14 @@ fn persist_turn_changes(
     store: &Mutex<Store>,
     sid: &str,
     capture: turn_changes::Captured,
+    last_write: i64,
 ) {
     let change_id = capture.summary.id.clone();
     match store
         .lock()
         .map_err(|e| e.to_string())
         .and_then(|store| {
-            let message_id = turn_changes::persist(&store, sid, capture)?;
+            let message_id = turn_changes::persist_dated(&store, sid, capture, last_write)?;
             Ok((message_id, turn_changes::summary(&store, sid, &change_id)?))
         })
     {
@@ -1112,6 +1437,18 @@ fn bounded_tail(text: &mut String, limit: usize) {
             i += 1;
         }
         text.drain(..i);
+    }
+}
+
+/// Adds `messageId` to an event's data object (kept when it has other fields); data that is
+/// not an object is left alone, so the event simply has no id.
+fn attach_message_id(activity: &mut AgentEvent, id: i64) {
+    match activity.data.as_mut() {
+        None => activity.data = Some(serde_json::json!({ "messageId": id })),
+        Some(serde_json::Value::Object(data)) => {
+            data.insert("messageId".into(), id.into());
+        }
+        Some(_) => {}
     }
 }
 
@@ -1250,7 +1587,14 @@ fn save_agent_activity(
                 .and_then(|content| db.tool_message(&activity.session_id, &tool.id, &content))
             } else {
                 bounded_tail(&mut activity.text, 8192);
-                db.message(&activity.session_id, &activity.kind, &activity.text)
+                db.insert_message(&activity.session_id, &activity.kind, &activity.text)
+                    .map(|id| {
+                        // The window dismisses a live error by its saved row (dismiss_error_messages);
+                        // an error never saved carries no id.
+                        if activity.kind == "error" {
+                            attach_message_id(activity, id);
+                        }
+                    })
             };
             // Keep recording tool/error activity if a response write fails,
             // while still surfacing that persistence error to the turn owner.
@@ -1301,10 +1645,12 @@ async fn list_slash_commands(
         } else {
             store.workspace_root(&task.project_id, Some(&session_id))?
         };
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
         (task.provider, cwd)
     };
     if cached_only.unwrap_or(false) {
-        return slash_commands::snapshot(&provider, &cwd);
+        return slash_commands::snapshot(&provider, &cwd).await;
     }
     slash_commands::catalog(&provider, &cwd, force.unwrap_or(false)).await
 }
@@ -1326,6 +1672,8 @@ async fn resolve_slash_command(
         } else {
             store.workspace_root(&task.project_id, Some(&session_id))?
         };
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
         (task.provider, cwd)
     };
     slash_commands::resolve(&provider, &cwd, &text).await
@@ -1377,11 +1725,10 @@ async fn prepare_command(
         if task.provider == "codex" && name == "/compact" && task.resume_id.is_none() {
             return Err(COMPACT_NEEDS_CONVERSATION.into());
         }
-        (
-            task.provider,
-            store.workspace_root(&task.project_id, Some(session_id))?,
-            original,
-        )
+        let cwd = store.workspace_root(&task.project_id, Some(session_id))?;
+        let main = store.workspace_root(&task.project_id, None)?;
+        skill_manager::remember_project(&cwd, &task.project_id, &main);
+        (task.provider, cwd, original)
     };
     let resolution = slash_commands::resolve(&provider, &cwd, &original).await?;
     if resolution.action.is_some() {
@@ -1539,6 +1886,8 @@ struct PreparedRun {
     assistant: Arc<Mutex<String>>,
     last_event: Arc<std::sync::atomic::AtomicI64>,
     team: Option<architect::Admission>,
+    /// A team worker's run (`worker_launch`): its requests are resolved, never surfaced.
+    team_worker: bool,
 }
 
 #[cfg(test)]
@@ -1570,7 +1919,7 @@ fn prepare_task_run_in_project(
     stopped: Arc<AtomicBool>,
     admission: RunAdmission<'_>,
 ) -> Result<PreparedRun> {
-    let mut agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let mut agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     agent_updates::ensure_not_installing()?;
     if state.shutdown.load(Ordering::SeqCst) != 0 {
         return Err("PandaCode is shutting down.".into());
@@ -1763,10 +2112,15 @@ fn prepare_task_run_in_project(
         skill,
         goal: admission.goal,
         codex_settings: session.codex_settings,
+        no_fresh_resume_fallback: false,
     };
-    architect::mark_started(&store, &session_id, admission.team.as_ref()).map_err(restore)?;
+    // Read before `mark_started`, and restored like it, so a failure leaves no started mark.
+    let team_worker = worker_launch(&store, admission.team.as_ref(), &session_id).map_err(restore)?;
+    architect::mark_started(&store, &session_id, admission.team.as_ref(), turn_message_id).map_err(restore)?;
     let mut agent = RunningAgent::new(tx, stopped.clone());
     agent.team_maintenance = team_maintenance;
+    agent.team_worker = team_worker;
+    let agent_is_worker = agent.team_worker;
     let run_id = agent.run_id.clone();
     let pending_approvals = agent.approvals.clone();
     let pending_requests = agent.pending_requests.clone();
@@ -1787,6 +2141,7 @@ fn prepare_task_run_in_project(
         assistant,
         last_event,
         team: admission.team,
+        team_worker: agent_is_worker,
     })
 }
 
@@ -1820,8 +2175,11 @@ fn prepare_cloud_attach(
         skill: None,
         goal: None,
         codex_settings: session.codex_settings,
+        no_fresh_resume_fallback: false,
     };
-    let agent = RunningAgent::new(tx, stopped);
+    let mut agent = RunningAgent::new(tx, stopped);
+    // A re-attached run has no team admission: whether it is a worker's comes from the store.
+    agent.team_worker = worker_launch(store, None, &session_id)?;
     let prepared = PreparedRun {
         config,
         restore_stage: None,
@@ -1835,6 +2193,7 @@ fn prepare_cloud_attach(
         assistant: agent.assistant.clone(),
         last_event: agent.last_event.clone(),
         team: None,
+        team_worker: agent.team_worker,
     };
     agents.insert(session_id, agent);
     Ok(prepared)
@@ -2064,6 +2423,8 @@ async fn launch_operation_admitted(
         })
         .collect::<Result<Vec<_>>>()?;
     let (tx, rx) = unbounded_channel();
+    // The run's own input, for a team worker request that must stop this run and no other.
+    let own_input = tx.downgrade();
     let stopped = Arc::new(AtomicBool::new(false));
     let PreparedRun {
         mut config,
@@ -2078,6 +2439,7 @@ async fn launch_operation_admitted(
         assistant,
         last_event,
         team,
+        team_worker,
     } = prepare_task_run_in_project(
         &state,
         session_id.clone(),
@@ -2135,8 +2497,7 @@ async fn launch_operation_admitted(
         config.prompt.push_str(&title.instruction());
     }
     if restore_stage.is_none() {
-        let worker = team.as_ref().is_some_and(|admission| admission.parent != session_id);
-        let instructions = app_instructions(chats::is_chat_folder(&config.cwd), worker);
+        let instructions = app_instructions(chats::is_chat_folder(&config.cwd), team_worker);
         if providers::takes_system_instructions(&config.provider) {
             // Cached with the system prompt: paid once, then read at a tenth of the price.
             config.instructions = instructions;
@@ -2179,14 +2540,28 @@ async fn launch_operation_admitted(
         let assistant_sink = assistant.clone();
         let store_sink = store.clone();
         let app_sink = app.clone();
-        let pending_requests_sink = pending_requests.clone();
         let subagents_sink = subagents.clone();
         let goal_reply_sink = goal_reply.clone();
         let goal_agents_sink = agents.clone();
         let native_turn_sink = Mutex::new(String::new());
         let team_sink = team.clone();
+        // The run's own ID for its end, after the sink takes `run_id`.
+        let settle_id = run_id.clone();
+        // Whatever ends this task before the run settles forgets what was kept for the run.
+        let mut leftovers = RunLeftovers { run_id: run_id.clone(), session_id: session_id.clone(), settled: false };
+        // PandaCode's tool hosts refuse a worker's always-ask tools by this mark.
+        providers::mark_worker_run(&session_id, &run_id, team_worker);
+        let own_run = worker_approvals::Run {
+            id: run_id.clone(),
+            input: own_input.clone(),
+            stopped: stopped.clone(),
+            approvals: pending_approvals.clone(),
+            requests: pending_requests.clone(),
+        };
         let coalescer = Arc::new(Mutex::new(providers::Coalescer::default()));
         let coalescer_sink = coalescer.clone();
+        let newly_limited = Arc::new(AtomicBool::new(false));
+        let limited_sink = newly_limited.clone();
         let sink: providers::Sink = Arc::new(move |mut e: AgentEvent| {
             if cloud && app_sink.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
                 return;
@@ -2194,6 +2569,9 @@ async fn launch_operation_admitted(
             last_event.store(storage::now(), Ordering::SeqCst);
             if e.kind == "done" || e.kind == providers::HEARTBEAT {
                 return;
+            }
+            if e.kind == "limited" {
+                limited_sink.store(true, Ordering::SeqCst);
             }
             let usage = if e.kind == "usage" {
                 let Some(usage) = e.data.as_ref().and_then(ContextUsage::from_value) else {
@@ -2233,6 +2611,21 @@ async fn launch_operation_admitted(
                     }
                 });
             }
+            if e.kind == providers::ACCOUNT_SWITCHED {
+                // Any run: the old account's requests can no longer be answered, so their cards go.
+                let cancelled = settle_account_switch(&store_sink, &own_run, &e.session_id);
+                if !cancelled.is_empty() {
+                    for event in cancelled {
+                        emit_coalesced(&app_sink, &coalescer_sink, event);
+                    }
+                    tray::refresh(&app_sink);
+                }
+                return;
+            }
+            if e.kind == providers::UNANSWERED_APPROVAL {
+                worker_approvals::stop_unanswered(team_worker, &own_run, &e);
+                return;
+            }
             if e.kind == "text" {
                 if let Ok(mut text) = assistant_sink.lock() {
                     text.push_str(&e.text);
@@ -2248,10 +2641,12 @@ async fn launch_operation_admitted(
                     e.kind.as_str(),
                     "approval" | "approval_cancelled" | "input_request" | "input_cancelled"
                 ) {
-                    let saved = save_approval_with_pending(&store_sink, &pending_approvals, Some(&pending_requests_sink), &run_id, &mut e);
+                    // Locks `agents`: this sink is never called with that lock held (see its doc).
+                    let saved = record_request_event(&store_sink, &own_run, team_worker, &goal_agents_sink, &mut e);
                     if saved.is_ok() && e.kind == "approval" {
                         if let Some(request_id) = &e.request_id {
-                            bots::approval_requested(&app_sink, &e.session_id, request_id, &e.text);
+                            let lasting_only = e.data.as_ref().is_some_and(|data| data[providers::LASTING_ONLY] == true);
+                            bots::approval_requested(&app_sink, &e.session_id, request_id, &e.text, lasting_only);
                         }
                         tray::refresh(&app_sink);
                     }
@@ -2269,7 +2664,7 @@ async fn launch_operation_admitted(
                         *slot = Some(error);
                     }
                     if matches!(e.kind.as_str(), "goal" | "goal_input") {
-                        if let Ok(registry) = goal_agents_sink.lock() {
+                        if let Ok(registry) = lock_agents(&goal_agents_sink) {
                             if let Some(agent) = registry.get(&e.session_id) {
                                 let _ = agent.send(RunInput::Stop);
                             }
@@ -2314,19 +2709,29 @@ async fn launch_operation_admitted(
                         tracker
                             .lock()
                             .ok()
-                            .and_then(|mut tracker| tracker.boundary())
+                            .and_then(|mut tracker| {
+                                let last_write = tracker.last_write();
+                                tracker.boundary().map(|capture| (capture, last_write))
+                            })
                     });
-                    if let Some(capture) = capture {
-                        persist_turn_changes(&app_sink, &store_sink, &changes_sid, capture);
+                    if let Some((capture, last_write)) = capture {
+                        persist_turn_changes(&app_sink, &store_sink, &changes_sid, capture, last_write);
                     }
                 }
             }
         });
         let host = if let Some(admission) = team.as_ref() {
             architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
+                .map(|host| {
+                    // Workers keep their scoped team tools; only the lead may manage other tasks.
+                    if admission.parent == session_id {
+                        agent_tools::with_app_host(host, agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
+                    } else {
+                        host
+                    }
+                })
         } else {
-            (config.provider == "codex")
-                .then(|| agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
+            Some(agent_tools::host(app.clone(), session_id.clone(), stopped.clone()))
         };
         let team_tools_missing = team.is_some() && host.is_none();
         let host = agent_tools::with_jev(host, app.clone(), session_id.clone(), stopped.clone());
@@ -2334,6 +2739,8 @@ async fn launch_operation_admitted(
         let host = schedules::tools::with_schedules(host, app.clone(), session_id.clone(), stopped.clone());
         let host = simulator::tools::with_simulator_for(host, app.clone(), session_id.clone(), stopped.clone());
         let host = vm::tools::with_vm(host, app.clone(), session_id.clone(), stopped.clone());
+        // A cloud agent already runs on its machine; Colab tools are for local agents.
+        let host = if cloud { host } else { cloud::colab_tools::with_colab(host, app.clone(), session_id.clone(), stopped.clone()) };
         let host = remote::orchestrate::with_machines(host, app.clone(), session_id.clone(), stopped.clone(), team.is_some());
         let host = design::with_design(host, app.clone(), session_id.clone(), stopped.clone());
         // A cloud agent's checkout is on its machine, where screenshots cannot be read.
@@ -2353,6 +2760,8 @@ async fn launch_operation_admitted(
         // The harness and model this run used, for model health.
         let ran = (config.provider.clone(), config.model.clone());
         let reached_harness = Arc::new(AtomicBool::new(false));
+        // Set by the run's own loop when it takes a stop (`providers::stop_taken`).
+        let loop_took_stop = Arc::new(AtomicBool::new(false));
         let result = if stopped.load(Ordering::SeqCst) {
             Ok(())
         } else if team_tools_missing {
@@ -2361,14 +2770,15 @@ async fn launch_operation_admitted(
                     .into(),
             )
         } else {
-            providers::run_with_tools(config, sink, rx, host, reached_harness.clone()).await
+            providers::run_with_tools_reporting(config, sink, rx, host, reached_harness.clone(), loop_took_stop.clone()).await
         };
         flush_coalesced(&app, &coalescer);
         if cloud && app.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
             // The remote run continues; the next launch re-attaches to it.
-            if let Ok(mut registry) = agents.lock() {
+            if let Ok(mut registry) = lock_agents(&agents) {
                 registry.remove(&session_id);
             }
+            // This run's own entries, whichever run the registry held, go with `leftovers`.
             return;
         }
         if let Ok(mut slot) = goal_reply.lock() {
@@ -2392,12 +2802,15 @@ async fn launch_operation_admitted(
             }
         }
         if let Some(tracker) = tracker {
-            if let Ok(Some(capture)) = tauri::async_runtime::spawn_blocking(move || {
-                tracker.lock().ok().and_then(|mut tracker| tracker.finish())
+            if let Ok(Some((capture, last_write))) = tauri::async_runtime::spawn_blocking(move || {
+                tracker.lock().ok().and_then(|mut tracker| {
+                    let last_write = tracker.last_write();
+                    tracker.finish().map(|capture| (capture, last_write))
+                })
             })
             .await
             {
-                persist_turn_changes(&app, &store, &session_id, capture);
+                persist_turn_changes(&app, &store, &session_id, capture, last_write);
             }
         }
         if cloud {
@@ -2410,7 +2823,7 @@ async fn launch_operation_admitted(
             }
             let unfinished = store.lock().ok().and_then(|db| cloud_agents::load(&db, &session_id).ok().flatten()).is_some_and(|cloud| cloud.active());
             if unfinished && app.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
-                if let Ok(mut registry) = agents.lock() {
+                if let Ok(mut registry) = lock_agents(&agents) {
                     registry.remove(&session_id);
                 }
                 return;
@@ -2418,8 +2831,22 @@ async fn launch_operation_admitted(
         }
         // Match the registry -> store lock order used for Start and Stop. Stop
         // cannot arrive between the final stage decision and registry removal.
-        let mut registry = agents.lock().ok();
-        let was_stopped = stopped.load(Ordering::SeqCst);
+        let mut registry = lock_agents(&agents).ok();
+        // A team worker stopped for a request it could not resolve fails with that reason, unless
+        // its harness finished the turn first. Settled by this run's own ID, registered or not, so
+        // nothing kept for it outlives the run.
+        if loop_took_stop.load(Ordering::SeqCst) {
+            worker_approvals::stop_taken(&settle_id);
+        }
+        let mut settled = leftovers.settle(stopped.load(Ordering::SeqCst));
+        // The team stopped this worker itself (without a stop through its agent, or before the
+        // automatic one): every client then reads it as stopped, as the team does.
+        if settled.reason.is_some() && store.lock().ok().is_some_and(|db| architect::stopped_by_team(&db, team.as_ref(), &session_id)) {
+            settled = worker_approvals::Settled { stopped: true, ..Default::default() };
+        }
+        let (unresolved, was_stopped) = (settled.reason.clone(), settled.stopped);
+        // The automatic stop's notes and error appear only now that it is confirmed.
+        show_settled_stop(&app, &store, settled);
         // Provider completion revokes callbacks too; a delayed collaboration/MCP
         // request must not write into the next run while the team remains active.
         stopped.store(true, Ordering::SeqCst);
@@ -2427,17 +2854,28 @@ async fn launch_operation_admitted(
         // Only the harness's own outcome counts for model health (Settings → Model routing): a stop
         // says nothing, and PandaCode's own failures before the harness (validation, attachments,
         // connections, team tools) are not the model's.
+        // A worker PandaCode stopped for an unresolvable request is not the model's failure either.
         let provider_error = match &result {
-            Err(error) if !was_stopped && reached_harness.load(Ordering::SeqCst) => Some(error.to_string()),
+            Err(error) if !was_stopped && unresolved.is_none() && reached_harness.load(Ordering::SeqCst) => Some(error.to_string()),
             _ => None,
         };
+        // Decided once here and handed to the team (`RunEnd::Harness`), so both agree.
+        let mut effort_relaunch = false;
         if let Some(error) = &provider_error {
-            model_health::record_failure(&ran.0, &ran.1, error);
+            // A reasoning effort a worker's harness refused at startup says nothing about the
+            // model: the team relaunches the worker without it.
+            let counts = store.lock().map_or(true, |db| architect::counts_against_model(&db, team.as_ref(), &session_id, error));
+            effort_relaunch = !counts;
+            if counts {
+                model_health::record_failure(&ran.0, &ran.1, error);
+            }
         } else if successful {
             model_health::record_success(&ran.0, &ran.1);
         }
         let mut children = subagents.lock().ok();
+        let mut is_bot = false;
         if let Ok(db) = store.lock() {
+            is_bot = bots::owner_of(&db, &session_id).ok().flatten().is_some();
             let child_status = if was_stopped || successful {
                 "stopped"
             } else {
@@ -2497,10 +2935,12 @@ async fn launch_operation_admitted(
                     }
                 }
             }
+            // A worker stopped for a request it could not resolve is saved as failed, as every
+            // other client shows it (`run_end`), not as interrupted.
             if let Err(error) = db.finish_task_operation(
                 &session_id,
                 successful,
-                was_stopped,
+                run_end(successful, was_stopped, unresolved.is_some()).0,
                 restore_stage.as_deref(),
             ) {
                 successful = false;
@@ -2544,6 +2984,12 @@ async fn launch_operation_admitted(
                 );
             }
         }
+        let limited = newly_limited.load(Ordering::SeqCst);
+        // The store is unlocked. Publish the hold before done so every client sees it
+        // even when another client stopped this run.
+        if let Some(reason) = headless::run_end_hold_reason(successful, was_stopped, limited, is_bot) {
+            headless::hold_queue(&app, &session_id, reason);
+        }
         if let Some(registry) = registry.as_mut() {
             if let Some(agent) = registry.get(&session_id) {
                 if let Ok(mut approvals) = agent.approvals.lock() {
@@ -2558,17 +3004,11 @@ async fn launch_operation_admitted(
                 memory::release_soon();
             }
         }
-        let done = if was_stopped {
-            "Turn stopped"
-        } else if successful {
-            "Turn complete"
-        } else {
-            "Turn failed"
-        };
+        let (ended_stopped, done) = run_end(successful, was_stopped, unresolved.is_some());
         // Before `done`, so the window's tray_seen for the open task lands after it.
-        tray::finished(&app, &session_id, was_stopped, successful);
+        tray::finished(&app, &session_id, ended_stopped, successful);
         let _ = app.emit("agent-event", event(&session_id, "done", done));
-        remote::run_finished(&app, &session_id, successful, was_stopped, done);
+        remote::run_finished(&app, &session_id, successful, ended_stopped, done);
         // A wake turn that never reached the agent gives its claim back (at-least-once).
         let restored = kind.is_some() && turn_message_id != 0 && store.lock().ok().is_some_and(|db| remote::orchestrate::restore_wake(&db, &session_id, turn_message_id).unwrap_or(false));
         // Settled machine threads wake this task now that it is idle.
@@ -2592,7 +3032,7 @@ async fn launch_operation_admitted(
             });
             // Only a clean run end delivers the next queued message; failed, stopped and
             // limited runs hold it, as on the desktop.
-            if successful && !was_stopped {
+            if successful && !was_stopped && !limited {
                 headless::drain_queue(app.clone(), session_id.clone());
             }
         }
@@ -2602,7 +3042,12 @@ async fn launch_operation_admitted(
         // Read before the team scheduler can start this task's next turn.
         let launch = providers::warm_epoch(&session_id);
         if let Some(registry) = registry.as_ref() {
-            architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
+            let end = match (&unresolved, &provider_error) {
+                (Some(reason), _) => architect::RunEnd::Unresolved(reason),
+                (None, Some(error)) => architect::RunEnd::Harness { error: error.as_str(), effort_relaunch: Some(effort_relaunch) },
+                (None, None) => architect::RunEnd::Clean,
+            };
+            architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped && unresolved.is_none(), end, registry);
         }
         drop(registry);
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
@@ -2637,7 +3082,7 @@ async fn launch_operation_admitted(
     Ok(())
 }
 fn runs_team_maintenance(state: &AppState, session_id: &str) -> Result<bool> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     Ok(agents.get(session_id).is_some_and(|agent| agent.team_maintenance))
 }
 #[tauri::command]
@@ -2686,7 +3131,7 @@ async fn respond_approval(
     if remote::route(&app, &state, &session_id, "approval.respond", serde_json::json!({"requestId": request_id, "approve": approved})).await?.is_some() {
         return Ok(());
     }
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     let tx = agents
         .get(&session_id)
         .ok_or("This agent is no longer running.")?;
@@ -2698,20 +3143,51 @@ async fn list_providers(app: tauri::AppHandle, force: Option<bool>, device_id: O
     if let Some(remote) = remote::catalog::providers(&app, device_id, force).await? {
         return Ok(remote);
     }
-    serde_json::to_value(local_providers(force).await).map_err(|e| e.to_string())
+    serde_json::to_value(listed_providers(force).await).map_err(|e| e.to_string())
 }
-/// This computer's harnesses; `force` drops the cached ACP catalogs first.
+/// This computer's harnesses for the app, from path lookups only: each version is the
+/// remembered one, else "". Versions unknown or due for a check are probed in the background and
+/// arrive as the `provider-versions` event, `{ versions: { [providerId]: string }, done: bool }`
+/// ('' for a failed or timed-out probe; `done` once no round is pending), announced by
+/// `announce_provider_versions`.
+async fn listed_providers(force: bool) -> Vec<providers::ProviderInfo> {
+    forget_provider_details(force);
+    tauri::async_runtime::spawn_blocking(providers::discover_now).await.unwrap_or_default()
+}
+/// This computer's harnesses with every version answered (joins the background probe and waits
+/// up to 8 s for versions never asked; the saved cache usually answers). For callers that show
+/// versions but cannot hear `provider-versions`.
 pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo> {
+    forget_provider_details(force);
+    tauri::async_runtime::spawn_blocking(providers::discover)
+        .await
+        .unwrap_or_default()
+}
+/// This computer's harnesses for callers that never show a version: remembered versions only,
+/// never waits on or starts a `--version` probe.
+pub(crate) async fn installed_providers() -> Vec<providers::ProviderInfo> {
+    tauri::async_runtime::spawn_blocking(providers::discover_installed).await.unwrap_or_default()
+}
+/// Sends every CLI version round's report to the webview as `provider-versions`.
+fn announce_provider_versions(app: tauri::AppHandle) {
+    providers::set_version_announcer(move |report| {
+        // Called by the probe thread with no lock held.
+        if let Err(error) = app.emit("provider-versions", &report) {
+            eprintln!("PandaCode: could not announce CLI versions: {error}");
+        }
+    });
+}
+/// `force` drops the cached ACP catalogs and CLI versions (failures included).
+fn forget_provider_details(force: bool) {
     if force {
         providers::acp_catalog::invalidate("antigravity");
         providers::acp_catalog::invalidate("grok");
         providers::acp_catalog::invalidate("devin");
         providers::acp_catalog::invalidate("zcode");
         providers::acp_catalog::invalidate("hermes");
+        providers::acp_catalog::invalidate("cursor");
+        providers::forget_versions();
     }
-    tauri::async_runtime::spawn_blocking(providers::discover)
-        .await
-        .unwrap_or_default()
 }
 #[tauri::command]
 async fn list_provider_models(app: tauri::AppHandle, provider: String, force: Option<bool>, device_id: Option<String>) -> Result<serde_json::Value> {
@@ -2741,7 +3217,7 @@ async fn respond_user_input(
         return Ok(());
     }
     let reply = {
-        let agents = state.agents.lock().map_err(|e| e.to_string())?;
+        let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
         let agent = agents
             .get(&session_id)
             .ok_or("This agent is no longer running.")?;
@@ -2770,7 +3246,7 @@ async fn respond_user_input(
         .map_err(|_| "The agent did not acknowledge the answer. Try again.".to_owned())?
         .map_err(|_| "The agent stopped before accepting the answer.".to_owned())?;
     accepted?;
-    let agents = state.agents.lock().map_err(|e| e.to_string())?;
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
     if let Some(agent) = agents.get(&session_id) {
         let mut approvals = agent.approvals.lock().map_err(|e| e.to_string())?;
         let mut pending_requests = agent.pending_requests.lock().map_err(|e| e.to_string())?;
@@ -2797,6 +3273,7 @@ fn list_app_tools() -> serde_json::Value {
     serde_json::json!(agent_tools::catalog()
         .into_iter()
         .chain(agent_tools::enabled_jev_catalog())
+        .chain(cloud::colab_tools::enabled_catalog())
         .map(|t| serde_json::json!({"name":t["name"],"description":t["description"]}))
         .collect::<Vec<_>>())
 }
@@ -2841,6 +3318,47 @@ async fn open_external_url(url: String) -> Result<()> {
     }
 }
 
+/// Settings → About → Third-party notices: opens the copy bundled with the app (a fixed
+/// resource path, never webview input) as plain text in the system's text viewer.
+#[tauri::command]
+async fn open_third_party_notices(app: tauri::AppHandle) -> Result<()> {
+    let path = app
+        .path()
+        .resource_dir()
+        .map_err(|_| "Could not find the app's bundled files.")?
+        .join("THIRD_PARTY_NOTICES.md");
+    if !path.is_file() {
+        return Err("The third-party notices are missing from this installation.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-t");
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = tokio::process::Command::new("notepad.exe");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut command = tokio::process::Command::new("xdg-open");
+        child_env::sanitize(&mut command);
+        command
+    };
+    command
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().map_err(|_| "Could not open the third-party notices.")?;
+    // Notepad stays open until closed (it is left running), so only an early failure counts.
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Err(_) => Ok(()),
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(_)) => Err("Could not open the third-party notices.".into()),
+        Ok(Err(e)) => Err(e.to_string()),
+    }
+}
+
 /// A sent attachment outside the task's workspace, shown in the file manager. It is only
 /// revealed (selected), never opened, so nothing in it runs.
 #[tauri::command]
@@ -2879,6 +3397,24 @@ async fn reveal_path(path: String) -> Result<()> {
         .await
         .map_err(|_| "Showing the attachment timed out.")?
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_workspace_file(state: State<'_, AppState>, project_id: String, session_id: Option<String>, path: String) -> Result<()> {
+    let root = state.root(&project_id, session_id.as_deref())?;
+    // Canonical regular file inside the project. A symlink is opened only when its
+    // target stays in the checkout, and the path handed to the OS is that target.
+    let target = workspace::openable_file(&root, &path)?;
+    #[cfg(target_os = "macos")]
+    let mut command = tokio::process::Command::new("/usr/bin/open");
+    #[cfg(target_os = "windows")]
+    let mut command = tokio::process::Command::new("explorer");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = tokio::process::Command::new("xdg-open");
+    child_env::sanitize(&mut command);
+    command.arg(target).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    tokio::time::timeout(std::time::Duration::from_secs(5), command.status()).await.map_err(|_| "Opening the file timed out.")?.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2927,7 +3463,7 @@ async fn git_status(
     session_id: Option<String>,
 ) -> Result<workspace::GitStatus> {
     let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_status(&root)).await
+    blocking(move || workspace::git_status(&root, workspace::Trust::Desktop)).await
 }
 #[tauri::command]
 async fn git_diff(
@@ -2938,7 +3474,7 @@ async fn git_diff(
     staged: Option<bool>,
 ) -> Result<String> {
     let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_diff(&root, path, staged.unwrap_or(false))).await
+    blocking(move || workspace::git_diff(&root, path, staged.unwrap_or(false), workspace::Trust::Desktop)).await
 }
 #[tauri::command]
 async fn git_stage(
@@ -2948,8 +3484,12 @@ async fn git_stage(
     paths: Vec<String>,
     staged: bool,
 ) -> Result<()> {
-    let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_stage(&root, paths, staged)).await
+    stage_files(&state, &project_id, session_id.as_deref(), paths, staged, workspace::Trust::Desktop).await
+}
+/// `git_stage`, and the phone's `git.stage` with its [`workspace::Trust`].
+pub(crate) async fn stage_files(state: &AppState, project_id: &str, session_id: Option<&str>, paths: Vec<String>, staged: bool, trust: workspace::Trust) -> Result<()> {
+    let root = state.root(project_id, session_id)?;
+    blocking(move || workspace::git_stage(&root, paths, staged, trust)).await
 }
 #[tauri::command]
 async fn git_commit(
@@ -2959,7 +3499,7 @@ async fn git_commit(
     message: String,
 ) -> Result<String> {
     let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_commit(&root, message)).await
+    blocking(move || workspace::git_commit(&root, message, workspace::Trust::Desktop)).await
 }
 fn create_worktree_task(
     store: &Arc<Mutex<Store>>,
@@ -3006,6 +3546,7 @@ fn create_worktree_task_with_defaults(
         )
     })?;
     transaction.commit().map_err(|e| e.to_string())?;
+    skill_manager::projects_changed();
     Ok(created)
 }
 
@@ -3033,7 +3574,7 @@ async fn attach_worktree(
     base: Option<String>,
     existing: Option<bool>,
 ) -> Result<Session> {
-    if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
+    if lock_agents(&state.agents).map_err(|e| e.to_string())?.contains_key(&session_id) {
         return Err("Stop the agent before moving this task into a worktree.".into());
     }
     let store = state.store.clone();
@@ -3049,9 +3590,11 @@ async fn attach_worktree(
         };
         let worktree = workspace::create_worktree_with(&root, &branch, base.as_deref(), existing.unwrap_or(false))?;
         let store = store.lock().map_err(|e| e.to_string())?;
-        store.attach_worktree(&source.id, &worktree.path, &worktree.branch).map_err(|error| {
+        let attached = store.attach_worktree(&source.id, &worktree.path, &worktree.branch).map_err(|error| {
             format!("Worktree created at {}, but the task could not be updated: {error}", worktree.path.display())
-        })
+        });
+        skill_manager::projects_changed();
+        attached
     })
     .await
 }
@@ -3070,25 +3613,33 @@ fn worktree_paths(store: &Arc<Mutex<Store>>, session_id: &str) -> Result<(PathBu
 
 #[tauri::command]
 async fn worktree_status(state: State<'_, AppState>, session_id: String) -> Result<workspace::WorktreeStatus> {
+    task_worktree_status(&state, session_id, workspace::Trust::Desktop).await
+}
+
+/// `worktree_status`, and the phone's `worktree.status` with its [`workspace::Trust`].
+pub(crate) async fn task_worktree_status(state: &AppState, session_id: String, trust: workspace::Trust) -> Result<workspace::WorktreeStatus> {
     let store = state.store.clone();
     blocking(move || {
         let (main, path, branch) = worktree_paths(&store, &session_id)?;
-        workspace::worktree_status(&main, &path, branch.as_deref())
+        workspace::worktree_status(&main, &path, branch.as_deref(), trust)
     })
     .await
 }
 
 #[tauri::command]
 async fn merge_worktree(state: State<'_, AppState>, session_id: String) -> Result<workspace::WorktreeMerge> {
-    if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
+    if lock_agents(&state.agents).map_err(|e| e.to_string())?.contains_key(&session_id) {
         return Err("Wait for the agent to finish before merging its worktree.".into());
     }
     let store = state.store.clone();
-    blocking(move || {
-        let (main, path, _) = worktree_paths(&store, &session_id)?;
-        workspace::merge_worktree(&main, &path)
-    })
-    .await
+    blocking(move || merge_task_worktree(&store, &session_id, workspace::Trust::Desktop)).await
+}
+
+/// Merges a local task's worktree into its project's checkout (`merge_worktree`, and the
+/// phone's `worktree.merge` with its [`workspace::Trust`]). Blocking.
+pub(crate) fn merge_task_worktree(store: &Arc<Mutex<Store>>, session_id: &str, trust: workspace::Trust) -> Result<workspace::WorktreeMerge> {
+    let (main, path, _) = worktree_paths(store, session_id)?;
+    workspace::merge_worktree(&main, &path, trust)
 }
 
 #[tauri::command]
@@ -3097,13 +3648,20 @@ async fn remove_worktree(
     session_id: String,
     delete_branch: Option<bool>,
 ) -> Result<workspace::WorktreeRemoval> {
-    if state.agents.lock().map_err(|e| e.to_string())?.contains_key(&session_id) {
+    remove_task_worktree(&state, session_id, delete_branch.unwrap_or(false), workspace::Trust::Desktop).await
+}
+
+/// `remove_worktree`, and the phone's `worktree.remove` with its [`workspace::Trust`].
+pub(crate) async fn remove_task_worktree(state: &AppState, session_id: String, delete_branch: bool, trust: workspace::Trust) -> Result<workspace::WorktreeRemoval> {
+    if lock_agents(&state.agents).map_err(|e| e.to_string())?.contains_key(&session_id) {
         return Err("Stop the agent before removing its worktree.".into());
     }
     let (main, path, branch) = worktree_paths(&state.store, &session_id)?;
     // A lingering agent's working directory would block the removal on Windows.
     providers::end_lingering_in(&path).await;
-    blocking(move || workspace::remove_worktree(&main, &path, branch.as_deref(), delete_branch.unwrap_or(false))).await
+    let removed = blocking(move || workspace::remove_worktree_for(&main, &path, branch.as_deref(), delete_branch, trust)).await;
+    skill_manager::projects_changed();
+    removed
 }
 
 #[tauri::command]
@@ -3112,6 +3670,7 @@ async fn recreate_worktree(state: State<'_, AppState>, session_id: String) -> Re
     blocking(move || {
         let (main, path, branch) = worktree_paths(&store, &session_id)?;
         workspace::recreate_worktree(&main, &path, branch.as_deref())?;
+        skill_manager::projects_changed();
         store.lock().map_err(|e| e.to_string())?.session(&session_id)
     })
     .await
@@ -3123,8 +3682,13 @@ async fn git_branches(
     project_id: String,
     session_id: Option<String>,
 ) -> Result<workspace::BranchList> {
-    let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_branches(&root)).await
+    task_branches(&state, &project_id, session_id.as_deref(), workspace::Trust::Desktop).await
+}
+
+/// `git_branches`, and the phone's `git.branches` (and `pull.create`'s base) with its [`workspace::Trust`].
+pub(crate) async fn task_branches(state: &AppState, project_id: &str, session_id: Option<&str>, trust: workspace::Trust) -> Result<workspace::BranchList> {
+    let root = state.root(project_id, session_id)?;
+    blocking(move || workspace::git_branches(&root, trust)).await
 }
 
 /// Check out another local branch in the task's own checkout; worktree tasks keep their branch.
@@ -3135,14 +3699,19 @@ async fn git_switch_branch(
     session_id: Option<String>,
     branch: String,
 ) -> Result<workspace::BranchList> {
-    if let Some(id) = session_id.as_deref() {
+    switch_branch(&state, &project_id, session_id.as_deref(), branch, workspace::Trust::Desktop).await
+}
+
+/// `git_switch_branch`, and the phone's `git.switchBranch` with its [`workspace::Trust`].
+pub(crate) async fn switch_branch(state: &AppState, project_id: &str, session_id: Option<&str>, branch: String, trust: workspace::Trust) -> Result<workspace::BranchList> {
+    if let Some(id) = session_id {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         if store.session(id)?.worktree_path.is_some() {
             return Err("This task works in its own worktree; its branch stays as it is.".into());
         }
     }
-    let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_switch(&root, &branch)).await
+    let root = state.root(project_id, session_id)?;
+    blocking(move || workspace::git_switch(&root, &branch, trust)).await
 }
 
 #[tauri::command]
@@ -3152,7 +3721,7 @@ async fn git_push(
     session_id: Option<String>,
 ) -> Result<String> {
     let root = state.root(&project_id, session_id.as_deref())?;
-    blocking(move || workspace::git_push(&root)).await
+    blocking(move || workspace::git_push(&root, workspace::Trust::Desktop)).await
 }
 
 /// Images from the picker, a drop or a paste join the same PNG registry as browser
@@ -3239,7 +3808,9 @@ async fn github_project_repos(state: State<'_, AppState>) -> Result<Vec<github_h
 #[tauri::command]
 async fn github_clone_repo(state: State<'_, AppState>, repo: String, parent: String) -> Result<Project> {
     let destination = blocking(move || github_hub::clone(&repo, std::path::Path::new(&parent))).await?;
-    state.store.lock().map_err(|e| e.to_string())?.add_project(&destination)
+    let project = state.store.lock().map_err(|e| e.to_string())?.add_project(&destination);
+    skill_manager::projects_changed();
+    project
 }
 
 #[tauri::command]
@@ -3332,7 +3903,7 @@ async fn set_task_link(
         .set_task_link(&session_id, &kind, link.as_ref())
 }
 
-/// Push the task's branch and open a pull request for it, linking the result.
+/// Push the task's branch and open a pull request (a draft with `draft`) for it, linking the result.
 #[tauri::command]
 async fn github_create_pull_request(
     state: State<'_, AppState>,
@@ -3340,6 +3911,7 @@ async fn github_create_pull_request(
     title: String,
     body: String,
     base: String,
+    draft: Option<bool>,
 ) -> Result<Session> {
     let root = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -3348,22 +3920,31 @@ async fn github_create_pull_request(
     };
     let store = state.store.clone();
     blocking(move || {
-        let status = workspace::git_status(&root)?;
-        if !status.is_repo {
-            return Err("Open a Git repository to create a pull request.".into());
-        }
-        if !status.files.is_empty() {
-            return Err("Commit or stash your changes before opening a pull request. The Changes tab can commit them.".into());
-        }
-        if status.branch.is_empty() || status.branch == base {
-            return Err(format!("Create a branch other than {base} before opening a pull request."));
-        }
-        workspace::git_push(&root)?;
-        let pull = github::create_pull_request(&root, &title, &body, &base, &status.branch)?;
-        let link = storage::TaskLink { kind: "pull".into(), number: pull.number, url: pull.url, title: pull.title, state: pull.state, checked_at: 0 };
+        let link = push_and_open_pull(&root, &title, &body, &base, draft.unwrap_or(false), workspace::Trust::Desktop)?;
         store.lock().map_err(|e| e.to_string())?.set_task_link(&session_id, "pull", Some(&link))
     })
     .await
+}
+
+/// Pushes a clean checkout on a branch other than `base` (its hooks as `trust` says) and opens a
+/// pull request for it: `github_create_pull_request`, and the phone's `pull.create`. Blocking.
+pub(crate) fn push_and_open_pull(root: &std::path::Path, title: &str, body: &str, base: &str, draft: bool, trust: workspace::Trust) -> Result<storage::TaskLink> {
+    // Before the status below: for an untrusted phone, a status refresh may already run the
+    // checkout's filters (docs/remote-access.md, Round-6 gates).
+    workspace::refuse_untrusted_programs(root, trust)?;
+    let status = workspace::git_status(root, trust)?;
+    if !status.is_repo {
+        return Err("Open a Git repository to create a pull request.".into());
+    }
+    if !status.files.is_empty() {
+        return Err("Commit or stash your changes before opening a pull request. The Changes tab can commit them.".into());
+    }
+    if status.branch.is_empty() || status.branch == base {
+        return Err(format!("Create a branch other than {base} before opening a pull request."));
+    }
+    workspace::git_push(root, trust)?;
+    let pull = github::create_pull_request_as(root, title, body, base, &status.branch, draft, trust)?;
+    Ok(storage::TaskLink { kind: "pull".into(), number: pull.number, url: pull.url, title: pull.title, state: pull.state, checked_at: 0 })
 }
 /// The task's checkout and its linked pull request number.
 fn linked_pull(state: &AppState, session_id: &str) -> Result<(PathBuf, i64)> {
@@ -3429,7 +4010,7 @@ async fn github_detect_pull_request(state: State<'_, AppState>, session_id: Stri
             Err(error) if error.is_empty() => return Ok(None),
             Err(error) => return Err(error),
         };
-        let branch = workspace::git_status(&root).map(|status| status.branch).unwrap_or_default();
+        let branch = workspace::git_status(&root, workspace::Trust::Desktop).map(|status| status.branch).unwrap_or_default();
         let Some(link) = github_pull::detect(&root, &repo, &turn, &branch, started)? else { return Ok(None) };
         let store = store.lock().map_err(|e| e.to_string())?;
         if store.session(&session_id)?.pull_request.is_some_and(|current| current.number == link.number) {
@@ -3458,6 +4039,29 @@ async fn github_link_pull_request(state: State<'_, AppState>, session_id: String
         store.lock().map_err(|e| e.to_string())?.set_task_link(&session_id, "pull", Some(&link))
     })
     .await
+}
+#[tauri::command]
+async fn manage_workspace_entry(
+    state: State<'_, AppState>, project_id: String, session_id: Option<String>,
+    action: String, path: String, name: Option<String>,
+) -> Result<String> {
+    let root = state.root(&project_id, session_id.as_deref())?;
+    blocking(move || workspace::manage_entry(&root, &action, &path, name.as_deref())).await
+}
+#[tauri::command]
+async fn write_workspace_file(
+    state: State<'_, AppState>, project_id: String, session_id: Option<String>,
+    path: String, content: String, expected: String,
+) -> Result<()> {
+    let root = state.root(&project_id, session_id.as_deref())?;
+    blocking(move || workspace::write_file(&root, &path, &content, &expected)).await
+}
+#[tauri::command]
+async fn workspace_file_stamp(
+    state: State<'_, AppState>, project_id: String, session_id: Option<String>, path: String,
+) -> Result<String> {
+    let root = state.root(&project_id, session_id.as_deref())?;
+    blocking(move || workspace::file_stamp(&root, &path)).await
 }
 #[tauri::command]
 async fn list_files(
@@ -3536,6 +4140,33 @@ async fn workspace_image(
     };
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::image_data_url(&root, &path)).await
+}
+
+/// An image an agent viewed in this task (a Read of `/tmp/shot.png`, Codex
+/// `imageView`, Kimi `Reading media: <path>`, a relative progress snapshot).
+/// Served only when one of the session's tool records names the path in an
+/// image-bearing place; a relative path must stay inside the task's checkout.
+/// See `tool_images` and `tool_images_auth`.
+#[tauri::command]
+async fn tool_image(state: State<'_, AppState>, session_id: String, path: String, max_edge: Option<u32>) -> Result<String> {
+    let store = state.store.clone();
+    blocking(move || {
+        tool_images_auth::ensure_on_this_machine(&store, &session_id)?;
+        let key = path.trim().to_owned();
+        let root = || {
+            let store = store.lock().map_err(|e| e.to_string())?;
+            let project_id = store.session(&session_id)?.project_id;
+            store.workspace_root(&project_id, Some(&session_id))
+        };
+        tool_images::load_sized(
+            &path,
+            root,
+            |spellings| tool_images_auth::session_viewed(&store, &session_id, &key, spellings),
+            tool_images::TOOL_IMAGE_LIMIT,
+            max_edge,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3678,7 +4309,7 @@ async fn start_run_script_terminal(
     let terms = state.terminals.clone();
     blocking(move || {
         let state = app.state::<AppState>();
-        let _admission = state.agents.lock().map_err(|_| "Agent state is unavailable.")?;
+        let _admission = lock_agents(&state.agents).map_err(|_| "Agent state is unavailable.")?;
         agent_updates::ensure_not_installing()?;
         if request_id.is_some_and(|id| !agent_tools::agent_ui_request_active(app.state(), id)) {
             return Err("Run request was cancelled before the script could start.".into());
@@ -3700,7 +4331,9 @@ async fn start_terminal(
     }
     let root = state.root(&project_id, session_id.as_deref())?;
     let terms = state.terminals.clone();
-    blocking(move || {
+    let start_app = app.clone();
+    let terminal_id = blocking(move || {
+        let app = start_app;
         let state = app.state::<AppState>();
         let _admission = state
             .agents
@@ -3709,7 +4342,30 @@ async fn start_terminal(
         agent_updates::ensure_not_installing()?;
         terminal::start(app.clone(), terms, &root, cols, rows)
     })
-    .await
+    .await?;
+    // terminal.list on a phone groups shells by task; the webview adopts the ones it did not
+    // open itself (a phone's terminal.open comes through here too).
+    if let Some(session_id) = &session_id {
+        terminal::tag_output(&terminal_id, session_id);
+    }
+    let _ = app.emit(
+        "terminal-opened",
+        TerminalOpened { terminal_id: &terminal_id, project_id: &project_id, session_id: session_id.as_deref() },
+    );
+    Ok(terminal_id)
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalOpened<'a> {
+    terminal_id: &'a str,
+    project_id: &'a str,
+    session_id: Option<&'a str>,
+}
+/// One page of a terminal's recorded output, for a webview tab attaching to a running shell.
+const TERMINAL_REPLAY_PAGE: usize = 64 * 1024;
+#[tauri::command]
+async fn read_terminal_output(terminal_id: String, after: u64) -> Result<terminal::OutputChunk> {
+    terminal::read_output(&terminal_id, after, TERMINAL_REPLAY_PAGE)
 }
 #[tauri::command]
 async fn write_terminal(
@@ -3756,7 +4412,7 @@ struct Metrics {
 }
 #[tauri::command]
 async fn get_metrics(state: State<'_, AppState>) -> Result<Metrics> {
-    let agents = state.agents.lock().map_err(|e| e.to_string())?.len();
+    let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?.len();
     let terms = state.terminals.lock().map_err(|e| e.to_string())?.len();
     let db = state.store.lock().map_err(|e| e.to_string())?.path.clone();
     blocking(move || {
@@ -3879,8 +4535,16 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Tauri gives WebKitGTK this folder as the webview's data directory (local storage holds
+    // unsent drafts); elsewhere the webview keeps its data in a folder of its own.
+    #[cfg(target_os = "linux")]
+    if let Ok(webview_data) = app.path().app_local_data_dir() {
+        crash_guard::narrow_webview_data(&webview_data);
+    }
     secret_store::setup(&dir);
     feature_controls::setup();
+    providers::load_version_cache(&dir);
+    announce_provider_versions(app.handle().clone());
     providers::sweep_cline_mcp_settings(&dir);
     provider_settings::setup(&dir)?;
     connections::setup(&dir)?;
@@ -3893,11 +4557,15 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     // Retain the database filename and bundle identifier so upgrades reuse existing data.
     let store = Store::open(&dir.join("kingcode.sqlite3"))?;
+    crash_guard::store_opened(store.restart_interrupted);
     if let Err(error) = store.discard_empty_drafts() {
         eprintln!("Could not clear unsent new tasks: {error}");
     }
+    let db_path = store.path.clone();
+    let store = Arc::new(Mutex::new(store));
+    remember_db_path(&store, db_path);
     app.manage(AppState {
-        store: Arc::new(Mutex::new(store)),
+        store,
         agents: Arc::new(Mutex::new(HashMap::new())),
         terminals: Arc::new(Mutex::new(HashMap::new())),
         shutdown: AtomicU8::new(0),
@@ -3909,6 +4577,7 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(vm::Vms::default());
     app.manage(file_preview::FilePreviews::default());
     app.manage(agent_tools::UiRequests::default());
+    app.manage(web_server::WebServer::new(dir.clone()));
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
@@ -3918,9 +4587,21 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Sent (no payload) to the main webview once a deliberate exit is committed, before shutdown.
+const APP_QUITTING_EVENT: &str = "app-quitting";
+
 /// Run-loop events shared by the desktop and serve: an exit request stops local agents
 /// (cloud runs keep going on their machines) within a deadline, then the process exits.
 fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    // After a crash the relaunch comes to the front only if PandaCode was in front.
+    // A closed window may never send its blur.
+    if let tauri::RunEvent::WindowEvent { label, event: window_event, .. } = &event {
+        match window_event {
+            tauri::WindowEvent::Focused(focused) => crash_guard::window_focused(label, *focused),
+            tauri::WindowEvent::Destroyed => crash_guard::window_focused(label, false),
+            _ => {}
+        }
+    }
     // A Dock click: other PandaCode windows can be up while the main one is hidden, so always show it.
     #[cfg(target_os = "macos")]
     if matches!(event, tauri::RunEvent::Reopen { .. }) {
@@ -3937,15 +4618,32 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         if state.shutdown.load(Ordering::SeqCst) == 2 {
             return;
         }
+        // Cloud runs keep going on their machines; their bridges are killed below.
+        let cloud: HashSet<String> = state.store.lock().ok().and_then(|store| cloud_agents::active_runs(&store).ok()).unwrap_or_default().into_iter().collect();
+        let local = lock_agents(&state.agents).map(|a| a.keys().filter(|id| !cloud.contains(*id)).count()).unwrap_or(0);
+        let shutting_down = state.shutdown.load(Ordering::SeqCst) != 0;
+        if quit_guard::should_confirm_quit(local, headless::active(), quit_guard::confirmed(), shutting_down, code == Some(tauri::RESTART_EXIT_CODE)) {
+            api.prevent_exit();
+            quit_guard::ask(app, local);
+            return;
+        }
         api.prevent_exit();
         if state.shutdown.swap(1, Ordering::SeqCst) == 1 {
             return;
         }
+        // Quitting (or restarting to update) from here on: a crash now is not relaunched.
+        crash_guard::notify_exit();
+        // Tell the page before it goes: WKWebView may not fire `pagehide` on Cmd+Q, and the
+        // page clears its window-death note on this. Fire and forget, never awaited. Quit,
+        // update restarts and the webview dialog's Restart (`request_restart`) all pass here.
+        if let Err(error) = app.emit_to("main", APP_QUITTING_EVENT, ()) {
+            eprintln!("Could not tell the window PandaCode is quitting: {error}");
+        }
+        if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
+        if let Some(web) = app.try_state::<web_server::WebServer>() { web.shutdown(); }
         jev::shutdown();
         app.state::<file_preview::FilePreviews>().shutdown();
-        // Cloud runs keep going on their machines; their bridges are killed below.
-        let cloud: HashSet<String> = state.store.lock().ok().and_then(|store| cloud_agents::active_runs(&store).ok()).unwrap_or_default().into_iter().collect();
-        if let Ok(agents) = state.agents.lock() {
+        if let Ok(agents) = lock_agents(&state.agents) {
             for (_, tx) in agents.iter().filter(|(id, _)| !cloud.contains(*id)) {
                 let _ = tx.send(RunInput::Stop);
             }
@@ -3958,7 +4656,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         tauri::async_runtime::spawn(async move {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
             while tokio::time::Instant::now() < deadline {
-                if agents.lock().map(|a| a.keys().all(|id| cloud.contains(id))).unwrap_or(true) {
+                if lock_agents(&agents).map(|a| a.keys().all(|id| cloud.contains(id))).unwrap_or(true) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3966,7 +4664,7 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             providers::shutdown_all();
             // Let pending pipe EOFs finish persistence after a forced cleanup.
             for _ in 0..20 {
-                if agents.lock().map(|a| a.is_empty()).unwrap_or(true) {
+                if lock_agents(&agents).map(|a| a.is_empty()).unwrap_or(true) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3978,6 +4676,15 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             handle.exit(0);
         });
     } else if matches!(event, tauri::RunEvent::Exit) {
+        crash_guard::notify_exit();
+        // The Dock's Quit and logout end here without ExitRequested; the page may not get it.
+        if app.try_state::<AppState>().is_some_and(|state| state.shutdown.load(Ordering::SeqCst) == 0) {
+            if let Err(error) = app.emit_to("main", APP_QUITTING_EVENT, ()) {
+                eprintln!("Could not tell the window PandaCode is quitting: {error}");
+            }
+        }
+        if let Some(voice) = app.try_state::<voice::Voice>() { voice.shutdown(); }
+        if let Some(web) = app.try_state::<web_server::WebServer>() { web.shutdown(); }
         app.state::<file_preview::FilePreviews>().shutdown();
         // VMs PandaCode started release their memory when it quits.
         app.state::<vm::Vms>().shutdown();
@@ -4002,14 +4709,577 @@ fn app_context() -> tauri::Context<tauri::Wry> {
     context
 }
 
+/// The workspace window's own setup: native appearance, the close listeners that hide it instead of
+/// destroying it, and dictation's stop. `tray::show` runs it again for a window it builds back.
+pub(crate) fn install_main_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    if let Err(error) = appearance::setup(window) {
+        eprintln!("Native appearance setup failed: {error}");
+    }
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        // A close that only hides the window (macOS, Windows with a menu bar item)
+        // stops recording and keeps downloads. A close that quits (tray::hide_on_close)
+        // cancels everything at once: transcribing would upload audio only for the
+        // exit to throw the result away.
+        let Some(voice) = handle.try_state::<voice::Voice>() else { return };
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } if tray::main_close_quits(&handle) => voice.shutdown(),
+            tauri::WindowEvent::CloseRequested { .. } => voice.stop_recording(&handle),
+            tauri::WindowEvent::Destroyed => voice.shutdown(),
+            _ => {}
+        }
+    });
+    tray::hide_on_close(window);
+}
+
+/// Commands of the main window. Also the web UI's (web_server.rs replays its calls through
+/// the main webview) and `pandacode serve --port`'s hidden main webview.
+pub(crate) fn main_invoke_handler(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        voice::voice_configuration,
+        voice::voice_save_profile,
+        voice::voice_select_profile,
+        voice::voice_delete_profile,
+        voice::voice_start,
+        voice::voice_stop,
+        voice::voice_retry,
+        voice::voice_cancel,
+        voice::local::voice_local_catalog,
+        voice::local::voice_local_download,
+        voice::local::voice_local_cancel_download,
+        voice::local::voice_local_delete,
+        voice::local::voice_local_select,
+        voice::local::test_recordings::voice_local_test_model,
+        voice::local::test_recordings::voice_mic_devices,
+        voice::local::test_recordings::voice_mic_test_start,
+        voice::local::test_recordings::voice_mic_test_stop,
+        voice::local::test_recordings::voice_mic_test_cancel,
+        voice::local::voice_preferences,
+        voice::local::voice_update_preferences,
+        agents_dock::agents_dock_snapshot,
+        agents_dock::agents_dock_preferences,
+        agents_dock::agents_dock_save_preferences,
+        agents_dock::agents_dock_pin,
+        support::open_support,
+        support::support_details,
+        model_routing::model_routing_status_command,
+        model_routing::model_routing_exclusions,
+        model_routing::model_routing_set_exclusions,
+        model_routing::model_routing_configure_command,
+        model_routing::model_routing_prepare,
+        model_routing::model_routing_route,
+        model_routing::model_routing_tiers,
+        model_routing::model_routing_set_tiers,
+        model_routing::model_routing_tier_models,
+        model_health::model_health_list,
+        model_health::model_health_clear,
+        local_sign_app,
+        crash_guard::commands::crash_recovery_take,
+        crash_guard::commands::crash_recovery_shown,
+        crash_guard::commands::crash_restart_enabled,
+        crash_guard::commands::set_crash_restart_enabled,
+        crash_guard::commands::crash_report_reveal,
+        sessions_missing,
+        app_updates::app_update_install_supported,
+        agent_updates::check_agent_updates,
+        agent_updates::update_agent,
+        feature_controls::feature_controls_get,
+        feature_controls::feature_controls_set,
+        moodboards::list_moodboards,
+        moodboards::create_moodboard,
+        moodboards::read_moodboard,
+        moodboards::rename_moodboard,
+        moodboards::delete_moodboard,
+        moodboards::add_moodboard_image,
+        moodboards::import_moodboard_images,
+        moodboards::update_moodboard_image,
+        moodboards::remove_moodboard_image,
+        moodboards::moodboard_image,
+        overlay::overlay_preferences,
+        overlay::overlay_save_preferences,
+        overlay::overlay_recording,
+        overlay::overlay_sync_context,
+        overlay::overlay_toggle,
+        overlay::overlay_hide,
+        overlay::overlay_snapshot,
+        overlay::overlay_thread,
+        overlay::overlay_launch,
+        overlay::overlay_select_model,
+        overlay::overlay_open_task,
+        remote::remote_status,
+        remote::remote_sign_in_start,
+        remote::remote_sign_in_finish,
+        remote::remote_sign_in_cancel,
+        remote::remote_sign_out,
+        remote::remote_set_host_enabled,
+        remote::remote_set_connection_enabled,
+        remote::remote_set_notify_enabled,
+        remote::remote_devices,
+        remote::remote_revoke_device,
+        remote::remote_targets,
+        remote::mirror::remote_start_task,
+        remote::orchestrate::links::orchestration_status,
+        remote::orchestrate::links::orchestration_set_enabled,
+        remote::orchestrate::links::orchestration_set_link,
+        remote::orchestrate::links::orchestration_pending,
+        remote::orchestrate::links::orchestration_link_respond,
+        remote::orchestrate::orchestration_children,
+        remote::orchestrate::orchestration_threads,
+        remote::mirror::remote_team,
+        remote::mirror::remote_worker_messages,
+        remote::mirror::remote_cancel_start,
+        remote::routes::remote_reconnect,
+        remote::routes::remote_direct_routes_status,
+        remote::routes::remote_set_direct_routes,
+        remote::grants::remote_device_grants,
+        remote::grants::remote_set_device_grant,
+        remote::grants::remote_pair_code,
+        remote::grants::remote_pair_code_cancel,
+        remote::grants::remote_pair_redeem,
+        remote::diagnostics::remote_diagnostics,
+        remote::diagnostics::remote_diagnostics_export,
+        remote_resubscribe,
+        remote_workspace_image,
+        cloud_agents::tasks::cloud_agent_targets,
+        cloud_agents::tasks::cloud_agent_start,
+        cloud_agents::tasks::cloud_agent_action,
+        cloud_agents::tasks::cloud_agent_set_claude_token,
+        remote::mirror::remote_repo_check,
+        provider_settings::provider_configuration,
+        connections::connections_list,
+        connections::connection_save,
+        connections::connection_delete,
+        connections::connection_assign,
+        connections::connection_pool_set,
+        connections::connection_new_account,
+        connections::connection_pool_member_set,
+        account_pool::account_pool_status,
+        account_pool::account_pool_clear,
+        account_sign_in::account_sign_in_start,
+        account_sign_in::account_sign_in_code,
+        account_sign_in::account_sign_in_cancel,
+        agent_usage::agent_usage,
+        agent_usage::agent_usage_asking_claude,
+        tray::tray_seen,
+        usage_ledger::usage_ledger,
+        capabilities::capabilities_inventory,
+        capabilities::cache_alignment,
+        prompt_activity,
+        set_resume_at_reset,
+        clear_usage_limit,
+        discard_draft,
+        set_queue_hold,
+        message_queue::queue_list,
+        message_queue::queue_holds,
+        message_queue::queue_add,
+        message_queue::queue_update,
+        message_queue::queue_remove,
+        message_queue::queue_take_steered,
+        message_queue::queue_reorder,
+        message_queue::queue_take,
+        message_queue::queue_restore,
+        message_queue::steer_task,
+        bots::bots_list,
+        bots::bot_desktop_thread,
+        bots::bot_detail,
+        bots::bot_create,
+        bots::bot_update,
+        bots::extended::bot_set_fresh_context,
+        bots::extended::bot_set_channel_history,
+        bots::bot_set_mode,
+        bots::bot_set_paused,
+        bots::bot_reset,
+        bots::bot_delete,
+        bots::bot_remember,
+        bots::bot_forget,
+        bots::bot_activity,
+        bots::bot_project_ids,
+        bots::bot_message,
+        bots::shared_channels::bot_shared_channels,
+        bots::shared_channels::bot_shared_channel_detail,
+        bots::shared_channels::bot_shared_channel_create,
+        bots::shared_channels::bot_shared_channel_update,
+        bots::shared_channels::bot_shared_channel_archive,
+        bots::shared_channels::bot_shared_channel_post,
+        bots::shared_channels::bot_shared_channel_stop,
+        bots::shared_channels::bot_shared_channel_continue,
+        bots::shared_channels::bot_shared_channel_reassign,
+        bots::shared_channels::bot_message_markers,
+        bots::failover::bot_failover_decide,
+        bots::failover::bot_failover_pending,
+        bots::failover::bot_model_switches,
+        bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
+        bots::schedule::bot_schedule_create,
+        bots::schedule::bot_schedule_set_enabled,
+        bots::schedule::bot_schedule_delete,
+        bots::schedule::bot_run_schedule_now,
+        schedules::schedules_list,
+        schedules::schedule_create,
+        schedules::schedule_update,
+        schedules::schedule_set_enabled,
+        schedules::schedule_delete,
+        schedules::schedule_run_now,
+        schedules::schedule_snooze,
+        schedules::schedule_runs,
+        schedules::scheduler_settings,
+        schedules::scheduler_set_settings,
+        bots::channels::bot_channel_add,
+        bots::channels::bot_channel_test,
+        bots::channels::bot_channel_configure,
+        bots::channels::bot_channel_set_enabled,
+        bots::channels::bot_channel_remove,
+        bots::channels::bot_pairing_decide,
+        bots::channels::bot_web_link,
+        bots::channels::bot_web_new_link,
+        bots::guard::bot_rule_add,
+        bots::guard::bot_rule_delete,
+        conversation_import::list_importable_conversations,
+        conversation_import::import_conversations,
+        provider_settings::provider_set_claude_connection_mode,
+        provider_settings::provider_set_claude_cli_refresh,
+        providers::privacy::harness_privacy,
+        providers::privacy::harness_privacy_set,
+        providers::claude_auth::provider_claude_status,
+        provider_settings::list_opencode_models,
+        provider_settings::save_opencode_models,
+        provider_settings::provider_set_executable,
+        provider_settings::provider_set_environment_variable,
+        provider_settings::provider_remove_environment_variable,
+        provider_settings::provider_set_global_environment_variable,
+        provider_settings::provider_remove_global_environment_variable,
+        provider_settings::provider_set_use_global_environment,
+        provider_settings::provider_save_glm_key,
+        provider_settings::provider_remove_glm_key,
+        provider_settings::provider_save_mimo_key,
+        provider_settings::provider_remove_mimo_key,
+        provider_settings::provider_save_alibaba_key,
+        provider_settings::provider_remove_alibaba_key,
+        provider_settings::provider_save_deepseek_key,
+        provider_settings::provider_remove_deepseek_key,
+        provider_settings::provider_save_commandcode_key,
+        provider_settings::provider_remove_commandcode_key,
+        provider_settings::provider_set_mimo_endpoint,
+        architect::profiles::architect_profiles,
+        architect::profiles::architect_set_lead_guidance,
+        architect::profiles::architect_save_profile,
+        architect::profiles::architect_delete_profile,
+        architect::architect_get,
+        architect::architect_configure,
+        architect::architect_set_council,
+        architect::architect_council_accept,
+        architect::architect_start,
+        architect::architect_control,
+        architect::architect_worker_messages,
+        architect::coordination::architect_team_messages,
+        task_controls::task_goal,
+        task_controls::codex_command,
+        task_controls::codex_jobs,
+        task_controls::set_task_preference,
+        task_controls::fork_codex_task,
+        task_controls::fork_session_at_message,
+        task_controls::get_message_content,
+        task_controls::archive_codex_task,
+        task_controls::export_task,
+        task_controls::save_task_export,
+        task_controls::export_debug_bundle,
+        task_controls::save_debug_bundle,
+        task_controls::start_harness_terminal,
+        list_projects,
+        add_project,
+        remove_project,
+        relink_project,
+        list_sessions,
+        pin_session,
+        dismiss_error_messages,
+        reorder_sessions,
+        get_task,
+        configure_window_appearance,
+        create_session,
+        create_board_task,
+        update_task_details,
+        set_task_stage,
+        start_task,
+        configure_session,
+        set_reasoning_effort,
+        update_session,
+        delete_session_with_attachment_cleanup,
+        chats::chat_create,
+        chats::chat_cleanup,
+        get_messages,
+        turn_changes::turn_change_diff,
+        turn_changes::turn_change_summary,
+        list_subagents,
+        get_subagent,
+        send_message,
+        list_slash_commands,
+        recipes_list,
+        recipes_save,
+        recipes_delete,
+        recipes_dry_run,
+        providers::acp::provider_check_connection,
+        resolve_slash_command,
+        stop_session,
+        respond_approval,
+        respond_user_input,
+        list_agent_integrations,
+        list_app_tools,
+        open_external_url,
+        agent_tools::agent_ui_request_active,
+        agent_tools::resolve_agent_ui_action,
+        browser::browser_inspect,
+        list_providers,
+        list_provider_models,
+        git_status,
+        git_diff,
+        jj_status,
+        jj_diff,
+        jj_describe,
+        jj_new,
+        jj_commit,
+        jj_log,
+        git_stage,
+        git_commit,
+        git_branches,
+        git_switch_branch,
+        git_push,
+        create_worktree,
+        attach_worktree,
+        worktree_status,
+        remove_worktree,
+        merge_worktree,
+        recreate_worktree,
+        github_status,
+        github_repos,
+        project_icon,
+        github_repo_pulls,
+        github_repo_issues,
+        github_repo_runs,
+        github_run_details,
+        github_project_repos,
+        github_clone_repo,
+        github_search,
+        github_issues,
+        github_resolve,
+        github_refresh_links,
+        github_create_pull_request,
+        github_pull_request,
+        github_pull_request_diff,
+        github_merge_pull_request,
+        github_detect_pull_request,
+        github_link_pull_request,
+        simulator::commands::simulator_status,
+        simulator::commands::simulator_select,
+        simulator::commands::simulator_create_duo,
+        simulator::commands::simulator_pose,
+        simulator::commands::simulator_power,
+        simulator::commands::simulator_frame,
+        simulator::commands::simulator_input,
+        simulator::commands::simulator_appearance,
+        simulator::commands::simulator_capture,
+        simulator::android_setup::android_setup,
+        vm::commands::vm_status,
+        vm::commands::vm_show,
+        vm::commands::vm_create,
+        vm::commands::vm_power,
+        vm::commands::vm_frame,
+        vm::commands::vm_input,
+        vm::commands::vm_desktop,
+        vm::setup::vm_setup,
+        cloud::commands::cloud_connections,
+        cloud::commands::cloud_connect,
+        cloud::commands::cloud_disconnect,
+        cloud::commands::cloud_set_inherit_environment,
+        cloud::commands::cloud_setup_sandboxes,
+        cloud::commands::cloud_instabox_images,
+        cloud::commands::cloud_instabox_set_image,
+        cloud::commands::cloud_digitalocean_catalog,
+        cloud::commands::cloud_digitalocean_set_options,
+        cloud::commands::cloud_colab_sign_in_start,
+        cloud::commands::cloud_colab_sign_in_cancel,
+        cloud::commands::cloud_colab_sign_in_status,
+        cloud::commands::cloud_colab_config,
+        cloud::commands::cloud_colab_usage,
+        cloud::commands::cloud_colab_set_config,
+        cloud::commands::cloud_colab_install_cli,
+        cloud::commands::cloud_colab_thread_runtimes,
+        cloud::commands::cloud_colab_runtime_action,
+        cloud::commands::cloud_machines,
+        cloud::commands::cloud_create,
+        cloud::commands::cloud_power,
+        cloud::commands::cloud_frame,
+        cloud::commands::cloud_input,
+        vsix_themes::themes_list,
+        vsix_themes::theme_import,
+        vsix_themes::theme_install,
+        vsix_themes::theme_remove,
+        token_saver::token_saver_tools,
+        token_saver::token_saver_install,
+        task_usage::task_token_usage,
+        skill_manager::skill_manager_list,
+        skill_manager::skill_manager_set,
+        skill_manager::skill_manager_reset,
+        skill_manager::skill_manager_restore,
+        skill_manager::skill_manager_uninstall,
+        skill_manager::skill_manager_undo_uninstall,
+        skill_manager::skill_manager_preview,
+        skill_manager::skill_manager_add,
+        skill_manager::skill_manager_add_library,
+        skills::skills_list,
+        skills::skills_import_folder,
+        skills::skills_import_github,
+        skills::skills_activate,
+        skills::skills_deactivate,
+        skills::skills_deactivate_all,
+        skills::skills_matrix,
+        skills::skills_scan,
+        skills::skills_remove,
+        set_task_link,
+        import_prompt_image,
+        read_clipboard_image,
+        prompt_image,
+        reveal_path,
+        open_third_party_notices,
+        open_workspace_file,
+        read_document,
+        dragged_file_paths,
+        describe_folder,
+        list_files,
+        manage_workspace_entry,
+        write_workspace_file,
+        workspace_file_stamp,
+        search_files,
+        search_text,
+        read_file,
+        read_document_file,
+        design::design_list,
+        design::design_read,
+        design::design_comments,
+        design::design_save_comments,
+        progress::progress_list,
+        progress::progress_media,
+        progress::progress_thumb,
+        progress::progress_clear,
+        workspace_image,
+        tool_image,
+        resolve_workspace_files,
+        prepare_file_preview,
+        get_run_script,
+        get_run_script_preview,
+        run_turn_checks,
+        start_run_script_terminal,
+        start_terminal,
+        write_terminal,
+        resize_terminal,
+        close_terminal,
+        get_terminal_activity,
+        read_terminal_output,
+        get_terminal_preferences,
+        get_metrics,
+        list_local_servers,
+        jev::jev_configuration,
+        jev::jev_save_configuration,
+        jev::jev_decision_models,
+        jev::jev_doctor,
+        jev::jev_install_runtime,
+        jev::jev_start,
+        jev::jev_watch_run,
+        jev::jev_cancel,
+        jev::jev_list_runs,
+        jev::jev_read_run,
+        jev_decisions::jev_assist_prepare,
+        jev_decisions::jev_assist_run,
+        jev_decisions::jev_assist_list,
+        jev_decisions::jev_assist_save_rules,
+        browser::browser_open,
+        browser::browser_bounds,
+        browser::browser_action,
+        browser::browser_pick,
+        browser::browser_capture,
+        browser::browser_close,
+        web_server::web_server_status,
+        web_server::web_server_configure,
+        web_server::web_server_rotate_token,
+        web_server::app_version,
+    ];
+    handler(invoke)
+}
+
+/// Says where a command-line web UI start is listening (warning when that is plain HTTP
+/// off loopback), or why it isn't. Returns the status on success.
+fn report_web_start(
+    result: std::result::Result<web_server::WebServerStatus, String>,
+    host: Option<std::net::IpAddr>,
+) -> Option<web_server::WebServerStatus> {
+    match result {
+        Ok(status) => {
+            web_server::print_start_notice(&status, host);
+            Some(status)
+        }
+        Err(error) => {
+            eprintln!("PandaCode web UI could not start: {error}");
+            None
+        }
+    }
+}
+
+/// Sent to the running app (with the WebServerStatus) when a second launch's `--port`
+/// started or moved the web UI, so the window can show its link.
+const WEB_SERVER_CLI_STARTED_EVENT: &str = "web-server-cli-started";
+
+/// Sent to the running app (`{ "error": … }`) when a second launch's `--port`/`--host` was
+/// invalid or the web UI could not start, so the window shows why instead of nothing.
+const WEB_SERVER_CLI_FAILED_EVENT: &str = "web-server-cli-failed";
+
+fn report_web_cli_failure(app: &tauri::AppHandle, error: &str) {
+    if let Err(emit_error) = app.emit(WEB_SERVER_CLI_FAILED_EVENT, serde_json::json!({ "error": error })) {
+        eprintln!("Could not tell the window about the web UI error: {emit_error}");
+    }
+    tray::show(app);
+}
+
 pub fn run() {
     // The npx installer signs the fresh bundle this way, before any window exists.
     if std::env::args().skip(1).any(|arg| arg == "--local-sign") {
         std::process::exit(local_signing::cli());
     }
-    let app = tauri::Builder::default()
+    let context = app_context();
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // A dead WKWebView content process leaves a blank window: reload it, within a limit.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.on_web_content_process_terminate(crash_guard::on_web_content_process_terminate);
+        // Cmd+Q quits through `app.exit(0)`, so it passes ExitRequested like the menu bar Quit.
+        builder = builder.menu(app_menu::build).on_menu_event(app_menu::on_menu_event);
+    }
+    let app = builder
         // First, as its docs require: a second launch focuses this window instead of opening another.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            // `pandacode --port N` while PandaCode runs: serve the running session there.
+            match web_server::parse_cli(&args, None, None) {
+                Ok(Some(web)) => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let result = web_server::start_cli(&app, web.port, web.host).await;
+                        let failure = result.as_ref().err().cloned();
+                        if let Some(status) = report_web_start(result, web.host) {
+                            // Never the token: app events reach every subscribed WebSocket.
+                            let status = web_server::WebServerStatus { token_url: None, ..status };
+                            if let Err(error) = app.emit(WEB_SERVER_CLI_STARTED_EVENT, status) {
+                                eprintln!("Could not tell the window about the web UI: {error}");
+                            }
+                        }
+                        if let Some(error) = failure {
+                            report_web_cli_failure(&app, &error);
+                        }
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("PandaCode web UI: {error}");
+                    report_web_cli_failure(app, &error);
+                }
+            }
             tray::show(app)
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -4017,24 +5287,45 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Here, not before the builder: plugin setup runs first, so a duplicate launch has
+            // already handed off to the running instance and exited without a guard of its own.
+            crash_guard::start(crash_guard::Mode::Desktop);
             // Covers DMG installs and earlier failures; only ad hoc bundles change, on disk only.
             std::thread::spawn(|| {
                 if let Err(error) = local_signing::sign_running_app() {
                     eprintln!("Local signing failed: {error}");
                 }
             });
-            let dir = setup_common(app)?;
-            agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
-            overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
+            // A failure here is not a crash: say why and exit, never a relaunch into it.
+            let ready = (|| -> Result<()> {
+                let dir = setup_common(app)?;
+                app.manage(voice::Voice::new(dir.clone()));
+                agents_dock::setup(app.handle(), &dir)?;
+                overlay::setup(app.handle(), &dir).map_err(|error| error.to_string())
+            })();
+            if let Err(error) = ready {
+                crash_guard::desktop_startup_failed(&error);
+            }
             vm::watch_idle(app.handle().clone());
+            // The local web UI binds a port only when asked: a flag, the environment, or a saved "on".
+            match web_server::cli_from_env() {
+                Ok(Some(web)) => {
+                    report_web_start(web_server::start_from_cli(app.handle(), web.port, web.host), web.host);
+                }
+                Ok(None) => web_server::start_if_saved(app.handle()),
+                Err(error) => {
+                    eprintln!("PandaCode web UI: {error}");
+                    // A GUI launch has no terminal: Settings -> Web access shows it instead.
+                    if let Some(server) = app.try_state::<web_server::WebServer>() {
+                        server.record_error(error);
+                    }
+                }
+            }
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("Menu bar item is unavailable: {error}");
             }
             if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = appearance::setup(&window) {
-                    eprintln!("Native appearance setup failed: {error}");
-                }
-                tray::hide_on_close(&window);
+                install_main_window(app.handle(), &window);
             }
             Ok(())
         })
@@ -4049,10 +5340,14 @@ pub fn run() {
                     overlay::overlay_open_task,
                     task_controls::fork_session_at_message,
                     task_controls::get_message_content,
+                    // Deletes only role='error' rows of the given session: reads nothing new.
+                    dismiss_error_messages,
                     list_providers,
                     list_provider_models,
                     search_files,
                     open_external_url,
+                    // Thumbnails in the launcher thread's tool rows.
+                    tool_image,
                 ];
                 return handler(invoke);
             }
@@ -4083,411 +5378,9 @@ pub fn run() {
                     .reject("Browser content has no application access.");
                 return true;
             }
-            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
-                agents_dock::agents_dock_snapshot,
-                agents_dock::agents_dock_preferences,
-                agents_dock::agents_dock_save_preferences,
-                agents_dock::agents_dock_pin,
-                support::open_support,
-                support::support_details,
-                model_routing::model_routing_status,
-                model_routing::model_routing_exclusions,
-                model_routing::model_routing_set_exclusions,
-                model_routing::model_routing_configure,
-                model_routing::model_routing_prepare,
-                model_routing::model_routing_route,
-                model_routing::model_routing_tiers,
-                model_routing::model_routing_set_tiers,
-                model_routing::model_routing_tier_models,
-                model_health::model_health_list,
-                model_health::model_health_clear,
-                local_sign_app,
-                app_updates::app_update_install_supported,
-                agent_updates::check_agent_updates,
-                agent_updates::update_agent,
-                feature_controls::feature_controls_get,
-                feature_controls::feature_controls_set,
-                moodboards::list_moodboards,
-                moodboards::create_moodboard,
-                moodboards::read_moodboard,
-                moodboards::rename_moodboard,
-                moodboards::delete_moodboard,
-                moodboards::add_moodboard_image,
-                moodboards::import_moodboard_images,
-                moodboards::update_moodboard_image,
-                moodboards::remove_moodboard_image,
-                moodboards::moodboard_image,
-                overlay::overlay_preferences,
-                overlay::overlay_save_preferences,
-                overlay::overlay_recording,
-                overlay::overlay_sync_context,
-                overlay::overlay_toggle,
-                overlay::overlay_hide,
-                overlay::overlay_snapshot,
-                overlay::overlay_thread,
-                overlay::overlay_launch,
-                overlay::overlay_select_model,
-                overlay::overlay_open_task,
-                remote::remote_status,
-                remote::remote_sign_in_start,
-                remote::remote_sign_in_finish,
-                remote::remote_sign_in_cancel,
-                remote::remote_sign_out,
-                remote::remote_set_host_enabled,
-                remote::remote_set_connection_enabled,
-                remote::remote_set_notify_enabled,
-                remote::remote_devices,
-                remote::remote_revoke_device,
-                remote::remote_targets,
-                remote::mirror::remote_start_task,
-                remote::orchestrate::links::orchestration_status,
-                remote::orchestrate::links::orchestration_set_enabled,
-                remote::orchestrate::links::orchestration_set_link,
-                remote::orchestrate::links::orchestration_pending,
-                remote::orchestrate::links::orchestration_link_respond,
-                remote::orchestrate::orchestration_children,
-                remote::orchestrate::orchestration_threads,
-                remote::mirror::remote_team,
-                remote::mirror::remote_worker_messages,
-                remote::mirror::remote_cancel_start,
-                remote::routes::remote_reconnect,
-                remote::routes::remote_direct_routes_status,
-                remote::routes::remote_set_direct_routes,
-                remote::grants::remote_device_grants,
-                remote::grants::remote_set_device_grant,
-                remote::grants::remote_pair_code,
-                remote::grants::remote_pair_code_cancel,
-                remote::grants::remote_pair_redeem,
-                remote::diagnostics::remote_diagnostics,
-                remote::diagnostics::remote_diagnostics_export,
-                remote_resubscribe,
-                remote_workspace_image,
-                cloud_agents::tasks::cloud_agent_targets,
-                cloud_agents::tasks::cloud_agent_start,
-                cloud_agents::tasks::cloud_agent_action,
-                cloud_agents::tasks::cloud_agent_set_claude_token,
-                remote::mirror::remote_repo_check,
-                provider_settings::provider_configuration,
-                connections::connections_list,
-                connections::connection_save,
-                connections::connection_delete,
-                connections::connection_assign,
-                connections::connection_pool_set,
-                connections::connection_new_account,
-                connections::connection_pool_member_set,
-                account_pool::account_pool_status,
-                account_pool::account_pool_clear,
-                account_sign_in::account_sign_in_start,
-                account_sign_in::account_sign_in_code,
-                account_sign_in::account_sign_in_cancel,
-                agent_usage::agent_usage,
-                tray::tray_seen,
-                usage_ledger::usage_ledger,
-                capabilities::capabilities_inventory,
-                capabilities::cache_alignment,
-                prompt_activity,
-                set_resume_at_reset,
-                clear_usage_limit,
-                discard_draft,
-                message_queue::queue_list,
-                message_queue::queue_add,
-                message_queue::queue_update,
-                message_queue::queue_remove,
-                message_queue::queue_reorder,
-                message_queue::queue_take,
-                message_queue::queue_restore,
-                message_queue::steer_task,
-                bots::bots_list,
-                bots::bot_desktop_thread,
-                bots::bot_detail,
-                bots::bot_create,
-                bots::bot_update,
-                bots::extended::bot_set_fresh_context,
-                bots::extended::bot_set_channel_history,
-                bots::bot_set_mode,
-                bots::bot_set_paused,
-                bots::bot_reset,
-                bots::bot_delete,
-                bots::bot_remember,
-                bots::bot_forget,
-                bots::bot_activity,
-                bots::bot_project_ids,
-                bots::bot_message,
-                bots::shared_channels::bot_shared_channels,
-                bots::shared_channels::bot_shared_channel_detail,
-                bots::shared_channels::bot_shared_channel_create,
-                bots::shared_channels::bot_shared_channel_update,
-                bots::shared_channels::bot_shared_channel_archive,
-                bots::shared_channels::bot_shared_channel_post,
-                bots::shared_channels::bot_shared_channel_stop,
-                bots::shared_channels::bot_shared_channel_continue,
-                bots::shared_channels::bot_shared_channel_reassign,
-                bots::shared_channels::bot_message_markers,
-                bots::failover::bot_failover_decide,
-                bots::failover::bot_failover_pending,
-                bots::failover::bot_model_switches,
-                bots::bot_set_capabilities, bots::bot_assign_task, bots::bot_task_links, bots::bot_task_brief,
-                bots::schedule::bot_schedule_create,
-                bots::schedule::bot_schedule_set_enabled,
-                bots::schedule::bot_schedule_delete,
-                bots::schedule::bot_run_schedule_now,
-                schedules::schedules_list,
-                schedules::schedule_create,
-                schedules::schedule_update,
-                schedules::schedule_set_enabled,
-                schedules::schedule_delete,
-                schedules::schedule_run_now,
-                schedules::schedule_snooze,
-                schedules::schedule_runs,
-                schedules::scheduler_settings,
-                schedules::scheduler_set_settings,
-                bots::channels::bot_channel_add,
-                bots::channels::bot_channel_test,
-                bots::channels::bot_channel_configure,
-                bots::channels::bot_channel_set_enabled,
-                bots::channels::bot_channel_remove,
-                bots::channels::bot_pairing_decide,
-                bots::channels::bot_web_link,
-                bots::channels::bot_web_new_link,
-                bots::guard::bot_rule_add,
-                bots::guard::bot_rule_delete,
-                conversation_import::list_importable_conversations,
-                conversation_import::import_conversations,
-                provider_settings::provider_set_claude_connection_mode,
-                providers::privacy::harness_privacy,
-                providers::privacy::harness_privacy_set,
-                providers::claude_auth::provider_claude_status,
-                provider_settings::list_opencode_models,
-                provider_settings::save_opencode_models,
-                provider_settings::provider_set_executable,
-                provider_settings::provider_set_environment_variable,
-                provider_settings::provider_remove_environment_variable,
-                provider_settings::provider_set_global_environment_variable,
-                provider_settings::provider_remove_global_environment_variable,
-                provider_settings::provider_set_use_global_environment,
-                provider_settings::provider_save_glm_key,
-                provider_settings::provider_remove_glm_key,
-                provider_settings::provider_save_mimo_key,
-                provider_settings::provider_remove_mimo_key,
-                provider_settings::provider_save_deepseek_key,
-                provider_settings::provider_remove_deepseek_key,
-                provider_settings::provider_save_commandcode_key,
-                provider_settings::provider_remove_commandcode_key,
-                provider_settings::provider_set_mimo_endpoint,
-                architect::profiles::architect_profiles,
-                architect::profiles::architect_set_lead_guidance,
-                architect::profiles::architect_save_profile,
-                architect::profiles::architect_delete_profile,
-                architect::architect_get,
-                architect::architect_configure,
-                architect::architect_start,
-                architect::architect_control,
-                architect::architect_worker_messages,
-                architect::coordination::architect_team_messages,
-                task_controls::task_goal,
-                task_controls::codex_command,
-                task_controls::codex_jobs,
-                task_controls::set_task_preference,
-                task_controls::fork_codex_task,
-                task_controls::fork_session_at_message,
-                task_controls::get_message_content,
-                task_controls::archive_codex_task,
-                task_controls::export_task,
-                task_controls::save_task_export,
-                task_controls::start_harness_terminal,
-                list_projects,
-                add_project,
-                remove_project,
-                relink_project,
-                list_sessions,
-                pin_session,
-                reorder_sessions,
-                get_task,
-                configure_window_appearance,
-                create_session,
-                create_board_task,
-                update_task_details,
-                set_task_stage,
-                start_task,
-                configure_session,
-                set_reasoning_effort,
-                update_session,
-                delete_session_with_attachment_cleanup,
-                chats::chat_create,
-                chats::chat_cleanup,
-                get_messages,
-                turn_changes::turn_change_diff,
-                turn_changes::turn_change_summary,
-                list_subagents,
-                get_subagent,
-                send_message,
-                list_slash_commands,
-                recipes_list,
-                recipes_save,
-                recipes_delete,
-                recipes_dry_run,
-                providers::acp::provider_check_connection,
-                resolve_slash_command,
-                stop_session,
-                respond_approval,
-                respond_user_input,
-                list_agent_integrations,
-                list_app_tools,
-                open_external_url,
-                agent_tools::agent_ui_request_active,
-                agent_tools::resolve_agent_ui_action,
-                browser::browser_inspect,
-                list_providers,
-                list_provider_models,
-                git_status,
-                git_diff,
-                jj_status,
-                jj_diff,
-                jj_describe,
-                jj_new,
-                jj_commit,
-                jj_log,
-                git_stage,
-                git_commit,
-                git_branches,
-                git_switch_branch,
-                git_push,
-                create_worktree,
-                attach_worktree,
-                worktree_status,
-                remove_worktree,
-                merge_worktree,
-                recreate_worktree,
-                github_status,
-                github_repos,
-                project_icon,
-                github_repo_pulls,
-                github_repo_issues,
-                github_repo_runs,
-                github_run_details,
-                github_project_repos,
-                github_clone_repo,
-                github_search,
-                github_issues,
-                github_resolve,
-                github_refresh_links,
-                github_create_pull_request,
-                github_pull_request,
-                github_pull_request_diff,
-                github_merge_pull_request,
-                github_detect_pull_request,
-                github_link_pull_request,
-                simulator::commands::simulator_status,
-                simulator::commands::simulator_select,
-                simulator::commands::simulator_create_duo,
-                simulator::commands::simulator_pose,
-                simulator::commands::simulator_power,
-                simulator::commands::simulator_frame,
-                simulator::commands::simulator_input,
-                simulator::commands::simulator_appearance,
-                simulator::commands::simulator_capture,
-                simulator::android_setup::android_setup,
-                vm::commands::vm_status,
-                vm::commands::vm_show,
-                vm::commands::vm_create,
-                vm::commands::vm_power,
-                vm::commands::vm_frame,
-                vm::commands::vm_input,
-                vm::commands::vm_desktop,
-                vm::setup::vm_setup,
-                cloud::commands::cloud_connections,
-                cloud::commands::cloud_connect,
-                cloud::commands::cloud_disconnect,
-                cloud::commands::cloud_set_inherit_environment,
-                cloud::commands::cloud_setup_sandboxes,
-                cloud::commands::cloud_instabox_images,
-                cloud::commands::cloud_instabox_set_image,
-                cloud::commands::cloud_machines,
-                cloud::commands::cloud_create,
-                cloud::commands::cloud_power,
-                cloud::commands::cloud_frame,
-                cloud::commands::cloud_input,
-                vsix_themes::themes_list,
-                vsix_themes::theme_import,
-                vsix_themes::theme_install,
-                vsix_themes::theme_remove,
-                token_saver::token_saver_tools,
-                token_saver::token_saver_install,
-                task_usage::task_token_usage,
-                skills::skills_list,
-                skills::skills_import_folder,
-                skills::skills_import_github,
-                skills::skills_activate,
-                skills::skills_deactivate,
-                skills::skills_matrix,
-                skills::skills_scan,
-                skills::skills_remove,
-                skills::skills_catalogs,
-                skills::skills_catalog_add,
-                skills::skills_catalog_refresh,
-                skills::skills_catalog_state,
-                skills::skills_catalog_import,
-                skills::skills_discover,
-                set_task_link,
-                import_prompt_image,
-                read_clipboard_image,
-                prompt_image,
-                reveal_path,
-                read_document,
-                dragged_file_paths,
-                describe_folder,
-                list_files,
-                search_files,
-                search_text,
-                read_file,
-                read_document_file,
-                design::design_list,
-                design::design_read,
-                design::design_comments,
-                design::design_save_comments,
-                progress::progress_list,
-                progress::progress_media,
-                progress::progress_thumb,
-                progress::progress_clear,
-                workspace_image,
-                resolve_workspace_files,
-                prepare_file_preview,
-                get_run_script,
-                get_run_script_preview,
-                run_turn_checks,
-                start_run_script_terminal,
-                start_terminal,
-                write_terminal,
-                resize_terminal,
-                close_terminal,
-                get_terminal_activity,
-                get_terminal_preferences,
-                get_metrics,
-                list_local_servers,
-                jev::jev_configuration,
-                jev::jev_save_configuration,
-                jev::jev_decision_models,
-                jev::jev_doctor,
-                jev::jev_install_runtime,
-                jev::jev_start,
-                jev::jev_watch_run,
-                jev::jev_cancel,
-                jev::jev_list_runs,
-                jev::jev_read_run,
-                jev_decisions::jev_assist_prepare,
-                jev_decisions::jev_assist_run,
-                jev_decisions::jev_assist_list,
-                jev_decisions::jev_assist_save_rules,
-                browser::browser_open,
-                browser::browser_bounds,
-                browser::browser_action,
-                browser::browser_pick,
-                browser::browser_capture,
-                browser::browser_close
-            ];
-            handler(invoke)
+            main_invoke_handler(invoke)
         })
-        .build(app_context())
+        .build(context)
         .expect("Failed to launch PandaCode");
     app.run(on_run_event);
 }

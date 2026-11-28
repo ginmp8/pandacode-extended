@@ -6,6 +6,7 @@ export function escape(value: unknown): string {
 const paths: Record<string, string> = {
   images: '<rect x="6" y="3" width="15" height="15" rx="2"/><path d="M3 7v12a2 2 0 0 0 2 2h12M6 14l4-4 5 5 3-3 3 3"/><circle cx="16" cy="7" r="1"/>',
   play: '<path d="m8 4 12 8-12 8Z"/>',
+  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
   board: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/>',
   chat: '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -71,6 +72,8 @@ const paths: Record<string, string> = {
   circle: '<circle cx="12" cy="12" r="8"/>',
   line: '<path d="m5 19 14-14"/>',
   minimize: '<path d="M5 12h14"/>',
+  maximize: '<path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/>',
+  restore: '<path d="M9 3v6H3M15 3v6h6M3 15h6v6M21 15h-6v6"/>',
   pin: '<path d="m16 3 5 5-4 2-3 5-2-2-6 6m3-9L7 8l5-3Z"/>',
   'arrow-right': '<path d="M5 12h14m-6-6 6 6-6 6"/>',
   text: '<path d="M5 6h14M12 6v14m-4 0h8"/>',
@@ -173,7 +176,14 @@ async function unsafeHtml(enriched: Modules['enriched'], value: string): Promise
     fallback ??= import('marked').then(m => {
       const links = new m.Renderer(); const renderLink = links.link;
       links.link = function (token) { return renderLink.call(this, { ...token, href: workspaceHref(token.href) }); };
-      return (text: string) => m.marked.parse(text, { renderer: links });
+      return async (text: string) => {
+        // Match the primary renderer; this inert template is sanitized by the caller.
+        const template = document.createElement('template');
+        template.innerHTML = await m.marked.parse(text, { renderer: links });
+        for (const node of template.content.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,th,td,summary')) node.setAttribute('dir', 'auto');
+        for (const node of template.content.querySelectorAll('pre,code')) node.setAttribute('dir', 'ltr');
+        return template.innerHTML;
+      };
     });
     return (await fallback)(value);
   }
@@ -220,18 +230,42 @@ function pendingView(value: string, html: string): string {
   const at = html.lastIndexOf('<pandacode-ui>');
   return at < 0 ? html : `${html.slice(0, at)}<pandacode-ui class="pending">${html.slice(at + 14)}`;
 }
-export async function markdown(target: HTMLElement, value: string, scroll?: HTMLElement): Promise<void> {
+/** `deferRaw`: no raw-text flash before the HTML (a long folded reply formatted as it nears the reader, whose raw text
+ *  would lay out unclamped above them); `afterWrite`: runs right after the HTML is written, inside the held place (the
+ *  reply's clamp, turn-card.ts syncReplyClamp), so the row lands at its final height in one anchored write. */
+export type MarkdownOptions = { deferRaw?: boolean; afterWrite?: () => void };
+/** The latest paint asked of each target: an older one finishing late writes nothing. */
+const paints = new WeakMap<HTMLElement, symbol>();
+export async function markdown(target: HTMLElement, value: string, scroll?: HTMLElement, options?: MarkdownOptions): Promise<void> {
   captureFileLinkContext(target);
-  const known = rendered.get(value);
-  if (known !== undefined) { remember(value, known); target.innerHTML = known; decorateFileLinks(target, target); return; }
-  // A reply that just streamed is built from its stream's settled HTML, not parsed whole again.
-  const settling = settle(value);
-  target.textContent = value;
-  const html = (settling && await settling) ?? await markdownHtml(value);
-  if (target.isConnected && target.textContent === value) {
-    const restore = scroll ? preserveTranscriptPosition(scroll, target) : undefined;
+  const token = Symbol('paint');
+  paints.set(target, token);
+  const write = (html: string): void => {
     target.innerHTML = html;
     decorateFileLinks(target, target);
+    options?.afterWrite?.();
+  };
+  const known = rendered.get(value);
+  if (known !== undefined) {
+    remember(value, known);
+    const restore = scroll && target.isConnected ? preserveTranscriptPosition(scroll, target) : undefined;
+    write(known);
+    restore?.();
+    return;
+  }
+  // A reply that just streamed is built from its stream's settled HTML, not parsed whole again.
+  const settling = settle(value);
+  if (!options?.deferRaw) {
+    // Raw text first: in a row above a paused reader it would move their line on WebKit (no scroll anchoring) until the HTML lands.
+    const restoreRaw = scroll ? preserveTranscriptPosition(scroll, target) : undefined;
+    target.textContent = value;
+    restoreRaw?.();
+  }
+  const html = (settling && await settling) ?? await markdownHtml(value);
+  const current = options?.deferRaw ? paints.get(target) === token : target.textContent === value;
+  if (target.isConnected && current) {
+    const restore = scroll ? preserveTranscriptPosition(scroll, target) : undefined;
+    write(html);
     restore?.();
   }
 }

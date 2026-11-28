@@ -98,6 +98,7 @@ pub(super) fn parse_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
             .filter(|effort| efforts.iter().any(|option| option.id == *effort))
             .map(str::to_owned);
         models.push(ModelInfo {
+            speed_tiers: Vec::new(),
             name: model_text(entry["displayLabel"].as_str(), id, 160),
             description: model_text(entry["description"].as_str(), "", 200),
             id: id.into(),
@@ -184,6 +185,22 @@ fn mcp_servers(server: &Value) -> Value {
         .filter_map(|header| Some((header["name"].as_str()?.to_owned(), header["value"].clone())))
         .collect();
     json!({field(server, "name"): {"transport":"streamableHttp","url":server["url"],"headers":headers}})
+}
+
+/// MSP stdio `mcpServers` entry from an ACP `McpServerStdio` (an extra server such
+/// as Colab's). Optional, so a server that fails to start never blocks the session.
+fn stdio_mcp_server(server: &Value) -> Value {
+    let mut entry = json!({"transport":"stdio","command":server["command"],"args":server["args"],"mode":"optional"});
+    let env: serde_json::Map<String, Value> = server["env"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|var| Some((var["name"].as_str()?.to_owned(), var["value"].clone())))
+        .collect();
+    if !env.is_empty() {
+        entry["env"] = Value::Object(env);
+    }
+    entry
 }
 
 fn tool_status(status: &str) -> &'static str {
@@ -352,11 +369,15 @@ impl Protocol {
             INITIALIZE => {
                 step.write.push(json!({"jsonrpc":"2.0","method":"initialized"}));
                 let mut params = json!({"commandId":command_id()});
-                if let Some(server) = &self.mcp_server {
+                if self.mcp_server.is_some() || !self.extra_mcp_servers.is_empty() {
                     let granted = result["grantedCapabilities"].as_array().is_some_and(|c| c.iter().any(|c| c == "sessionMcp"));
                     if granted {
-                        params["config"] = json!({"mcpServers":mcp_servers(server)});
-                    } else if self.mcp_required {
+                        let mut servers = self.mcp_server.as_ref().map(mcp_servers).unwrap_or_else(|| json!({}));
+                        for extra in &self.extra_mcp_servers {
+                            servers[field(extra, "name")] = stdio_mcp_server(extra);
+                        }
+                        params["config"] = json!({"mcpServers":servers});
+                    } else if self.mcp_server.is_some() && self.mcp_required {
                         return Err("This Muse Code version cannot attach PandaCode's agent tools. Update Muse Code and retry.".into());
                     }
                 }
@@ -542,7 +563,16 @@ impl Protocol {
             .map(|command| format!("Run `{command}`"))
             .or_else(|| subject["path"].as_str().map(|path| format!("{} {path}", field(params, "toolName"))))
             .unwrap_or_else(|| format!("Allow {}?", field(params, "toolName")));
+        // Which decisions Muse offers, so a team worker's auto-approval can decline
+        // (and keep going) when there is no approve choice, instead of waiting.
+        let choices = json!({"approve": muse_choice(params, true).is_some(), "deny": muse_choice(params, false).is_some()});
         self.approval(value, label, step);
+        if let Some(event) = step.events.last_mut().filter(|event| event.kind == "approval") {
+            let data = event.data.get_or_insert_with(|| json!({}));
+            if let Some(data) = data.as_object_mut() {
+                data.insert("museChoices".into(), choices);
+            }
+        }
         Ok(())
     }
 
@@ -673,11 +703,7 @@ impl Protocol {
     /// the prompt stays open instead of sending an ID Muse would refuse.
     pub(super) fn muse_decide(&mut self, request: &Value, approved: bool) -> Option<Value> {
         let params = &request["params"];
-        let wanted: &[&str] = if approved { &["approved", "approvedForSession"] } else { &["denied", "abort"] };
-        let choice = wanted.iter().find_map(|decision| {
-            params["availableChoices"].as_array().into_iter().flatten()
-                .find(|c| c["decision"] == *decision && c["choiceId"].as_str().is_some_and(|id| !id.is_empty()))
-        })?;
+        let choice = muse_choice(params, approved)?;
         Some(self.muse_request("approval/decide", json!({
             "commandId":command_id(),"sessionId":params["sessionId"],"approvalId":params["approvalId"],
             "choiceId":choice["choiceId"],"requirementId":params["currentRequirementId"]
@@ -739,6 +765,15 @@ impl Protocol {
         }
         json!({"jsonrpc":"2.0","id":900,"method":"turn/interrupt","params":params})
     }
+}
+
+/// The offered one-time choice for approving or denying, if any.
+fn muse_choice(params: &Value, approved: bool) -> Option<&Value> {
+    let wanted: &[&str] = if approved { &["approved", "approvedForSession"] } else { &["denied", "abort"] };
+    wanted.iter().find_map(|decision| {
+        params["availableChoices"].as_array().into_iter().flatten()
+            .find(|c| c["decision"] == *decision && c["choiceId"].as_str().is_some_and(|id| !id.is_empty()))
+    })
 }
 
 #[cfg(test)]
@@ -1095,6 +1130,34 @@ mod tests {
     }
 
     #[test]
+    fn colab_mcp_rides_as_an_optional_stdio_session_server() {
+        let colab = super::super::mcp_host::acp_mcp_servers(&[super::super::mcp_host::Stdio::new(
+            super::super::mcp_host::COLAB_MCP,
+            "/bin/uvx".into(),
+            vec!["colab-mcp".into()],
+        )]);
+        let bridge = json!({"type":"http","name":"pandacode_architect","url":"http://127.0.0.1:9/mcp","headers":[{"name":"Authorization","value":"Bearer t"}]});
+        let start = |bridge: Option<Value>, extra: Vec<Value>| {
+            let mut p = Protocol::new(super::super::tests::config("muse"));
+            p.mcp_server = bridge;
+            p.extra_mcp_servers = extra;
+            p.receive(initialized()).unwrap().write[1].clone()
+        };
+        let with = start(Some(bridge.clone()), colab.clone());
+        let servers = &with["params"]["config"]["mcpServers"];
+        assert_eq!(servers["pandacode_architect"]["transport"], "streamableHttp");
+        assert_eq!(servers["colab-mcp"], json!({"transport":"stdio","command":"/bin/uvx","args":["colab-mcp"],"mode":"optional"}));
+        // Colab alone still attaches.
+        let alone = start(None, colab);
+        assert_eq!(alone["params"]["config"]["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(alone["params"]["config"]["mcpServers"]["colab-mcp"]["transport"], "stdio");
+        // Off by default: the session carries exactly the bridge, and nothing without one.
+        let without = start(Some(bridge.clone()), Vec::new());
+        assert_eq!(without["params"]["config"], json!({"mcpServers":mcp_servers(&bridge)}));
+        assert!(start(None, Vec::new())["params"].get("config").is_none());
+    }
+
+    #[test]
     fn resume_reattaches_pandacode_tools_as_session_mcp() {
         let mut cfg = super::super::tests::config("muse");
         cfg.resume_id = Some(SESSION_ID.into());
@@ -1135,6 +1198,22 @@ mod tests {
         assert!(p.muse_user_input(&id, json!({"answers":{"which-fruits":["Apple","Banana"]}})).is_err());
         let step = p.muse_user_input(&id, json!({"answers":{"which-fruits":["Banana"]}})).unwrap();
         assert_eq!(step.write[0]["params"]["answers"], json!([{"questionId":"which-fruits","selectedLabel":"Banana"}]));
+    }
+
+    #[test]
+    fn approval_events_report_which_decisions_are_offered() {
+        let (mut p, _) = started("ask", "default", false);
+        let event = p.receive(approval_request()).unwrap().events.remove(0);
+        assert_eq!(event.data.unwrap()["museChoices"], json!({"approve":true,"deny":true}));
+        // Recorded choices with only a reject: a worker declines and Muse continues.
+        let mut reject_only = approval_request();
+        reject_only["params"]["availableChoices"] = json!([{"choiceId":"abort","label":"Reject","decision":"abort","scope":"once","acceptsFeedback":true}]);
+        let (mut p, _) = started("ask", "default", false);
+        let event = p.receive(reject_only).unwrap().events.remove(0);
+        assert_eq!(event.data.as_ref().unwrap()["museChoices"], json!({"approve":false,"deny":true}));
+        let id = event.request_id.unwrap();
+        assert_eq!(p.approval_step(&id, false).write[0]["params"]["choiceId"], "abort");
+        assert!(!p.pending.contains_key(&id));
     }
 
     #[test]

@@ -1,11 +1,15 @@
 import './settings.css';
+import { mountSkillManager } from './skill-manager';
+import type { SkillManagerHost } from './skill-manager-model';
 import { mountProviderReadiness } from './provider-readiness';
 import { escape, icon } from './dom';
 import { infoMark } from './tooltip';
 import { providerLogo } from './provider-logos';
 import { uiSizeControls } from './ui-size';
+import { mountReadingWidthControl, readingWidthControl } from './reading-width';
 import type { Project, Provider, ProviderId } from './types';
 import { mountOverlaySettings } from './overlay-settings';
+import { mountVoiceSettings } from './voice-settings';
 import { mountSupportDetails } from './support-settings';
 import { aboutSettingsHtml, mountAboutSettings } from './about-settings';
 import { mountResourceUsage, resourceUsageHtml } from './resource-usage-settings';
@@ -13,11 +17,12 @@ import { mountModelRouting } from './model-routing';
 import { mountAgentTeams, type AgentTeamsOptions } from './agent-teams';
 import { mountCloudSettings, type CloudSettingsHost } from './cloud-settings';
 import { mountSkillsLibrary, type SkillsLibraryHost } from './skills-library';
-import { call, subscribe } from './bridge';
+import { call, subscribe, webMode } from './bridge';
 import { settleIn, trackSegment } from './motion';
 import { mount as mountCapabilities } from './capabilities-panel';
 import { mountRemoteSettings } from './remote-settings';
 import { mountFeatureControls } from './feature-controls';
+import { mountWebServerSettings, type WebServerHost } from './web-server-settings';
 import { mountSchedulesSettings } from './schedules-settings';
 import { appUpdates } from './app-updates';
 import type { RemoteHost } from './remote-types';
@@ -25,6 +30,8 @@ import type { AgentsDockPreferences } from './agents-dock';
 import { SECTIONS, type SettingsPage, type SettingsSection } from './settings-sections';
 import { mountRecommended } from './recommended-settings';
 import { enabled as turnChecksEnabled } from './turn-checks';
+import { crashRestartSettingsHtml, mountCrashRestartSettings, type KeepDrafts } from './crash-restart-settings';
+import { setStillSkyEnabled, stillSkyEnabled } from './sky-window';
 
 /** Panels that live elsewhere and are embedded here: each mounts into a host and returns its cleanup. */
 type Embed = (host: HTMLElement) => Promise<() => void>;
@@ -44,6 +51,10 @@ interface SettingsOptions {
   turnChecks: boolean;
   section?: SettingsSection;
   discover(): Promise<Provider[]>;
+  /** True while this harness's version is still being probed: installed with no version, it says "Checking…". */
+  versionPending?(id: Provider['id']): boolean;
+  /** True until the real harness list has answered: rows are the last launch's, so none is called missing yet. */
+  listPending?(): boolean;
   /** Mounts the optional GitHub row; returns its cleanup. */
   github?(host: HTMLElement): () => void;
   /** Projects listed under General; remove() rejects with the native refusal text. */
@@ -55,19 +66,28 @@ interface SettingsOptions {
   /** Cloud sandbox connections (Daytona, Cloudflare, AWS). */
   cloud?: CloudSettingsHost;
   /** Skills library and rules registry. */
-  skills?: SkillsLibraryHost;
+  skills?: SkillsLibraryHost & Pick<SkillManagerHost, 'activeProject'>;
   /** PandaCode Connect: sign-in, remote control and devices. */
   remote?: RemoteHost;
   embed: { colors: Embed; wallpapers: Embed; providerConnections: Embed; openCodeModels: Embed; harnessPrivacy: Embed };
+  /** Settings › General › Crash recovery: removes the saved composer drafts. */
+  clearDrafts?(): void;
+  /** Settings › General › Crash recovery: Keep unsent drafts. */
+  keepDrafts?: KeepDrafts;
   /** Leaves Settings for the workspace. */
   close(): void;
 }
-export interface SettingsView { show(section: SettingsSection): void; dispose(): void }
+export interface SettingsView {
+  show(section: SettingsSection): void;
+  /** Agents rows follow a changed harness list (versions reported later) in place: open rows stay open. */
+  providersChanged(providers: Provider[]): void;
+  dispose(): void;
+}
 
 const sectionOf = (page: SettingsPage) => SECTIONS.find(section => section.pages.some(item => item.id === page))!;
 
 /** Key-based plans that run through Claude Code; they are set up under Providers, not listed as agents. */
-const PLANS = new Set<ProviderId>(['glm', 'mimo']);
+const PLANS = new Set<ProviderId>(['glm', 'mimo', 'alibaba']);
 
 /** A row: title, its control, then the info mark named after it (after the control in Tab order); the help's
  * text stays in the DOM for screen readers. */
@@ -139,11 +159,14 @@ function sectionHtml(id: SettingsPage, options: SettingsOptions): string {
   const defaultName = options.providers.find(provider => provider.id === options.defaultProvider)?.name ?? options.defaultProvider;
   switch (id) {
     case 'recommended': return '<div id="recommended-settings"></div>';
+    case 'voice': return '<div id="voice-settings"></div>';
     case 'general': return `<div class="settings-group">${uiSizeControls()}${switchRow('compact-mode', 'Compact conversation', '', options.compact)}${switchRow('expand-tool-activity', 'Expand tool activity', '', options.activityExpanded)}</div>
-      <h3 class="settings-heading">Quick launcher</h3><div id="launcher-settings"></div><h3 class="settings-heading">Running agents widget</h3><div id="agents-dock-settings"></div>${options.projects ? '<h3 class="settings-heading">Projects</h3><div id="projects-settings" class="settings-group"></div>' : ''}`;
+      <h3 class="settings-heading">Quick launcher</h3><div id="launcher-settings"></div><h3 class="settings-heading">Running agents widget</h3><div id="agents-dock-settings"></div><h3 class="settings-heading">Crash recovery</h3>${crashRestartSettingsHtml()}${options.projects ? '<h3 class="settings-heading">Projects</h3><div id="projects-settings" class="settings-group"></div>' : ''}`;
     case 'appearance': return `<div class="settings-group">
         ${settingRow('Theme', `<button type="button" class="secondary-button" data-action="toggle-theme">${icon(options.theme === 'dark' ? 'sun' : 'moon')}Use ${options.theme === 'dark' ? 'light' : 'dark'}</button>`, 'Imported VS Code themes keep their own.')}
         ${switchRow('daily-wallpapers', 'Wallpapers', 'Off, the thread shows a live sky that follows the time of day.', options.wallpapers)}
+        ${switchRow('still-sky', 'Still sky', 'Keep the live sky as a still frame without animating clouds or pointer motion.', stillSkyEnabled())}
+        ${settingRow('Reading width', readingWidthControl(), 'Comfortable keeps thread lines near 100 characters. Wide fits more code and tables, at longer lines.')}
       </div>
       <h3 class="settings-heading">Colors</h3><div class="settings-embed settings-colors" data-embed="colors"></div>
       <div class="settings-wallpapers" ${options.wallpapers ? '' : 'hidden'}><h3 class="settings-heading">Wallpapers</h3><div class="settings-embed" data-embed="wallpapers"></div></div>`;
@@ -168,9 +191,10 @@ function sectionHtml(id: SettingsPage, options: SettingsOptions): string {
       ${fold('Capabilities and cache', '<div id="capabilities-settings"></div>')}`;
     case 'schedules': return '<div id="schedules-settings"></div>';
     case 'features': return '<div id="feature-controls-settings"></div>';
-    case 'skills': return '<div id="skills-library"></div>';
+    case 'skills': return '<div id="skill-manager"></div>';
+    case 'rules': return '<div id="skills-library"></div>';
     case 'cloud': return '<div id="cloud-settings"></div>';
-    case 'remote': return '<div id="remote-settings"></div>';
+    case 'remote': return '<div id="remote-settings"></div><h3 class="settings-heading">Web access</h3><div id="web-server-settings"></div><p class="web-server-notice" role="status" aria-live="polite"></p><p class="web-server-notice web-server-notice-error" role="alert"></p>';
     case 'github': return '<div id="github-settings"></div>';
     case 'about': return `${aboutSettingsHtml()}${resourceUsageHtml()}
       <div class="settings-group settings-support"><div class="setting-row"><div><strong>Help & support</strong></div><button type="button" class="secondary-button" data-action="support">Open issues${icon('forward')}</button></div><details class="support-details"><summary>App details for support${icon('chevron')}</summary><p>Only the app version, platform, and architecture. Nothing is sent automatically.</p><textarea aria-label="App details for support" rows="3" readonly spellcheck="false"></textarea><div class="support-details-actions"><button type="button" class="secondary-button support-copy" disabled>${icon('copy')}Copy app details</button><button type="button" class="secondary-button support-retry" hidden>Try again</button></div><p role="status" aria-live="polite"></p></details></div>`;
@@ -223,9 +247,17 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
       row.querySelector('strong')!.textContent = provider.name;
       row.querySelector('summary')!.setAttribute('aria-label', `${provider.name} details, ${provider.installed ? 'Installed' : 'Not installed'}`);
       row.querySelector('.provider-availability')!.classList.toggle('available', provider.installed);
-      row.querySelector('.settings-installed')!.textContent = provider.installed ? (provider.id === 'antigravity' ? 'ACP installed' : 'Installed') : 'Not installed';
-      row.querySelector('.settings-provider-version')!.textContent = provider.version || 'Not reported';
-      row.querySelector('code')!.textContent = provider.path || 'Install the agent, then refresh.';
+      // `providers.rs` reports "ACP" only for the standalone server binary; an `agy` CLI that
+      // answers no version reports "", so it reads as any other installed agent.
+      const antigravityAcpOnly = provider.id === 'antigravity' && provider.version.trim() === 'ACP';
+      row.querySelector('.settings-installed')!.textContent = provider.installed ? (antigravityAcpOnly ? 'ACP installed' : 'Installed') : 'Not installed';
+      // The last launch's installed harness, before the real list answers: pending, never "Install the agent".
+      const listing = provider.installed && !provider.path && Boolean(options.listPending?.());
+      const version = row.querySelector('.settings-provider-version')!;
+      const versionText = provider.version || (provider.installed && (listing || options.versionPending?.(provider.id)) ? 'Checking…' : 'Not reported');
+      if (version.textContent !== versionText) version.textContent = versionText;
+      const location = row.querySelector('code')!, locationText = provider.path || (listing ? 'Checking…' : 'Install the agent, then refresh.');
+      if (location.textContent !== locationText) location.textContent = locationText;
       if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null);
       rows.delete(provider.id);
     }
@@ -294,6 +326,43 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
     };
   };
   let recommended: ReturnType<typeof mountRecommended> | undefined;
+  let routingCleanup: (() => void) | undefined;
+  let routingKey = '';
+  let teamsCleanup: (() => void) | undefined;
+  let teamsKey = '';
+  const providerRosterKey = (all: Provider[]) => options.listPending?.()
+    ? 'pending'
+    : `ready:${all.map(p => `${p.id}:${p.installed ? 1 : 0}:${p.name}`).join('\n')}`;
+
+  function mountRouting(): void {
+    if (!options.teams || !mounted.has('routing')) return;
+    const slot = panels.get('routing')!.querySelector<HTMLElement>('#model-routing-settings')!;
+    const key = providerRosterKey(providersNow);
+    if (key === 'pending') {
+      if (!routingCleanup) slot.innerHTML = '<p class="dialog-loading">Loading…</p>';
+      return;
+    }
+    if (routingCleanup && routingKey === key) return;
+    routingCleanup?.();
+    routingCleanup = mountModelRouting(slot, { ...options.teams, providers: providersNow });
+    routingKey = key;
+  }
+
+  function mountTeams(): void {
+    if (!options.teams || !mounted.has('teams')) return;
+    const slot = panels.get('teams')!.querySelector<HTMLElement>('#agent-teams-settings')!;
+    const key = providerRosterKey(providersNow);
+    if (key === 'pending') {
+      if (!teamsCleanup) slot.innerHTML = '<p class="dialog-loading">Loading…</p>';
+      return;
+    }
+    if (teamsCleanup && teamsKey === key) return;
+    // Keep an open team edit form intact until the editor closes or the tab is revisited.
+    if (teamsCleanup && slot.querySelector('.agent-team-editor:not([hidden])')) return;
+    teamsCleanup?.();
+    teamsCleanup = mountAgentTeams(slot, { ...options.teams, providers: providersNow });
+    teamsKey = key;
+  }
 
   /** A group's live parts mount the first time it opens, and stay mounted while Settings is open. */
   function mountSection(id: SettingsPage): void {
@@ -304,22 +373,62 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
       recommended = mountRecommended(panel.querySelector<HTMLElement>('#recommended-settings')!, knownRecommended, askRecommended);
       cleanups.push(() => recommended?.dispose());
     }
+    // In a browser tab the microphone would be this device's, not the PandaCode machine's: say so instead of failing voice_* calls.
+    if (id === 'voice' && webMode) panel.querySelector<HTMLElement>('#voice-settings')!.innerHTML = '<div class="settings-group"><div class="setting-row"><div><strong>Voice input</strong><small>Voice dictation uses the microphone on the PandaCode machine and is only available in the desktop app.</small></div></div></div>';
+    else if (id === 'voice') cleanups.push(mountVoiceSettings(panel.querySelector<HTMLElement>('#voice-settings')!));
+    if (id === 'appearance') {
+      const stillSky = panel.querySelector<HTMLInputElement>('#still-sky')!;
+      const row = stillSky.closest<HTMLElement>('.setting-row')!;
+      const wallpapers = panel.querySelector<HTMLElement>('.settings-wallpapers')!;
+      const syncVisibility = () => { row.hidden = !wallpapers.hidden; };
+      const observer = new MutationObserver(syncVisibility);
+      observer.observe(wallpapers, { attributes: true, attributeFilter: ['hidden'] });
+      syncVisibility();
+      cleanups.push(() => observer.disconnect());
+      stillSky.addEventListener('change', () => setStillSkyEnabled(stillSky.checked));
+      cleanups.push(mountReadingWidthControl(panel));
+    }
     if (id === 'general') {
-      cleanups.push(mountOverlaySettings(panel.querySelector<HTMLElement>('#launcher-settings')!));
+      // The global shortcut belongs to the desktop app; a browser tab would only show preview data.
+      if (webMode) panel.querySelector<HTMLElement>('#launcher-settings')!.innerHTML = '<div class="settings-group"><div class="setting-row"><div><strong>Quick launcher</strong><small>The global quick launcher shortcut is only available in the desktop app.</small></div></div></div>';
+      else cleanups.push(mountOverlaySettings(panel.querySelector<HTMLElement>('#launcher-settings')!));
       cleanups.push(mountAgentsDockSettings(panel.querySelector<HTMLElement>('#agents-dock-settings')!));
+      cleanups.push(mountCrashRestartSettings(panel.querySelector<HTMLElement>('#crash-restart-settings')!, options.clearDrafts, options.keepDrafts));
     }
     if (id === 'remote' && options.remote) cleanups.push(mountRemoteSettings(panel.querySelector<HTMLElement>('#remote-settings')!, options.remote));
+    if (id === 'remote') {
+      // Without the app's notifier: confirmations go to a polite status that clears itself; errors to an
+      // alert that stays until the next notice or until Settings closes.
+      const notice = panel.querySelector<HTMLElement>('.web-server-notice[role="status"]');
+      const alertNotice = panel.querySelector<HTMLElement>('.web-server-notice[role="alert"]');
+      let noticeTimer: number | undefined;
+      const clearNotices = () => { window.clearTimeout(noticeTimer); if (notice) notice.textContent = ''; if (alertNotice) alertNotice.textContent = ''; };
+      const inlineNotify = (text: string) => { clearNotices(); if (!notice) return; notice.textContent = text; noticeTimer = window.setTimeout(() => { notice.textContent = ''; }, 4000); };
+      // The danger tone goes on a leading icon; the message stays a text node in normal ink (never parsed as HTML).
+      const inlineError = (text: string) => {
+        clearNotices();
+        if (!alertNotice) return;
+        const mark = document.createElement('span');
+        mark.className = 'web-server-notice-icon'; mark.dataset.stateTone = 'danger'; mark.setAttribute('aria-hidden', 'true');
+        mark.innerHTML = icon('alert');
+        alertNotice.replaceChildren(mark, document.createTextNode(text));
+      };
+      cleanups.push(clearNotices);
+      const webHost: WebServerHost = options.remote ?? { call, listen: (_name, cb) => subscribe('web-server-changed', cb), notify: inlineNotify, notifyError: inlineError, openUrl: url => call('open_external_url', { url }) };
+      cleanups.push(mountWebServerSettings(panel.querySelector<HTMLElement>('#web-server-settings')!, webHost));
+    }
     if (id === 'general' && options.projects) cleanups.push(mountProjects(panel.querySelector<HTMLElement>('#projects-settings')!, options.projects));
     if (id === 'github' && options.github) cleanups.push(options.github(panel.querySelector<HTMLElement>('#github-settings')!));
-    if (id === 'routing' && options.teams) cleanups.push(mountModelRouting(panel.querySelector<HTMLElement>('#model-routing-settings')!, { ...options.teams, providers: options.providers }));
-    if (id === 'teams' && options.teams) cleanups.push(mountAgentTeams(panel.querySelector<HTMLElement>('#agent-teams-settings')!, { ...options.teams, providers: options.providers }));
+    if (id === 'routing' && options.teams) mountRouting();
+    if (id === 'teams' && options.teams) mountTeams();
     if (id === 'schedules') cleanups.push(mountSchedulesSettings(panel.querySelector<HTMLElement>('#schedules-settings')!, options.schedules ?? { openThread: () => {} }));
     if (id === 'tools') {
       const slot = panel.querySelector<HTMLElement>('#capabilities-settings')!;
       slot.closest('details')!.addEventListener('toggle', () => cleanups.push(mountCapabilities(slot, call)), { once: true });
     }
     if (id === 'features') cleanups.push(mountFeatureControls(panel.querySelector<HTMLElement>('#feature-controls-settings')!));
-    if (id === 'skills' && options.skills) cleanups.push(mountSkillsLibrary(panel.querySelector<HTMLElement>('#skills-library')!, options.skills));
+    if (id === 'skills' && options.skills) cleanups.push(mountSkillManager(panel.querySelector<HTMLElement>('#skill-manager')!, options.skills));
+    if (id === 'rules' && options.skills) cleanups.push(mountSkillsLibrary(panel.querySelector<HTMLElement>('#skills-library')!, options.skills));
     if (id === 'cloud' && options.cloud) cleanups.push(mountCloudSettings(panel.querySelector<HTMLElement>('#cloud-settings')!, options.cloud));
     if (id === 'about') {
       cleanups.push(mountSupportDetails(panel.querySelector<HTMLDetailsElement>('.support-details')!));
@@ -352,6 +461,7 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
     subnavs.forEach(subnav => { subnav.hidden = subnav.dataset.sectionPages !== section.id; });
     panels.forEach((panel, key) => { panel.hidden = key !== page; });
     if (page === 'recommended' && mounted.has(page)) recommended?.refresh();
+    if (page === 'teams' && mounted.has(page)) mountTeams();
     mountSection(page);
     const selected = pageTabs.find(tab => tab.dataset.section === page);
     if (selected) trackSegment(selected.parentElement!, selected);
@@ -405,9 +515,18 @@ export function mountSettings(host: HTMLElement, options: SettingsOptions): Sett
   show(options.section ?? 'recommended', true);
   return {
     show: id => show(id, true),
+    providersChanged: providers => {
+      if (disposed) return;
+      updateProviders(providers);
+      recommended?.refresh();
+      mountRouting();
+      mountTeams();
+    },
     dispose: () => {
       if (disposed) return;
       disposed = true; readinessCleanup.forEach(cleanup => cleanup());
+      routingCleanup?.(); routingCleanup = undefined;
+      teamsCleanup?.(); teamsCleanup = undefined;
       cleanups.forEach(cleanup => cleanup());
       host.removeEventListener('click', click); host.removeEventListener('keydown', keydown);
       refreshButton.removeEventListener('click', refresh);

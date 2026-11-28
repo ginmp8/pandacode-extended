@@ -1,4 +1,4 @@
-import { call, preview } from './bridge';
+import { call, nativeDesktop } from './bridge';
 import { isMac } from './platform';
 
 type AppearancePreferences = { reducedTransparency: boolean; increasedContrast: boolean; darkMode: boolean };
@@ -7,11 +7,14 @@ type ConfigureAppearance = (preferences: AppearancePreferences) => Promise<Nativ
 
 /** One native material, refreshed only for preferences or window activation. */
 export function initializeNativeAppearance(
-  configure: ConfigureAppearance = preferences => call('configure_window_appearance', preferences),
+  configure?: ConfigureAppearance,
 ): () => void {
   const root = document.documentElement;
   // Reserve native window controls before appearance IPC, including its solid fallback.
-  root.dataset.nativePlatform = !preview && isMac ? 'macos' : 'other';
+  root.dataset.nativePlatform = nativeDesktop && isMac ? 'macos' : 'other';
+  // Browser tabs have no native window to configure: an opaque surface, no traffic-light gutter.
+  if (!nativeDesktop && !configure) { root.dataset.nativeMaterial = 'solid'; return () => { delete root.dataset.nativeMaterial; delete root.dataset.nativePlatform; }; }
+  const apply: ConfigureAppearance = configure ?? (preferences => call('configure_window_appearance', preferences));
   const transparency = matchMedia('(prefers-reduced-transparency: reduce)');
   const contrast = matchMedia('(prefers-contrast: more)');
   let disposed = false, busy = false, dirty = false;
@@ -32,7 +35,7 @@ export function initializeNativeAppearance(
         dirty = false;
         const requested = preferences();
         try {
-          const result = await configure(requested);
+          const result = await apply(requested);
           if (disposed || dirty) continue;
           root.dataset.nativePlatform = result.platform;
           root.dataset.nativeMaterial = result.platform === 'macos'

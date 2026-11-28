@@ -8,7 +8,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel only superseded pull_request runs; active push and manual runs remain intact for the release gate.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   dependency-audit:
     name: Dependency audit (npm lockfiles)
@@ -94,7 +95,11 @@ jobs:
   rust:
     name: Rust check and tests (Linux)
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # Tests and clippy, then the up-to-55-minute release smoke.
+    timeout-minutes: 120
+    env:
+      # Same x86_64 transcribe-cpp floor as the linux-x86_64 release row (see release.yml).
+      TRANSCRIBE_CMAKE_ARGS: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (Node 24 runtime)
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (Node 24 runtime)
@@ -106,15 +111,48 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Install Linux native dependencies
+        # Bound the apt step as in the upstream CI; retain the Extended mirror recovery.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils
+          # Avoid the runner's stalled Azure package mirror; keep all Tauri dependencies and tests.
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils libasound2-plugins
       # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
       - run: npm ci
       - run: npm run build
+      - name: Diagnose locked Rust dependencies without modifying committed sources
+        shell: bash
+        run: |
+          if cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null; then
+            exit 0
+          fi
+          # Update only entries that actually require reconciliation; do not globally re-resolve packages.
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          echo '--- BEGIN GENERATED CARGO LOCK DIFF ---'
+          git diff -- src-tauri/Cargo.lock
+          echo '--- END GENERATED CARGO LOCK DIFF ---'
+          exit 1
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
       - if: ${{ !cancelled() }}
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # CI runners have no sound card, so ALSA's default can't capture and the smoke would skip. A
+      # null default captures silence, and its hint makes cpal list `default` as the default input.
+      # ALSA plugins also list jack/oss without a server; the smoke validates dictation fallback.
+      - name: Null ALSA default input
+        run: printf '%s\n' 'pcm.!default { type null; hint { show on; description "CI null capture" } }' > ~/.asoundrc
+      # The real audio smoke under the release profile, as in rust-platforms.
+      - name: Real audio smoke (release profile)
+        timeout-minutes: 55
+        env:
+          PANDACODE_REQUIRE_REAL_MIC: '1'
+        shell: bash
+        # The exact filter can select zero tests. Require one passing release-audio smoke test.
+        # Bash propagates cargo failures through tee with -eo pipefail.
+        run: |
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/real-audio.log"
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/real-audio.log"
+          grep -q 'fell back to the default input' "$RUNNER_TEMP/real-audio.log"
 
   router:
     # x86_64 Linux builds without ONNX Runtime (see `panda_onnx` in src-tauri/build.rs), so Panda Router's
@@ -151,3 +189,90 @@ jobs:
           EOF
           echo "PANDA_ROUTER_ASSETS=$PWD/.panda-router" >> "$GITHUB_ENV"
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- panda_router model_routing
+
+  rust-platforms:
+    # Builds the Rust library (and transcribe-cpp, the native speech engine) on the release targets the
+    # Linux job does not cover, so a platform-only break shows up in CI instead of first at release time.
+    # Each row copies its release.yml build row: same runner and TRANSCRIBE_CMAKE_ARGS (see the comment
+    # there; an empty value adds no CMake arguments). Clippy covers the same targets as the Linux job;
+    # tests stay on Linux, except the release-profile real-audio smoke (as in the Linux job) on macOS,
+    # Windows x64 and Linux arm64. The Linux arm64 row installs the same native packages as the Linux job.
+    name: Rust clippy (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple silicon: the crate's build.rs already sets GGML_NATIVE=OFF on macOS.
+          - { os: macos-latest, target: darwin-aarch64, transcribe_cmake: '' }
+          # Intel Mac on its native runner, with the x86_64 SSE4.2/AVX/F16C floor.
+          - { os: macos-15-intel, target: darwin-x86_64, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          # Windows x64 on the release runner, with the baseline SSE4.2/AVX/F16C floor.
+          - { os: windows-2022, target: windows-x86_64, transcribe_cmake: '-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON' }
+          # Windows arm64 builds native (ggml refuses GGML_NATIVE=OFF with MSVC on ARM), as in release.yml:
+          # dotprod/i8mm from the runner, SVE and SME pinned off (platform.rs checks neither).
+          - { os: windows-11-arm, target: windows-aarch64, transcribe_cmake: '-DGGML_MACHINE_SUPPORTS_sve=OFF -DGGML_MACHINE_SUPPORTS_sme=OFF' }
+          # Linux arm64 pinned to plain ARMv8-A, never the runner's CPU.
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, transcribe_cmake: '-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      TRANSCRIBE_CMAKE_ARGS: ${{ matrix.transcribe_cmake }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with: { node-version: '22', cache: npm }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          # ARM64 ports DNS failures can leave partial APT indexes that cause stale-package 404s.
+          # Retry update and install together, requiring every index refresh to succeed.
+          for attempt in 1 2 3; do
+            if sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update &&
+               sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y libwebkit2gtk-4.1-dev libasound2-dev build-essential curl wget file libxdo-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb dbus-x11 xdg-utils libasound2-plugins; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
+      # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
+      - run: npm ci
+      # The release startup smoke flaked on windows-11-arm (cold Node starts), so its tests run there too.
+      - name: Release startup smoke tests (Windows arm64)
+        if: matrix.target == 'windows-aarch64'
+        run: node --test scripts/release/ci-startup-smoke.test.mjs
+      - run: npm run build
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # CI runners have no sound card, so ALSA's default can't capture and the smoke would skip. A
+      # null default captures silence, and its hint makes cpal list `default` as the default input.
+      # ALSA plugins also list jack/oss without a server; the smoke validates dictation fallback.
+      - name: Null ALSA default input
+        if: runner.os == 'Linux'
+        run: printf '%s\n' 'pcm.!default { type null; hint { show on; description "CI null capture" } }' > ~/.asoundrc
+      # The real audio stack under the shipped release profile: cpal 0.16's undefined behaviour only
+      # crashed optimised builds, so debug tests passed while the released app segfaulted.
+      # macOS and Linux require a recording; the Windows x64 runner may have no usable input, so there
+      # the smoke lists devices, opens the default if one exists, and passes without one.
+      - name: Real audio smoke (release profile)
+        if: runner.os == 'macOS' || matrix.target == 'windows-x86_64' || matrix.target == 'linux-aarch64'
+        # Upstream release smoke now allows 75 minutes for cold Intel builds.
+        timeout-minutes: 75
+        # macOS runners have virtual inputs (Null Audio Device, Apple Virtual Sound Device) and Linux
+        # has the null default above, so a runner with no input must fail instead of passing.
+        env:
+          PANDACODE_REQUIRE_REAL_MIC: ${{ runner.os != 'Windows' && '1' || '' }}
+        shell: bash
+        # The exact filter can select zero tests. Require one passing release-audio smoke test.
+        # Bash propagates cargo failures through tee with -eo pipefail.
+        run: |
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/real-audio.log"
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/real-audio.log"
+          if [ "$RUNNER_OS" = Linux ]; then grep -q 'fell back to the default input' "$RUNNER_TEMP/real-audio.log"; fi

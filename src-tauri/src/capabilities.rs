@@ -88,6 +88,7 @@ pub(crate) async fn capabilities_inventory(
     task_id: Option<String>,
 ) -> Result<Inventory, String> {
     let task_scoped = task_id.is_some();
+    let homes = Homes::resolved();
     let home = crate::agent_usage_providers::home()
         .ok_or("Could not locate the user config directory.")?;
     let cwd = workspace_for(&state, task_id.as_deref(), &home)?;
@@ -111,6 +112,7 @@ pub(crate) async fn capabilities_inventory(
             &harness.id,
             &home,
             task_scoped.then_some(cwd.as_path()),
+            &homes,
         ));
         let id = harness.id.clone();
         let cwd = cwd.clone();
@@ -386,10 +388,18 @@ fn parse_toml_mcp(harness: &str, config: &str, key: &str, source: &str) -> Vec<C
 }
 
 fn parse_claude_settings(settings: &Value) -> Vec<CapabilityEntry> {
+    parse_settings_hooks_and_plugins("claude", "~/.claude/settings.json", settings)
+}
+
+fn parse_settings_hooks_and_plugins(
+    harness: &str,
+    source: &str,
+    settings: &Value,
+) -> Vec<CapabilityEntry> {
     let mut entries = Vec::new();
     if let Some(hooks) = settings.get("hooks").and_then(Value::as_object) {
         for event in hooks.keys() {
-            if let Some(item) = entry("claude", "hook", event, "~/.claude/settings.json", None) {
+            if let Some(item) = entry(harness, "hook", event, source, None) {
                 entries.push(item);
             }
         }
@@ -405,9 +415,7 @@ fn parse_claude_settings(settings: &Value) -> Vec<CapabilityEntry> {
                             .unwrap_or(true)
                     });
                     if enabled {
-                        if let Some(item) =
-                            entry("claude", "plugin", name, "~/.claude/settings.json", None)
-                        {
+                        if let Some(item) = entry(harness, "plugin", name, source, None) {
                             entries.push(item);
                         }
                     }
@@ -420,9 +428,7 @@ fn parse_claude_settings(settings: &Value) -> Vec<CapabilityEntry> {
                         .or_else(|| plugin.get("name").and_then(Value::as_str))
                     {
                         if plugin.get("enabled").and_then(Value::as_bool) != Some(false) {
-                            if let Some(item) =
-                                entry("claude", "plugin", name, "~/.claude/settings.json", None)
-                            {
+                            if let Some(item) = entry(harness, "plugin", name, source, None) {
                                 entries.push(item);
                             }
                         }
@@ -435,14 +441,25 @@ fn parse_claude_settings(settings: &Value) -> Vec<CapabilityEntry> {
     entries
 }
 
+fn parse_antigravity_hooks(source: &str, hooks: &Value) -> Vec<CapabilityEntry> {
+    let Some(map) = hooks.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter(|(_, config)| config.get("enabled").and_then(Value::as_bool) != Some(false))
+        .filter_map(|(name, _)| entry("antigravity", "hook", name, source, None))
+        .collect()
+}
+
 fn scan_harness_configs(
     harness: &str,
     home: &Path,
     project: Option<&Path>,
+    homes: &Homes,
 ) -> Vec<CapabilityEntry> {
     let mut entries = Vec::new();
     match harness {
-        "claude" | "glm" | "mimo" => {
+        "claude" | "glm" | "mimo" | "alibaba" => {
             if let Some(value) = read_json(&home.join(".claude.json")) {
                 entries.extend(parse_mcp_json(
                     harness,
@@ -468,8 +485,9 @@ fn scan_harness_configs(
             }
         }
         "codex" => {
-            let config_dir = std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
+            let config_dir = homes
+                .codex
+                .clone()
                 .filter(|path| path.is_absolute())
                 .unwrap_or_else(|| home.join(".codex"));
             if let Some(config) = read_text(&config_dir.join("config.toml")) {
@@ -588,73 +606,55 @@ fn scan_harness_configs(
                 }
             }
         }
+        "antigravity" => {
+            let mut seen_mcp = std::collections::HashSet::new();
+            for (path, source) in [
+                (
+                    home.join(".gemini/config/mcp_config.json"),
+                    "~/.gemini/config/mcp_config.json",
+                ),
+                (
+                    home.join(".gemini/antigravity/mcp_config.json"),
+                    "~/.gemini/antigravity/mcp_config.json",
+                ),
+            ] {
+                if let Some(value) = read_json(&path) {
+                    for item in parse_mcp_json(harness, source, &value, "mcpServers") {
+                        if seen_mcp.insert(item.name.clone()) {
+                            entries.push(item);
+                        }
+                    }
+                }
+            }
+            if let Some(value) = read_json(&home.join(".gemini/antigravity-cli/settings.json")) {
+                const SOURCE: &str = "~/.gemini/antigravity-cli/settings.json";
+                for item in parse_mcp_json(harness, SOURCE, &value, "mcpServers") {
+                    if seen_mcp.insert(item.name.clone()) {
+                        entries.push(item);
+                    }
+                }
+                entries.extend(parse_settings_hooks_and_plugins(harness, SOURCE, &value));
+            }
+            if let Some(value) = read_json(&home.join(".gemini/config/hooks.json")) {
+                entries.extend(parse_antigravity_hooks("~/.gemini/config/hooks.json", &value));
+            }
+        }
         _ => {}
     }
-    entries.extend(scan_skill_dirs(harness, home, project));
+    entries.extend(scan_skill_dirs(harness, home, project, homes));
     entries
 }
 
-fn skill_roots(harness: &str, home: &Path, project: Option<&Path>) -> Vec<(PathBuf, &'static str)> {
-    let mut roots = Vec::new();
-    match harness {
-        "claude" | "glm" | "mimo" => {
-            roots.push((home.join(".claude/skills"), "~/.claude/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".claude/skills"), ".claude/skills"));
-            }
-        }
-        "codex" => {
-            roots.push((home.join(".codex/skills"), "~/.codex/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".agents/skills"), ".agents/skills"));
-            }
-        }
-        "opencode" => {
-            roots.push((
-                home.join(".config/opencode/skills"),
-                "~/.config/opencode/skills",
-            ));
-            if let Some(project) = project {
-                roots.push((project.join(".opencode/skills"), ".opencode/skills"));
-            }
-        }
-        "kimi" => {
-            roots.push((home.join(".kimi-code/skills"), "~/.kimi-code/skills"));
-            roots.push((home.join(".kimi/skills"), "~/.kimi/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".kimi/skills"), ".kimi/skills"));
-            }
-        }
-        "pi" | "omp" => {
-            roots.push((home.join(".pi/agent/skills"), "~/.pi/agent/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".pi/skills"), ".pi/skills"));
-            }
-        }
-        "cline" => {
-            roots.push((home.join(".cline/skills"), "~/.cline/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".cline/skills"), ".cline/skills"));
-                roots.push((project.join(".clinerules/skills"), ".clinerules/skills"));
-                roots.push((project.join(".claude/skills"), ".claude/skills"));
-            }
-        }
-        "deepseek" => {
-            roots.push((home.join(".dsh/skills"), "~/.dsh/skills"));
-            roots.push((home.join(".agents/skills"), "~/.agents/skills"));
-            if let Some(project) = project {
-                roots.push((project.join(".dsh/skills"), ".dsh/skills"));
-                roots.push((project.join(".agents/skills"), ".agents/skills"));
-            }
-        }
-        _ => {}
-    }
-    roots
-}
+use crate::skill_manager::roots::{skill_roots, Homes};
 
-fn scan_skill_dirs(harness: &str, home: &Path, project: Option<&Path>) -> Vec<CapabilityEntry> {
+fn scan_skill_dirs(
+    harness: &str,
+    home: &Path,
+    project: Option<&Path>,
+    homes: &Homes,
+) -> Vec<CapabilityEntry> {
     let mut entries = Vec::new();
-    for (root, source) in skill_roots(harness, home, project) {
+    for (root, source) in skill_roots(harness, home, project, homes) {
         let Ok(items) = fs::read_dir(root) else {
             continue;
         };
@@ -668,7 +668,7 @@ fn scan_skill_dirs(harness: &str, home: &Path, project: Option<&Path>) -> Vec<Ca
             let Some(name) = item.file_name().to_str().and_then(safe_label) else {
                 continue;
             };
-            if let Some(item) = entry(harness, "skill", &name, source, None) {
+            if let Some(item) = entry(harness, "skill", &name, &source, None) {
                 entries.push(item);
             }
         }
@@ -813,7 +813,7 @@ env = { API_KEY = "secret" }
         )
         .unwrap();
 
-        let entries = scan_harness_configs("claude", &home, Some(&project));
+        let entries = scan_harness_configs("claude", &home, Some(&project), &Homes::default());
         assert!(entries.iter().any(|item| item.name == "user-docs"));
         assert!(entries.iter().any(|item| item.name == "project-docs"));
         assert!(entries.iter().any(|item| item.name == "PreToolUse"));
@@ -858,7 +858,7 @@ env = { API_KEY = "secret" }
             "private prompt",
         )
         .unwrap();
-        let entries = scan_skill_dirs("claude", &home, Some(&project));
+        let entries = scan_skill_dirs("claude", &home, Some(&project), &Homes::default());
         assert!(entries.iter().any(|item| item.name == "review"));
         assert!(entries.iter().any(|item| item.name == "release-check"));
         assert!(!serde_json::to_string(&entries)
@@ -917,7 +917,7 @@ env = { API_KEY = "secret" }
         .unwrap();
         fs::create_dir_all(project.join(".cline/skills/code-review")).unwrap();
         fs::create_dir_all(project.join(".clinerules/skills/doc-gen")).unwrap();
-        let entries = scan_harness_configs("cline", &home, Some(&project));
+        let entries = scan_harness_configs("cline", &home, Some(&project), &Homes::default());
         let local_tools: Vec<_> = entries
             .iter()
             .filter(|item| item.harness == "cline" && item.kind == "mcp server" && item.name == "local-tool")
@@ -957,7 +957,7 @@ env = { API_KEY = "secret" }
 "#,
         )
         .unwrap();
-        let entries = scan_harness_configs("opencode", &home, None);
+        let entries = scan_harness_configs("opencode", &home, None, &Homes::default());
         let server = entries
             .iter()
             .find(|item| item.kind == "mcp server" && item.name == "context7")
@@ -977,7 +977,7 @@ env = { API_KEY = "secret" }
         fs::create_dir_all(home.join(".agents/skills/agents-skill")).unwrap();
         fs::create_dir_all(project.join(".dsh/skills/project-skill")).unwrap();
         fs::create_dir_all(project.join(".agents/skills/project-agents-skill")).unwrap();
-        let entries = scan_harness_configs("deepseek", &home, Some(&project));
+        let entries = scan_harness_configs("deepseek", &home, Some(&project), &Homes::default());
         let mut skills: Vec<_> = entries
             .iter()
             .filter(|item| item.harness == "deepseek" && item.kind == "skill")
@@ -990,5 +990,93 @@ env = { API_KEY = "secret" }
         );
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn capabilities_configured_account_skill_sources_omit_absolute_paths() {
+        let home = fixture_home("private-home");
+        let account = fixture_home("private-account");
+        fs::create_dir_all(account.join("skills/review")).unwrap();
+        let mut homes = Homes::default();
+        homes
+            .configured
+            .insert("claude".into(), vec![account.clone()]);
+        let entries = scan_skill_dirs("claude", &home, None, &homes);
+        assert_eq!(entries.len(), 1);
+        let json = serde_json::to_string(&entries).unwrap();
+        assert!(!json.contains(home.to_str().unwrap()));
+        assert!(!json.contains(account.to_str().unwrap()));
+        assert!(entries[0].source.contains("account 1"));
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
+    fn antigravity_mcp_hooks_and_settings_inventory_reads_configured_paths_without_secrets() {
+        let home = fixture_home("antigravity-home");
+        fs::create_dir_all(home.join(".gemini/config")).unwrap();
+        fs::create_dir_all(home.join(".gemini/antigravity")).unwrap();
+        fs::create_dir_all(home.join(".gemini/antigravity-cli")).unwrap();
+        fs::write(
+            home.join(".gemini/config/mcp_config.json"),
+            r#"{"mcpServers":{"primary-docs":{"command":"/opt/local/node","args":["SECRET"],"env":{"TOKEN":"SECRET"}},"remote-api":{"url":"https://mcp.private.test/mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join(".gemini/antigravity/mcp_config.json"),
+            r#"{"mcpServers":{"primary-docs":{"command":"legacy-node"},"legacy-tool":{"command":"python3"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join(".gemini/antigravity-cli/settings.json"),
+            r#"{"mcpServers":{"cli-tool":{"command":"npx","args":["SECRET"]}},"hooks":{"PreToolUse":[{"command":"SECRET"}]},"enabledPlugins":{"review@local":true,"disabled@local":false}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join(".gemini/config/hooks.json"),
+            r#"{"lint-checker":{"PostToolUse":[{"command":"SECRET"}]},"paused-hook":{"enabled":false,"PreToolUse":[]}}"#,
+        )
+        .unwrap();
+
+        let entries = scan_harness_configs("antigravity", &home, None, &Homes::default());
+        let primary: Vec<_> = entries
+            .iter()
+            .filter(|item| item.kind == "mcp server" && item.name == "primary-docs")
+            .collect();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].source, "~/.gemini/config/mcp_config.json");
+        assert_eq!(primary[0].command.as_deref(), Some("node"));
+        assert!(entries.iter().any(|item| {
+            item.kind == "mcp server" && item.name == "remote-api" && item.command.is_none()
+        }));
+        assert!(entries.iter().any(|item| {
+            item.kind == "mcp server"
+                && item.name == "legacy-tool"
+                && item.source == "~/.gemini/antigravity/mcp_config.json"
+        }));
+        assert!(entries.iter().any(|item| {
+            item.kind == "mcp server"
+                && item.name == "cli-tool"
+                && item.source == "~/.gemini/antigravity-cli/settings.json"
+        }));
+        assert!(entries
+            .iter()
+            .any(|item| item.kind == "hook" && item.name == "PreToolUse"));
+        assert!(entries.iter().any(|item| {
+            item.kind == "hook"
+                && item.name == "lint-checker"
+                && item.source == "~/.gemini/config/hooks.json"
+        }));
+        assert!(!entries.iter().any(|item| item.name == "paused-hook"));
+        assert!(entries
+            .iter()
+            .any(|item| item.kind == "plugin" && item.name == "review@local"));
+        assert!(!entries.iter().any(|item| item.name == "disabled@local"));
+
+        let serialized = serde_json::to_string(&entries).unwrap();
+        assert!(!serialized.contains("SECRET"));
+        assert!(!serialized.contains("mcp.private.test"));
+        assert!(!serialized.contains(home.to_str().unwrap()));
+        fs::remove_dir_all(home).unwrap();
     }
 }

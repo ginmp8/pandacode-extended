@@ -8,15 +8,17 @@
  * A Linux copy not started from an AppImage (unpacked, or a distro package) is never
  * installed over in place: it only reports the update. The request carries no personal
  * data. The browser preview never checks. */
-import { call, preview } from './bridge';
+import { call, nativeDesktop } from './bridge';
 import { CHECK_EVERY, downloadsOnItsOwn, parseUpdateMode, restartNow, updatePrompt, type UpdateMode, type UpdateState } from './app-updates-policy';
 import { PROJECT_LINKS } from './about-settings';
+import { errorText } from './error-text';
 export { describeUpdate, type UpdateMode, type UpdateState } from './app-updates-policy';
 
 export interface UpdatesHost {
   /** True while any agent is working; installing waits for it to finish. */
   busy(): boolean;
   notify(text: string): void;
+  notifyError?(text: string): void;
 }
 export interface AppUpdates {
   readonly state: UpdateState;
@@ -29,6 +31,8 @@ export interface AppUpdates {
   check(): Promise<void>;
   /** Installs a downloaded update and restarts; refuses while an agent is working. */
   restart(): Promise<void>;
+  /** Opens the release page for an update this copy can't install itself; a failure is reported through the host. */
+  openReleases(): Promise<void>;
 }
 
 const KEY = 'pandacode.autoUpdate';
@@ -41,15 +45,15 @@ export const appUpdates = (): AppUpdates | undefined => instance;
 
 export function startAppUpdates(host: UpdatesHost): AppUpdates {
   const listeners = new Set<() => void>();
-  let state: UpdateState = preview ? { kind: 'off' } : { kind: 'idle' };
+  let state: UpdateState = nativeDesktop ? { kind: 'idle' } : { kind: 'off' };
   let mode: UpdateMode = (() => { try { return parseUpdateMode(localStorage.getItem(KEY)); } catch { return 'off' as const; } })();
   // Until the native answer arrives nothing has been checked, so nothing can install.
   let installable = false, approved = false;
-  const known = preview ? Promise.resolve() : call<boolean>('app_update_install_supported')
+  const known = !nativeDesktop ? Promise.resolve() : call<boolean>('app_update_install_supported')
     .then(value => { installable = value; }, cause => { console.warn('Could not tell how PandaCode was installed:', cause); });
   let pending: Pending | null = null, lastCheck = 0, lastInput = Date.now(), checking: Promise<void> | null = null;
   const set = (next: UpdateState) => { state = next; listeners.forEach(listener => listener()); };
-  const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
+  const message = (cause: unknown) => errorText(cause, 'An unexpected error occurred.');
 
   async function download(update: Pending): Promise<void> {
     let total = 0, received = 0;
@@ -62,7 +66,7 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
   }
 
   async function run(): Promise<void> {
-    if (preview || state.kind === 'downloading' || state.kind === 'ready' || state.kind === 'installing') return;
+    if (!nativeDesktop || state.kind === 'downloading' || state.kind === 'ready' || state.kind === 'installing') return;
     lastCheck = Date.now();
     set({ kind: 'checking' });
     await known;
@@ -78,6 +82,11 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
     }
   }
   const check = () => (checking ??= run().finally(() => { checking = null; }));
+
+  async function openReleases(): Promise<void> {
+    try { await call('open_external_url', { url: PROJECT_LINKS.releases }); }
+    catch (cause) { (host.notifyError ?? host.notify)(`Couldn’t open the release page: ${message(cause)}`); }
+  }
 
   /** Re-signs the bundle with the stable local identity (macOS); never blocks an update. */
   async function localSign(): Promise<void> {
@@ -103,7 +112,7 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
     } catch (cause) { set({ kind: 'error', message: message(cause) }); }
   }
 
-  if (!preview) {
+  if (nativeDesktop) {
     const input = () => { lastInput = Date.now(); };
     for (const name of ['pointerdown', 'keydown', 'wheel']) addEventListener(name, input, { passive: true, capture: true });
     window.setTimeout(() => { if (mode !== 'off') void check(); }, FIRST_CHECK);
@@ -117,7 +126,7 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
     get state() { return state; },
     get mode() { return mode; },
     get installable() { return installable; },
-    supported: !preview,
+    supported: nativeDesktop,
     subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
     setMode(next) {
       mode = next;
@@ -128,6 +137,7 @@ export function startAppUpdates(host: UpdatesHost): AppUpdates {
     },
     check,
     restart,
+    openReleases,
   };
   return instance;
 }
@@ -155,7 +165,7 @@ export function mountUpdatePill(pill: HTMLButtonElement, updates: AppUpdates): v
   };
   updates.subscribe(paint);
   pill.addEventListener('click', () => {
-    if (updates.state.kind === 'available' && !updates.installable) void call('open_external_url', { url: PROJECT_LINKS.releases });
+    if (updates.state.kind === 'available' && !updates.installable) void updates.openReleases();
     else void updates.restart();
   });
   later.addEventListener('click', () => { if (updates.state.kind === 'available') dismissed = updates.state.version; paint(); });

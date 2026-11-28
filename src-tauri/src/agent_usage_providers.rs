@@ -21,12 +21,15 @@ const KIMI_GLOBAL_BASE: &str = "https://api.kimi.ai/coding/v1";
 const GLM_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 const OPENCODE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/user/balance";
+const COMMANDCODE_CREDITS_URL: &str = "https://api.commandcode.ai/alpha/billing/credits";
+const COMMANDCODE_USAGE_URL: &str = "https://api.commandcode.ai/alpha/usage/summary";
 
 pub(crate) async fn fetch(provider: &str) -> Usage {
     let mut usage = match provider {
         "kimi" => fetch_kimi().await,
         "glm" => fetch_glm().await,
         "deepseek" => fetch_deepseek().await,
+        "commandcode" => fetch_commandcode().await,
         "opencode" => fetch_opencode().await,
         "antigravity" => fetch_antigravity().await,
         _ => Usage::empty(
@@ -175,6 +178,59 @@ async fn fetch_deepseek() -> Usage {
         Ok(value) => parse_deepseek(&value),
         Err(error) => error.into_usage("deepseek"),
     }
+}
+
+/// Command Code's two billing reads: the plan windows and credits, and the
+/// billing-period spend that makes the monthly pool's used share. Only the
+/// bearer key and fixed URLs travel; neither response text is echoed.
+async fn fetch_commandcode() -> Usage {
+    // Same rule as GLM and DeepSeek: a failed background read cannot establish
+    // which key the harness uses, so it never falls back to the environment.
+    let saved = tokio::task::spawn_blocking(crate::provider_settings::commandcode_key).await;
+    let saved = saved.ok().and_then(Result::ok).ok_or(());
+    let api_key = match saved_key_or_environment(saved, env_key("COMMAND_CODE_API_KEY")) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return Usage::empty(
+                "commandcode",
+                "signedOut",
+                "Add your Command Code API key in Settings → Agents to read your plan usage.",
+            )
+        }
+        Err(()) => {
+            return Usage::empty(
+                "commandcode",
+                "unavailable",
+                "The configured Command Code account could not be verified without opening secure storage. View your plan usage in Command Code Studio.",
+            )
+        }
+    };
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => return error.into_usage("commandcode"),
+    };
+    let credits = match request_json(
+        client
+            .get(COMMANDCODE_CREDITS_URL)
+            .bearer_auth(&api_key)
+            .header("Accept", "application/json"),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return error.into_usage("commandcode"),
+    };
+    // The spend read only sizes the monthly window: a failure there must not
+    // hide the 5-hour and weekly limits that the credits response gave.
+    let summary = request_json(
+        client
+            .get(COMMANDCODE_USAGE_URL)
+            .bearer_auth(&api_key)
+            .header("Accept", "application/json"),
+    )
+    .await
+    .unwrap_or(Value::Null);
+    parse_commandcode(&credits, &summary)
 }
 
 #[derive(Deserialize)]
@@ -633,7 +689,11 @@ fn antigravity_command(
     timeout: Duration,
 ) -> Result<Vec<u8>, ()> {
     let mut command = crate::providers::provider_command("antigravity", path).map_err(|_|())?.into_std();
-    command.args(args).current_dir(cwd);
+    // Prevent agy auto-update notices from corrupting --version or /usage JSON on stdout.
+    command
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .args(args)
+        .current_dir(cwd);
     let output = crate::workspace::run_process(command, "Antigravity usage", limit, timeout)
         .map_err(|_| ())?;
     if !output.status.success() || output.stdout.truncated {
@@ -691,13 +751,56 @@ fn antigravity_report(path: &Path, cwd: &Path, timeout: Duration) -> Usage {
     }
 }
 
+fn is_agy_cli(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("agy"))
+}
+
+fn has_explicit_antigravity_credentials(
+    process_env: bool,
+    provider_env: &[(String, String)],
+) -> bool {
+    process_env
+        || provider_env
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON"))
+}
+
+/// `agy -p /usage` has no `--gemini-dir` flag and ignores `GEMINI_DIR`/`ANTIGRAVITY_GEMINI_DIR`,
+/// so a provider setting that moves the directory would report the default account's limits.
+fn has_custom_antigravity_gemini_dir(provider_env: &[(String, String)]) -> bool {
+    provider_env.iter().any(|(key, value)| {
+        !value.trim().is_empty()
+            && (key.eq_ignore_ascii_case("GEMINI_DIR")
+                || key.eq_ignore_ascii_case("ANTIGRAVITY_GEMINI_DIR"))
+    })
+}
+
+fn select_antigravity_cli(
+    antigravity_executable: Option<PathBuf>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    // Prefer the resolved Antigravity executable only when it is the agy CLI.
+    // The ACP server executable (e.g. agy_acp_server) must never be invoked in print mode.
+    antigravity_executable
+        .filter(|path| is_agy_cli(path))
+        .or_else(fallback)
+}
+
 async fn fetch_antigravity() -> Usage {
-    if std::env::var_os("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON").is_some() {
+    let provider_env = crate::provider_settings::environment("antigravity");
+    if has_explicit_antigravity_credentials(
+        std::env::var_os("ANTIGRAVITY_OAUTH_CREDENTIALS_JSON").is_some(),
+        &provider_env,
+    ) {
         return Usage::empty("antigravity", "unavailable", "This Antigravity connection uses explicit credentials that the CLI usage report cannot identify safely.");
     }
-    // Resolve the standalone CLI independently. The ACP server executable and
-    // its saved override must never be replaced or invoked in print mode.
-    let Some(path) = crate::providers::executable("agy") else {
+    if has_custom_antigravity_gemini_dir(&provider_env) {
+        return Usage::empty("antigravity", "unavailable", "Antigravity provider settings specify a custom GEMINI_DIR that the agy CLI usage report cannot target safely.");
+    }
+    let Some(path) = select_antigravity_cli(crate::providers::executable("antigravity"), || {
+        crate::providers::executable("agy")
+    }) else {
         return Usage::empty(
             "antigravity",
             "unsupported",
@@ -1007,6 +1110,82 @@ fn deepseek_amount(value: &Value) -> Option<String> {
         .then(|| text.to_owned())
 }
 
+/// A credits bucket: absent (or null) counts as zero, while a present but
+/// unreadable one leaves the whole pool unknown instead of guessing.
+fn commandcode_balance(credits: &Value, field: &str) -> Option<f64> {
+    match credits.get(field) {
+        None | Some(Value::Null) => Some(0.0),
+        Some(value) => number(value),
+    }
+}
+
+/// One window limit. A missing cap, a zero cap or unreadable numbers skip the
+/// window; `resetAt` is epoch milliseconds.
+fn commandcode_window(entry: &Value, label: &str) -> Option<UsageWindow> {
+    let cap = number(&entry["cap"]).filter(|cap| *cap > 0.0)?;
+    let used = number(&entry["used"])?;
+    Some(UsageWindow::new(
+        label,
+        (used / cap * 100.0).clamp(0.0, 100.0),
+        entry["resetAt"]
+            .as_i64()
+            .filter(|ms| *ms > 0)
+            .and_then(|ms| epoch_iso(ms / 1000)),
+    ))
+}
+
+fn parse_commandcode(credits: &Value, summary: &Value) -> Usage {
+    let limits = &credits["windowLimits"];
+    let mut windows: Vec<UsageWindow> = [("fiveHour", "5-hour"), ("weekly", "Weekly")]
+        .into_iter()
+        .filter_map(|(field, label)| commandcode_window(&limits[field], label))
+        .collect();
+    // Absent credit buckets count as zero, but a missing credits object leaves
+    // the pool itself unknown rather than inventing an empty one.
+    let remaining = credits
+        .get("credits")
+        .filter(|balance| balance.is_object())
+        .and_then(|balance| {
+            ["monthlyCredits", "purchasedCredits", "freeCredits"]
+                .into_iter()
+                .try_fold(0.0, |total, field| {
+                    commandcode_balance(balance, field).map(|value| total + value)
+                })
+        });
+    let used = number(&summary["totalCost"]).or_else(|| number(&summary["totalCredits"]));
+    let mut message = None;
+    match (
+        used.filter(|used| *used >= 0.0),
+        remaining.filter(|remaining| *remaining >= 0.0),
+    ) {
+        (Some(used), Some(remaining)) if used + remaining > 0.0 => {
+            windows.push(UsageWindow::new(
+                "Monthly credits",
+                (used / (used + remaining) * 100.0).clamp(0.0, 100.0),
+                None,
+            ));
+            // Show the pool in dollars and cents, as a statement would: the
+            // API reports fractional credits whose exact sum can straddle a cent.
+            let used_cents = (used * 100.0).round();
+            let pool_cents = used_cents + (remaining * 100.0).round();
+            message = Some(format!(
+                "${:.2} of ${:.2} credits used this billing period.",
+                used_cents / 100.0,
+                pool_cents / 100.0
+            ));
+        }
+        (None, Some(remaining)) => {
+            message = Some(format!("${:.2} credits left.", remaining));
+        }
+        _ => {}
+    }
+    let mut usage = ready("commandcode", windows, "Command Code billing API");
+    if usage.status == "ready" {
+        usage.message = message;
+    }
+    usage
+}
+
 fn parse_opencode(value: &Value) -> Usage {
     let mut windows = Vec::new();
     for (field, label) in [
@@ -1063,6 +1242,35 @@ pub(crate) fn epoch_iso(seconds: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The test child has isolated process variables and the test-only in-memory secret store.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn glm_quota_key_matches_harness_with_conflicting_saved_environment() {
+        const CHILD: &str = "PANDACODE_TEST_GLM_PRECEDENCE";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "agent_usage_providers::tests::glm_quota_key_matches_harness_with_conflicting_saved_environment", "--nocapture"])
+                .env(CHILD, "1")
+                .env("ZAI_API_KEY", "process-key-A")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!("glm-precedence-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("provider-settings.json"), r#"{"executablePaths":{},"environment":{"glm":{"ZAI_API_KEY":"saved-provider-key-B"}}}"#).unwrap();
+        crate::provider_settings::setup(&directory).unwrap();
+        let effective = crate::account_config::environment("glm", &[]);
+        assert_eq!(crate::account_config::var(&effective, "ZAI_API_KEY").as_deref(), Some("saved-provider-key-B"));
+        let harness = crate::providers::glm_environment().unwrap();
+        let harness_key = &harness.iter().find(|(name, _)| name == "ANTHROPIC_AUTH_TOKEN").unwrap().1;
+        let quota_key = saved_key_or_environment(Ok(None), env_key("ZAI_API_KEY")).unwrap().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(harness_key, "process-key-A");
+        assert_eq!(&quota_key, harness_key);
+    }
+
     use serde_json::json;
 
     #[tokio::test]
@@ -1193,6 +1401,113 @@ mod tests {
             assert_eq!(usage.status, "unavailable", "case: {body}");
             assert!(usage.windows.is_empty());
         }
+    }
+
+    /// Recorded live Command Code billing payloads.
+    fn commandcode_fixtures() -> (Value, Value) {
+        (
+            json!({"credits":{"belowThreshold":false,"creditThreshold":0,"monthlyCredits":68.699074271,"purchasedCredits":0,"freeCredits":0},"windowLimits":{"limited":true,"exceeded":null,"fiveHour":{"used":1.298331809,"cap":14,"exceeded":false,"resetAt":1795708935914_i64},"weekly":{"used":1.300925729,"cap":35,"exceeded":false,"resetAt":1795955817816_i64}},"sandboxAccess":true,"sandboxMinutes":{"usedMinutes":0,"limitMinutes":0,"overageUsd":0,"resetAt":1796083200000_i64}}),
+            json!({"totalCount":1029,"totalCost":1.2955396364,"totalCredits":1.2955396364,"totalMonthlyCredits":1.2955396364,"totalPurchasedCredits":0,"totalFreeCredits":0,"periodBasis":"billing-period","periodStart":"2026-11-22T12:13:05.000Z","daily":[]}),
+        )
+    }
+
+    #[test]
+    fn commandcode_reads_recorded_live_credits_and_window_limits() {
+        let (credits, summary) = commandcode_fixtures();
+        let usage = parse_commandcode(&credits, &summary);
+        assert_eq!(usage.status, "ready");
+        assert_eq!(usage.windows.len(), 3);
+        assert_eq!(
+            usage.windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(),
+            ["5-hour", "Weekly", "Monthly credits"]
+        );
+        for (window, expected) in usage.windows.iter().zip([9.2738, 3.7169, 1.8509]) {
+            assert!(
+                (window.used_percent - expected).abs() < 1e-3,
+                "{}: {}",
+                window.label,
+                window.used_percent
+            );
+        }
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            epoch_iso(1795708935914 / 1000).as_deref()
+        );
+        assert!(usage.windows[2].resets_at.is_none());
+        assert_eq!(usage.source.as_deref(), Some("Command Code billing API"));
+        assert!(usage.plan.is_none());
+        assert_eq!(
+            usage.message.as_deref(),
+            Some("$1.30 of $70.00 credits used this billing period.")
+        );
+    }
+
+    #[test]
+    fn commandcode_missing_fields_never_become_windows_or_leak_details() {
+        const PRIVATE: &str = "PRIVATE_DIAGNOSTIC";
+        for (credits, summary) in [
+            (json!(null), json!(null)),
+            (json!({}), json!({})),
+            (json!({"windowLimits":{},"credits":{}}), json!({})),
+            (
+                json!({"windowLimits":{"fiveHour":{"used":1,"cap":0},"weekly":{"used":1,"cap":0}},"credits":{}}),
+                json!({}),
+            ),
+            (
+                json!({"windowLimits":{"fiveHour":{"used":PRIVATE,"cap":14},"weekly":{"used":true,"cap":null}},"credits":{}}),
+                json!({"totalCost":PRIVATE}),
+            ),
+            (
+                json!({"credits":{"monthlyCredits":PRIVATE,"purchasedCredits":0,"freeCredits":0}}),
+                json!({"totalCost":1.0}),
+            ),
+            (
+                json!({"windowLimits":{"fiveHour":{"used":0,"cap":0}},"credits":{"monthlyCredits":0,"purchasedCredits":0,"freeCredits":0}}),
+                json!({"totalCost":0.0}),
+            ),
+        ] {
+            let usage = parse_commandcode(&credits, &summary);
+            assert_ne!(usage.status, "ready", "case: {credits} {summary}");
+            assert!(usage.windows.is_empty(), "case: {credits} {summary}");
+            let serialized = serde_json::to_string(&usage).unwrap();
+            assert!(!serialized.contains(PRIVATE), "case: {credits} {summary}");
+            assert!(
+                usage
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| !message.is_empty() && message.len() < 200),
+                "case: {credits} {summary}"
+            );
+        }
+        // A known monthly pool with no readable spend still reports what is left.
+        let only_remaining = parse_commandcode(
+            &json!({"windowLimits":{"fiveHour":{"used":1,"cap":2}},"credits":{"monthlyCredits":68.699074271}}),
+            &json!({}),
+        );
+        assert_eq!(only_remaining.status, "ready");
+        assert_eq!(only_remaining.windows.len(), 1);
+        assert_eq!(
+            only_remaining.message.as_deref(),
+            Some("$68.70 credits left.")
+        );
+    }
+
+    #[test]
+    fn commandcode_clamps_used_over_cap_and_reset_milliseconds() {
+        let usage = parse_commandcode(
+            &json!({"windowLimits":{"fiveHour":{"used":20,"cap":14,"resetAt":1795708935914_i64},"weekly":{"used":70,"cap":35,"resetAt":"soon"}}}),
+            &json!({}),
+        );
+        assert_eq!(usage.status, "ready");
+        assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].used_percent, 100.0);
+        assert_eq!(usage.windows[1].used_percent, 100.0);
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            epoch_iso(1795708935914 / 1000).as_deref()
+        );
+        assert!(usage.windows[1].resets_at.is_none());
+        assert!(usage.message.is_none());
     }
 
     #[tokio::test]
@@ -1470,6 +1785,70 @@ key = "oauth/kimi-code"
     }
 
     #[test]
+    fn antigravity_usage_refuses_custom_provider_gemini_dir() {
+        let env = |name: &str, value: &str| vec![(name.to_string(), value.to_string())];
+        assert!(has_custom_antigravity_gemini_dir(&env("GEMINI_DIR", "/custom")));
+        assert!(has_custom_antigravity_gemini_dir(&env("gemini_dir", "/custom")));
+        assert!(has_custom_antigravity_gemini_dir(&env("Antigravity_Gemini_Dir", "/custom")));
+        assert!(!has_custom_antigravity_gemini_dir(&env("GEMINI_DIR", "  ")));
+        assert!(!has_custom_antigravity_gemini_dir(&env("ANTIGRAVITY_GEMINI_DIR", "")));
+        assert!(!has_custom_antigravity_gemini_dir(&env("HTTP_PROXY", "http://localhost:8080")));
+        assert!(!has_custom_antigravity_gemini_dir(&[]));
+    }
+
+    #[test]
+    fn antigravity_usage_guards_provider_settings_credentials_and_prefers_agy_only() {
+        assert!(!has_explicit_antigravity_credentials(false, &[]));
+        assert!(has_explicit_antigravity_credentials(true, &[]));
+        assert!(has_explicit_antigravity_credentials(
+            false,
+            &[(
+                "ANTIGRAVITY_OAUTH_CREDENTIALS_JSON".into(),
+                "{}".into()
+            )]
+        ));
+        assert!(!has_explicit_antigravity_credentials(
+            false,
+            &[("HTTP_PROXY".into(), "http://localhost:8080".into())]
+        ));
+
+        let custom_agy = PathBuf::from("/opt/custom/agy");
+        let fallback_agy = PathBuf::from("/usr/local/bin/agy");
+        let acp_server = PathBuf::from("/opt/antigravity/agy_acp_server.par");
+        let windows_agy = PathBuf::from(if cfg!(windows) {
+            r"C:\Tools\AGY.EXE"
+        } else {
+            "/tools/AGY.EXE"
+        });
+        let windows_acp = PathBuf::from(if cfg!(windows) {
+            r"C:\Tools\agy_acp_server.exe"
+        } else {
+            "/tools/agy_acp_server.exe"
+        });
+
+        assert_eq!(
+            select_antigravity_cli(Some(custom_agy.clone()), || Some(fallback_agy.clone())),
+            Some(custom_agy)
+        );
+        assert_eq!(
+            select_antigravity_cli(Some(windows_agy.clone()), || Some(fallback_agy.clone())),
+            Some(windows_agy)
+        );
+        assert_eq!(
+            select_antigravity_cli(Some(acp_server), || Some(fallback_agy.clone())),
+            Some(fallback_agy.clone())
+        );
+        assert_eq!(
+            select_antigravity_cli(Some(windows_acp), || None),
+            None
+        );
+        assert_eq!(
+            select_antigravity_cli(None, || Some(fallback_agy.clone())),
+            Some(fallback_agy)
+        );
+    }
+
+    #[test]
     fn antigravity_version_gate_rejects_older_and_ambiguous_versions() {
         for version in ["1.1.11", "1.2.2", "2.0.0", "1.1.11\n"] {
             assert!(
@@ -1525,7 +1904,7 @@ key = "oauth/kimi-code"
     fn agy_script(directory: &Path, version: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = directory.join("agy");
-        std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = '--version' ]; then printf '%s' '{version}'; exit 0; fi\n{body}\n")).unwrap();
+        std::fs::write(&path, format!("#!/bin/sh\n[ \"${{AGY_CLI_DISABLE_AUTO_UPDATE:-}}\" = 'true' ] || exit 9\nif [ \"$1\" = '--version' ]; then printf '%s' '{version}'; exit 0; fi\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }

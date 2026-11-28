@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
     sync::mpsc::UnboundedReceiver,
 };
@@ -20,9 +20,13 @@ use tokio::{
 mod attachments;
 mod goals;
 mod host_inputs;
-mod host_tools;
+pub(crate) mod host_tools;
 mod mcp_host;
 mod warm;
+mod cli_versions;
+
+pub(crate) use cli_versions::VersionReport;
+use cli_versions::VersionTarget;
 pub use warm::{discard as discard_warm_agent, epoch as warm_epoch, prewarm as prewarm_agent, supported as warms};
 use host_tools::apply_step;
 pub use host_tools::ToolHost;
@@ -44,9 +48,11 @@ mod commandcode;
 mod extra_models;
 mod github_copilot;
 mod devin;
+mod cursor;
 pub(crate) mod hermes;
 mod glm;
 mod mimo;
+mod alibaba;
 mod muse;
 mod deepseek;
 mod kimi_models;
@@ -57,7 +63,7 @@ mod zcode;
 mod diagnostics;
 pub(crate) mod claude_auth;
 pub(crate) mod privacy;
-pub(crate) use launch::{command, pty_command, external_path, executable_path, widen_process_path};
+pub(crate) use launch::{command, pty_command, std_command, external_path, executable_path, widen_process_path};
 #[cfg(test)]
 mod kimi_stream_tests;
 #[cfg(test)]
@@ -85,6 +91,13 @@ const STARTUP_LIMIT: Duration = Duration::from_secs(300);
 const FINISH_GRACE: Duration = Duration::from_millis(1000);
 /// Antigravity ignores EOF and writes context checkpoints in the background (40-80 s each).
 const ANTIGRAVITY_GRACE: Duration = Duration::from_secs(120);
+/// After a lingering agent was asked to close its session, how long one that never answers has
+/// before it is signalled. With the close frame's 500 ms and the 2 s signal wait, `end_lingering`
+/// stays under 5 s.
+const ANTIGRAVITY_CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// Longest stdout frame looked at for the close answer, which is small: a chatty agent must not
+/// cost CPU here.
+const CLOSE_ANSWER_LIMIT: usize = 64 * 1024;
 /// Under the app data dir: per-run `TEMP` folders of Antigravity on Windows.
 const AGENT_TEMP_DIR: &str = "agent-temp";
 const AGENT_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -97,7 +110,7 @@ const PREVIEW_TRUNCATED: &str = "\n[Preview truncated]";
 fn should_shrink(len: usize, capacity: usize) -> bool {
     capacity > 1024 * 1024 && len <= FRAME_KEEP / 2
 }
-pub(crate) const PROVIDERS: [(&str, &str); 19] = [
+pub(crate) const PROVIDERS: [(&str, &str); 21] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("kimi", "Kimi Code"),
@@ -106,6 +119,7 @@ pub(crate) const PROVIDERS: [(&str, &str); 19] = [
     ("antigravity", "Antigravity"),
     ("grok", "Grok Build"),
     ("mimo", "MiMo Token Plan"),
+    ("alibaba", "Alibaba Token Plan"),
     ("pi", "Pi"),
     ("deepseek", "DeepSeek"),
     ("commandcode", "Command Code"),
@@ -117,6 +131,7 @@ pub(crate) const PROVIDERS: [(&str, &str); 19] = [
     ("devin", "Devin CLI"),
     ("zcode", "ZCode"),
     ("hermes", "Hermes Agent"),
+    ("cursor", "Cursor CLI"),
 ];
 
 /// Claude Code tools that only report back to a session that stays open after its turn.
@@ -124,7 +139,7 @@ pub(crate) const CLAUDE_SESSION_BOUND_TOOLS: &str = "ScheduleWakeup,Monitor,Cron
 
 /// Never runs an agent-reviewed task under some other policy.
 fn review_supported(provider: &str, mode: &str) -> Result<(), String> {
-    if mode == "review" && !matches!(provider, "claude" | "glm" | "mimo") {
+    if mode == "review" && !matches!(provider, "claude" | "glm" | "mimo" | "alibaba") {
         return Err("Approve for me needs Claude Code's auto mode; this harness has no agent-reviewed approvals. Choose another access mode.".into());
     }
     Ok(())
@@ -132,7 +147,7 @@ fn review_supported(provider: &str, mode: &str) -> Result<(), String> {
 
 /// Harnesses that take app instructions as a system prompt (`--append-system-prompt`).
 pub fn takes_system_instructions(provider: &str) -> bool {
-    matches!(provider, "claude" | "glm" | "mimo" | "pi" | "omp")
+    matches!(provider, "claude" | "glm" | "mimo" | "alibaba" | "pi" | "omp")
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +172,11 @@ pub struct RunConfig {
     pub codex_settings: Option<Value>,
     /// Only native-validated, managed screenshot paths; never arbitrary web content.
     pub images: Vec<PathBuf>,
+    /// Set when an account-pool rotation rewrites the prompt into a resume.
+    /// A missing saved session must fail instead of opening an empty `session/new`.
+    /// Runtime-only: `RunConfig` is not serialized (`GoalRequest` has no `Serialize`),
+    /// so a `serde` skip attribute cannot be attached here.
+    pub(crate) no_fresh_resume_fallback: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -366,6 +386,119 @@ fn field<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
+/// Name, input and output for Codex app-server items beyond commands, file
+/// changes and tool calls. Only named fields are copied, each one bounded.
+type CodexItemDetails = (String, Option<String>, Option<String>);
+type Fields = serde_json::Map<String, Value>;
+const CODEX_ITEM_TEXT_LIMIT: usize = 2048;
+
+fn put_text(target: &mut Fields, key: &str, value: &Value) {
+    if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
+        target.insert(key.into(), limited(text, CODEX_ITEM_TEXT_LIMIT).into());
+    }
+}
+fn put_texts(target: &mut Fields, key: &str, value: &Value, count: usize) {
+    let Some(values) = value.as_array() else { return; };
+    let texts: Vec<Value> = values.iter().filter_map(Value::as_str).take(count)
+        .map(|text| limited(text, 512).into()).collect();
+    if !texts.is_empty() { target.insert(key.into(), texts.into()); }
+}
+fn fields_input(fields: Fields) -> Option<String> {
+    (!fields.is_empty()).then(|| preview_json(&Value::Object(fields), TOOL_INPUT_LIMIT))
+}
+fn text_output(value: &Value) -> Option<String> {
+    value.as_str().filter(|text| !text.is_empty()).map(|text| limited(text, TOOL_OUTPUT_LIMIT))
+}
+
+fn codex_item_details(item: &Value) -> Option<CodexItemDetails> {
+    let mut input = Fields::new();
+    let (name, output) = match field(item, "type") {
+        "imageView" => {
+            put_text(&mut input, "path", &item["path"]);
+            ("View image".to_owned(), None)
+        }
+        "webSearch" => {
+            put_text(&mut input, "query", &item["query"]);
+            let action = &item["action"];
+            if action.is_object() {
+                let mut summary = Fields::new();
+                for key in ["type", "query", "url", "pattern"] { put_text(&mut summary, key, &action[key]); }
+                put_texts(&mut summary, "queries", &action["queries"], 8);
+                if !summary.is_empty() { input.insert("action".into(), summary.into()); }
+            }
+            ("web_search".to_owned(), web_search_links(&item["results"]))
+        }
+        "sleep" => {
+            if let Some(ms) = item["durationMs"].as_u64() { input.insert("durationMs".into(), ms.into()); }
+            ("sleep".to_owned(), None)
+        }
+        "collabAgentToolCall" => {
+            for key in ["prompt", "model", "reasoningEffort"] { put_text(&mut input, key, &item[key]); }
+            put_texts(&mut input, "receiverThreadIds", &item["receiverThreadIds"], 16);
+            let tool = limited(field(item, "tool"), 128);
+            (if tool.is_empty() { "Agent".into() } else { format!("Agent · {tool}") }, agent_states(&item["agentsStates"]))
+        }
+        "subAgentActivity" => {
+            for key in ["agentPath", "kind", "model", "reasoningEffort"] { put_text(&mut input, key, &item[key]); }
+            ("Sub-agent".to_owned(), None)
+        }
+        "imageGeneration" => {
+            put_text(&mut input, "revisedPrompt", &item["revisedPrompt"]);
+            let failure = item["failure"].is_object().then(|| limited(field(&item["failure"], "type"), 256));
+            ("Generate image".to_owned(), text_output(&item["savedPath"]).or(failure))
+        }
+        "plan" => ("Plan".to_owned(), text_output(&item["text"])),
+        "enteredReviewMode" => {
+            put_text(&mut input, "review", &item["review"]);
+            ("Review".to_owned(), None)
+        }
+        "exitedReviewMode" => ("Review".to_owned(), text_output(&item["review"])),
+        "functionCallOutput" => {
+            let name = limited(field(item, "name"), 128);
+            let name = match field(item, "namespace") { "" => name, namespace => format!("{} · {name}", limited(namespace, 128)) };
+            let output = item.get("output").filter(|value| !value.is_null()).map(|value| output_json(value, TOOL_OUTPUT_LIMIT));
+            (name, output)
+        }
+        _ => return None,
+    };
+    Some((name, fields_input(input), output))
+}
+
+/// `Links: [{"title","url"}]`, the shape the window's web card reads. The list
+/// stops before the bound so the JSON always stays whole.
+fn web_search_links(results: &Value) -> Option<String> {
+    const PREFIX: &str = "Links: ";
+    let mut links = Vec::new();
+    let mut bytes = PREFIX.len() + 2;
+    for result in results.as_array()?.iter().take(50) {
+        let pick = |keys: &[&str]| keys.iter().find_map(|key| result[*key].as_str().filter(|text| !text.is_empty()));
+        let Some(url) = pick(&["url", "link", "href"]).filter(|url| url.len() <= 2048) else { continue; };
+        let mut link = json!({"title": limited(pick(&["title", "name"]).unwrap_or(url), 256), "url": url});
+        if let Some(snippet) = pick(&["snippet", "description"]) { link["snippet"] = limited(snippet, 300).into(); }
+        let size = serde_json::to_string(&link).map_or(usize::MAX, |text| text.len() + 1);
+        if bytes.saturating_add(size) > TOOL_OUTPUT_LIMIT { break; }
+        bytes += size;
+        links.push(link);
+    }
+    (!links.is_empty()).then(|| format!("{PREFIX}{}", Value::Array(links)))
+}
+
+fn agent_states(states: &Value) -> Option<String> {
+    let states = states.as_object().filter(|states| !states.is_empty())?;
+    let mut preview = Preview::new(TOOL_OUTPUT_LIMIT);
+    for (index, (thread, state)) in states.iter().take(32).enumerate() {
+        if index > 0 { preview.text("\n"); }
+        preview.text(&limited(thread, 256));
+        preview.text(": ");
+        preview.text(field(state, "status"));
+        if let Some(message) = state["message"].as_str().filter(|message| !message.is_empty()) {
+            preview.text(" — ");
+            preview.text(&limited(message, CODEX_ITEM_TEXT_LIMIT));
+        }
+    }
+    Some(preview.finish())
+}
+
 fn content_preview(value: &Value, limit: usize) -> String {
     fn content(value: &Value, preview: &mut Preview, depth: usize) {
         if preview.truncated {
@@ -532,6 +665,9 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
+    /// Faster service tiers beyond the standard speed (Codex `serviceTiers`, Claude fast mode).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speed_tiers: Vec<ReasoningEffortInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -542,20 +678,131 @@ pub struct ReasoningEffortInfo {
     pub description: String,
 }
 
+/// Harnesses that take a steering message into the running turn (`RunInput::Steer`) rather than
+/// holding it for a new one: Claude-family stream input, Codex `turn/steer`, Pi `steer`, and
+/// OpenCode and Devin over ACP.
+pub(crate) fn steers_live(provider: &str) -> bool {
+    matches!(provider, "claude" | "glm" | "mimo" | "codex" | "pi" | "omp" | "opencode" | "devin")
+}
+
+/// The status a run's loop reports when it takes a stop (or pauses a goal on one), so the run's
+/// owner knows the stop, not the harness, ended the turn.
+pub(crate) const STOPPING_STATUS: &str = "Stopping agent";
+pub(crate) const PAUSING_GOAL_STATUS: &str = "Pausing goal";
+
+/// The event a pooled run reports when it moves to another account: the old account's open
+/// requests can no longer be answered, so the run's owner settles them (`account_switched`).
+pub(crate) const ACCOUNT_SWITCHED: &str = "account_switched";
+
+/// Whether the session's pooled run is changing accounts, so input waits for the next account.
+pub(crate) fn switching_accounts(session_id: &str) -> bool {
+    pool::switching(session_id)
+}
+
+/// The event a run reports when it could not apply an approval decision (`approval_step`).
+pub(crate) const UNANSWERED_APPROVAL: &str = "approval_unanswered";
+/// Phrases of the startup errors for a reasoning effort a harness refuses (Codex and Claude
+/// model checks, the provider-wide check), shared with `architect::model_efforts::rejected`.
+pub(crate) const MODEL_REFUSES_EFFORT: &str = "does not support this reasoning effort";
+pub(crate) const UNSUPPORTED_EFFORT: &str = "Unsupported reasoning effort";
+
+/// The decline a tool or harness gets when the user declines an approval.
+pub(crate) const USER_DECLINE: &str = "Declined by the user";
+/// Most decline texts one session keeps (its oldest goes first), so one session's burst of
+/// declines never evicts another's; and a safety cap over all sessions.
+const DECLINE_REASONS_PER_SESSION: usize = 16;
+const DECLINE_REASONS_MAX: usize = 1024;
+/// Decline texts PandaCode chose for approvals it answered itself (a team worker's always-ask tool),
+/// by session and the harness's approval ID. The tool host returns one instead of `USER_DECLINE`;
+/// a user's own decline registers none, so it reads exactly as before. Approval IDs can repeat
+/// across runs (Codex host-tool IDs are small integers), so a reason is scoped to its session
+/// and a session's reasons are dropped when its run ends (`forget_decline_reasons`).
+/// Kept apart from `worker_approvals`' run registry: the tool host claims it inside the run and
+/// knows only its session, not the team run.
+static DECLINE_REASONS: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+pub(crate) fn set_decline_reason(session_id: &str, id: &str, reason: &str) {
+    let mut reasons = DECLINE_REASONS.lock().unwrap_or_else(|poison| poison.into_inner());
+    reasons.retain(|(session, known, _)| !(session == session_id && known == id));
+    if reasons.iter().filter(|(session, _, _)| session == session_id).count() >= DECLINE_REASONS_PER_SESSION {
+        if let Some(oldest) = reasons.iter().position(|(session, _, _)| session == session_id) {
+            reasons.remove(oldest);
+        }
+    }
+    if reasons.len() >= DECLINE_REASONS_MAX {
+        reasons.remove(0);
+    }
+    reasons.push((session_id.to_owned(), id.to_owned(), reason.to_owned()));
+}
+
+/// Claims the reason registered for this approval, if any (also on approval, so none is left).
+pub(crate) fn take_decline_reason(session_id: &str, id: &str) -> Option<String> {
+    let mut reasons = DECLINE_REASONS.lock().unwrap_or_else(|poison| poison.into_inner());
+    let index = reasons.iter().position(|(session, known, _)| session == session_id && known == id)?;
+    Some(reasons.remove(index).2)
+}
+
+/// Drops every reason left for a session (its run ended, so none can be claimed any more).
+pub(crate) fn forget_decline_reasons(session_id: &str) {
+    DECLINE_REASONS.lock().unwrap_or_else(|poison| poison.into_inner()).retain(|(session, _, _)| session != session_id);
+}
+
+/// Sessions whose current run is a team worker's, so PandaCode's own tool hosts refuse the
+/// always-ask tools before any approval prompt (the request-text matcher in `worker_approvals`
+/// stays as a second line for hosts PandaCode does not run). Each entry is `(session, run)`: a
+/// run sets its session's mark as it starts and clears only its own (`RunLeftovers`), so an older
+/// run of the same task ending late never clears a newer run's mark.
+static WORKER_RUNS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+fn worker_runs() -> std::sync::MutexGuard<'static, Vec<(String, String)>> {
+    WORKER_RUNS.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// A run starts: its session's mark becomes this run's (or none, for a run that is not a worker's).
+pub(crate) fn mark_worker_run(session_id: &str, run_id: &str, worker: bool) {
+    let mut runs = worker_runs();
+    runs.retain(|(session, _)| session != session_id);
+    if worker {
+        runs.push((session_id.to_owned(), run_id.to_owned()));
+    }
+}
+
+/// A run ends: clears its session's mark only while the mark is still this run's.
+pub(crate) fn clear_worker_run(session_id: &str, run_id: &str) {
+    worker_runs().retain(|(session, run)| !(session == session_id && run == run_id));
+}
+
+/// Whether this session's current run is a managed team worker's.
+pub(crate) fn is_worker_run(session_id: &str) -> bool {
+    worker_runs().iter().any(|(session, _)| session == session_id)
+}
+
+/// The refusal a tool host returns when a team worker calls an always-ask tool.
+pub(crate) fn worker_tool_refusal(session_id: &str, tool: &str) -> Option<String> {
+    let tool = crate::cloud::deploy::ALWAYS_ASK.iter().find(|name| **name == tool)?;
+    is_worker_run(session_id).then(|| crate::worker_approvals::ask_lead_reason(tool))
+}
+
+/// The text a declined approval returns: PandaCode's own reason, else the user's decline.
+pub(crate) fn decline_text(session_id: &str, id: &str) -> String {
+    take_decline_reason(session_id, id).unwrap_or_else(|| USER_DECLINE.into())
+}
+
 pub fn validate_reasoning_effort(provider: &str, effort: Option<&str>) -> Result<(), String> {
     let valid = match (provider, effort) {
         (
-            "claude" | "codex" | "kimi" | "glm" | "opencode" | "antigravity" | "grok" | "mimo"
-            | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes",
+            "claude" | "codex" | "kimi" | "glm" | "opencode" | "antigravity" | "grok" | "mimo" | "alibaba"
+            | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes" | "cursor",
             None,
         ) => true,
-        ("claude" | "glm" | "mimo", Some(value)) => {
+        ("claude" | "glm" | "mimo" | "alibaba", Some(value)) => {
             ["low", "medium", "high", "xhigh", "max"].contains(&value)
         }
         // The current app-server schema deliberately permits catalog-defined effort IDs.
         // Kimi's thinking option lists on/off or the model's levels (low/high/max).
-        ("codex" | "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "devin" | "zcode" | "hermes", Some(value)) => {
+        ("codex" | "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "devin" | "zcode" | "hermes" | "cursor", Some(value)) => {
             !value.is_empty()
+                && !value.starts_with('-')
                 && value.len() <= 64
                 && value
                     .bytes()
@@ -568,7 +815,7 @@ pub fn validate_reasoning_effort(provider: &str, effort: Option<&str>) -> Result
     if valid {
         Ok(())
     } else {
-        Err("Unsupported reasoning effort for this provider".into())
+        Err(format!("{UNSUPPORTED_EFFORT} for this provider"))
     }
 }
 
@@ -595,6 +842,7 @@ impl ModelInfo {
             reasoning_efforts: Vec::new(),
             default_reasoning_effort: None,
             context_window: None,
+            speed_tiers: Vec::new(),
         }
     }
 }
@@ -604,7 +852,7 @@ pub(crate) fn executable(name: &str) -> Option<PathBuf> {
         return Some(path);
     }
     launch::find(executable_name(name))
-        .or_else(|| if name == "hermes" { launch::find("hermes-acp") } else if name == "devin" { devin::bundled() } else if name == "zcode" { zcode::bundled() } else if name == "antigravity" { launch::find("agy") } else { None })
+        .or_else(|| if name == "hermes" { launch::find("hermes-acp") } else if name == "cursor" { cursor::agent_alias() } else if name == "devin" { devin::bundled() } else if name == "zcode" { zcode::bundled() } else if name == "antigravity" { launch::find("agy") } else { None })
 }
 
 /// Starts a provider CLI with the provider's saved environment variables applied.
@@ -618,13 +866,14 @@ pub(crate) fn provider_command(provider: &str, path: &Path) -> Result<Command, S
 
 fn executable_name(name: &str) -> &str {
     match name {
-        "glm" | "mimo" => "claude",
+        "glm" | "mimo" | "alibaba" => "claude",
         "antigravity" if cfg!(windows) => "agy_acp_server",
         "antigravity" => "agy_acp_server.par",
         "deepseek" => "dsh",
         "commandcode" => "command-code",
         "github-copilot" => "copilot",
         "hermes" => "hermes",
+        "cursor" => "cursor-agent",
         other => other,
     }
 }
@@ -680,6 +929,14 @@ pub(crate) fn mimo_environment() -> Result<Vec<(String, String)>, String> {
     mimo::environment()
 }
 
+pub(crate) fn alibaba_arguments() -> Vec<String> {
+    alibaba::arguments()
+}
+
+pub(crate) fn alibaba_environment() -> Result<Vec<(String, String)>, String> {
+    alibaba::environment()
+}
+
 pub(crate) fn mimo_endpoint_url(id: &str) -> Option<&'static str> {
     mimo::endpoint_url(id)
 }
@@ -688,9 +945,36 @@ pub(crate) fn mimo_endpoints() -> &'static [(&'static str, &'static str, &'stati
     &mimo::ENDPOINTS
 }
 
-fn version(path: &Path) -> Option<String> {
-    capture(launch::std_command(path).ok()?, &["--version"], Duration::from_secs(2))
-        .map(|text| text.chars().take(150).collect())
+/// Loads the saved CLI versions from the app data folder; call once at startup.
+pub(crate) fn load_version_cache(data_dir: &Path) {
+    cli_versions::shared().load(data_dir.join(cli_versions::CACHE_FILE));
+}
+
+/// Forgets every CLI version (Settings refresh), failures included, so the next list asks again.
+pub(crate) fn forget_versions() {
+    cli_versions::shared().forget();
+}
+
+/// Who hears what each background version round learned (the `provider-versions` event);
+/// called on a probe thread with no lock held. Set once at startup.
+pub(crate) fn set_version_announcer(announce: impl Fn(VersionReport) + Send + Sync + 'static) {
+    cli_versions::shared().set_announcer(Arc::new(announce));
+}
+
+/// Version string recorded by `discover`. `"ACP"` is only the placeholder for the non-`agy` server
+/// binary, which the Settings UI reads as "ACP installed": an installed `agy` CLI that does not
+/// answer `--version` is blank instead, so a slow CLI is not mistaken for the server alone.
+/// `probed` is what the shared version cache knows for this binary ("" when unknown or failed).
+fn discovered_version(id: &str, path: Option<&Path>, probed: String) -> String {
+    if id == "antigravity" {
+        match path {
+            None => String::new(),
+            Some(path) if acp::is_agy_cli(path) => probed,
+            Some(_) => "ACP".into(),
+        }
+    } else {
+        probed
+    }
 }
 
 /// Whether this Claude CLI takes `--include-hook-events` (absent in 2.1.0, present by 2.1.100):
@@ -763,11 +1047,12 @@ fn capture(mut command: std::process::Command, args: &[&str], timeout: Duration)
     // Drained on its own thread: a child writing past the OS pipe buffer while we poll
     // must not block forever on the write (read only after exit would never drain it).
     let mut piped = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (sender, reader) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
         use std::io::Read as _;
         let _ = piped.read_to_end(&mut bytes);
-        bytes
+        let _ = sender.send(bytes);
     });
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
@@ -790,30 +1075,77 @@ fn capture(mut command: std::process::Command, args: &[&str], timeout: Duration)
     if !status.success() {
         return None;
     }
-    let mut bytes = reader.join().ok()?;
+    // shortcut: descendants can retain the reader after timeout; use process-group cleanup if this recurs.
+    let mut bytes = reader.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).ok()?;
     bytes.truncate(2 * 1024 * 1024);
     Some(String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
-/// Blocking discovery; invoke on a worker thread, not the UI event loop.
+/// Where each provider's CLI is, in `PROVIDERS` order: path lookups only.
+fn installed_paths() -> Vec<Option<PathBuf>> {
+    PROVIDERS.iter().map(|(id, _)| executable(id)).collect()
+}
+
+/// The binaries asked for a version. Antigravity's ACP server is not asked (it reports "ACP");
+/// the `agy` CLI is.
+fn version_targets(paths: &[Option<PathBuf>]) -> Vec<VersionTarget> {
+    PROVIDERS
+        .iter()
+        .zip(paths)
+        .map(|((id, _), path)| ((*id).to_owned(), version_target(id, path.as_deref())))
+        .collect()
+}
+
+fn version_target(id: &str, path: Option<&Path>) -> Option<PathBuf> {
+    match path {
+        Some(path) if id == "antigravity" && !acp::is_agy_cli(path) => None,
+        path => path.map(Path::to_path_buf),
+    }
+}
+
+/// Blocking discovery: joins the background version round (starting one if none runs) and waits
+/// up to 8 s for versions never asked; anything it learns is announced like any round. Invoke on
+/// a worker thread, not the UI event loop.
 pub fn discover() -> Vec<ProviderInfo> {
+    let paths = installed_paths();
+    let versions = cli_versions::shared().versions_blocking(&version_targets(&paths));
+    provider_infos(paths, versions)
+}
+
+/// Discovery that never waits on a probe: each version is the remembered one, else "". Versions
+/// unknown or due for a check go to one background round, whose answers are announced (see
+/// `set_version_announcer`). Path lookups only; still call it off the UI event loop.
+pub fn discover_now() -> Vec<ProviderInfo> {
+    let paths = installed_paths();
+    let versions = cli_versions::shared().versions_now(&version_targets(&paths), true);
+    provider_infos(paths, versions)
+}
+
+/// Discovery for callers that never show a version: remembered versions only, and no probe is
+/// started. Path lookups only; still call it off the UI event loop.
+pub fn discover_installed() -> Vec<ProviderInfo> {
+    let paths = installed_paths();
+    let versions = cli_versions::shared().versions_now(&version_targets(&paths), false);
+    provider_infos(paths, versions)
+}
+
+fn provider_infos(paths: Vec<Option<PathBuf>>, versions: Vec<String>) -> Vec<ProviderInfo> {
     PROVIDERS.into_iter()
-    .map(|(id, name)| {
-        let path = executable(id);
+    .zip(paths)
+    .zip(versions)
+    .map(|(((id, name), path), version)| {
         ProviderInfo {
             id: id.into(),
             name: name.into(),
             installed: path.is_some(),
-            version: if id == "antigravity" {
-                "ACP".into()
-            } else {
-                path.as_deref().and_then(version).unwrap_or_default()
-            },
+            version: discovered_version(id, path.as_deref(), version),
             path: path.map(|p| p.to_string_lossy().into_owned()),
             models: if id == "glm" {
                 glm::models()
             } else if id == "mimo" {
                 mimo::models()
+            } else if id == "alibaba" {
+                alibaba::models()
             } else if id == "opencode" {
                 selected_opencode_models(
                     Vec::new(),
@@ -864,6 +1196,7 @@ fn selected_opencode_models(catalog: Vec<ModelInfo>, selected: &[String]) -> Vec
     let mut models = vec![ModelInfo::default_choice()];
     for id in selected {
         models.push(available.remove(id).unwrap_or_else(|| ModelInfo {
+            speed_tiers: Vec::new(),
             id: id.clone(),
             name: id.clone(),
             description: "Saved OpenCode model".into(),
@@ -882,40 +1215,361 @@ fn opencode_major_version(version: &str) -> Option<u64> {
         .find_map(|word| word.trim_start_matches('v').split('.').next()?.parse().ok())
 }
 
-/// OpenCode v2 removed `models --verbose`, but its local API still reports each
-/// model's variants. Only v2 gets this command: v1 has no `api` subcommand.
+const OPENCODE_EMPTY_MODELS: &str = "OpenCode returned no models";
+
+struct ZeroingBytes(Vec<u8>);
+impl Drop for ZeroingBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+struct ZeroingString(String);
+impl Drop for ZeroingString {
+    fn drop(&mut self) {
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        bytes.fill(0);
+    }
+}
+
+/// OpenCode v2 removed `models --verbose`, and v2.4.0 removed the 5 s plugin wait
+/// from `/api/model`. Start a private `serve --stdio --port 0` server and wait for
+/// `/api/plugin` readiness before fetching `/api/model`, falling back to the legacy
+/// `--standalone api model.list`, `--standalone models`, and plain `models` paths.
+/// Only v2 gets v2 commands: v1 has no `serve`, `api`, or `--standalone`.
 async fn opencode_catalog(path: &Path) -> Result<Vec<ModelInfo>, String> {
     let owned = path.to_owned();
-    // Longer than `version()`'s 2 s: OpenCode's cold start can pass that, and a missed
-    // answer here would cost a v2 install its efforts.
-    let major = tokio::task::spawn_blocking(move || capture(launch::std_command(&owned).ok()?, &["--version"], Duration::from_secs(5)))
-        .await
-        .ok()
-        .flatten()
-        .as_deref()
-        .and_then(opencode_major_version);
+    // Longer than `version()`'s 2 s: Windows `@opencode/cli` runs a 3 s PowerShell
+    // AVX2 probe on cold start, and a missed answer here costs a v2 install its efforts.
+    let major = tokio::task::spawn_blocking(move || {
+        capture(launch::std_command(&owned).ok()?, &["--version"], Duration::from_secs(8))
+    })
+    .await
+    .ok()
+    .flatten()
+    .as_deref()
+    .and_then(opencode_major_version);
     if major.is_some_and(|major| major >= 2) {
         match opencode_v2_catalog(path).await {
             Ok(models) => return Ok(models),
-            // A hung CLI would hang again; anything else falls back to the bare IDs.
-            Err(error) if error.contains("timed out") => return Err("OpenCode model discovery timed out".into()),
+            // A hung CLI would hang again; anything else falls back.
+            Err(error) if error.contains("timed out") => {
+                return Err("OpenCode model discovery timed out".into());
+            }
+            Err(_) => {}
+        }
+        match opencode_v2_api_catalog(path).await {
+            Ok(models) => return Ok(models),
+            Err(error) if error.contains("timed out") => {
+                return Err("OpenCode model discovery timed out".into());
+            }
+            Err(_) => {}
+        }
+        match extra_models::opencode_v2(path).await {
+            Ok(models) => return Ok(models),
+            Err(error) if error.contains("timed out") => {
+                return Err("OpenCode model discovery timed out".into());
+            }
             Err(_) => {}
         }
     }
     extra_models::opencode(path).await
 }
 
-async fn opencode_v2_catalog(path: &Path) -> Result<Vec<ModelInfo>, String> {
+fn opencode_v2_app_data() -> Option<PathBuf> {
     #[cfg(test)]
-    let app_data = std::env::temp_dir().join("pandacode-test-app-data");
-    #[cfg(test)]
-    let app_data = Some(app_data.as_path());
+    {
+        Some(std::env::temp_dir().join("pandacode-test-app-data"))
+    }
     #[cfg(not(test))]
-    let app_data = crate::secret_store::dir();
-    opencode_v2_catalog_in(path, app_data).await
+    {
+        crate::secret_store::dir().map(Path::to_path_buf)
+    }
+}
+
+async fn opencode_v2_catalog(path: &Path) -> Result<Vec<ModelInfo>, String> {
+    let app_data = opencode_v2_app_data();
+    opencode_v2_catalog_in(path, app_data.as_deref()).await
+}
+
+async fn opencode_v2_api_catalog(path: &Path) -> Result<Vec<ModelInfo>, String> {
+    let app_data = opencode_v2_app_data();
+    opencode_v2_api_catalog_in(path, app_data.as_deref()).await
+}
+
+fn validate_opencode_server_url(raw: &str) -> Result<reqwest::Url, String> {
+    const INVALID: &str = "OpenCode server reported an invalid address";
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| INVALID)?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(INVALID.into());
+    }
+    let host = url.host_str().ok_or(INVALID)?;
+    if host != "127.0.0.1" && host != "[::1]" && !host.eq_ignore_ascii_case("localhost") {
+        return Err(INVALID.into());
+    }
+    Ok(url)
+}
+
+fn parse_opencode_server_url_line(line: &str) -> Result<reqwest::Url, String> {
+    const INVALID: &str = "OpenCode server reported an invalid address";
+    let payload: Value = serde_json::from_str(line.trim()).map_err(|_| INVALID)?;
+    let raw = payload["url"].as_str().ok_or(INVALID)?;
+    validate_opencode_server_url(raw)
+}
+
+async fn read_bounded_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+) -> Result<ZeroingBytes, String> {
+    let mut bytes = ZeroingBytes(Vec::new());
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Could not read OpenCode model metadata".to_owned())?
+    {
+        if bytes.0.len().saturating_add(chunk.len()) > limit {
+            return Err("OpenCode model metadata exceeded its limit".into());
+        }
+        bytes.0.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn fetch_opencode_v2_catalog_from_server(
+    base_url: &reqwest::Url,
+    directory: &str,
+    auth: &str,
+    plugin_wait: Duration,
+    model_wait: Duration,
+    mut child: Option<&mut Child>,
+) -> Result<Vec<ModelInfo>, String> {
+    const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+    const PLUGIN_POLL: Duration = Duration::from_millis(50);
+    const MODEL_POLL: Duration = Duration::from_millis(100);
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not create OpenCode HTTP client")?;
+
+    let mut plugin_url = base_url.clone();
+    plugin_url.set_path("/api/plugin");
+    plugin_url.query_pairs_mut().clear().append_pair("directory", directory);
+
+    let mut model_url = base_url.clone();
+    model_url.set_path("/api/model");
+    model_url.query_pairs_mut().clear().append_pair("directory", directory);
+
+    let plugin_deadline = tokio::time::Instant::now() + plugin_wait;
+    loop {
+        match client
+            .get(plugin_url.clone())
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(mut response) => {
+                let status = response.status();
+                if status == reqwest::StatusCode::OK {
+                    if let Ok(bytes) = read_bounded_body(&mut response, OUTPUT_LIMIT).await {
+                        let ready = serde_json::from_slice::<Value>(&bytes.0)
+                            .ok()
+                            .and_then(|value| value["data"].as_array().map(|data| !data.is_empty()))
+                            .unwrap_or(false);
+                        drop(bytes);
+                        if ready {
+                            break;
+                        }
+                    }
+                } else if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return Err("OpenCode server rejected discovery credentials".into());
+                } else if status == reqwest::StatusCode::NOT_FOUND
+                    || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                {
+                    break;
+                }
+            }
+            Err(_) => {
+                if child
+                    .as_deref_mut()
+                    .and_then(|process| process.try_wait().ok().flatten())
+                    .is_some()
+                {
+                    return Err("OpenCode server exited during discovery".into());
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= plugin_deadline {
+            break;
+        }
+        tokio::time::sleep(PLUGIN_POLL).await;
+    }
+
+    let model_deadline = tokio::time::Instant::now() + model_wait;
+    loop {
+        match client
+            .get(model_url.clone())
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(mut response) => {
+                let status = response.status();
+                if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    if tokio::time::Instant::now() < model_deadline {
+                        tokio::time::sleep(MODEL_POLL).await;
+                        continue;
+                    }
+                    return Err(
+                        "OpenCode could not load models. Check its provider login and configuration."
+                            .into(),
+                    );
+                }
+                if status != reqwest::StatusCode::OK {
+                    return Err(
+                        "OpenCode could not load models. Check its provider login and configuration."
+                            .into(),
+                    );
+                }
+                let mut bytes = read_bounded_body(&mut response, OUTPUT_LIMIT).await?;
+                let parsed = parse_opencode_v2_models(&bytes.0);
+                bytes.0.fill(0);
+                drop(bytes);
+                match parsed {
+                    Ok(models) => return Ok(models),
+                    Err(error)
+                        if error == OPENCODE_EMPTY_MODELS
+                            && tokio::time::Instant::now() < model_deadline =>
+                    {
+                        tokio::time::sleep(MODEL_POLL).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(_) => {
+                if child
+                    .as_deref_mut()
+                    .and_then(|process| process.try_wait().ok().flatten())
+                    .is_some()
+                {
+                    return Err("OpenCode server exited during discovery".into());
+                }
+                if tokio::time::Instant::now() < model_deadline {
+                    tokio::time::sleep(MODEL_POLL).await;
+                    continue;
+                }
+                return Err("Could not reach OpenCode model discovery server".into());
+            }
+        }
+    }
 }
 
 async fn opencode_v2_catalog_in(path: &Path, app_data: Option<&Path>) -> Result<Vec<ModelInfo>, String> {
+    const LINE_LIMIT: usize = 16 * 1024;
+    const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
+    const PLUGIN_WAIT: Duration = Duration::from_secs(5);
+    const MODEL_WAIT: Duration = Duration::from_secs(4);
+
+    // OpenCode reads config from its directory, and anyone can plant one in a shared temp folder.
+    let folder = app_data
+        .and_then(|dir| AgentTemp::create_in(&dir.join(AGENT_TEMP_DIR)))
+        .ok_or("Could not create a private folder for OpenCode discovery")?;
+    let password = ZeroingString(format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let auth = {
+        use base64::Engine as _;
+        let credentials = ZeroingString(format!("opencode:{}", password.0));
+        let encoded = ZeroingString(
+            base64::engine::general_purpose::STANDARD.encode(credentials.0.as_bytes()),
+        );
+        ZeroingString(format!("Basic {}", encoded.0))
+    };
+    let mut command = provider_command("opencode", path)?;
+    // Explicitly override OPENCODE_PASSWORD after apply_environment so an inherited
+    // or saved password cannot shadow the per-call secret.
+    command
+        .args(["serve", "--stdio", "--port", "0"])
+        .current_dir(&folder.0)
+        .env("OPENCODE_PASSWORD", &password.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Could not start OpenCode model discovery")?;
+    let mut group = ProcessGroup::register(child.id());
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let directory = launch::external_path(&folder.0)
+        .to_string_lossy()
+        .into_owned();
+
+    let result = tokio::time::timeout(TOTAL_TIMEOUT, async {
+        let stdout = stdout.ok_or("OpenCode server output unavailable")?;
+        let mut reader = tokio::io::BufReader::new(stdout.take((LINE_LIMIT + 1) as u64));
+        let mut line = Vec::new();
+        reader
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(|_| "Could not read OpenCode server address".to_owned())?;
+        if line.is_empty() || line.len() > LINE_LIMIT {
+            return Err("OpenCode server did not report a valid address".into());
+        }
+        let line_text = std::str::from_utf8(&line)
+            .map_err(|_| "OpenCode server reported an invalid address".to_owned())?;
+        let base_url = parse_opencode_server_url_line(line_text)?;
+        fetch_opencode_v2_catalog_from_server(
+            &base_url,
+            &directory,
+            &auth.0,
+            PLUGIN_WAIT,
+            MODEL_WAIT,
+            Some(&mut child),
+        )
+        .await
+    })
+    .await
+    .unwrap_or_else(|_| Err("OpenCode model discovery timed out".into()));
+
+    // Closing stdin signals `serve --stdio` to exit cleanly; escalate if it lingers.
+    drop(stdin);
+    if tokio::time::timeout(Duration::from_millis(500), child.wait())
+        .await
+        .is_err()
+    {
+        finish_child(&mut child, &mut group, Some(Duration::from_millis(500))).await;
+    } else {
+        release_group(&mut group);
+    }
+    drop(auth);
+    drop(password);
+    drop(folder);
+    result
+}
+
+async fn opencode_v2_api_catalog_in(path: &Path, app_data: Option<&Path>) -> Result<Vec<ModelInfo>, String> {
     const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
     let mut command = launch::std_command(path)?;
     crate::provider_settings::apply_environment("opencode", &mut command);
@@ -949,6 +1603,9 @@ fn parse_opencode_v2_models(bytes: &[u8]) -> Result<Vec<ModelInfo>, String> {
     const INVALID: &str = "Invalid OpenCode model catalog";
     let response: Value = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
     let entries = response["data"].as_array().ok_or(INVALID)?;
+    if entries.is_empty() {
+        return Err(OPENCODE_EMPTY_MODELS.into());
+    }
     if entries.len() > MODEL_CATALOG_LIMIT {
         return Err("OpenCode returned too many models".into());
     }
@@ -961,6 +1618,7 @@ fn parse_opencode_v2_models(bytes: &[u8]) -> Result<Vec<ModelInfo>, String> {
                 return Err(INVALID.to_owned());
             }
             Ok(ModelInfo {
+                speed_tiers: Vec::new(),
                 name: model_text(entry["name"].as_str(), &id, 160),
                 description: id.clone(),
                 // The API lists variants least to most, unlike v1's sorted keys.
@@ -991,11 +1649,11 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
     let semaphore = &model_discovery_semaphores()[index];
     let _permit = if matches!(
         provider,
-        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes"
+        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes" | "cursor"
     ) {
         // Saving models refreshes both windows. Queue their bounded metadata
         // queries so one window does not cache incomplete ID-only fallbacks.
-        tokio::time::timeout(Duration::from_secs(if provider == "opencode" { 20 } else { 65 }), semaphore.acquire())
+        tokio::time::timeout(Duration::from_secs(if provider == "opencode" { 30 } else { 65 }), semaphore.acquire())
             .await
             .map_err(|_| "Model discovery is busy. Try again shortly.".to_owned())?
             .map_err(|_| "Model discovery is unavailable".to_owned())?
@@ -1014,6 +1672,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
         "antigravity" => acp::models(&path).await,
         "grok" => acp::grok_models(&path).await,
         "mimo" => Ok(mimo::models()),
+        "alibaba" => Ok(alibaba::models()),
         "pi" | "omp" => pi::models(&path, provider).await,
         "deepseek" => deepseek::models(&path).await,
         "commandcode" => commandcode::models(&path).await,
@@ -1024,6 +1683,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
         "devin" => devin::models(&path).await,
         "zcode" => zcode::models(&path).await,
         "hermes" => hermes::models(&path).await,
+        "cursor" => cursor::models(&path).await,
         _ => unreachable!(),
     }
 }
@@ -1098,11 +1758,32 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     default_reasoning_effort: default_effort,
                     // model/list does not report the effective window. Live usage does.
                     context_window: None,
+                    speed_tiers: codex_speed_tiers(&entry["serviceTiers"]),
                 });
             }
         }
     }
     Ok(models)
+}
+
+/// Every tier Codex reports, so new ones (Ultra Fast) appear without a release.
+fn codex_speed_tiers(tiers: &Value) -> Vec<ReasoningEffortInfo> {
+    let mut found: Vec<ReasoningEffortInfo> = Vec::new();
+    for tier in tiers.as_array().into_iter().flatten().take(8) {
+        let Some(id) = tier["id"].as_str().filter(|id| valid_service_tier(id)) else { continue };
+        if !found.iter().any(|known| known.id == id) {
+            found.push(ReasoningEffortInfo {
+                id: id.into(),
+                name: model_text(tier["name"].as_str(), id, 64),
+                description: model_text(tier["description"].as_str(), "", 500),
+            });
+        }
+    }
+    found
+}
+
+pub(crate) fn valid_service_tier(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
 }
 
 // SDK displayName can still be just "Sonnet". Format the provider's resolved
@@ -1166,6 +1847,12 @@ fn parse_claude_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
             continue;
         }
         let model = ModelInfo {
+            // Claude Code's catalog flags the models it can run in fast mode.
+            speed_tiers: if entry["supportsFastMode"] == true {
+                vec![ReasoningEffortInfo { id: "fast".into(), name: "Fast".into(), description: "Claude Code fast mode: faster output at a higher price.".into() }]
+            } else {
+                Vec::new()
+            },
             id: id.into(),
             name: claude_model_name(entry, id),
             description: model_text(entry["description"].as_str(), "", 1000),
@@ -1366,6 +2053,8 @@ struct Protocol {
     inputs: HashMap<String, Value>,
     host: Option<host_tools::HostTools>,
     mcp_server: Option<Value>,
+    /// Extra stdio servers (Colab's MCP) sent beside `mcp_server` in ACP sessions.
+    extra_mcp_servers: Vec<Value>,
     mcp_required: bool,
     codex_mcp_servers: Option<Value>,
     mcp_tool_names: HashSet<String>,
@@ -1382,6 +2071,7 @@ struct Protocol {
     early_kimi_commands: Option<Vec<u8>>,
     tools: HashMap<String, ToolActivity>,
     file_write_tools: HashSet<String>,
+    non_mcp_tools: HashSet<String>,
     tool_order: VecDeque<String>,
     partial_tools: HashMap<(String, u64), PartialTool>,
     image_blocks: Vec<Value>,
@@ -1390,6 +2080,19 @@ struct Protocol {
     acp_config: Value,
     // Grok Build authenticates before session calls; the session request waits here.
     acp_pending_session: Option<Value>,
+    acp_can_load: bool,
+    acp_resuming: bool,
+    acp_load_fallback_tried: bool,
+    acp_fresh_fallback_tried: bool,
+    acp_resume_params: Option<Value>,
+    acp_turn_text: String,
+    acp_context_window: Option<u64>,
+    /// `usage_update` seen before `session/prompt` (phase 0). Emitted once the session opens.
+    acp_pending_phase0_usage: Option<(u64, Option<u64>)>,
+    /// `initialize` advertised `sessionCapabilities.close` (or the capability object).
+    acp_can_close: bool,
+    acp_saw_any_usage_update: bool,
+    acp_saw_usage_update: bool,
     grok_context_used: u64,
     grok_reasoning: bool,
     /// A plan task whose harness advertises no plan mode: PandaCode keeps it
@@ -1448,6 +2151,22 @@ fn event_metadata(value: &Value) -> Option<Value> {
     }
 }
 
+/// Set on an approval event's data when approving can only grant a lasting permission (an ACP
+/// request offering `allow_always` but no `allow_once`).
+pub(crate) const LASTING_ONLY: &str = "lastingOnly";
+/// Beside `LASTING_ONLY`: whether the request also offers a reject choice, so a team worker's
+/// automatic answer can decline it instead of stopping the turn.
+pub(crate) const LASTING_DECLINABLE: &str = "lastingDeclinable";
+
+fn declinable(request: &Value) -> bool {
+    request["params"]["options"].as_array().into_iter().flatten().any(|option| matches!(option["kind"].as_str(), Some("reject_once" | "reject_always")))
+}
+
+fn lasting_only(request: &Value) -> bool {
+    let kinds = || request["params"]["options"].as_array().into_iter().flatten().filter_map(|option| option["kind"].as_str());
+    kinds().any(|kind| kind == "allow_always") && !kinds().any(|kind| kind == "allow_once")
+}
+
 impl Protocol {
     fn emit_text(&mut self, update: Option<text_stream::Update>, step: &mut Step) {
         let Some(update) = update else {
@@ -1501,6 +2220,7 @@ impl Protocol {
             inputs: HashMap::new(),
             host: None,
             mcp_server: None,
+            extra_mcp_servers: Vec::new(),
             codex_mcp_servers: None,
             mcp_required: true,
             mcp_tool_names: HashSet::new(),
@@ -1515,12 +2235,24 @@ impl Protocol {
             early_kimi_commands: None,
             tools: HashMap::new(),
             file_write_tools: HashSet::new(),
+            non_mcp_tools: HashSet::new(),
             tool_order: VecDeque::new(),
             partial_tools: HashMap::new(),
             image_blocks: Vec::new(),
             kimi_thinking_values: Vec::new(),
             acp_config: Value::Null,
             acp_pending_session: None,
+            acp_can_load: false,
+            acp_resuming: false,
+            acp_load_fallback_tried: false,
+            acp_fresh_fallback_tried: false,
+            acp_resume_params: None,
+            acp_turn_text: String::new(),
+            acp_context_window: None,
+            acp_pending_phase0_usage: None,
+            acp_can_close: false,
+            acp_saw_any_usage_update: false,
+            acp_saw_usage_update: false,
             grok_context_used: 0,
             grok_reasoning: false,
             plan_fallback: false,
@@ -1540,6 +2272,24 @@ impl Protocol {
         let mut event = self.event("usage", "", None);
         event.data = Some(json!({"usedTokens":used,"contextWindow":window}));
         step.events.push(event);
+    }
+    fn flush_pending_phase0_usage(&mut self, step: &mut Step) {
+        if let Some((used, window)) = self.acp_pending_phase0_usage.take() {
+            self.usage(used, window, step);
+        }
+    }
+    /// A stopped ACP turn is settled by the prompt reply or by any live-steer reply still in flight.
+    fn acp_stop_settled(&self, value: &Value) -> bool {
+        if !acp::is_acp_provider(&self.config.provider) {
+            return false;
+        }
+        if value.get("result").is_none() && value.get("error").is_none() {
+            return false;
+        }
+        let Some(id) = value["id"].as_u64() else {
+            return false;
+        };
+        id == 3 || self.acp_steers.has_live(id)
     }
     fn claude_usage(&mut self, usage: &Value, fresh: bool, step: &mut Step) {
         if fresh {
@@ -1604,6 +2354,8 @@ impl Protocol {
             });
         }
         if self.config.provider == "codex" {
+            // `prepare_turn` already dropped a switched-off skill (off the runtime) before the
+            // protocol was built, so attaching reads no switches here.
             if let Some((name, path)) = self.config.skill.take() {
                 content.push(json!({"type":"skill","name":name,"path":path}));
             }
@@ -1662,6 +2414,19 @@ impl Protocol {
         output: Option<String>,
         step: &mut Step,
     ) {
+        self.tool_update_with_kind(id, name, status, input, output, None, step);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn tool_update_with_kind(
+        &mut self,
+        id: &str,
+        name: Option<&str>,
+        status: Option<&str>,
+        input: Option<String>,
+        output: Option<String>,
+        kind: Option<&str>,
+        step: &mut Step,
+    ) {
         if id.is_empty() {
             return;
         }
@@ -1671,9 +2436,13 @@ impl Protocol {
                 if let Some(oldest) = self.tool_order.pop_front() {
                     self.tools.remove(&oldest);
                     self.file_write_tools.remove(&oldest);
+                    self.non_mcp_tools.remove(&oldest);
                 }
             }
             self.tool_order.push_back(id.clone());
+        }
+        if kind.is_some_and(|k| !matches!(k, "" | "other")) {
+            self.non_mcp_tools.insert(id.clone());
         }
         let previous = self.tools.get(&id);
         // Claude may replay its complete tool_use after the corresponding result.
@@ -1706,12 +2475,18 @@ impl Protocol {
         if previous == Some(&tool) {
             return;
         }
+        let non_mcp_kind = self.non_mcp_tools.contains(&id);
         self.tools.insert(id, tool.clone());
         // The authenticated bridge emits these calls itself. Provider tool
         // frames are retained for joining sparse results, but not shown twice.
-        if self.mcp_tool_names.contains(&tool.name)
-            || (self.config.provider == "cline" && cline::host_tool(&tool.name).is_some_and(|name| self.mcp_tool_names.contains(name)))
-        {
+        // Never suppress calls with a non-MCP kind (e.g. `execute`/`edit`),
+        // even if their title starts with an MCP namespace prefix.
+        let explicit_mcp = strip_mcp_architect_prefix(&tool.name)
+            .is_some_and(|name| self.mcp_tool_names.contains(name))
+            || (self.config.provider == "cline"
+                && cline::host_tool(&tool.name)
+                    .is_some_and(|name| self.mcp_tool_names.contains(name)));
+        if !non_mcp_kind && (explicit_mcp || self.mcp_tool_names.contains(&tool.name)) {
             return;
         }
         let mut event = self.event("tool", format!("{} · {}", tool.name, tool.status), None);
@@ -1888,17 +2663,12 @@ impl Protocol {
                 };
                 self.tool_update(id, Some(&name), Some(status), input, output, step);
             }
-            _ => {
-                // Keep a label for other provider activities without forwarding
-                // arbitrary nested protocol payloads as tool details.
-                self.tool_update(
-                    id,
-                    Some(field(item, "type")),
-                    Some(status),
-                    None,
-                    None,
-                    step,
-                );
+            kind => {
+                // Known activities keep a few named, bounded fields; others keep
+                // only a label, never arbitrary nested protocol payloads.
+                let (name, input, output) = codex_item_details(item)
+                    .unwrap_or_else(|| (limited(kind, 256), None, None));
+                self.tool_update(id, Some(&name), Some(status), input, output, step);
             }
         }
     }
@@ -1945,15 +2715,17 @@ impl Protocol {
             && update["rawOutput"].is_null();
         let mut buffered = Step::default();
         let target = if buffer_only { &mut buffered } else { step };
-        self.tool_update(
+        self.tool_update_with_kind(
             field(update, "toolCallId"),
             update["title"].as_str(),
             status,
             input,
             output,
+            update["kind"].as_str(),
             target,
         );
         self.file_write_tools.retain(|id| self.tools.contains_key(id));
+        self.non_mcp_tools.retain(|id| self.tools.contains_key(id));
         let paths = if writes {
             let mut paths: Vec<String> = update["locations"].as_array().into_iter().flatten().take(201)
                 .filter_map(|location| location["path"].as_str()).filter(|p| p.len() <= 4096).map(str::to_owned).collect();
@@ -1976,8 +2748,9 @@ impl Protocol {
                     json!({"experimentalApi":true,"requestAttestation":false});
                 request
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => {
-                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"pandacode","version":"0.1.0"}}})
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "cursor" => {
+                let capabilities = if self.config.provider == "cursor" { cursor::client_capabilities() } else { json!({}) };
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":capabilities,"clientInfo":{"name":"pandacode","version":"0.1.0"}}})
             }
             _ => {
                 json!({"type":"control_request","request_id":"pandacode-init","request":{"subtype":"initialize","hooks":null}})
@@ -1988,6 +2761,13 @@ impl Protocol {
         let request_id = uuid::Uuid::new_v4().to_string();
         let mut event = self.event("approval", short(&text), Some(&value));
         event.request_id = Some(request_id.clone());
+        // Approving it grants more than this action (`approve`), so PandaCode never approves
+        // it automatically (a bot's allow rule asks instead; a team worker's is declined).
+        if lasting_only(&value) {
+            let data = event.data.get_or_insert_with(|| json!({}));
+            data[LASTING_ONLY] = json!(true);
+            data[LASTING_DECLINABLE] = json!(declinable(&value));
+        }
         self.pending.insert(request_id, value);
         step.events.push(event);
     }
@@ -2000,6 +2780,7 @@ impl Protocol {
             return Some(decision);
         }
         let request = self.pending.remove(id)?;
+        let declined = decline_text(&self.config.session_id, id);
         Some(match self.config.provider.as_str() {
             "pi" | "omp" => json!({"type":"extension_ui_response","id":request["id"],"confirmed":approved}),
             "zcode" => zcode::permission_decision(&request, approved),
@@ -2013,7 +2794,7 @@ impl Protocol {
                 json!({"id":request["id"],"result":result})
             }
             "devin" => devin::decision(&request, approved),
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "hermes" | "cursor" => {
                 let options = request["params"]["options"].as_array();
                 let kinds = if approved {
                     ["allow_once", "allow_always"]
@@ -2029,7 +2810,7 @@ impl Protocol {
                 json!({"jsonrpc":"2.0","id":request["id"],"result":{"outcome":outcome}})
             }
             _ => {
-                json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":if approved {json!({"behavior":"allow","updatedInput":request["request"]["input"]})} else {json!({"behavior":"deny","message":"Declined by the user"})}}})
+                json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":if approved {json!({"behavior":"allow","updatedInput":request["request"]["input"]})} else {json!({"behavior":"deny","message":declined})}}})
             }
         })
     }
@@ -2041,7 +2822,7 @@ impl Protocol {
             "codex" => {
                 json!({"id":900,"method":"turn/interrupt","params":{"threadId":self.remote_id,"turnId":self.turn_id}})
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "cursor" => {
                 json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.remote_id}})
             }
             _ => {
@@ -2084,7 +2865,7 @@ impl Protocol {
             "pi" | "omp" => self.pi(value).map(|step| self.steered(step)),
             "zcode" => self.zcode(value).map(|step| self.steered(step)),
             "muse" => self.muse(value),
-            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => self.acp(value),
+            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "cursor" => self.acp(value),
             _ => self.claude(value),
         }
     }
@@ -2200,7 +2981,7 @@ impl Protocol {
                                 .iter()
                                 .any(|option| &option.id == effort)
                         }) {
-                            return Err("The selected Codex model does not support this reasoning effort. Choose another effort or use harness settings.".into());
+                            return Err(format!("The selected Codex model {MODEL_REFUSES_EFFORT}. Choose another effort or use harness settings."));
                         }
                     }
                     self.codex_goal_ready(&mut step)?;
@@ -2375,7 +3156,7 @@ impl Protocol {
                         }
                         self.mcp_server = None;
                     }
-                    let mut params = json!({"cwd":self.config.cwd,"mcpServers":self.mcp_server.iter().collect::<Vec<_>>()});
+                    let mut params = json!({"cwd":self.config.cwd,"mcpServers":self.acp_mcp_servers()});
                     let method = if self.remote_id.is_empty() {
                         "session/new"
                     } else {
@@ -2407,6 +3188,7 @@ impl Protocol {
                     }
                     step.events
                         .push(self.event("session", self.remote_id.clone(), None));
+                    self.flush_pending_phase0_usage(&mut step);
                     let modes = value["result"]["modes"]["availableModes"].as_array();
                     // Kimi ACP's mode descriptions may be stale: the actual
                     // engine uses yolo for routine auto-approval and auto for
@@ -2449,19 +3231,46 @@ impl Protocol {
                     }
                     return Ok(step);
                 }
-                if params["sessionId"].as_str().is_some_and(|id| id != self.remote_id) {return Ok(step);}
                 let update=&params["update"];
+                let kind = update["sessionUpdate"].as_str().unwrap_or("");
+                if matches!(kind, "usage_update" | "available_commands_update" | "config_option_update") {
+                    let owned = !self.remote_id.is_empty()
+                        && params["sessionId"].as_str() == Some(self.remote_id.as_str());
+                    if !owned {
+                        return Ok(step);
+                    }
+                }
+                if params["sessionId"].as_str().is_some_and(|id| id != self.remote_id) {return Ok(step);}
                 if update["sessionUpdate"] == "available_commands_update" { self.commands_changed(&value, &mut step); }
                 if update["sessionUpdate"] == "config_option_update" { self.kimi_config_options(update); }
+                if update["sessionUpdate"] == "usage_update" {
+                    let valid_size = update["size"]
+                        .as_u64()
+                        .filter(|&v| v > 0 && v <= 1_000_000_000);
+                    if let Some(valid_size) = valid_size {
+                        self.acp_context_window = Some(valid_size);
+                    }
+                    if let Some(used) = update["used"].as_u64().filter(|&v| v <= 1_000_000_000) {
+                        self.acp_saw_any_usage_update = true;
+                        let window = valid_size.or(self.acp_context_window);
+                        if self.phase == 0 {
+                            self.acp_pending_phase0_usage = Some((used, window));
+                        } else {
+                            self.acp_saw_usage_update = true;
+                            self.usage(used, window, &mut step);
+                        }
+                    }
+                    return Ok(step);
+                }
                 // session/load can replay history before its response; UI already owns that history.
                 if self.phase==0{return Ok(step);}
                 match string(update,"sessionUpdate").as_str() {
-                    "usage_update"=>{if let Some(used)=update["used"].as_u64() {self.usage(used,update["size"].as_u64(),&mut step);}},
                     "agent_message_chunk"=>{
                         let content=&update["content"];
                         if content["type"]=="text" || content["type"].is_null() {
                             let text=field(content,"text");
                             if !text.is_empty() {
+                                self.record_acp_turn_text(text);
                                 if let Some(id)=update["messageId"].as_str().filter(|id| !id.is_empty()) {
                                     self.kimi_message_id=limited(id,256);
                                 } else if self.kimi_message_id.is_empty() {
@@ -2474,13 +3283,20 @@ impl Protocol {
                     },
                     "agent_thought_chunk"=>{
                         self.kimi_message_id.clear();
-                        if update["content"]["type"]=="text" {self.thinking(field(&update["content"],"text"),&mut step);}
+                        self.acp_turn_text.clear();
+                        let content=&update["content"];
+                        if content["type"]=="text" || content["type"].is_null() {
+                            self.thinking(field(content,"text"),&mut step);
+                        }
                     },
                     "tool_call"|"tool_call_update"=>{
                         // Late snapshots of a known tool must not split a later
                         // assistant response. Only a new call closes the segment.
                         let id=field(update,"toolCallId");
-                        if !id.is_empty() && !self.tools.contains_key(id) {self.kimi_message_id.clear();}
+                        if !id.is_empty() && !self.tools.contains_key(id) {
+                            self.kimi_message_id.clear();
+                            self.acp_turn_text.clear();
+                        }
                         self.kimi_tool(update,&mut step);
                     },
                     "plan"=>step.events.push(self.event("status","Plan updated",Some(update))),
@@ -2525,11 +3341,47 @@ impl Protocol {
         }
         Ok(())
     }
+    fn record_acp_turn_text(&mut self, text: &str) {
+        const ACP_TURN_TEXT_LIMIT: usize = 4096;
+        if text.is_empty() {
+            return;
+        }
+        if text.len() >= ACP_TURN_TEXT_LIMIT {
+            self.acp_turn_text.clear();
+            let mut start = text.len() - ACP_TURN_TEXT_LIMIT;
+            while start < text.len() && !text.is_char_boundary(start) {
+                start += 1;
+            }
+            if let Some(nl) = text[start..].find('\n') {
+                if start + nl + 1 < text.len() {
+                    start += nl + 1;
+                }
+            }
+            self.acp_turn_text.push_str(&text[start..]);
+            return;
+        }
+        self.acp_turn_text.push_str(text);
+        if self.acp_turn_text.len() > ACP_TURN_TEXT_LIMIT {
+            let mut cut = self.acp_turn_text.len() - ACP_TURN_TEXT_LIMIT;
+            while cut < self.acp_turn_text.len() && !self.acp_turn_text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            if let Some(nl) = self.acp_turn_text[cut..].find('\n') {
+                if cut + nl + 1 < self.acp_turn_text.len() {
+                    cut += nl + 1;
+                }
+            }
+            self.acp_turn_text.drain(..cut);
+        }
+    }
     fn kimi_prompt(&mut self, step: &mut Step) {
+        self.acp_turn_text.clear();
+        self.acp_saw_usage_update = false;
         let mut request = json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":self.remote_id}});
         request["params"]["prompt"] = Value::Array(self.prompt_content());
         step.write.push(request);
         self.phase = 1;
+        self.flush_pending_phase0_usage(step);
     }
     fn claude(&mut self, value: Value) -> Result<Step, String> {
         let mut step = Step::default();
@@ -2563,7 +3415,7 @@ impl Protocol {
                                     .iter()
                                     .any(|option| &option.id == effort)
                                 {
-                                    return Err("The selected Claude model does not support this reasoning effort. Choose another effort or use harness settings.".into());
+                                    return Err(format!("The selected Claude model {MODEL_REFUSES_EFFORT}. Choose another effort or use harness settings."));
                                 }
                             }
                         }
@@ -2965,6 +3817,10 @@ impl ProcessGroup {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(pid);
+            // Stopped by the crash guard if the app dies before it can.
+            if let Err(error) = crate::crash_guard::child_started(pid) {
+                eprintln!("Agent process group {pid}: {error}");
+            }
         }
         Self(pid)
     }
@@ -2978,31 +3834,37 @@ impl Drop for ProcessGroup {
                 .remove(&pid)
             {
                 kill_group(pid);
+                if let Err(error) = crate::crash_guard::child_ended(pid) {
+                    eprintln!("Agent process group {pid}: {error}");
+                }
             }
         }
     }
 }
 
-async fn finish_child(child: &mut Child, stdin: ChildStdin, group: &mut ProcessGroup, grace: Duration) {
-    drop(stdin);
-    if tokio::time::timeout(grace, child.wait())
-        .await
-        .is_err()
-    {
+/// Signals the process group, waits for `child.wait()`, then escalates to `SIGKILL` and reaps.
+/// `stdin` is the caller's: dropping it is an EOF, which Antigravity ignores, so linger closes
+/// the session before it calls this.
+async fn finish_child(child: &mut Child, group: &mut ProcessGroup, term_wait: Option<Duration>) {
+    if let Some(wait) = term_wait {
         #[cfg(unix)]
         if let Some(pid) = group.0 {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGTERM);
             }
         }
-        if tokio::time::timeout(Duration::from_millis(500), child.wait())
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout(wait, child.wait()).await.is_err() {
             let _ = child.kill().await;
+            let _ = child.wait().await;
         }
     }
-    // Also clean up provider-created background processes, including orphaned children.
+    release_group(group);
+}
+
+/// Lets a reaped child's group go: kills what is left of it (provider-created background processes,
+/// including orphaned children), forgets it and tells the crash guard. Runs after the reap, so
+/// `ProcessGroup::drop` does not SIGKILL a child we have not waited for.
+fn release_group(group: &mut ProcessGroup) {
     let cleanup = ProcessGroup(group.0.take());
     drop(cleanup);
 }
@@ -3010,6 +3872,13 @@ async fn finish_child(child: &mut Child, stdin: ChildStdin, group: &mut ProcessG
 /// Antigravity's Windows build unpacks 150-250 MB into `%TEMP%\\_MEI*` and removes it only on a
 /// clean exit, which a forced kill skips. So it gets its own `TEMP`, deleted when this drops.
 pub(crate) struct AgentTemp(PathBuf);
+/// Sweeps run in this process; a test checks the once-per-process rule.
+#[cfg(all(test, unix))]
+static SWEEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, unix))]
+pub(crate) fn agent_temp_sweeps() -> usize {
+    SWEEPS.load(std::sync::atomic::Ordering::Relaxed)
+}
 impl AgentTemp {
     /// None off Windows, or if the folder cannot be made: the agent then uses the system `TEMP`.
     pub(crate) fn redirect(command: &mut Command) -> Option<Self> {
@@ -3017,14 +3886,27 @@ impl AgentTemp {
             return None;
         }
         let root = crate::secret_store::dir()?.join(AGENT_TEMP_DIR);
-        static SWEPT: std::sync::Once = std::sync::Once::new();
-        SWEPT.call_once(|| Self::sweep(&root));
+        Self::sweep_once(&root);
         let temp = Self::create_in(&root)?;
         command.env("TEMP", &temp.0).env("TMP", &temp.0);
         Some(temp)
     }
+    /// Sweeps once per process, whoever asks first (a redirect or ACP discovery): a
+    /// running agent keeps its unpacked runtime in this folder for the life of the
+    /// process, so only the first caller cleans up old entries.
+    pub(crate) fn sweep_once(root: &Path) {
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        SWEPT.call_once(|| {
+            #[cfg(all(test, unix))]
+            SWEEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // An unpacked `_MEI*` runtime is hundreds of MB: deleting it must not hold an async
+            // worker. Only old folders go, so the caller's new one is safe from this thread.
+            let root = root.to_path_buf();
+            std::thread::spawn(move || Self::sweep(&root));
+        });
+    }
     /// Folders left by a crash or a quit. Only old ones: `pandacode serve` has no single-instance
-    /// guard, so another process's agent can be using a recent one.
+    /// guard, so another process's agent can be using a recent one. Synchronous.
     fn sweep(root: &Path) {
         for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
             let age = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|time| time.elapsed().ok());
@@ -3060,9 +3942,41 @@ impl Drop for AgentTemp {
 }
 
 struct Lingering {
+    /// Tells this entry from a newer one for the same task, so a finishing linger task removes
+    /// only its own.
+    id: u64,
     /// Canonical, for `end_lingering_in`.
     cwd: PathBuf,
-    agent: tokio::task::JoinHandle<()>,
+    /// Wakes the linger task so it can close the session and reap the child. Taken by the first
+    /// `end_lingering`. Dropping the sender is the same signal: a replaced entry must not leave
+    /// the agent up.
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// True once the child is closed and reaped (or the task ended any other way).
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
+fn next_lingering_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Held by a linger task: when it ends, however it ends, waiters are told and its own entry,
+/// never a newer one for the same task, leaves the map.
+struct LingerDone {
+    session_id: String,
+    id: u64,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for LingerDone {
+    fn drop(&mut self) {
+        let mut agents = lingering().lock().unwrap_or_else(|p| p.into_inner());
+        if agents.get(&self.session_id).is_some_and(|entry| entry.id == self.id) {
+            agents.remove(&self.session_id);
+        }
+        drop(agents);
+        let _ = self.done.send(true);
+    }
 }
 
 /// Agents past their turn, still finishing background work, by task.
@@ -3071,47 +3985,201 @@ fn lingering() -> &'static Mutex<HashMap<String, Lingering>> {
     AGENTS.get_or_init(Default::default)
 }
 
+/// What ended the wait for an agent asked to close its session.
+#[derive(Debug, PartialEq)]
+enum CloseOutcome {
+    Answered,
+    Exited,
+    /// No answer: it ran out the clock, or its exit could not be confirmed.
+    TimedOut,
+}
+
+/// Whether `frame` answers `session/close`: the reply to request 9, a result or an error with no
+/// method, as the close loop in `inspect_state` reads it. Bytes, so whatever else the agent prints
+/// merely fails to parse.
+fn answers_close(frame: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(frame).is_ok_and(|value| {
+        value["id"] == 9
+            && value.get("method").is_none()
+            && (value.get("result").is_some() || value.get("error").is_some())
+    })
+}
+
+/// Drains a lingering agent's stdout to EOF and signals its answer to `session/close`. It reads
+/// bytes and keeps reading after the answer: the pipe stays open for as long as the agent may write.
+async fn drain_stdout(mut stdout: tokio::process::ChildStdout, answered: Arc<tokio::sync::Notify>) {
+    let (mut line, mut skipped, mut buf) = (Vec::new(), false, [0u8; 8192]);
+    loop {
+        let count = match stdout.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(count) => count,
+        };
+        for part in buf[..count].split_inclusive(|byte| *byte == b'\n') {
+            let complete = part.last() == Some(&b'\n');
+            if !skipped {
+                line.extend_from_slice(&part[..part.len() - usize::from(complete)]);
+                if line.len() > CLOSE_ANSWER_LIMIT {
+                    // Too long to be the answer: dropped, while the pipe stays read.
+                    line.clear();
+                    skipped = true;
+                }
+            }
+            if complete {
+                if !skipped && answers_close(&line) {
+                    answered.notify_one();
+                }
+                line.clear();
+                skipped = false;
+            }
+        }
+    }
+}
+
+/// An ACP server answers `session/close` and keeps running until it is signalled, so the wait ends
+/// on that answer rather than on an exit that never comes. An agent that leaves by itself is reaped
+/// at once; one that never answers runs out the clock.
+async fn wait_for_close(answer: impl std::future::Future<Output = ()>, child: &mut Child) -> CloseOutcome {
+    tokio::select! {
+        () = answer => CloseOutcome::Answered,
+        status = child.wait() => {
+            if status.is_ok() { CloseOutcome::Exited } else { CloseOutcome::TimedOut }
+        }
+        () = tokio::time::sleep(ANTIGRAVITY_CLOSE_WAIT) => CloseOutcome::TimedOut,
+    }
+}
+
 /// Gives a finished agent `ANTIGRAVITY_GRACE` to exit by itself, without holding the turn open.
-/// Its group stays in the process registry, so app quit still kills it, and its pipes stay read,
-/// because an agent that writes to a closed pipe would die on the spot.
+/// Its group stays in the process registry, so app quit still kills it, and its pipes stay read
+/// until it is gone, because an agent that writes to a closed pipe would die on the spot. An agent
+/// that exits by itself inside the grace is reaped at once.
 #[allow(clippy::too_many_arguments)]
 fn linger_agent(
     session_id: String,
     cwd: &Path,
     mut child: Child,
-    stdin: ChildStdin,
-    mut stdout: tokio::process::ChildStdout,
+    mut stdin: ChildStdin,
+    stdout: tokio::process::ChildStdout,
     stderr: StderrReader,
     mut group: ProcessGroup,
     temp: Option<AgentTemp>,
+    close: Option<(bool, String)>,
 ) {
-    let agent = tokio::spawn(async move {
-        let (_stderr, _temp) = (stderr, temp);
-        // In this task, so an abort stops the drain too. It never ends the select: an agent can
-        // close stdout and keep working.
-        let drain = async move {
-            let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
-            std::future::pending::<()>().await
-        };
-        tokio::select! {
-            () = finish_child(&mut child, stdin, &mut group, ANTIGRAVITY_GRACE) => {}
-            () = drain => {}
-        }
-    });
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done) = tokio::sync::watch::channel(false);
+    let id = next_lingering_id();
+    let guard = LingerDone { session_id: session_id.clone(), id, done: done_tx };
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
-    let mut agents = lingering().lock().unwrap_or_else(|p| p.into_inner());
-    agents.retain(|_, lingering| !lingering.agent.is_finished());
-    agents.insert(session_id, Lingering { cwd, agent });
+    // Inserted before the task starts, so a task that finishes at once still removes its entry.
+    {
+        let mut agents = lingering().lock().unwrap_or_else(|p| p.into_inner());
+        agents.retain(|_, lingering| !*lingering.done.borrow());
+        agents.insert(session_id, Lingering { id, cwd, shutdown: Some(shutdown), done });
+    }
+    tokio::spawn(async move {
+        // Declared first, so it drops last: after the child is reaped and the temp folder let go.
+        let _guard = guard;
+        let (_stderr, _temp) = (stderr, temp);
+        // Its own task, so it outlives the selects below and keeps reading while the close frame is
+        // written and the child is waited for: an agent that answers the close with output must not
+        // hit a closed pipe. A full pipe must not stall the agent either.
+        let answered = Arc::new(tokio::sync::Notify::new());
+        let drain = tokio::spawn(drain_stdout(stdout, answered.clone()));
+        // Shutdown is the oneshot or the grace timer, never abort. An agent that exits by itself
+        // is reaped here at once, so its group leaves the registry now rather than at the end of
+        // the grace, a quit or the next turn.
+        let mut exited = tokio::select! {
+            () = tokio::time::sleep(ANTIGRAVITY_GRACE) => false,
+            _ = shutdown_rx => false,
+            status = child.wait() => status.is_ok(),
+        };
+        let (can_close, remote_id) = close.unwrap_or((false, String::new()));
+        let mut close_outcome = None;
+        if !exited && can_close && !remote_id.is_empty() {
+            let mut line = br#"{"jsonrpc":"2.0","id":9,"method":"session/close","params":{"sessionId":"#.to_vec();
+            line.extend_from_slice(&serde_json::to_vec(&remote_id).unwrap_or_else(|_| b"\"\"".to_vec()));
+            line.extend_from_slice(b"}}\n");
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                stdin.write_all(&line).await?;
+                stdin.flush().await
+            })
+            .await;
+            close_outcome = Some(wait_for_close(answered.notified(), &mut child).await);
+            exited = close_outcome == Some(CloseOutcome::Exited);
+        }
+        if exited {
+            release_group(&mut group);
+        } else {
+            drop(stdin);
+            // Windows has no SIGTERM: once the server acknowledged `session/close`, a long
+            // grace only stalls before the forced kill.
+            let grace = if close_outcome == Some(CloseOutcome::Answered) && !cfg!(unix) {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(2)
+            };
+            finish_child(&mut child, &mut group, Some(grace)).await;
+        }
+        // Nothing legitimate can still write: the drain ends here rather than with a descendant
+        // that kept the pipe.
+        drain.abort();
+    });
 }
 
-/// Ends the task's lingering agent. Its next turn must not share the conversation store with it.
-/// Dropping the aborted task kills the group and removes its temp folder.
+/// Ends the task's lingering agent. Returns only after the child is closed and reaped, for every
+/// concurrent caller. The shutdown is sent before the first await, so a caller dropped mid-wait
+/// (a Stop) still leaves the agent closing and reaping in its own task.
 pub(crate) async fn end_lingering(session_id: &str) {
-    let lingering = lingering().lock().unwrap_or_else(|p| p.into_inner()).remove(session_id);
-    if let Some(Lingering { agent, .. }) = lingering {
-        agent.abort();
-        let _ = agent.await;
+    lingering_ended(signal_lingering(session_id)).await;
+}
+
+/// Tells the task's lingering agent to close, at once and without awaiting, and returns what
+/// says it is gone. The entry stays until its task ends, so every caller can wait on it.
+fn signal_lingering(session_id: &str) -> Option<tokio::sync::watch::Receiver<bool>> {
+    let mut agents = lingering().lock().unwrap_or_else(|p| p.into_inner());
+    agents.get_mut(session_id).map(|entry| {
+        if let Some(shutdown) = entry.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        entry.done.clone()
+    })
+}
+
+/// Waits until a signalled lingering agent is closed and reaped.
+async fn lingering_ended(done: Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(mut done) = done {
+        let _ = done.wait_for(|&finished| finished).await;
     }
+}
+
+/// Ends every lingering agent. App quit still uses `shutdown_all`, which SIGKILLs the registry.
+#[cfg(test)]
+pub(crate) async fn end_all_lingering() {
+    let ids: Vec<String> = lingering()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    for id in ids {
+        end_lingering(&id).await;
+    }
+}
+
+/// Spaces simultaneous local Antigravity process spawns so parallel Architect
+/// workers do not collide on `~/.gemini/antigravity-cli/mcp/*.json.tmp` renames.
+async fn antigravity_spawn_gate() {
+    static LAST_SPAWN: OnceLock<tokio::sync::Mutex<Option<tokio::time::Instant>>> = OnceLock::new();
+    let mutex = LAST_SPAWN.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut last = mutex.lock().await;
+    let spacing = Duration::from_millis(350);
+    if let Some(prev) = *last {
+        let target = prev + spacing;
+        let now = tokio::time::Instant::now();
+        if target > now {
+            tokio::time::sleep_until(target).await;
+        }
+    }
+    *last = Some(tokio::time::Instant::now());
 }
 
 /// Ends every lingering agent working in `folder`, whichever task it belongs to, before the folder
@@ -3143,6 +4211,15 @@ pub async fn run(
 
 tokio::task_local! {
     static HARNESS: Arc<std::sync::atomic::AtomicBool>;
+    /// Set when the run's own loop takes a `RunInput::Stop` (`stop_taken`): its owner then knows
+    /// the stop, not the harness, ended the turn.
+    static STOP_TAKEN: Arc<std::sync::atomic::AtomicBool>;
+}
+
+/// The run's loop took a stop. Every loop that takes `RunInput::Stop` calls this (and still
+/// reports `STOPPING_STATUS` for the window).
+pub(crate) fn stop_taken() {
+    let _ = STOP_TAKEN.try_with(|taken| taken.store(true, std::sync::atomic::Ordering::SeqCst));
 }
 
 #[cfg(test)]
@@ -3178,7 +4255,9 @@ fn reached_harness() {
     let _ = HARNESS.try_with(|reached| reached.store(true, std::sync::atomic::Ordering::SeqCst));
 }
 
-/// `harness` is set once the run reaches the harness (`reached_harness`).
+/// `harness` is set once the run reaches the harness (`reached_harness`). Tests' entry point;
+/// the app runs `run_with_tools_reporting`.
+#[cfg(test)]
 pub async fn run_with_tools(
     config: RunConfig,
     sink: Sink,
@@ -3186,14 +4265,36 @@ pub async fn run_with_tools(
     host: Option<ToolHost>,
     harness: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
+    run_with_tools_reporting(config, sink, input, host, harness, Default::default()).await
+}
+
+/// `run_with_tools`, also setting `taken` once the run's loop takes a stop (`stop_taken`).
+pub async fn run_with_tools_reporting(
+    config: RunConfig,
+    sink: Sink,
+    input: UnboundedReceiver<RunInput>,
+    host: Option<ToolHost>,
+    harness: Arc<std::sync::atomic::AtomicBool>,
+    taken: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    // Refreshes the task's project for its switches: a SQLite read, kept off the runtime.
+    let (session_id, cwd) = (config.session_id.clone(), config.cwd.clone());
+    if let Err(error) = crate::blocking(move || {
+        crate::skill_manager::begin_launch_at(&session_id, &cwd);
+        Ok(())
+    })
+    .await
+    {
+        eprintln!("Warning: could not refresh the skill settings project: {error}");
+    }
     let identity = Protocol::new(config.clone());
     sink(identity.event("status", "Starting agent", None));
     // A goal operation is acknowledged by its own turn, so it is never continued elsewhere.
     let pooled = config.goal.is_none() && crate::account_pool::enabled(&config.provider) && !crate::cloud_agents::transport::is_cloud(&config.session_id);
     let result = if pooled {
-        HARNESS.scope(harness, pool::run(config, sink.clone(), input, host)).await
+        STOP_TAKEN.scope(taken, HARNESS.scope(harness, pool::run(config, sink.clone(), input, host))).await
     } else {
-        HARNESS.scope(harness, run_inner(config, sink.clone(), input, host)).await
+        STOP_TAKEN.scope(taken, HARNESS.scope(harness, run_inner(config, sink.clone(), input, host))).await
     };
     if let Err(error) = &result {
         sink(identity.event("error", error.clone(), None));
@@ -3226,13 +4327,35 @@ fn codex_user_limits_threads(command: &Command, config: &RunConfig) -> bool {
     })
 }
 
+#[cfg(test)]
 fn configure_command(command: &mut Command, config: &RunConfig) {
+    configure_command_with_skills(command, config, &Default::default());
+}
+
+/// Lists OpenCode's agents for this launch itself; `run_inner` passes its one scan instead.
+fn configure_command_with_skills(
+    command: &mut Command,
+    config: &RunConfig,
+    disabled: &std::collections::BTreeSet<String>,
+) {
+    let agents = (config.provider == "opencode")
+        .then(|| crate::skill_manager::opencode_agents_at(disabled, &config.cwd));
+    configure_command_with_agents(command, config, disabled, &agents.unwrap_or_default());
+}
+
+fn configure_command_with_agents(
+    command: &mut Command,
+    config: &RunConfig,
+    disabled: &std::collections::BTreeSet<String>,
+    opencode_agents: &crate::skill_manager::OpenCodeAgents,
+) {
     claude_auth::configure(command, &config.provider);
     let use_model = !config.model.is_empty() && config.model != "default";
     match config.provider.as_str() {
         "codex" => {
             // Process-local override: never alter the user's Codex config.
             command.args(["app-server", "--enable", "goals"]);
+            command.args(crate::skill_manager::codex_arguments(disabled));
             if !codex_user_limits_threads(command, config) {
                 command.args(["-c", CODEX_NO_THREAD_LIMIT]);
             }
@@ -3246,7 +4369,7 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
         "zcode" => zcode::configure(command),
         "muse" => muse::configure(command, config),
         "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" => acp::configure(command, config),
-        "github-copilot" | "devin" | "hermes" => acp::configure(command, config),
+        "github-copilot" | "devin" | "hermes" | "cursor" => acp::configure(command, config),
         "kimi" => {
             if use_model {
                 command.args(["--model", &config.model]);
@@ -3286,16 +4409,27 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
                 command.arg("--allow-dangerously-skip-permissions");
             }
             // These wait on a live session; PandaCode's process ends with the turn.
-            command.arg(format!("--disallowedTools={}", CLAUDE_SESSION_BOUND_TOOLS));
+            command.arg(format!(
+                "--disallowedTools={}",
+                crate::skill_manager::claude_disallowed(CLAUDE_SESSION_BOUND_TOOLS, disabled)
+            ));
             if use_model {
                 command.args(["--model", &config.model]);
             } else if config.provider == "glm" {
                 command.args(["--model", glm::DEFAULT_MODEL]);
             } else if config.provider == "mimo" {
                 command.args(["--model", mimo::DEFAULT_MODEL]);
+            } else if config.provider == "alibaba" {
+                command.args(["--model", alibaba::DEFAULT_MODEL]);
             }
             if let Some(effort) = &config.reasoning_effort {
                 command.args(["--effort", effort]);
+            }
+            // The Speed row stores Claude's fast mode as the task's service tier.
+            if config.provider == "claude"
+                && config.codex_settings.as_ref().is_some_and(|settings| settings["serviceTier"] == "fast")
+            {
+                command.args(["--settings", r#"{"fastMode":true}"#]);
             }
             if let Some(id) = &config.resume_id {
                 command.arg(format!("--resume={id}"));
@@ -3305,6 +4439,50 @@ fn configure_command(command: &mut Command, config: &RunConfig) {
             }
             command.env_remove("CLAUDECODE");
         }
+    }
+    if config.provider == "opencode" {
+        command.env(
+            "OPENCODE_CONFIG_CONTENT",
+            crate::skill_manager::opencode_enforcement_with(
+                &opencode_configuration(&config.mode),
+                disabled,
+                opencode_agents,
+            ),
+        );
+    }
+}
+
+/// The connection may have replaced the inline configuration: deny again for the same agents.
+/// The denies also always go through `OPENCODE_PERMISSION` (kept rules, merged last by OpenCode).
+/// Text that can't be read stays untouched and the launch also asks, as for names OpenCode can't deny.
+fn enforce_opencode_after_connection(
+    command: &mut Command,
+    config: &mut RunConfig,
+    disabled: &std::collections::BTreeSet<String>,
+    agents: &crate::skill_manager::OpenCodeAgents,
+) {
+    let variable = |name: &str| {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.and_then(|value| value.to_str()).map(str::to_owned))
+            .unwrap_or_else(|| std::env::var(name).ok())
+    };
+    let inline = variable("OPENCODE_CONFIG_CONTENT").unwrap_or_else(|| "{}".into());
+    let permission = variable("OPENCODE_PERMISSION");
+    let launch = crate::skill_manager::opencode_launch_with(
+        &inline,
+        permission.as_deref(),
+        disabled,
+        agents,
+    );
+    command.env("OPENCODE_CONFIG_CONTENT", launch.content);
+    if let Some(permission) = launch.permission {
+        command.env("OPENCODE_PERMISSION", permission);
+    }
+    if !launch.enforced {
+        crate::skill_manager::remind_unenforced(config, disabled);
     }
 }
 
@@ -3323,6 +4501,7 @@ async fn run_inner(
         "antigravity",
         "grok",
         "mimo",
+        "alibaba",
         "pi",
         "deepseek",
         "commandcode",
@@ -3334,6 +4513,7 @@ async fn run_inner(
         "devin",
         "zcode",
         "hermes",
+        "cursor",
     ]
     .contains(&config.provider.as_str())
     {
@@ -3344,9 +4524,39 @@ async fn run_inner(
     }
     review_supported(&config.provider, &config.mode)?;
     validate_reasoning_effort(&config.provider, config.reasoning_effort.as_deref())?;
+    // Switches, the installed-skill scan and OpenCode's agent files are read off the runtime.
+    // Unrecoverable switches never refuse a launch: they deny or ask (`launch_disabled`).
+    let (prepared, disabled, opencode_agents) = crate::blocking(move || {
+        let disabled = crate::skill_manager::launch_disabled(
+            &config.provider,
+            &config.cwd,
+            crate::skill_manager::disabled_for(&config.session_id),
+        );
+        // Refuses a typed switched-off skill before anything is sent, then adds reminders.
+        crate::skill_manager::prepare_turn(&mut config, &disabled)?;
+        // OpenCode's agents are listed once and reused by every configuration below.
+        let agents = if config.provider == "opencode" {
+            crate::skill_manager::opencode_agents_at(&disabled, &config.cwd)
+        } else {
+            Default::default()
+        };
+        // Some agent could not be given the denies: ask instead, as for names OpenCode can't deny.
+        if config.provider == "opencode" && !agents.complete && !disabled.is_empty() {
+            crate::skill_manager::remind_unenforced(&mut config, &disabled);
+        }
+        Ok((config, disabled, agents))
+    })
+    .await?;
+    config = prepared;
     // A cloud task runs the same pipeline through a bridge to its machine; local MCP host
     // tools stay on this computer (docs/cloud-agents.md, step 5).
-    if let Some(command) = crate::cloud_agents::transport::command(&config, |command| configure_command(command, &config)).await? {
+    if let Some(command) = crate::cloud_agents::transport::command(&config, |command| {
+        crate::blocking_snapshot(|| {
+            configure_command_with_agents(command, &config, &disabled, &opencode_agents)
+        })
+    })
+    .await?
+    {
         return run_process_with_tools(config, sink, input, command, Vec::new(), None).await;
     }
     let mut connection = crate::connections::for_task(&config.session_id, &config.provider)
@@ -3363,10 +4573,39 @@ async fn run_inner(
     config.cwd = external_path(&config.cwd);
     let image_blocks = attachments::load(&config.provider, &config.images).await?;
     let mut command = provider_command(&config.provider, &path)?;
-    configure_command(&mut command, &config);
+    let defer_antigravity_gemini_dir = config.provider == "antigravity" && connection.is_some();
+    let mut command = {
+        let (config, disabled, agents) =
+            (config.clone(), disabled.clone(), opencode_agents.clone());
+        crate::blocking(move || {
+            if defer_antigravity_gemini_dir {
+                acp::configure_antigravity_base(&mut command, &config);
+            } else {
+                configure_command_with_agents(&mut command, &config, &disabled, &agents);
+            }
+            Ok(command)
+        })
+        .await?
+    };
     // A named connection's arguments and environment win over the global setup.
     if let Some(connection) = &connection {
         connection.apply(&mut command);
+        // A connection's own `-c skills.config=…` can't override the switches: merged, manager last.
+        if config.provider == "codex" {
+            command.args(crate::skill_manager::codex_connection_arguments(
+                &connection.args,
+                &disabled,
+            ));
+        }
+    }
+    if defer_antigravity_gemini_dir {
+        let (env, args): (&[(String, String)], &[String]) = connection
+            .as_ref()
+            .map_or((&[], &[]), |connection| (&connection.env, &connection.args));
+        acp::antigravity_gemini_dir_isolated(&mut command, env, args)?;
+    }
+    if config.provider == "opencode" && !disabled.is_empty() {
+        enforce_opencode_after_connection(&mut command, &mut config, &disabled, &opencode_agents);
     }
     if config.provider == "kilo" {
         let inline = kilo::configure_environment(&mut command, &config);
@@ -3378,6 +4617,8 @@ async fn run_inner(
         Some(glm::configure(&mut command)?)
     } else if config.provider == "mimo" {
         Some(mimo::configure(&mut command)?)
+    } else if config.provider == "alibaba" {
+        Some(alibaba::configure(&mut command)?)
     } else if config.provider == "deepseek" {
         deepseek::configure(&mut command)?
     } else if config.provider == "commandcode" {
@@ -3413,6 +4654,22 @@ async fn run_process(
     run_process_with_tools(config, sink, input, command, image_blocks, None).await
 }
 
+/// Strips PandaCode's MCP server namespace prefixes that ACP harnesses prepend
+/// to host tool names so deduplication and self-scoped auto-approval match cleanly.
+pub(super) fn strip_mcp_architect_prefix(name: &str) -> Option<&str> {
+    for prefix in [
+        "mcp__pandacode_architect__",
+        "mcp_pandacode_architect_",
+        "pandacode_architect__",
+        "pandacode_architect:",
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
 /// Host tools that need no permission prompt once registered for the run.
 fn self_scoped_host_tool(name: &str) -> bool {
     optional_metadata_tool(name) || crate::bots::tools::self_scoped(name) || crate::schedules::tools::self_scoped(name) || crate::architect::team_tool(name)
@@ -3420,7 +4677,7 @@ fn self_scoped_host_tool(name: &str) -> bool {
 fn optional_metadata_tool(name: &str) -> bool {
     name == crate::session_titles::TOOL || name == crate::turn_changes::TRACK_TOOL
 }
-// Preview, simulator, VM, design, cloud deploy, Jev, and bot tools are optional
+// Preview, simulator, VM, Colab, design, cloud deploy, Jev, and bot tools are optional
 // transport capabilities, but retain their normal approval requirements and transcript
 // activity. They are not metadata tools.
 fn optional_transport_tool(name: &str) -> bool {
@@ -3431,12 +4688,16 @@ fn optional_transport_tool(name: &str) -> bool {
         )
         || name.starts_with("pandacode_simulator_")
         || name.starts_with("pandacode_vm_")
+        || name.starts_with("pandacode_colab_")
         || name.starts_with("pandacode_design_")
         || name.starts_with("pandacode_jev_")
         || name.starts_with("pandacode_bot_")
 }
+/// Tools Codex gets from its per-run MCP server rather than as dynamic tools: that server's
+/// override rides `thread/resume` too, while dynamic tools reach only `thread/start`.
 fn per_run_mcp_tool(name: &str) -> bool {
     name.starts_with("pandacode_jev_")
+        || name.starts_with("pandacode_colab_")
         || optional_metadata_tool(name)
         || matches!(name, "pandacode_run_project" | "pandacode_preview_file")
 }
@@ -3470,6 +4731,20 @@ fn split_jev_host(host: Option<ToolHost>) -> (Option<ToolHost>, Option<ToolHost>
     ((!host.tools.is_empty()).then_some(host), Some(jev))
 }
 
+/// The extra stdio servers (Colab's MCP) a run sends in its session request. Claude-family
+/// CLIs and Codex take them on their command line and thread config, and Cline from its
+/// settings file when that was written (else from `session/new`, as the bridge falls back).
+/// Pi and OMP speak their own RPC with no stdio MCP. ZCode's entries carry its session
+/// isolation and always-load; every other ACP agent takes plain stdio entries.
+fn extra_mcp_servers(provider: &str, cline_settings: bool, stdio: &[mcp_host::Stdio]) -> Vec<Value> {
+    match provider {
+        "claude" | "glm" | "mimo" | "alibaba" | "codex" | "pi" | "omp" => Vec::new(),
+        "cline" if cline_settings => Vec::new(),
+        "zcode" => mcp_host::zcode_mcp_servers(stdio),
+        _ => mcp_host::acp_mcp_servers(stdio),
+    }
+}
+
 async fn run_process_with_tools(
     config: RunConfig,
     sink: Sink,
@@ -3489,7 +4764,12 @@ async fn run_process_with_tools(
     };
     // A warm agent started after the task's last turn: same launch, tools already listed.
     let mut spare = match &host {
-        Some(tools) if warm::supported(&config) => warm::take(&config.session_id, &warm::key(&config, &tools.tools)),
+        Some(tools) if warm::supported(&config) => {
+            // The key reads the task's switches and saved settings: off the runtime.
+            let (keyed, catalog) = (config.clone(), tools.tools.clone());
+            let key = crate::blocking(move || Ok(warm::key(&keyed, &catalog))).await?;
+            warm::take(&config.session_id, &key)
+        }
         _ => {
             warm::launched(&config.session_id);
             None
@@ -3522,8 +4802,8 @@ async fn run_process_with_tools(
             (host.map(host_tools::HostTools::new).transpose()?, server)
         }
         (
-            "claude" | "glm" | "mimo" | "kimi" | "opencode" | "antigravity" | "grok" | "pi"
-            | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "hermes",
+            "claude" | "glm" | "mimo" | "alibaba" | "kimi" | "opencode" | "antigravity" | "grok" | "pi"
+            | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "hermes" | "cursor" | "zcode",
             Some(host),
         ) => (
             None,
@@ -3535,42 +4815,103 @@ async fn run_process_with_tools(
             )
             .await?,
         ),
-        // ZCode bridging does not pass `mcpServers` in session/create yet, so a
-        // started server would sit unconsumed; drop host tools until it does.
-        ("zcode", Some(_)) => (None, None),
         (_, None) => (None, None),
         _ => return Err("Host tools are unavailable for this provider".into()),
+    };
+    // Colab's MCP for local runs when the user turned it on; empty otherwise.
+    let stdio = {
+        let session_id = config.session_id.clone();
+        crate::blocking(move || Ok(mcp_host::stdio_servers(&session_id))).await?
     };
     let _pi_bridge = if matches!(config.provider.as_str(), "pi" | "omp") {
         Some(pi::Bridge::configure(&mut command, &config.mode, mcp.as_ref())?)
     } else { None };
-    let cline_settings = match &mcp {
-        Some(server) if config.provider == "cline" && !crate::cloud_agents::transport::is_cloud(&config.session_id) => {
-            match cline::mcp_settings(&mut command, &server.kimi_config()) {
-                Ok(folder) => Some(folder),
-                Err(error) if server.required() => return Err(error),
-                Err(_) => None,
-            }
+    let cline_settings = if config.provider == "cline"
+        && (mcp.is_some() || !stdio.is_empty())
+        && !crate::cloud_agents::transport::is_cloud(&config.session_id)
+    {
+        match cline::mcp_settings(&mut command, mcp.as_ref().map(mcp_host::Server::kimi_config).as_ref(), &stdio) {
+            Ok(folder) => Some(folder),
+            Err(error) if mcp.as_ref().is_some_and(mcp_host::Server::required) => return Err(error),
+            Err(_) => None,
         }
-        _ => None,
+    } else {
+        None
     };
     reached_harness();
-    let lingers = config.provider == "antigravity" && !crate::cloud_agents::transport::is_cloud(&config.session_id);
+    let local = !crate::cloud_agents::transport::is_cloud(&config.session_id);
+    let lingers = config.provider == "antigravity" && local;
+    let mut pre_spawn_inputs = VecDeque::new();
+    if local {
+        // Signalled before the wait, so a Stop drops only the wait: the old agent still closes
+        // and its own task reaps it.
+        let end = lingering_ended(signal_lingering(&config.session_id));
+        tokio::pin!(end);
+        loop {
+            tokio::select! {
+                biased;
+                action = input.recv() => match action {
+                    Some(RunInput::Stop) | None => {
+                        if let Some(server) = &mcp {
+                            server.stop();
+                        }
+                        stop_taken();
+                        sink(AgentEvent {
+                            session_id: config.session_id.clone(),
+                            kind: "status".into(),
+                            text: STOPPING_STATUS.into(),
+                            request_id: None,
+                            data: None,
+                            tool: None,
+                        });
+                        return Ok(());
+                    }
+                    Some(other) => pre_spawn_inputs.push_back(other),
+                },
+                () = &mut end => break,
+            }
+        }
+    }
     let mut agent_temp = None;
     let (mut child, mut group) = if let Some(spare) = spare {
         (spare.child, spare.group)
     } else {
         if lingers {
-            end_lingering(&config.session_id).await;
             agent_temp = AgentTemp::redirect(&mut command);
+            let gate = antigravity_spawn_gate();
+            tokio::pin!(gate);
+            loop {
+                tokio::select! {
+                    biased;
+                    action = input.recv() => match action {
+                        Some(RunInput::Stop) | None => {
+                            if let Some(server) = &mcp {
+                                server.stop();
+                            }
+                            stop_taken();
+                            sink(AgentEvent {
+                                session_id: config.session_id.clone(),
+                                kind: "status".into(),
+                                text: STOPPING_STATUS.into(),
+                                request_id: None,
+                                data: None,
+                                tool: None,
+                            });
+                            return Ok(());
+                        }
+                        Some(other) => pre_spawn_inputs.push_back(other),
+                    },
+                    () = &mut gate => break,
+                }
+            }
         }
-        if matches!(config.provider.as_str(), "claude" | "glm" | "mimo") {
+        if matches!(config.provider.as_str(), "claude" | "glm" | "mimo" | "alibaba") {
             let external = crate::feature_controls::get().external_mcp_servers;
             if !external {
                 command.arg("--strict-mcp-config");
             }
-            if let Some(server) = &mcp {
-                command.args(["--mcp-config", &server.claude_config().to_string()]);
+            if let Some(servers) = mcp_host::claude_mcp_config(mcp.as_ref().map(mcp_host::Server::claude_config), &stdio) {
+                command.args(["--mcp-config", &servers.to_string()]);
             } else if !external {
                 command.args(["--mcp-config", r#"{"mcpServers":{}}"#]);
             }
@@ -3600,12 +4941,22 @@ async fn run_process_with_tools(
     protocol.image_blocks = image_blocks;
     protocol.host = host;
     // Cline already has the server from its settings file, not from `session/new`.
-    protocol.mcp_server = mcp.as_ref().filter(|_| cline_settings.is_none()).map(mcp_host::Server::kimi_config);
+    // ZCode's entry rides `session/create` instead, and names session isolation
+    // plus always-load so the tools reach the model.
+    protocol.mcp_server = mcp.as_ref().filter(|_| cline_settings.is_none()).map(|server| {
+        if protocol.config.provider == "zcode" {
+            server.zcode_config()
+        } else {
+            server.kimi_config()
+        }
+    });
+    protocol.extra_mcp_servers = extra_mcp_servers(&protocol.config.provider, cline_settings.is_some(), &stdio);
     protocol.mcp_required = mcp.as_ref().is_some_and(mcp_host::Server::required);
-    protocol.codex_mcp_servers = mcp
-        .as_ref()
-        .filter(|_| protocol.config.provider == "codex")
-        .map(mcp_host::Server::codex_config);
+    protocol.codex_mcp_servers = if protocol.config.provider == "codex" {
+        mcp_host::codex_mcp_servers(mcp.as_ref().map(mcp_host::Server::codex_config), &stdio)
+    } else {
+        None
+    };
     // An optional bridge can fail to bind. In that case no local MCP tool is
     // registered, so a same-named user server must retain normal approvals.
     protocol.mcp_tool_names = if mcp.is_some() { mcp_tool_names } else { HashSet::new() };
@@ -3619,14 +4970,23 @@ async fn run_process_with_tools(
     let step_limit = startup_step();
     let mut deadline = startup_deadline(started, started, step_limit);
     let mut answered = false;
+    let mut stray_stdout: usize = 0;
+    let mut stray_notes: Vec<String> = Vec::new();
     let result=async {
         write_json(&mut stdin,&protocol.initial()).await?;
         if protocol.config.provider == "antigravity" {
             sink(protocol.event("status", "Waiting for Antigravity startup", None));
         }
         loop {
+            let has_buffered = !pre_spawn_inputs.is_empty();
             tokio::select! {
-                action=input.recv(),if input_open && !stopped=>{
+                action=async {
+                    if has_buffered {
+                        pre_spawn_inputs.pop_front()
+                    } else {
+                        input.recv().await
+                    }
+                },if input_open && !stopped=>{
                     match action {
                         Some(RunInput::Goal{request,reply})=>{let step=protocol.goal_control(request,reply);if apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued).await? {return Ok(());}},
                         Some(RunInput::CodexRequest{method,params,reply})=>{let step=protocol.codex_control(method,params,reply);apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued).await?;},
@@ -3642,18 +5002,23 @@ async fn run_process_with_tools(
                             if let Some(server) = &mcp { server.stop(); }
                             if let Some(step)=protocol.stop_goal() {
                                 input_open=false;
-                                sink(protocol.event("status","Pausing goal",None));
+                                stop_taken();sink(protocol.event("status",PAUSING_GOAL_STATUS,None));
                                 jobs.abort_all(); queued.clear();
                                 let cancel=protocol.cancel_requests();
                                 apply_step(&mut protocol,cancel,&sink,&mut stdin,&mut jobs,&mut queued).await?;
                                 if apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued).await? {return Ok(());}
                                 continue;
                             }
-                            input_open=false;stopped=true;sink(protocol.event("status","Stopping agent",None));
+                            input_open=false;stopped=true;stop_taken();sink(protocol.event("status",STOPPING_STATUS,None));
                             jobs.abort_all(); queued.clear();
                             let step=protocol.cancel_requests();
                             let _=tokio::time::timeout(Duration::from_millis(500),apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued)).await;
-                            let _=tokio::time::timeout(Duration::from_millis(500),write_json(&mut stdin,&protocol.cancel())).await;deadline=tokio::time::Instant::now()+Duration::from_secs(3);
+                            let _=tokio::time::timeout(Duration::from_millis(500),write_json(&mut stdin,&protocol.cancel())).await;
+                            // No session/prompt is in flight, so an id==3 reply will never arrive.
+                            if protocol.phase == 0 && acp::is_acp_provider(&protocol.config.provider) {
+                                return Ok(());
+                            }
+                            deadline=tokio::time::Instant::now()+Duration::from_secs(3);
                         },
                     }
                 },
@@ -3693,6 +5058,12 @@ async fn run_process_with_tools(
                             apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued).await?;
                             break Ok(());
                         }
+                        if stray_stdout > 0 {
+                            break Err(format!(
+                                "Invalid provider JSON: {}",
+                                stray_notes.first().map_or("unexpected non-JSON stdout", String::as_str)
+                            ));
+                        }
                         break Err("Agent exited before completing its response".into());
                     }
                     // Retained bytes contain no newline: only scan this read.
@@ -3707,12 +5078,42 @@ async fn run_process_with_tools(
                         let line=&bytes[consumed..end];consumed=end+1;
                         if line.len()>MAX_FRAME{return Err("Provider sent an oversized JSON message".into());}
                         if line.iter().all(u8::is_ascii_whitespace){continue;}
-                        let value:Value=serde_json::from_slice(line).map_err(|e|format!("Invalid provider JSON: {e}"))?;
+                        let trimmed = line.iter().position(|b| !b.is_ascii_whitespace()).map_or(&[][..], |i| &line[i..]);
+                        if !trimmed.starts_with(b"{") {
+                            if stopped {
+                                continue;
+                            }
+                            stray_stdout += 1;
+                            let note = limited(String::from_utf8_lossy(trimmed).trim(), 256);
+                            if stray_stdout <= 64 {
+                                eprintln!("PandaCode: ignored non-JSON stdout line {stray_stdout} from {}", protocol.config.provider);
+                                if stray_notes.len() < 8 {
+                                    stray_notes.push(note);
+                                }
+                                continue;
+                            }
+                            return Err("Invalid provider JSON: provider emitted too many non-JSON stdout lines".into());
+                        }
+                        let value = match serde_json::from_slice::<Value>(line) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if stopped {
+                                    continue;
+                                }
+                                return Err(format!("Invalid provider JSON: {error}"));
+                            }
+                        };
                         if stopped {
-                            if pi::stop_settled(&protocol.config.provider, &value) {return Ok(());}
+                            if pi::stop_settled(&protocol.config.provider, &value)
+                                || protocol.acp_stop_settled(&value)
+                            {
+                                return Ok(());
+                            }
                             continue;
                         }
                         answered=true;
+                        stray_stdout=0;
+                        stray_notes.clear();
                         if protocol.phase==0 {deadline=startup_deadline(started,tokio::time::Instant::now(),step_limit);}
                         let step=protocol.receive(value)?;
                         if apply_step(&mut protocol,step,&sink,&mut stdin,&mut jobs,&mut queued).await? {return Ok(());}
@@ -3746,15 +5147,25 @@ async fn run_process_with_tools(
         sink(event);
     }
     if lingers && result.is_ok() && !stopped {
-        linger_agent(protocol.config.session_id.clone(), &protocol.config.cwd, child, stdin, stdout, stderr_task, group, agent_temp);
+        let close = Some((protocol.acp_can_close, protocol.remote_id.clone()));
+        linger_agent(protocol.config.session_id.clone(), &protocol.config.cwd, child, stdin, stdout, stderr_task, group, agent_temp, close);
         return Ok(());
     }
-    finish_child(&mut child, stdin, &mut group, FINISH_GRACE).await;
-    let diagnostic = tokio::time::timeout(Duration::from_millis(500), &mut stderr_task.0)
+    drop(stdin);
+    if tokio::time::timeout(FINISH_GRACE, child.wait()).await.is_err() {
+        finish_child(&mut child, &mut group, Some(Duration::from_millis(500))).await;
+    } else {
+        let cleanup = ProcessGroup(group.0.take());
+        drop(cleanup);
+    }
+    let mut diagnostic = tokio::time::timeout(Duration::from_millis(500), &mut stderr_task.0)
         .await
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
+    if !stray_notes.is_empty() && diagnostic.is_empty() {
+        diagnostic = stray_notes.join("\n");
+    }
     let diagnostic = mcp
         .as_ref()
         .map(|server| server.redact(&diagnostic))
@@ -3825,6 +5236,7 @@ mod tests {
         assert!(!super::should_shrink(10, 1024 * 1024));
         assert!(!super::should_shrink(super::FRAME_KEEP, 2 * 1024 * 1024));
     }
+
     /// Recorded from `opencode --standalone api model.list` 2.2.5 (trimmed to two models).
     const OPENCODE_V2_MODELS: &str = r#"{"location":{"directory":"/tmp"},"data":[{"id":"flint-40b-free","modelID":"flint-40b-free","providerID":"opencode","type":"chat","family":"flint","name":"Flint 40B Free","package":"@opencode/ai/providers/openai-compatible","settings":{"apiKey":"public","baseURL":"https://opencode.ai/inference/openai/v1","provider":"opencode"},"capabilities":{"tools":true,"input":["text"],"output":["text"],"temperature":true},"variants":[{"id":"low","settings":{"reasoningEffort":"low"}},{"id":"medium","settings":{"reasoningEffort":"medium"}},{"id":"high","settings":{"reasoningEffort":"high"}},{"id":"xhigh","settings":{"reasoningEffort":"xhigh"}},{"id":"max","settings":{"reasoningEffort":"max"}}],"time":{"released":1792540800000},"cost":[{"input":0,"output":0,"cache":{"read":0,"write":0}}],"status":"active","enabled":true,"limit":{"context":262144,"output":65536}},{"id":"big-pickle","modelID":"big-pickle","providerID":"opencode","type":"chat","family":"big-pickle","name":"Big Pickle","package":"@opencode/ai/providers/openai-compatible","settings":{"apiKey":"public","baseURL":"https://opencode.ai/inference/openai/v1","provider":"opencode"},"capabilities":{"tools":true,"input":["text"],"output":["text"],"temperature":true},"variants":[],"time":{"released":1760659200000},"cost":[{"input":0,"output":0,"cache":{"read":0,"write":0}}],"status":"active","enabled":true,"limit":{"context":200000,"input":160000,"output":32000}}]}"#;
 
@@ -3847,6 +5259,37 @@ mod tests {
         for bad in [&b"SECRET"[..], br#"{"data":"SECRET"}"#, br#"{"data":[{"id":"SECRET"}]}"#] {
             assert!(!super::parse_opencode_v2_models(bad).unwrap_err().contains("SECRET"));
         }
+        assert_eq!(
+            super::parse_opencode_v2_models(br#"{"data":[]}"#).unwrap_err(),
+            "OpenCode returned no models"
+        );
+    }
+
+    #[test]
+    fn opencode_v2_server_url_validation_allows_only_loopback_http() {
+        for good in [
+            "http://127.0.0.1:41234",
+            "http://localhost:41234",
+            "http://[::1]:41234",
+        ] {
+            assert!(super::validate_opencode_server_url(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "https://127.0.0.1:41234",
+            "http://169.254.169.254:80",
+            "http://192.168.1.10:41234",
+            "http://example.com:41234",
+            "http://0.0.0.0:41234",
+            "file:///etc/passwd",
+            "http://user:pass@127.0.0.1:41234",
+            "http://127.0.0.1:41234?next=evil",
+            "http://127.0.0.1:41234#frag",
+            "not a url",
+        ] {
+            assert!(super::validate_opencode_server_url(bad).is_err(), "{bad}");
+        }
+        assert!(super::parse_opencode_server_url_line(r#"{"url":"http://127.0.0.1:9999"}"#).is_ok());
+        assert!(super::parse_opencode_server_url_line(r#"{"url":"http://example.com:9999"}"#).is_err());
     }
 
     #[test]
@@ -3856,7 +5299,7 @@ mod tests {
         assert_eq!(super::opencode_major_version("opencode"), None);
     }
 
-    /// Runs the catalog against a stand-in CLI; `$MARK` records every `api` call.
+    /// Runs the catalog against a stand-in CLI; `$MARK` records every v2 command call.
     #[cfg(unix)]
     async fn opencode_catalog_with(version: &str, verbose: &str, api: &str) -> (Result<Vec<super::ModelInfo>, String>, bool) {
         use std::os::unix::fs::PermissionsExt;
@@ -3865,7 +5308,7 @@ mod tests {
         let (script, mark, models) = (root.join("opencode"), root.join("api-called"), root.join("models.json"));
         std::fs::write(&models, api).unwrap();
         std::fs::write(&script, format!(
-            "#!/bin/sh\ncase \"$*\" in\n*--version*) echo '{version}';;\n*'--standalone api model.list --param directory='*) : > '{mark}'; cat '{models}';;\n'models --verbose') {verbose};;\nmodels) echo opencode/plain;;\n*) exit 9;;\nesac\n",
+            "#!/bin/sh\ncase \"$*\" in\n*--version*) echo '{version}';;\n'serve --stdio --port 0') : > '{mark}'; exit 9;;\n*'--standalone api model.list --param directory='*) : > '{mark}'; cat '{models}';;\n'--standalone models') : > '{mark}'; exit 9;;\n'models --verbose') {verbose};;\nmodels) echo opencode/plain;;\n*) exit 9;;\nesac\n",
             mark = mark.display(), models = models.display(),
         )).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3881,7 +5324,7 @@ mod tests {
         let path = super::executable("opencode").expect("Install OpenCode first");
         let models = super::opencode_catalog(&path).await.unwrap();
         let with_efforts = models.iter().filter(|model| !model.reasoning_efforts.is_empty()).count();
-        println!("{:?}: {} models, {with_efforts} with efforts", super::version(&path), models.len() - 1);
+        println!("{}: {} models, {with_efforts} with efforts", path.display(), models.len() - 1);
         assert!(with_efforts > 0);
     }
 
@@ -3891,6 +5334,33 @@ mod tests {
         let (models, called) = opencode_catalog_with("opencode v2.2.5", "exit 1", OPENCODE_V2_MODELS).await;
         assert!(called);
         assert_eq!(models.unwrap()[2].reasoning_efforts.len(), 5);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_v2_empty_api_falls_back_to_standalone_models_then_plain() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pandacode-opencode-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("opencode");
+        // Empty data: [] from api model.list must NOT return Ok([default]); it must fall back
+        // to `--standalone models` before plain `models`.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'opencode v2.4.1';;\n*'--standalone api model.list --param directory='*) echo '{\"data\":[]}';;\n'--standalone models') echo 'opencode/from-standalone';;\nmodels) echo 'opencode/plain';;\n*) exit 9;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let models = super::opencode_catalog(&script).await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].id, "opencode/from-standalone");
+
+        // When `--standalone models` also fails, fall back to plain `models`.
+        let (models, _) = opencode_catalog_with("opencode v2.4.1", "exit 1", r#"{"data":[]}"#).await;
+        let models = models.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].id, "opencode/plain");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
@@ -3912,9 +5382,214 @@ mod tests {
         assert_eq!(efforts, ["low", "high"]);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_v2_serve_stdio_polls_plugins_and_models_with_basic_auth_and_exits_on_eof() {
+        use base64::Engine as _;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let plugin_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let model_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen_auth = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let plugin_calls_srv = plugin_calls.clone();
+        let model_calls_srv = model_calls.clone();
+        let seen_auth_srv = seen_auth.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let plugin_calls = plugin_calls_srv.clone();
+                let model_calls = model_calls_srv.clone();
+                let seen_auth = seen_auth_srv.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = tokio::io::BufReader::new(read_half);
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut auth_header = String::new();
+                    loop {
+                        let mut header = String::new();
+                        let n = reader.read_line(&mut header).await.unwrap_or(0);
+                        if n == 0 || header == "\r\n" || header == "\n" {
+                            break;
+                        }
+                        if let Some((k, v)) = header.split_once(':') {
+                            if k.eq_ignore_ascii_case("authorization") {
+                                auth_header = v.trim().to_owned();
+                            }
+                        }
+                    }
+                    seen_auth.lock().unwrap().push(auth_header);
+                    let path = request_line.split_whitespace().nth(1).unwrap_or("");
+                    let (status, body) = if path.starts_with("/api/plugin?") {
+                        let n = plugin_calls.fetch_add(1, Ordering::SeqCst);
+                        if n < 2 {
+                            ("200 OK", r#"{"data":[]}"#.to_owned())
+                        } else {
+                            ("200 OK", r#"{"data":[{"id":"opencode-provider"}]}"#.to_owned())
+                        }
+                    } else if path.starts_with("/api/model?") {
+                        let n = model_calls.fetch_add(1, Ordering::SeqCst);
+                        match n {
+                            0 => ("503 Service Unavailable", r#"{"error":"starting"}"#.to_owned()),
+                            1 => ("200 OK", r#"{"data":[]}"#.to_owned()),
+                            _ => ("200 OK", OPENCODE_V2_MODELS.to_owned()),
+                        }
+                    } else {
+                        ("404 Not Found", "{}".to_owned())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = write_half.write_all(response.as_bytes()).await;
+                    let _ = write_half.shutdown().await;
+                });
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!("pandacode-opencode-serve-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, seen, eof_marker, app_data) = (
+            root.join("opencode"),
+            root.join("seen"),
+            root.join("eof-exited"),
+            root.join("app-data"),
+        );
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'opencode v2.4.1';;\n'serve --stdio --port 0')\n  printf '%s\\n%s\\n%s\\n' \"$(pwd -P)\" \"$(ls -ld . | cut -c1-10)\" \"$OPENCODE_PASSWORD\" > '{seen}'\n  printf '{{\"url\":\"http://127.0.0.1:{port}\"}}\\n'\n  cat >/dev/null\n  : > '{eof}'\n  exit 0\n  ;;\n*) exit 9;;\nesac\n",
+                seen = seen.display(),
+                eof = eof_marker.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let models = super::opencode_v2_catalog_in(&script, Some(&app_data)).await.unwrap();
+        server.abort();
+
+        let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["default", "opencode/big-pickle", "opencode/flint-40b-free"]);
+        assert_eq!(models[2].reasoning_efforts.len(), 5);
+        assert_eq!(models[2].context_window, Some(262144));
+        let serialized = serde_json::to_string(&models).unwrap();
+        assert!(!serialized.contains("apiKey") && !serialized.contains("baseURL"));
+
+        assert_eq!(plugin_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 3);
+        assert!(eof_marker.exists(), "server should have exited cleanly on stdin EOF");
+
+        let seen_text = std::fs::read_to_string(&seen).unwrap();
+        let lines: Vec<&str> = seen_text.lines().collect();
+        let folder = Path::new(lines[0]);
+        assert!(folder.starts_with(app_data.canonicalize().unwrap().join(super::AGENT_TEMP_DIR)));
+        assert_eq!(lines[1], "drwx------");
+        let password = lines[2];
+        assert!(password.len() >= 32, "expected random per-call password");
+        let expected_auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
+        );
+        let auths = seen_auth.lock().unwrap();
+        assert_eq!(auths.len(), 6);
+        assert!(auths.iter().all(|header| header == &expected_auth));
+
+        for _ in 0..100 {
+            if !folder.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!folder.exists(), "private folder stayed behind");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opencode_v2_serve_rejects_unauthorized_and_non_loopback() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(read_half);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let _ = write_half
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = write_half.shutdown().await;
+            }
+        });
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let err = super::fetch_opencode_v2_catalog_from_server(
+            &url,
+            "/tmp",
+            "Basic d3Jvbmc=",
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+        assert!(err.contains("credentials"), "{err}");
+
+        // Oversized response bodies are rejected by read_bounded_body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(read_half);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let body = "x".repeat(64);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = write_half.write_all(response.as_bytes()).await;
+                let _ = write_half.shutdown().await;
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let mut response = client
+            .get(format!("http://127.0.0.1:{port}/api/model"))
+            .send()
+            .await
+            .unwrap();
+        let err = super::read_bounded_body(&mut response, 32).await.err().unwrap();
+        server.abort();
+        assert_eq!(err, "OpenCode model metadata exceeded its limit");
+    }
+
     #[test]
     fn opencode_choices_keep_only_saved_models_and_retain_unavailable_ids() {
         let model = super::ModelInfo {
+            speed_tiers: Vec::new(),
             id: "vendor/selected".into(),
             name: "Selected model".into(),
             description: "Provider metadata".into(),
@@ -3923,6 +5598,7 @@ mod tests {
             context_window: Some(200_000),
         };
         let unused = super::ModelInfo {
+            speed_tiers: Vec::new(),
             id: "vendor/not-selected".into(),
             ..model.clone()
         };
@@ -3972,6 +5648,16 @@ mod tests {
         assert!(validate_reasoning_effort("hermes", Some("bad\nflag")).is_err());
     }
 
+    #[test]
+    fn cursor_is_registered_with_its_cli_and_catalog_defined_efforts() {
+        assert!(PROVIDERS.contains(&("cursor", "Cursor CLI")));
+        assert_eq!(executable_name("cursor"), "cursor-agent");
+        for effort in ["extra-high", "xhigh", "true", "none"] {
+            assert!(validate_reasoning_effort("cursor", Some(effort)).is_ok(), "{effort}");
+        }
+        assert!(validate_reasoning_effort("cursor", Some("bad\nflag")).is_err());
+    }
+
     pub(super) fn config(provider: &str) -> RunConfig {
         RunConfig {
             session_id: "local".into(),
@@ -3987,6 +5673,7 @@ mod tests {
             goal: None,
             codex_settings: None,
             images: Vec::new(),
+            no_fresh_resume_fallback: false,
         }
     }
 
@@ -4108,6 +5795,61 @@ mod tests {
         host_tools::HostTools::new(mcp).unwrap();
     }
 
+    /// Dynamic tools reach only `thread/start`; the per-run MCP override rides `thread/resume`
+    /// too, so a resumed Codex thread keeps the Colab tools.
+    #[test]
+    fn colab_tools_ride_codexs_per_run_mcp_so_resumed_threads_get_them() {
+        let colab = crate::design::listed(crate::cloud::colab_tools::catalog());
+        let names: Vec<String> = colab.iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        let mut tools = crate::agent_tools::catalog();
+        tools.extend(colab);
+        let host = ToolHost {
+            tools,
+            approval_tools: ["pandacode_colab_manage".into(), "pandacode_colab_exec".into(), "pandacode_open_browser".into()].into(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({})) })),
+        };
+        let (dynamic, mcp) = split_jev_host(Some(host));
+        let (dynamic, mcp) = (dynamic.unwrap(), mcp.expect("Colab tools go to the per-run MCP server"));
+        assert!(dynamic.tools.iter().all(|tool| !tool["name"].as_str().unwrap().starts_with("pandacode_colab_")));
+        let served: Vec<&str> = mcp.tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
+        assert_eq!(served, names.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(mcp.approval_tools, ["pandacode_colab_manage".into(), "pandacode_colab_exec".into()].into());
+        assert!(dynamic.approval_tools.contains("pandacode_open_browser"));
+        // Codex registers them as its per-run server's tools for approval routing.
+        assert!(names.iter().all(|name| per_run_mcp_tool(name) && optional_transport_tool(name)));
+        host_tools::HostTools::new(mcp).unwrap();
+    }
+
+    #[test]
+    fn extra_stdio_servers_go_where_each_harness_reads_them() {
+        let stdio = [mcp_host::Stdio::new(mcp_host::COLAB_MCP, "/bin/uvx".into(), vec!["colab-mcp".into()])];
+        let plain = json!({"name":"colab-mcp","command":"/bin/uvx","args":["colab-mcp"],"env":[]});
+        for provider in ["claude", "glm", "mimo", "alibaba", "codex", "pi", "omp"] {
+            assert!(extra_mcp_servers(provider, false, &stdio).is_empty(), "{provider}");
+        }
+        assert!(extra_mcp_servers("cline", true, &stdio).is_empty(), "Cline's settings file has it");
+        assert_eq!(extra_mcp_servers("cline", false, &stdio), vec![plain.clone()], "a failed settings file falls back to session/new");
+        for provider in ["kimi", "opencode", "antigravity", "grok", "kilo", "hermes", "muse"] {
+            assert_eq!(extra_mcp_servers(provider, false, &stdio), vec![plain.clone()], "{provider}");
+        }
+        let zcode = extra_mcp_servers("zcode", false, &stdio);
+        assert_eq!(zcode[0]["isolation"], "session");
+        assert_eq!(zcode[0]["alwaysLoad"], true);
+        assert_eq!(zcode[0]["command"], "/bin/uvx");
+        assert!(extra_mcp_servers("kimi", false, &[]).is_empty());
+    }
+
+    #[test]
+    fn team_workers_get_no_extra_stdio_servers() {
+        let session = format!("worker-stdio-{}", uuid::Uuid::new_v4());
+        assert!(!is_worker_run(&session));
+        mark_worker_run(&session, "run", true);
+        assert!(is_worker_run(&session));
+        assert!(mcp_host::stdio_servers(&session).is_empty());
+        clear_worker_run(&session, "run");
+        assert!(!is_worker_run(&session));
+    }
+
     #[test]
     fn preview_tools_do_not_block_normal_acp_turns_when_http_mcp_is_unavailable() {
         for provider in ["kimi", "opencode", "antigravity", "grok", "cline"] {
@@ -4134,6 +5876,7 @@ mod tests {
             "pandacode_cloud_cli",
             "pandacode_simulator_tap",
             "pandacode_vm_exec",
+            "pandacode_colab_run_python",
             "pandacode_design_artboard",
             "pandacode_jev_test",
             "pandacode_bot_recall",
@@ -4152,13 +5895,81 @@ mod tests {
 
     #[test]
     fn approve_for_me_runs_only_where_the_harness_reviews_actions() {
-        for provider in ["claude", "glm", "mimo"] {
+        for provider in ["claude", "glm", "mimo", "alibaba"] {
             assert!(review_supported(provider, "review").is_ok());
         }
-        for provider in ["codex", "kimi", "opencode", "antigravity", "grok", "pi", "omp", "deepseek", "commandcode", "cline", "kilo", "github-copilot", "muse", "hermes"] {
+        for provider in ["codex", "kimi", "opencode", "antigravity", "grok", "pi", "omp", "deepseek", "commandcode", "cline", "kilo", "github-copilot", "muse", "hermes", "cursor"] {
             assert!(review_supported(provider, "review").unwrap_err().contains("Approve for me"), "{provider}");
             assert!(review_supported(provider, "ask").is_ok());
         }
+    }
+
+    #[test]
+    fn one_sessions_burst_of_declines_never_evicts_anothers() {
+        set_decline_reason("quiet-session", "7", "Declined: team workers cannot run it.");
+        for i in 0..100 {
+            set_decline_reason("busy-session", &i.to_string(), "Declined: team workers cannot run it.");
+        }
+        assert!(take_decline_reason("quiet-session", "7").is_some(), "the other session keeps its reason");
+        assert!(take_decline_reason("busy-session", "99").is_some(), "the newest is kept");
+        assert!(take_decline_reason("busy-session", "0").is_none(), "the busy session's oldest went first");
+        forget_decline_reasons("busy-session");
+    }
+
+    /// A loop that takes a stop from the run's input must say so (`STOPPING_STATUS`), or a team
+    /// worker's automatic stop reads as "finished first" and its failure is lost.
+    #[test]
+    fn every_input_loop_that_takes_a_stop_reports_it() {
+        let marker = ["Some(RunInput", "::Stop)"].concat();
+        for (name, source) in [("providers.rs", include_str!("providers.rs")), ("providers/pool.rs", include_str!("providers/pool.rs"))] {
+            for (at, _) in source.match_indices(&marker) {
+                let arm = &source[at..(at + 1500).min(source.len())];
+                assert!(arm.contains("stop_taken()"), "{name}: an input loop takes a stop without marking it (`stop_taken`)");
+                assert!(arm.contains("STOPPING_STATUS"), "{name}: an input loop takes a stop without reporting STOPPING_STATUS");
+            }
+        }
+        // The pool's stop taken between accounts marks it as well.
+        let pool = include_str!("providers/pool.rs");
+        let between = pool.find("Stopped while the run changed accounts").expect("the pool's stop between accounts");
+        assert!(pool[between..between + 400].contains("stopped_between_accounts("));
+        let helper = pool.find("fn stopped_between_accounts(").unwrap();
+        assert!(pool[helper..helper + 200].contains("super::stop_taken();"));
+    }
+
+    #[tokio::test]
+    async fn a_taken_stop_sets_the_runs_flag_and_only_inside_its_run() {
+        let taken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        STOP_TAKEN.scope(taken.clone(), async { stop_taken() }).await;
+        assert!(taken.load(std::sync::atomic::Ordering::SeqCst));
+        // Outside any run it is a no-op.
+        stop_taken();
+    }
+
+    #[test]
+    fn a_decision_after_claude_cancelled_its_permission_reports_nothing() {
+        let mut p = Protocol::new(config("claude"));
+        let step = p.receive(json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}})).unwrap();
+        let id = step.events.iter().find(|e| e.kind == "approval").unwrap().request_id.clone().unwrap();
+        p.receive(json!({"type":"control_cancel_request","request_id":"r"})).unwrap();
+        // The automatic decision arrives late: nothing waits on it, so the worker keeps running.
+        let late = p.approval_step(&id, true);
+        assert!(late.events.is_empty() && late.write.is_empty(), "{:?}", late.events);
+    }
+
+    #[test]
+    fn claudes_permission_for_an_always_ask_tool_is_recognised_for_team_workers() {
+        let mut cfg = config("claude");
+        cfg.mode = "full".into();
+        let mut p = Protocol::new(cfg);
+        let step = p.receive(json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"mcp__pandacode__pandacode_cloud_cli","input":{"args":["deploy"]}}})).unwrap();
+        let event = step.events.iter().find(|e| e.kind == "approval").expect("Claude asks for it");
+        // The real label is the bare tool name; the data keeps only scalar keys.
+        assert_eq!(event.text, "mcp__pandacode__pandacode_cloud_cli");
+        assert_eq!(event.data.as_ref().unwrap()["type"], "control_request");
+        assert_eq!(crate::worker_approvals::always_ask_tool(event), Some("pandacode_cloud_cli"));
+        let mut other = event.clone();
+        other.text = "mcp__pandacode__pandacode_status".into();
+        assert_eq!(crate::worker_approvals::always_ask_tool(&other), None);
     }
 
     #[test]
@@ -4195,7 +6006,7 @@ mod tests {
 
     #[test]
     fn claude_preview_tools_never_inherit_the_metadata_permission_exemption() {
-        for provider in ["claude", "glm", "mimo"] {
+        for provider in ["claude", "glm", "mimo", "alibaba"] {
             for mode in ["ask", "auto", "plan"] {
                 for name in ["pandacode_run_project", "pandacode_preview_file"] {
                     let name = format!("mcp__pandacode_architect__{name}");
@@ -4279,7 +6090,7 @@ mod tests {
     #[test]
     fn claude_title_permission_is_silent_only_for_the_registered_metadata_tool() {
         let title_name = format!("mcp__pandacode_architect__{}", crate::session_titles::TOOL);
-        for provider in ["claude", "glm", "mimo"] {
+        for provider in ["claude", "glm", "mimo", "alibaba"] {
             for mode in ["ask", "auto", "plan"] {
                 for (registered, name) in [(true, title_name.as_str()), (false, title_name.as_str()), (true, "mcp__other__pandacode_title"), (true, "mcp__pandacode_architect__pandacode_open_browser")] {
                     let mut cfg = config(provider);
@@ -4401,6 +6212,11 @@ mod tests {
         assert!(validate_reasoning_effort("kimi", Some("high level")).is_err());
         assert!(validate_reasoning_effort("codex", Some("future_effort")).is_ok());
         assert!(validate_reasoning_effort("codex", Some("")).is_err());
+        for provider in ["grok", "cline", "codex"] {
+            assert!(validate_reasoning_effort(provider, Some("-x")).is_err(), "{provider}");
+            assert!(validate_reasoning_effort(provider, Some("--help")).is_err(), "{provider}");
+            assert!(validate_reasoning_effort(provider, Some("extra-high")).is_ok(), "{provider}");
+        }
     }
 
     #[test]
@@ -4442,6 +6258,169 @@ mod tests {
             .receive(json!({"id":2,"result":{"thread":{"id":"remote"}}}))
             .unwrap();
         assert!(turn.write[0]["params"].get("effort").is_none());
+    }
+
+    #[test]
+    fn skill_manager_claude_arbitrary_names_use_advisory_and_unrecoverable_prefs_block_skill_tools()
+    {
+        for provider in ["claude", "glm", "mimo", "alibaba"] {
+            let mut cfg = config(provider);
+            let disabled = std::collections::BTreeSet::from(["Friendly 技能".into()]);
+            crate::skill_manager::apply_instructions(&mut cfg, &disabled);
+            let mut command = Command::new("claude");
+            configure_command_with_skills(&mut command, &cfg, &disabled);
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            assert!(args
+                .windows(2)
+                .any(|a| a[0] == "--append-system-prompt" && a[1].contains("[\"Friendly 技能\"]")));
+            assert!(!args.iter().any(|a| a.contains("Skill(Friendly")));
+        }
+        let mut cfg = config("codex");
+        cfg.skill = Some(("any-skill".into(), "/skill".into()));
+        let disabled = std::collections::BTreeSet::from(["*".into()]);
+        crate::skill_manager::apply_instructions(&mut cfg, &disabled);
+        assert!(cfg.skill.is_none());
+        assert_eq!(
+            crate::skill_manager::claude_disallowed("Monitor", &disabled),
+            "Monitor,Skill"
+        );
+    }
+
+    #[test]
+    fn skill_manager_codex_and_opencode_receive_native_launch_overrides() {
+        let disabled = std::collections::BTreeSet::from(["review".into()]);
+        let mut command = Command::new("codex");
+        configure_command_with_skills(&mut command, &config("codex"), &disabled);
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c"
+                && pair[1] == "skills.config=[{name=\"review\",enabled=false}]"));
+        let mut command = Command::new("opencode");
+        configure_command_with_skills(&mut command, &config("opencode"), &disabled);
+        let inline = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let value: Value = serde_json::from_str(inline).unwrap();
+        assert_eq!(value["permission"]["skill"]["review"], "deny");
+    }
+
+    #[test]
+    fn skill_manager_opencode_connection_config_that_cannot_be_read_is_kept_and_the_launch_asks() {
+        let disabled = std::collections::BTreeSet::from(["review".into()]);
+        let mut cfg = config("opencode");
+        let mut command = Command::new("opencode");
+        let text = r#"{"provider":{"work":{"options":{"timeout":{env:TIMEOUT}}}}}"#;
+        command.env("OPENCODE_CONFIG_CONTENT", text);
+        enforce_opencode_after_connection(&mut command, &mut cfg, &disabled, &Default::default());
+        let env = |name: &str| {
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .unwrap()
+                .1
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(env("OPENCODE_CONFIG_CONTENT"), text);
+        let permission: Value = serde_json::from_str(&env("OPENCODE_PERMISSION")).unwrap();
+        assert_eq!(permission["skill"]["review"], "deny");
+        assert!(format!("{}{}", cfg.prompt, cfg.instructions)
+            .contains("Do not use these skills in this session: review."));
+        // A readable connection configuration gets the denies merged in and no reminder.
+        let mut cfg = config("opencode");
+        let mut command = Command::new("opencode");
+        command.env("OPENCODE_CONFIG_CONTENT", r#"{"mcp":{"x":{}}}"#);
+        enforce_opencode_after_connection(&mut command, &mut cfg, &disabled, &Default::default());
+        let value: Value =
+            serde_json::from_str(&env_of(&command, "OPENCODE_CONFIG_CONTENT")).unwrap();
+        assert!(value["mcp"]["x"].is_object());
+        assert_eq!(value["permission"]["skill"]["review"], "deny");
+        assert!(!format!("{}{}", cfg.prompt, cfg.instructions).contains("review"));
+    }
+
+    fn env_of(command: &Command, name: &str) -> String {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .unwrap()
+            .1
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn skill_manager_codex_connection_skills_config_cannot_override_the_switches() {
+        let disabled = std::collections::BTreeSet::from(["review".into()]);
+        let mut command = Command::new("codex");
+        configure_command_with_skills(&mut command, &config("codex"), &disabled);
+        let connection = vec![
+            "-c".to_string(),
+            "skills.config=[{name=\"review\",enabled=true},{path=\"/x/SKILL.md\",enabled=false}]"
+                .into(),
+        ];
+        command.args(&connection);
+        command.args(crate::skill_manager::codex_connection_arguments(
+            &connection,
+            &disabled,
+        ));
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let last = args
+            .iter()
+            .rev()
+            .find(|a| a.starts_with("skills.config="))
+            .unwrap();
+        let table = last.parse::<toml::Table>().unwrap();
+        let rules = table["skills"]["config"].as_array().unwrap();
+        assert_eq!(rules.len(), 3, "{last}");
+        assert_eq!(rules[1]["path"].as_str(), Some("/x/SKILL.md"));
+        assert_eq!(rules[2]["name"].as_str(), Some("review"));
+        assert_eq!(rules[2]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn skill_manager_claude_launch_has_one_merged_disallowed_tools_flag() {
+        let disabled = std::collections::BTreeSet::from(["alpha".into(), "beta".into()]);
+        for provider in ["claude", "glm", "mimo", "alibaba"] {
+            let mut command = Command::new("claude");
+            configure_command_with_skills(&mut command, &config(provider), &disabled);
+            let flags: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| s.starts_with("--disallowedTools="))
+                .collect();
+            assert_eq!(
+                flags,
+                [format!(
+                    "--disallowedTools={CLAUDE_SESSION_BOUND_TOOLS},Skill(alpha),Skill(beta)"
+                )]
+            );
+        }
     }
 
     #[test]
@@ -4563,12 +6542,17 @@ mod tests {
         );
         let mut p = Protocol::new(config("kimi"));
         p.phase = 1;
-        let step=p.receive(json!({"method":"session/update","params":{"update":{"sessionUpdate":"usage_update","used":4096,"size":262144}}})).unwrap();
+        p.remote_id = "remote".into();
+        let step=p.receive(json!({"method":"session/update","params":{"sessionId":"remote","update":{"sessionUpdate":"usage_update","used":4096,"size":262144}}})).unwrap();
         assert_eq!(
             step.events[0].data,
             json!({"usedTokens":4096,"contextWindow":262144}).into()
         );
-        let step=p.receive(json!({"method":"session/update","params":{"update":{"sessionUpdate":"usage_update","used":-1,"size":262144}}})).unwrap();
+        let missing = p.receive(json!({"method":"session/update","params":{"update":{"sessionUpdate":"usage_update","used":1,"size":262144}}})).unwrap();
+        assert!(missing.events.iter().all(|event| event.kind != "usage"));
+        let mismatch = p.receive(json!({"method":"session/update","params":{"sessionId":"other","update":{"sessionUpdate":"usage_update","used":1,"size":262144}}})).unwrap();
+        assert!(mismatch.events.iter().all(|event| event.kind != "usage"));
+        let step=p.receive(json!({"method":"session/update","params":{"sessionId":"remote","update":{"sessionUpdate":"usage_update","used":-1,"size":262144}}})).unwrap();
         assert!(step.events.is_empty());
     }
 
@@ -5067,6 +7051,41 @@ mod tests {
     }
 
     #[test]
+    fn model_catalogs_report_speed_tiers_from_the_harness() {
+        let models = parse_codex_models(&json!({"data":[
+            {"model":"fast","serviceTiers":[{"id":"priority","name":"Fast","description":"1.5x speed"},{"id":"ultrafast","name":"Ultra Fast"},{"id":"priority","name":"Dup"},{"id":""},{"id":"bad\nid"},{"name":"No id"}]},
+            {"model":"plain","serviceTiers":[]}
+        ]})).unwrap();
+        let tiers: Vec<_> = models[1].speed_tiers.iter().map(|tier| (tier.id.as_str(), tier.name.as_str(), tier.description.as_str())).collect();
+        assert_eq!(tiers, [("priority", "Fast", "1.5x speed"), ("ultrafast", "Ultra Fast", "")]);
+        assert!(models[2].speed_tiers.is_empty());
+        assert!(serde_json::to_value(&models[2]).unwrap().get("speedTiers").is_none());
+        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"][1]["id"], "ultrafast");
+        let many: Vec<_> = (0..20).map(|n| json!({"id":format!("t{n}")})).collect();
+        assert_eq!(parse_codex_models(&json!({"data":[{"model":"m","serviceTiers":many}]})).unwrap()[1].speed_tiers.len(), 8);
+
+        let claude = parse_claude_models(&json!({"models":[{"value":"opus","supportsFastMode":true},{"value":"haiku"}]})).unwrap();
+        assert_eq!(claude[1].speed_tiers.iter().map(|tier| tier.id.as_str()).collect::<Vec<_>>(), ["fast"]);
+        assert!(claude[2].speed_tiers.is_empty());
+    }
+
+    #[test]
+    fn claude_fast_mode_is_passed_as_a_flag_setting_only_when_chosen() {
+        let args = |provider: &str, settings: Option<Value>| {
+            let mut cfg = config(provider);
+            cfg.codex_settings = settings;
+            let mut command = Command::new("claude");
+            configure_command(&mut command, &cfg);
+            command.as_std().get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        let fast = ["--settings".to_string(), r#"{"fastMode":true}"#.to_string()];
+        assert!(args("claude", Some(json!({"serviceTier":"fast"}))).windows(2).any(|pair| pair == fast));
+        for (provider, settings) in [("claude", None), ("claude", Some(json!({"serviceTier":null}))), ("glm", Some(json!({"serviceTier":"fast"})))] {
+            assert!(!args(provider, settings).iter().any(|arg| arg == "--settings"));
+        }
+    }
+
+    #[test]
     fn model_catalog_rejects_malformed_or_oversized_pages() {
         assert!(parse_codex_models(&json!({"models":[]})).is_err());
         assert!(parse_codex_models(&json!({"data":vec![json!({"model":"m"});101]})).is_err());
@@ -5262,6 +7281,44 @@ mod tests {
     }
 
     #[test]
+    fn only_the_run_that_owns_a_worker_mark_clears_it() {
+        let session = format!("worker-mark-{}", uuid::Uuid::new_v4());
+        let tool = crate::cloud::deploy::ALWAYS_ASK[0];
+        mark_worker_run(&session, "old", true);
+        // A newer run of the same task starts before the older one's leftovers drop.
+        mark_worker_run(&session, "new", true);
+        clear_worker_run(&session, "old");
+        assert!(worker_tool_refusal(&session, tool).is_some(), "the older run left the newer run's mark");
+        clear_worker_run(&session, "new");
+        assert!(worker_tool_refusal(&session, tool).is_none());
+        // A newer run that is not a worker's drops the older worker run's mark at once.
+        mark_worker_run(&session, "old", true);
+        mark_worker_run(&session, "new", false);
+        assert!(worker_tool_refusal(&session, tool).is_none());
+    }
+
+    #[test]
+    fn acp_approvals_take_a_one_time_choice_and_flag_lasting_only_requests() {
+        // Recorded option sets: Kimi, Grok and Cline (a one-time choice beside lasting ones; Grok's
+        // full handshake is in acp.rs), and a request offering only a lasting choice.
+        let kimi = json!([{"optionId":"custom-yes","kind":"allow_once"},{"optionId":"custom-no","kind":"reject_once"}]);
+        let grok = json!([{"optionId":"allow-edits-session","name":"Yes, allow all edits during this session","kind":"allow_always"},{"optionId":"allow-once","name":"Yes","kind":"allow_once"},{"optionId":"reject-once","name":"No, and tell Grok what to do differently","kind":"reject_once"}]);
+        let cline = json!([{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"allow_always","name":"Allow always","kind":"allow_always"},{"optionId":"reject_once","name":"Reject","kind":"reject_once"}]);
+        let lasting = json!([{"optionId":"always","kind":"allow_always"},{"optionId":"reject","kind":"reject_once"}]);
+        let lasting_no_reject = json!([{"optionId":"always","kind":"allow_always"}]);
+        // One ACP choice path serves every harness; Kimi's protocol hands each set to it.
+        for (provider, options, chosen, lasting_only, declinable) in [("kimi", kimi, "custom-yes", false, false), ("grok", grok, "allow-once", false, false), ("cline", cline, "allow_once", false, false), ("only allow_always", lasting, "always", true, true), ("allow_always, no reject", lasting_no_reject, "always", true, false)] {
+            let mut p = Protocol::new(config("kimi"));
+            let step = p.receive(json!({"jsonrpc":"2.0","id":"req-1","method":"session/request_permission","params":{"sessionId":"s","toolCall":{"title":"Edit file","kind":"edit"},"options":options}})).unwrap();
+            let event = step.events.iter().find(|event| event.kind == "approval").unwrap_or_else(|| panic!("{provider}: no approval"));
+            assert_eq!(event.data.as_ref().is_some_and(|data| data[LASTING_ONLY] == true), lasting_only, "{provider}");
+            assert_eq!(event.data.as_ref().is_some_and(|data| data[LASTING_DECLINABLE] == true), declinable, "{provider}");
+            let id = event.request_id.clone().unwrap();
+            assert_eq!(p.approve(&id, true).unwrap()["result"]["outcome"]["optionId"], chosen, "{provider}");
+        }
+    }
+
+    #[test]
     fn kimi_questions_never_silently_select_first_answer() {
         let mut p = Protocol::new(config("kimi"));
         let step=p.receive(json!({"jsonrpc":"2.0","id":20,"method":"session/request_permission","params":{"toolCall":{"title":"Choose a database"},"options":[{"kind":"allow_once","optionId":"q0_opt_0","name":"Postgres"},{"kind":"allow_once","optionId":"q0_opt_1","name":"SQLite"},{"kind":"reject_once","optionId":"q0_skip","name":"Skip"}]}})).unwrap();
@@ -5372,7 +7429,11 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
     /// then leaves the marker. It ignores stdin's EOF, as Antigravity does.
     #[cfg(unix)]
     fn lingering_agent() -> String {
-        acp_agent("0", r#"sleep 2; echo '{}'; echo note >&2; echo done > "$1"; exec sleep 30"#)
+        r#"read -r a; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r a; echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default"}]}]}}'
+read -r a; echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+sleep 2; echo '{}'; echo note >&2; echo done > "$1"; exec sleep 30"#
+            .into()
     }
 
     #[cfg(unix)]
@@ -5407,6 +7468,167 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         let _ = std::fs::remove_file(marker);
     }
 
+    /// Whether the session's linger task ended on its own within `wait`.
+    #[cfg(unix)]
+    async fn linger_finished_within(id: &str, wait: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        while tokio::time::Instant::now() < deadline {
+            if lingering().lock().unwrap().get(id).is_none_or(|agent| *agent.done.borrow()) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Advertises `session/close` and, once asked, runs `reply` and then `after`.
+    #[cfg(unix)]
+    fn closing_agent(reply: &str, after: &str) -> String {
+        format!(
+            r#"read -r a; echo '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r a; echo '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s","configOptions":[{{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{{"value":"default"}}]}}]}}}}'
+read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+while read -r a; do case "$a" in *session/close*) break;; esac; done
+{reply}
+{after}"#
+        )
+    }
+
+    /// Whether the agent whose pid `marker` holds is gone.
+    #[cfg(unix)]
+    fn agent_gone(marker: &Path) -> bool {
+        std::fs::read_to_string(marker)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<i32>().ok())
+            .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == -1)
+    }
+
+    /// Asked to close, the agent writes 4 MiB (more than any pipe buffer holds) before it leaves
+    /// the marker and exits by itself: stdout stays read until it is gone, and the close waits for
+    /// neither a signal nor the clock. The marker is the close frame, so it proves the agent was
+    /// asked, not just left alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lingering_agent_can_answer_its_close_with_a_full_stdout() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let marker = marker_path();
+        let bulk = r#"dd if=/dev/zero bs=65536 count=64 2>/dev/null | tr '\000' 'x'; echo"#;
+        let script = closing_agent(bulk, r#"printf '%s' "$a" > "$1""#);
+        assert_eq!(run_script("antigravity", "linger-close", &script, &marker).await, Ok(()));
+        let started = std::time::Instant::now();
+        end_lingering("linger-close").await;
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(4), "end_lingering took {elapsed:?}");
+        let closed = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(closed.contains(r#""method":"session/close""#), "the agent could not finish answering its close: {closed:?}");
+        let _ = std::fs::remove_file(marker);
+    }
+
+    /// An agent that answers its close and, as an ACP server does, keeps running is signalled as
+    /// soon as it has answered and is gone when `end_lingering` returns; one that never answers
+    /// runs out the clock first. Timing is the evidence here, with a margin under that clock: which
+    /// event ends the wait is pinned by `wait_for_close_ends_on_the_answer_not_on_an_exit_that_never_comes`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lingering_agent_that_answers_its_close_is_signalled_at_once() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let result = r#"printf '%s\n' '{"jsonrpc":"2.0","id":9,"result":{}}'"#;
+        let error = r#"printf '%s\n' '{"jsonrpc":"2.0","id":9,"error":{"code":-32601,"message":"Method not found"}}'"#;
+        for (task, answer) in [("linger-answer", result), ("linger-error", error), ("linger-silent", "")] {
+            let marker = marker_path();
+            // Its pid first: the signal may follow the answer within milliseconds.
+            let script = closing_agent(&format!(r#"echo "$$" > "$1"; {answer}"#), "exec sleep 30");
+            assert_eq!(run_script("antigravity", task, &script, &marker).await, Ok(()));
+            let started = std::time::Instant::now();
+            end_lingering(task).await;
+            let elapsed = started.elapsed();
+            if answer.is_empty() {
+                assert!(elapsed >= ANTIGRAVITY_CLOSE_WAIT && elapsed < Duration::from_secs(5), "{task}: {elapsed:?}");
+            } else {
+                assert!(elapsed < Duration::from_millis(1500), "{task}: end_lingering waited for the clock: {elapsed:?}");
+            }
+            assert!(agent_gone(&marker), "{task}: the agent outlived end_lingering");
+            let _ = std::fs::remove_file(marker);
+        }
+    }
+
+    /// Runs `script` as an agent, asks it to close and waits as linger does: what ended the wait,
+    /// and whether the agent was still running then.
+    #[cfg(unix)]
+    async fn close_wait(script: &str) -> (CloseOutcome, bool) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let answered = Arc::new(tokio::sync::Notify::new());
+        let drain = tokio::spawn(drain_stdout(child.stdout.take().unwrap(), answered.clone()));
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"session/close\",\"params\":{\"sessionId\":\"s\"}}\n")
+            .await
+            .unwrap();
+        let outcome = wait_for_close(answered.notified(), &mut child).await;
+        let running = child.try_wait().unwrap().is_none();
+        drop(child.stdin.take());
+        finish_child(&mut child, &mut ProcessGroup(None), Some(Duration::from_secs(2))).await;
+        drain.abort();
+        (outcome, running)
+    }
+
+    /// Reads the close frame, then runs `reply` and `after`.
+    #[cfg(unix)]
+    fn answering_agent(reply: &str, after: &str) -> String {
+        format!("read -r a\n{reply}\n{after}")
+    }
+
+    /// The wait ends on the agent's answer, a result or an error, wherever it is in the output. A
+    /// request numbered 9, a reply to another request or silence run out the clock; an agent that
+    /// leaves is reaped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_for_close_ends_on_the_answer_not_on_an_exit_that_never_comes() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let result = r#"printf '%s\n' '{"jsonrpc":"2.0","id":9,"result":{}}'"#;
+        let error = r#"printf '%s\n' '{"jsonrpc":"2.0","id":9,"error":{"code":-32601,"message":"Method not found"}}'"#;
+        for reply in [result, error] {
+            assert_eq!(close_wait(&answering_agent(reply, "exec sleep 30")).await, (CloseOutcome::Answered, true));
+        }
+        // After bytes that are not UTF-8 and a frame too long to be the answer, and split over two writes.
+        let scattered = r#"printf '\377\376\n'; head -c 70000 /dev/zero | tr '\000' x; echo; printf '%s' '{"jsonrpc":"2.0","id":9,"res'; sleep 0.2; printf '%s\n' 'ult":{}}'"#;
+        assert_eq!(close_wait(&answering_agent(scattered, "exec sleep 30")).await, (CloseOutcome::Answered, true));
+        let other = r#"printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{}}' '{"jsonrpc":"2.0","id":3,"result":{}}'"#;
+        assert_eq!(close_wait(&answering_agent(other, "exec sleep 30")).await, (CloseOutcome::TimedOut, true));
+        assert_eq!(close_wait(&answering_agent("", "exec sleep 30")).await, (CloseOutcome::TimedOut, true));
+        assert_eq!(close_wait(&answering_agent("", "exit 0")).await, (CloseOutcome::Exited, false));
+    }
+
+    /// An agent that leaves by itself inside the grace is reaped at once and its group let go:
+    /// nothing of it waits for the grace, a quit or the next turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_that_exits_inside_the_grace_is_reaped_at_once() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let marker = marker_path();
+        let script = r#"read -r a; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r a; echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default"}]}]}}'
+read -r a; echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+sleep 0.3; echo "$$" > "$1"; exit 0"#;
+        assert_eq!(run_script("antigravity", "linger-exit", script, &marker).await, Ok(()));
+        assert!(wait_for(&marker).await, "the agent did not leave by itself");
+        assert!(linger_finished_within("linger-exit", Duration::from_secs(5)).await, "the linger task outlived its agent");
+        let pid: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        assert!(!process_registry().lock().unwrap().contains(&(pid as u32)), "the exited agent kept its group in the registry");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the exited agent was not reaped");
+        end_lingering("linger-exit").await;
+        assert!(!lingering().lock().unwrap().contains_key("linger-exit"));
+        let _ = std::fs::remove_file(marker);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn the_next_turn_and_app_quit_end_a_lingering_agent() {
@@ -5429,6 +7651,98 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         end_lingering("linger-quit").await;
     }
 
+    /// A stand-in linger task that takes `exit` to finish once told to shut down.
+    fn fake_lingering(task: &str, cwd: &Path, exit: Duration) {
+        let (shutdown, rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done) = tokio::sync::watch::channel(false);
+        let id = next_lingering_id();
+        let guard = LingerDone { session_id: task.into(), id, done: done_tx };
+        let entry = Lingering { id, cwd: cwd.canonicalize().unwrap(), shutdown: Some(shutdown), done };
+        lingering().lock().unwrap().insert(task.into(), entry);
+        tokio::spawn(async move {
+            let _guard = guard;
+            let _ = rx.await;
+            tokio::time::sleep(exit).await;
+        });
+    }
+
+    /// The agent's pid goes to the marker at once; asked to close, it takes 0.3 s to leave.
+    #[cfg(unix)]
+    fn slow_closing_agent() -> String {
+        format!(r#"echo "$$" > "$1"
+{}"#, closing_agent("", "sleep 0.3; exit 0"))
+    }
+
+    /// Two callers at once: neither returns before the agent is closed and reaped. The second used
+    /// to find the entry already taken and return while the agent was still up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linger_every_concurrent_caller_waits_for_the_agent_to_be_gone() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let marker = marker_path();
+        assert_eq!(run_script("antigravity", "linger-both", &slow_closing_agent(), &marker).await, Ok(()));
+        let started = std::time::Instant::now();
+        let caller = || async {
+            end_lingering("linger-both").await;
+            (agent_gone(&marker), started.elapsed())
+        };
+        let ((first, first_at), (second, second_at)) = tokio::join!(caller(), caller());
+        assert!(first && second, "a caller returned while the agent was up: {first} {second}");
+        assert!(first_at >= Duration::from_millis(250) && second_at >= Duration::from_millis(250), "{first_at:?} {second_at:?}");
+        assert!(!lingering().lock().unwrap().contains_key("linger-both"));
+        let _ = std::fs::remove_file(marker);
+    }
+
+    /// A waiter dropped mid-wait, as a Stop drops it, still leaves the agent closing: it is gone
+    /// shortly after, and a later caller still finds it ending rather than a stale entry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linger_a_cancelled_waiter_still_ends_the_agent() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let marker = marker_path();
+        assert_eq!(run_script("antigravity", "linger-cancel", &slow_closing_agent(), &marker).await, Ok(()));
+        let cancelled = tokio::time::timeout(Duration::from_millis(50), end_lingering("linger-cancel")).await;
+        assert!(cancelled.is_err(), "the agent left before the waiter was dropped");
+        assert!(!agent_gone(&marker), "the agent left before the waiter was dropped");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !agent_gone(&marker) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(agent_gone(&marker), "dropping the waiter left the agent running");
+        end_lingering("linger-cancel").await;
+        assert!(!lingering().lock().unwrap().contains_key("linger-cancel"));
+        let _ = std::fs::remove_file(marker);
+    }
+
+    /// A Stop while the next run waits for the old agent returns at once, and the old agent still
+    /// closes and is reaped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linger_a_stop_while_the_next_run_waits_still_ends_the_old_agent() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let marker = marker_path();
+        assert_eq!(run_script("antigravity", "linger-stop", &slow_closing_agent(), &marker).await, Ok(()));
+        let mut config = config("antigravity");
+        config.session_id = "linger-stop".into();
+        let (input, receiver) = tokio::sync::mpsc::unbounded_channel();
+        input.send(RunInput::Stop).unwrap();
+        let sink: Sink = Arc::new(|_| {});
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 7"]);
+        let started = std::time::Instant::now();
+        assert_eq!(run_process(config, sink, receiver, command, Vec::new()).await, Ok(()));
+        assert!(started.elapsed() < Duration::from_millis(250), "the Stop waited for the old agent");
+        assert!(!agent_gone(&marker), "the Stop waited for the old agent");
+        // No second caller: only the run's own signal can end it before the 120 s grace.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !agent_gone(&marker) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(agent_gone(&marker), "the old agent outlived the Stop");
+        end_lingering("linger-stop").await;
+        let _ = std::fs::remove_file(marker);
+    }
+
     #[tokio::test]
     async fn removing_a_folder_ends_only_the_agents_working_in_it() {
         let root = std::env::temp_dir().join(format!("pandacode-linger-in-{}", uuid::Uuid::new_v4()));
@@ -5436,13 +7750,13 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         std::fs::create_dir_all(&inside).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         for (task, cwd) in [("linger-in-gone", &inside), ("linger-in-kept", &other)] {
-            let lingering_agent = Lingering { cwd: cwd.canonicalize().unwrap(), agent: tokio::spawn(std::future::pending()) };
-            lingering().lock().unwrap().insert(task.into(), lingering_agent);
+            fake_lingering(task, cwd, Duration::ZERO);
         }
         end_lingering_in(&root.join("gone")).await;
         assert!(!lingering().lock().unwrap().contains_key("linger-in-gone"));
         assert!(lingering().lock().unwrap().contains_key("linger-in-kept"));
-        end_lingering("linger-in-kept").await;
+        end_all_lingering().await;
+        assert!(!lingering().lock().unwrap().contains_key("linger-in-kept"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5454,6 +7768,201 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         let error = run.await.unwrap_err();
         assert!(error.contains("boom"), "{error}");
         assert!(!lingering().lock().unwrap().contains_key("linger-failed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stray_stdout_does_not_mask_mid_turn_eof_after_valid_json() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        // Benign startup banner followed by valid JSON, then mid-turn EOF -> reports ordinary exit,
+        // NOT "Invalid provider JSON: Starting banner...".
+        let mid_turn_crash = r#"
+            echo 'Starting banner...'
+            read -r init
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -r sess
+            exit 1
+        "#;
+        let err = run_script("opencode", "stray-after-json", mid_turn_crash, Path::new("/dev/null"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Agent exited before completing its response"), "{err}");
+        assert!(!err.contains("Invalid provider JSON"), "{err}");
+        assert!(!err.contains("Starting banner"), "{err}");
+
+        // Non-JSON stdout with NO valid JSON frame before EOF still reports Invalid provider JSON.
+        let non_json_only = "read -r init; echo 'fatal: unknown flag'; exit 1";
+        let err = run_script("opencode", "stray-before-json", non_json_only, Path::new("/dev/null"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid provider JSON"), "{err}");
+        assert!(err.contains("fatal: unknown flag"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopped_run_ignores_more_than_64_non_json_stdout_lines() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        // Start an ACP session, reach prompt phase, receive Stop -> emit 100 non-JSON
+        // shutdown lines followed by the settled id:3 reply -> must return Ok(()).
+        let script = r#"
+            read -r init
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -r sess
+            echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-stop-noise","configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default"}]}]}}'
+            read -r prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-stop-noise","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
+            read -r cancel
+            i=1
+            while [ "$i" -le 100 ]; do
+                echo "shutdown noise line $i"
+                i=$((i + 1))
+            done
+            echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+        "#;
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        let mut cfg = config("antigravity");
+        cfg.session_id = "stop-noise-session".into();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx_stop = tx.clone();
+        let sink: Sink = Arc::new(move |event| {
+            if event.kind == "text" {
+                let _ = tx_stop.send(RunInput::Stop);
+            }
+        });
+        let result = run_process(cfg, sink, rx, command, Vec::new()).await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopped_run_ignores_malformed_json_and_phase_zero_returns_immediately() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        let broken_then_settled = r#"
+            read -r init
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -r sess
+            echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-broken","configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default"}]}]}}'
+            read -r prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-broken","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
+            read -r cancel
+            echo '{broken'
+            echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+        "#;
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", broken_then_settled]);
+        let mut cfg = config("antigravity");
+        cfg.session_id = "stop-broken-json".into();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx_stop = tx.clone();
+        let sink: Sink = Arc::new(move |event| {
+            if event.kind == "text" {
+                let _ = tx_stop.send(RunInput::Stop);
+            }
+        });
+        assert_eq!(run_process(cfg, sink, rx, command, Vec::new()).await, Ok(()));
+
+        let only_broken = r#"
+            read -r init
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -r sess
+            echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-only","configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default"}]}]}}'
+            read -r prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-only","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
+            read -r cancel
+            echo '{not-json'
+            exit 0
+        "#;
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", only_broken]);
+        let mut cfg = config("antigravity");
+        cfg.session_id = "stop-broken-eof".into();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx_stop = tx.clone();
+        let sink: Sink = Arc::new(move |event| {
+            if event.kind == "text" {
+                let _ = tx_stop.send(RunInput::Stop);
+            }
+        });
+        let err_or_ok = run_process(cfg, sink, rx, command, Vec::new()).await;
+        assert_eq!(err_or_ok, Ok(()), "{err_or_ok:?}");
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let mut cfg = config("antigravity");
+        cfg.session_id = "stop-phase-zero".into();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx_stop = tx.clone();
+        let sink: Sink = Arc::new(move |event| {
+            if event.text == "Waiting for Antigravity startup" {
+                let _ = tx_stop.send(RunInput::Stop);
+            }
+        });
+        let started = std::time::Instant::now();
+        let result = run_process(cfg, sink, rx, command, Vec::new()).await;
+        assert_eq!(result, Ok(()));
+        assert!(
+            started.elapsed() < Duration::from_millis(2500),
+            "phase 0 stop waited for a prompt reply: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_disables_auto_update_only_for_agy_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pandacode-agy-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agy = root.join("agy");
+        let other = root.join("other-cli");
+        for bin in [&agy, &other] {
+            std::fs::write(bin, "#!/bin/sh\nprintf 'disable=%s\\n' \"$AGY_CLI_DISABLE_AUTO_UPDATE\"\n").unwrap();
+            std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let probe = |bin: &Path| cli_versions::version(bin, Duration::from_secs(5));
+        assert_eq!(probe(&agy).as_deref(), Some("disable=true"));
+        assert_eq!(probe(&other).as_deref(), Some("disable="));
+        // Only the `agy` CLI is asked for a version; the ACP server binary is not.
+        assert_eq!(version_target("antigravity", Some(agy.as_path())), Some(agy.clone()));
+        assert_eq!(version_target("antigravity", Some(other.as_path())), None);
+        assert_eq!(version_target("codex", Some(other.as_path())), Some(other.clone()));
+        assert_eq!(discovered_version("antigravity", None, String::new()), "");
+        assert_eq!(discovered_version("antigravity", Some(other.as_path()), String::new()), "ACP");
+        assert_eq!(discovered_version("antigravity", Some(agy.as_path()), "disable=true".into()), "disable=true");
+        // An `agy` that fails or prints nothing is still an installed CLI: blank, not the server's "ACP".
+        for (name, body) in [("failing", "exit 1"), ("silent", "exit 0")] {
+            let bin = root.join(name).join("agy");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let probed = probe(&bin).unwrap_or_default();
+            assert_eq!(discovered_version("antigravity", Some(bin.as_path()), probed), "");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_interrupts_antigravity_spawn_gate_without_spawning() {
+        let _serial = concurrent_process_tests::process_test_lock().lock().await;
+        // Prime the spawn gate so the next antigravity run must wait ~350 ms before spawning.
+        antigravity_spawn_gate().await;
+        let marker = marker_path();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", r#"echo spawned > "$1""#, "sh", marker.to_str().unwrap()]);
+        let mut cfg = config("antigravity");
+        cfg.session_id = "stop-before-spawn".into();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = tx.send(RunInput::Stop);
+        let sink: Sink = Arc::new(|_| {});
+        let started = std::time::Instant::now();
+        let result = run_process(cfg, sink, rx, command, Vec::new()).await;
+        assert_eq!(result, Ok(()));
+        assert!(started.elapsed() < Duration::from_millis(250), "Stop should cancel before the 350ms spawn gate finishes");
+        assert!(!marker.exists(), "Stopped worker must not spawn child process");
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]
@@ -5505,7 +8014,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let app_data = root.join("app-data");
 
-        opencode_v2_catalog_in(&script, Some(&app_data)).await.unwrap();
+        opencode_v2_api_catalog_in(&script, Some(&app_data)).await.unwrap();
 
         let seen = std::fs::read_to_string(&seen).unwrap();
         let lines: Vec<&str> = seen.lines().collect();
@@ -5521,10 +8030,12 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
         }
         assert!(!folder.exists(), "the private folder stayed behind");
 
-        // Without a private folder it never runs, and the error takes the bare-ID path.
+        // Without a private folder neither v2 discovery path runs, and the error takes the bare-ID path.
         let _ = std::fs::remove_file(root.join("seen"));
         for app_data in [None, Some(script.as_path())] {
             let error = opencode_v2_catalog_in(&script, app_data).await.unwrap_err();
+            assert!(!error.contains("timed out"), "{error}");
+            let error = opencode_v2_api_catalog_in(&script, app_data).await.unwrap_err();
             assert!(!error.contains("timed out"), "{error}");
         }
         assert!(!root.join("seen").exists());
@@ -5624,6 +8135,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 goal: None,
                 codex_settings: None,
                 images: Vec::new(),
+                no_fresh_resume_fallback: false,
             };
             let mut task = tokio::spawn(run(cfg, sink, receiver));
             let outcome = match tokio::time::timeout(Duration::from_secs(90), &mut task).await {

@@ -102,11 +102,42 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
 }
 
 pub fn show(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let Some(window) = app.get_webview_window("main").or_else(|| reopen_main_window(app)) else { return };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// The configured window the menu bar item opens: the workspace window, labelled `main`.
+fn workspace_window(config: &tauri::utils::config::Config) -> Option<&tauri::utils::config::WindowConfig> {
+    config.app.windows.iter().find(|window| window.label == "main")
+}
+
+/// The workspace window when the close button left nothing behind: build it again from the app
+/// config, so "Open PandaCode" opens a window instead of doing nothing. `hide_on_close` normally
+/// keeps the window alive; this is the fallback for when it did not, where a new window is the
+/// only way back to the tasks.
+fn reopen_main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    let config = workspace_window(app.config())?.clone();
+    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|builder| builder.build()) {
+        Ok(window) => {
+            crate::install_main_window(app, &window);
+            Some(window)
+        }
+        Err(error) => {
+            eprintln!("Workspace window could not be reopened: {error}");
+            None
+        }
     }
+}
+
+/// True when closing the main window quits the app rather than hiding it (see `hide_on_close`).
+pub(crate) fn main_close_quits(app: &AppHandle) -> bool {
+    close_quits(cfg!(target_os = "linux"), app.tray_by_id(ID).is_some())
+}
+
+fn close_quits(linux: bool, has_tray: bool) -> bool {
+    linux || !has_tray
 }
 
 /// Closing the main window hides it, so `show` and every other path that brings it back still
@@ -118,7 +149,7 @@ pub(crate) fn hide_on_close(window: &WebviewWindow) {
     window.on_window_event(move |event| {
         let tauri::WindowEvent::CloseRequested { api, .. } = event else { return };
         api.prevent_close();
-        if cfg!(target_os = "linux") || main.app_handle().tray_by_id(ID).is_none() {
+        if main_close_quits(main.app_handle()) {
             main.app_handle().exit(0);
         } else if cfg!(target_os = "macos") && main.is_fullscreen().unwrap_or(false) {
             // Hiding a window in native fullscreen leaves its black Space behind.
@@ -243,22 +274,33 @@ pub(crate) struct TraySnapshot {
     finished: Vec<TrayTask>,
     usage: Vec<Usage>,
     checking: bool,
+    /// PandaCode is running Claude Code for the global Claude setup's check:
+    /// its row says "Asking Claude Code…".
+    #[serde(rename = "askingClaude")]
+    asking_claude: bool,
 }
 
+/// Async with the reads on the blocking pool: a sync command would lock the store on the main
+/// thread. Locks in turn, never nested: agents then store (`listed_sessions`), store
+/// (projects), `UNSEEN`, `USAGE`; each guard is dropped before the next and before `snapshot`.
 #[tauri::command]
-pub(crate) fn tray_snapshot(app: AppHandle) -> Result<TraySnapshot, String> {
-    let state = app.state::<AppState>();
-    let sessions = crate::listed_sessions(&state)?;
-    let projects: HashMap<String, String> = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .projects()?
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
-    let unseen = lock(&UNSEEN).clone();
-    Ok(snapshot(&sessions, &projects, &unseen, lock(&USAGE).values().cloned().collect()))
+pub(crate) async fn tray_snapshot(app: AppHandle) -> Result<TraySnapshot, String> {
+    crate::blocking(move || {
+        let state = app.state::<AppState>();
+        let sessions = crate::listed_sessions(&state)?;
+        let projects: HashMap<String, String> = state
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .projects()?
+            .into_iter()
+            .map(|p| (p.id, p.name))
+            .collect();
+        let unseen = lock(&UNSEEN).clone();
+        let usage: Vec<Usage> = lock(&USAGE).values().cloned().collect();
+        Ok(snapshot(&sessions, &projects, &unseen, usage))
+    })
+    .await
 }
 
 fn snapshot(sessions: &[Session], projects: &HashMap<String, String>, unseen: &BTreeMap<String, bool>, usage: Vec<Usage>) -> TraySnapshot {
@@ -283,6 +325,7 @@ fn snapshot(sessions: &[Session], projects: &HashMap<String, String>, unseen: &B
             .collect(),
         usage,
         checking: CHECKING.load(Ordering::SeqCst) > 0,
+        asking_claude: crate::agent_usage_claude::asking_for(""),
     }
 }
 
@@ -329,8 +372,52 @@ pub(crate) fn tray_resize(app: AppHandle, height: f64) {
     }
 }
 
-/// Claude and Codex, plus every agent a task has used. Each result updates the popover.
-fn refresh_usage(app: &AppHandle, refresh_now: bool) {
+/// Whether a result gets a row in the popover: any with windows; for Claude
+/// also one without (a rate limit, an expired login…), so its row shows the
+/// state instead of silently disappearing, but a "no login" result only when
+/// Claude Code is installed (a Codex-only setup gets no permanent "Sign-in
+/// needed" row). Other agents without limits (not set up) stay out.
+fn shown_in_popover(provider: &str, usage: &crate::agent_usage::Usage, claude_installed: bool) -> bool {
+    if !usage.windows.is_empty() {
+        return true;
+    }
+    // A setup that isn't the subscription (an API key, say) has no limits
+    // here: the panel explains it, the menu bar leaves it out.
+    let not_subscription = usage.action == Some("apiConnection");
+    provider == "claude" && usage.status != "unsupported" && !not_subscription && (claude_installed || usage.status != "signedOut")
+}
+
+/// While a Claude check runs, the popover is told twice a second, so its
+/// Claude row can say "Asking Claude Code…" once PandaCode runs it; a row
+/// with nothing yet shows the saved reading meanwhile (`show_saved`).
+fn asking_ticker(app: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let mut was = false;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let asking = crate::agent_usage_claude::asking_for("");
+            if show_saved(crate::agent_usage_claude::saved_for("").await) || asking != was {
+                was = asking;
+                let _ = app.emit_to(LABEL, "tray-changed", ());
+            }
+        }
+    })
+}
+
+/// Puts the saved Claude reading (stale) in the popover while its check runs,
+/// unless the row already shows something; whether it did.
+fn show_saved(saved: Option<Usage>) -> bool {
+    let Some(saved) = saved.filter(|saved| !saved.windows.is_empty()) else { return false };
+    let mut all = lock(&USAGE);
+    if all.contains_key("claude") {
+        return false;
+    }
+    all.insert("claude".into(), saved);
+    true
+}
+
+/// Claude and Codex, plus every agent a task has used.
+fn usage_providers(app: &AppHandle) -> BTreeSet<String> {
     let mut providers: BTreeSet<String> = ["claude", "codex"].map(String::from).into();
     if let Ok(store) = app.state::<AppState>().store.lock() {
         if let Ok(mut statement) = store.db.prepare("SELECT DISTINCT provider FROM sessions") {
@@ -339,17 +426,47 @@ fn refresh_usage(app: &AppHandle, refresh_now: bool) {
             }
         }
     }
+    providers
+}
+
+/// Checks every provider of `usage_providers`; each result updates the popover. Returns at
+/// once: callers run on the main thread (the tray click, `tray_refresh_usage`), so the store
+/// is read on the blocking pool.
+fn refresh_usage(app: &AppHandle, refresh_now: bool) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let reader = app.clone();
+        let providers = match tauri::async_runtime::spawn_blocking(move || usage_providers(&reader)).await {
+            Ok(providers) => providers,
+            Err(error) => {
+                eprintln!("Menu bar item could not list the agents to check: {error}");
+                return;
+            }
+        };
+        check_usage(&app, providers, refresh_now);
+    });
+}
+
+fn check_usage(app: &AppHandle, providers: BTreeSet<String>, refresh_now: bool) {
     CHECKING.fetch_add(providers.len(), Ordering::SeqCst);
     let _ = app.emit_to(LABEL, "tray-changed", ());
     for provider in providers {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Ok(usage) = crate::agent_usage::query_usage(provider.clone(), refresh_now).await {
+            let ticker = (provider == "claude").then(|| asking_ticker(app.clone()));
+            let queried = crate::agent_usage::query_usage(provider.clone(), refresh_now).await;
+            if let Some(ticker) = ticker {
+                ticker.abort();
+            }
+            if let Ok(usage) = queried {
+                // Looked up off the async threads, before taking the lock (it touches the disk).
+                let installed = provider == "claude"
+                    && tokio::task::spawn_blocking(|| crate::providers::executable("claude").is_some()).await.unwrap_or(false);
                 let mut all = lock(&USAGE);
-                if usage.windows.is_empty() {
-                    all.remove(&provider);
-                } else {
+                if shown_in_popover(&provider, &usage, installed) {
                     all.insert(provider, usage);
+                } else {
+                    all.remove(&provider);
                 }
             }
             CHECKING.fetch_sub(1, Ordering::SeqCst);
@@ -363,6 +480,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_claude_result_without_windows_keeps_its_row_with_its_state() {
+        use crate::agent_usage::Usage;
+        let mut limited = Usage::empty("claude", "error", "Claude's usage service is rate limited.");
+        limited.action = Some("rateLimited");
+        assert!(shown_in_popover("claude", &limited, false), "a login exists: its state shows");
+        let no_login = Usage::empty("claude", "signedOut", "Sign in.");
+        assert!(shown_in_popover("claude", &no_login, true), "Claude Code installed: sign-in needed shows");
+        assert!(!shown_in_popover("claude", &no_login, false), "not installed and no login: no row");
+        assert!(!shown_in_popover("kimi", &Usage::empty("kimi", "unavailable", "Not set up."), true), "others without limits stay out");
+        assert!(!shown_in_popover("claude", &Usage::empty("claude", "unsupported", ""), true));
+        let api_key = Usage { action: Some("apiConnection"), ..Usage::empty("claude", "unavailable", "Claude is launched with ANTHROPIC_API_KEY set.") };
+        assert!(!shown_in_popover("claude", &api_key, true), "not your subscription: panel only");
+    }
+
+    #[test]
+    fn while_claude_is_checked_the_saved_reading_fills_an_empty_row_only() {
+        lock(&USAGE).remove("claude");
+        let mut saved = Usage::empty("claude", "ready", "");
+        saved.stale = true;
+        assert!(!show_saved(Some(saved.clone())), "no windows: nothing to show");
+        saved.windows.push(crate::agent_usage::UsageWindow::new("Weekly", 21.0, None));
+        assert!(!show_saved(None));
+        assert!(show_saved(Some(saved.clone())), "an empty row shows it");
+        assert!(lock(&USAGE)["claude"].stale);
+        let fresh = Usage::empty("claude", "ready", "");
+        lock(&USAGE).insert("claude".into(), fresh);
+        assert!(!show_saved(Some(saved)), "a row with a result keeps it");
+        assert!(!lock(&USAGE)["claude"].stale);
+        lock(&USAGE).remove("claude");
+    }
+
+    #[test]
     fn tray_position_centers_under_icon_and_clamps() {
         let area = (0.0, 25.0, 1440.0, 875.0);
         assert_eq!(position((700.0, 0.0, 40.0, 24.0), (340.0, 400.0), area, 6.0), (550.0, 31.0));
@@ -370,5 +519,22 @@ mod tests {
         assert_eq!(position((0.0, 0.0, 20.0, 24.0), (340.0, 400.0), area, 6.0).0, 6.0);
         // A bottom taskbar icon opens the popover above it.
         assert_eq!(position((700.0, 870.0, 40.0, 30.0), (340.0, 400.0), (0.0, 0.0, 1440.0, 870.0), 6.0), (550.0, 464.0));
+    }
+
+    #[test]
+    fn closing_the_main_window_quits_on_linux_or_without_a_menu_bar_item() {
+        assert!(close_quits(true, true), "Linux quits even with a tray icon");
+        assert!(close_quits(true, false));
+        assert!(close_quits(false, false), "nothing could reopen the window");
+        assert!(!close_quits(false, true), "macOS and Windows with a menu bar item only hide");
+    }
+
+    #[test]
+    fn open_rebuilds_the_window_it_looks_for() {
+        let mut config = tauri::utils::config::Config::default();
+        config.app.windows = vec![tauri::utils::config::WindowConfig { label: "main".into(), ..Default::default() }];
+        assert!(workspace_window(&config).is_some(), "the workspace window is the one show finds");
+        config.app.windows[0].label = "renamed".into();
+        assert!(workspace_window(&config).is_none(), "only the window show looks for is rebuilt");
     }
 }

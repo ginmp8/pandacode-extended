@@ -10,6 +10,9 @@ use tokio::{
 const HEADER_LIMIT: usize = 8192;
 const RESULT_LIMIT: usize = 128 * 1024;
 const SERVER_NAME: &str = "pandacode_architect";
+/// Versions this loopback server speaks. `2026-07-28` is the revision ZCode
+/// probes for; the older two are what the other harnesses negotiate.
+const MCP_VERSIONS: &[&str] = &["2026-07-28", "2025-06-18", "2025-03-26"];
 
 pub(super) struct Server {
     authority: String,
@@ -142,9 +145,118 @@ impl Server {
     pub(super) fn codex_config(&self) -> Value {
         json!({SERVER_NAME:{"url":format!("http://{}/mcp",self.authority),"http_headers":{"Authorization":format!("Bearer {}",self.token)},"enabled":true,"required":self.required(),"startup_timeout_sec":if self.required() {15} else {3},"tool_timeout_sec":360}})
     }
+    /// ZCode's `session/create` `mcpServers` entry. Session isolation keeps the
+    /// per-run bridge out of the user's server registry, and `alwaysLoad` is
+    /// what lifts the tools into the model's list — ZCode defers every
+    /// MCP tool it does not always load behind its tool search.
+    pub(super) fn zcode_config(&self) -> Value {
+        json!({"type":"http","name":SERVER_NAME,"url":format!("http://{}/mcp",self.authority),
+            "headers":[{"name":"Authorization","value":format!("Bearer {}",self.token)}],
+            "isolation":"session","alwaysLoad":true})
+    }
     pub(super) fn redact(&self, text: &str) -> String {
         text.replace(&self.token, "[redacted]")
     }
+}
+
+/// Name of Google's browser-notebook MCP server in every harness's server list.
+pub(super) const COLAB_MCP: &str = "colab-mcp";
+/// How long Codex waits for a stdio server to start: a first `uvx` run fetches and builds it.
+const STDIO_STARTUP_SECS: u64 = 90;
+
+/// An extra stdio MCP server one run launches beside `pandacode_architect`.
+/// Only ever passed on the harness's command line or in a private temp file,
+/// never written into the user's own configuration.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Stdio {
+    pub(super) name: String,
+    pub(super) command: String,
+    pub(super) args: Vec<String>,
+}
+
+impl Stdio {
+    pub(super) fn new(name: &str, command: String, args: Vec<String>) -> Self {
+        Self { name: name.into(), command, args }
+    }
+    fn claude_entry(&self) -> Value {
+        json!({"command": self.command, "args": self.args})
+    }
+    fn codex_entry(&self) -> Value {
+        json!({"command": self.command, "args": self.args, "enabled": true, "required": false,
+            "startup_timeout_sec": STDIO_STARTUP_SECS, "tool_timeout_sec": 300})
+    }
+    /// ACP `McpServerStdio`: stdio is the baseline transport, so it needs no capability.
+    fn acp_entry(&self) -> Value {
+        json!({"name": self.name, "command": self.command, "args": self.args, "env": []})
+    }
+    /// ZCode's entry: the ACP one scoped to this session and loaded up front, like the bridge
+    /// (`Server::zcode_config`), so its tools reach the model.
+    pub(super) fn zcode_entry(&self) -> Value {
+        zcode_scoped(self.acp_entry())
+    }
+    pub(super) fn cline_entry(&self) -> Value {
+        json!({"command": self.command, "args": self.args, "disabled": false})
+    }
+}
+
+/// Marks an `mcpServers` entry for ZCode: session isolation and always-load.
+pub(super) fn zcode_scoped(mut entry: Value) -> Value {
+    if entry.is_object() {
+        entry["isolation"] = json!("session");
+        entry["alwaysLoad"] = json!(true);
+    }
+    entry
+}
+
+/// This run's extra stdio servers: Colab's MCP when the user turned it on, for local runs
+/// of the user's own tasks only. A cloud run's harness lives on another machine, and a
+/// managed team worker keeps to the tools its lead gave it.
+pub(super) fn stdio_servers(session_id: &str) -> Vec<Stdio> {
+    if crate::cloud_agents::transport::is_cloud(session_id) || crate::providers::is_worker_run(session_id) {
+        return Vec::new();
+    }
+    crate::cloud::colab::colab_mcp_command()
+        .map(|(command, args)| Stdio::new(COLAB_MCP, command, args))
+        .into_iter()
+        .collect()
+}
+
+/// `--mcp-config` for Claude-family CLIs: the bridge's config with the stdio servers
+/// added to `mcpServers`. Without extras the bridge's config is returned untouched.
+pub(super) fn claude_mcp_config(bridge: Option<Value>, extra: &[Stdio]) -> Option<Value> {
+    if extra.is_empty() {
+        return bridge;
+    }
+    let mut config = bridge.filter(|config| config["mcpServers"].is_object()).unwrap_or_else(|| json!({"mcpServers":{}}));
+    for server in extra {
+        config["mcpServers"][&server.name] = server.claude_entry();
+    }
+    Some(config)
+}
+
+/// Codex `mcp_servers.<name>` overrides: the bridge's plus the stdio servers.
+pub(super) fn codex_mcp_servers(bridge: Option<Value>, extra: &[Stdio]) -> Option<Value> {
+    if extra.is_empty() {
+        return bridge;
+    }
+    let mut servers = bridge.filter(Value::is_object).unwrap_or_else(|| json!({}));
+    for server in extra {
+        servers[&server.name] = server.codex_entry();
+    }
+    Some(servers)
+}
+
+/// ACP `mcpServers` entries that ride beside the bridge's HTTP entry.
+pub(super) fn acp_mcp_servers(extra: &[Stdio]) -> Vec<Value> {
+    extra.iter().map(Stdio::acp_entry).collect()
+}
+
+/// ZCode `mcpServers` entries that ride beside the bridge's (`Stdio::zcode_entry`).
+pub(super) fn zcode_mcp_servers(extra: &[Stdio]) -> Vec<Value> {
+    extra.iter().map(Stdio::zcode_entry).collect()
+}
+
+impl Server {
     pub(super) fn stop(&self) {
         self.task.abort();
     }
@@ -338,7 +450,7 @@ async fn read_request(stream: &mut TcpStream, context: &Context) -> Result<Vec<u
     }
     if headers
         .get("mcp-protocol-version")
-        .is_some_and(|version| !matches!(*version, "2025-03-26" | "2025-06-18"))
+        .is_some_and(|version| !MCP_VERSIONS.contains(version))
     {
         return Err(400);
     }
@@ -411,14 +523,31 @@ impl Context {
             "initialize" => {
                 let version = request["params"]["protocolVersion"]
                     .as_str()
-                    .filter(|version| matches!(*version, "2025-03-26" | "2025-06-18"))
+                    .filter(|version| MCP_VERSIONS.contains(version))
                     .unwrap_or("2025-03-26");
                 json!({"protocolVersion":version,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"PandaCode architect","version":"0.1.0"}})
             }
+            // ZCode (2026-07-28 revision) probes every HTTP server with
+            // `server/discover` and drops the ones that cannot name a version it
+            // speaks; it never falls back to `initialize` for them. The cache
+            // hints are part of that revision's discover result: ttl 0 is
+            // immediately stale, and private keeps the answer on this bearer.
+            "server/discover" => {
+                json!({"resultType":"complete","ttlMs":0,"cacheScope":"private",
+                       "supportedVersions":MCP_VERSIONS,
+                       "capabilities":{"tools":{"listChanged":false}},
+                       "serverInfo":{"name":"PandaCode architect","version":"0.1.0"}})
+            }
             "ping" => json!({}),
+            // Results carry the revision's wire fields unconditionally: modern
+            // clients reject a `tools/list` or `tools/call` without
+            // `resultType` outright, and legacy SDKs ignore the extra keys.
+            // `ttlMs: 0` means immediately stale, so a client must not replay a
+            // host-tool call from cache. Each tool is name, description and
+            // input schema from this run's catalog — nothing else.
             "tools/list" => {
                 let tools:Vec<Value> = self.host.tools.iter().map(|spec| json!({"name":spec["name"],"description":spec["description"],"inputSchema":spec["inputSchema"]})).collect();
-                json!({"tools":tools})
+                json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":tools})
             }
             "tools/call" => {
                 let name = request["params"]["name"].as_str().unwrap_or_default();
@@ -458,7 +587,8 @@ impl Context {
                         let Ok(Ok(_permit)) = tokio::time::timeout(SLOT_WAIT, self.calls.acquire()).await else {
                             return Err("Too many PandaCode tools are running at once; retry this call in a moment.".to_string());
                         };
-                        tokio::time::timeout(Duration::from_secs(60),(self.host.handler)(name.into(),args)).await
+                        let limit = host_tools::tool_timeout(name, &args);
+                        tokio::time::timeout(limit,(self.host.handler)(name.into(),args)).await
                             .unwrap_or_else(|_|Err("PandaCode tool timed out".into()))
                     } => result,
                     _ = cancel.notified() => Err("Architect tool canceled".into()),
@@ -495,20 +625,28 @@ impl Context {
                     &input,
                     &output,
                 );
-                json!({"content":content,"isError":error})
+                // Same cache hints as tools/list. ttl 0 keeps a call from being
+                // served again; the spec's call result allows the extra keys.
+                json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","content":content,"isError":error})
             }
             _ => return HttpResponse::error(id, -32601, "Method not found"),
         };
         HttpResponse::json(json!({"jsonrpc":"2.0","id":id,"result":result}))
     }
     async fn authorize(&self, name: &str, args: &Value) -> Result<(), String> {
+        // A team worker never gets an always-ask tool, however the harness words the prompt.
+        // A Python run that may create a paid Colab runtime counts as managing one.
+        let always_ask = crate::cloud::deploy::always_ask_as(name, args);
+        if let Some(reason) = crate::providers::worker_tool_refusal(&self.session_id, always_ask.unwrap_or(name)) {
+            return Err(reason);
+        }
         if !self.host.approval_tools.contains(name) {
             return Ok(());
         }
         if self.mode == "plan" {
             return Err("This host action is unavailable in Plan mode".into());
         }
-        if self.mode == "full" && !crate::cloud::deploy::ALWAYS_ASK.contains(&name) {
+        if self.mode == "full" && always_ask.is_none() {
             return Ok(());
         }
         let id = format!("mcp-approval:{}", uuid::Uuid::new_v4());
@@ -528,15 +666,20 @@ impl Context {
             session_id: self.session_id.clone(),
             kind: "approval".into(),
             text: format!("Allow {name}?\n{}", preview_json(args, TOOL_INPUT_LIMIT)),
-            request_id: Some(id),
+            request_id: Some(id.clone()),
             data: None,
             tool: None,
         });
         let wait = crate::remote::orchestrate::approval_wait(name).unwrap_or(Duration::from_secs(300));
         match tokio::time::timeout(wait, receive).await {
-            Ok(Ok(true)) => Ok(()),
-            Ok(Ok(false)) => Err("Declined by the user".into()),
-            _ => Err("App approval expired or was cancelled".into()),
+            Ok(Ok(false)) => Err(crate::providers::decline_text(&self.session_id, &id)),
+            outcome => {
+                crate::providers::take_decline_reason(&self.session_id, &id);
+                match outcome {
+                    Ok(Ok(true)) => Ok(()),
+                    _ => Err("App approval expired or was cancelled".into()),
+                }
+            }
         }
     }
     fn activity(&self, id: &str, name: &str, status: &str, input: &str, output: &str) {
@@ -599,6 +742,84 @@ mod tests {
     async fn request(server: &Server, body: Value, extra: &str) -> (u16, Value) {
         let bytes = serde_json::to_vec(&body).unwrap();
         raw(server,format!("POST /mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n",server.authority,server.token,bytes.len(),extra),bytes).await
+    }
+
+    /// ZCode (2026-07-28 revision) probes HTTP servers with `server/discover`,
+    /// and its tool results must carry the revision's wire fields.
+    #[tokio::test]
+    async fn discover_and_result_fields_satisfy_the_2026_revision() {
+        let server = server().await;
+        // Discover is the same authenticated loopback POST as every other method.
+        let (denied, _) = raw(
+            &server,
+            format!("POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\n\r\n", server.authority),
+            vec![],
+        )
+        .await;
+        assert_eq!(denied, 401);
+        let (_, discover) = request(&server, json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}), "").await;
+        assert_eq!(discover["result"]["supportedVersions"].as_array().unwrap().as_slice(), [json!("2026-07-28"), json!("2025-06-18"), json!("2025-03-26")].as_slice());
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert_eq!(discover["result"]["ttlMs"], 0);
+        assert_eq!(discover["result"]["cacheScope"], "private");
+        assert_eq!(discover["result"]["capabilities"]["tools"]["listChanged"], false);
+        // A client that negotiated 2026-07-28 sends that header. It must not be
+        // rejected, and initialize echoes the version instead of downgrading it.
+        let (status, initialized) = request(
+            &server,
+            json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2026-07-28"}}),
+            "MCP-Protocol-Version: 2026-07-28\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+        let (status, list) = request(
+            &server,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            "MCP-Protocol-Version: 2026-07-28\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(list["result"]["resultType"], "complete");
+        assert_eq!(list["result"]["ttlMs"], 0);
+        assert_eq!(list["result"]["cacheScope"], "private");
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "the bridge lists this run's catalog and nothing else");
+        assert_eq!(tools[0]["name"], "pandacode_delegate");
+        let fields = tools[0].as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains_key("name") && fields.contains_key("description") && fields.contains_key("inputSchema"));
+        let (rejected, _) = request(&server, json!({"jsonrpc":"2.0","id":9,"method":"ping"}), "MCP-Protocol-Version: 2099-01-01\r\n").await;
+        assert_eq!(rejected, 400);
+        let (_, call) = request(
+            &server,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pandacode_delegate","arguments":{"prompt":"Bridge 🐼"}}}),
+            "",
+        )
+        .await;
+        assert_eq!(call["result"]["resultType"], "complete");
+        // ttl 0 is immediately stale: a host-tool result is not replayed.
+        assert_eq!(call["result"]["ttlMs"], 0);
+        assert_eq!(call["result"]["cacheScope"], "private");
+        // The entry ZCode rides in session/create. It is the Kimi entry plus
+        // session isolation and always-load: same loopback URL, same bearer,
+        // no second credential and no command or env.
+        let entry = server.zcode_config();
+        let kimi = server.kimi_config();
+        assert_eq!(entry["name"], SERVER_NAME);
+        assert_eq!(entry["type"], "http");
+        assert_eq!(entry["url"], kimi["url"]);
+        assert_eq!(entry["headers"], kimi["headers"]);
+        assert_eq!(entry["isolation"], "session");
+        assert_eq!(entry["alwaysLoad"], true);
+        let url = entry["url"].as_str().unwrap();
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert!(url.ends_with("/mcp"));
+        assert_eq!(entry["headers"].as_array().unwrap().len(), 1);
+        assert_eq!(entry["headers"][0]["name"], "Authorization");
+        assert_eq!(entry["headers"][0]["value"], format!("Bearer {}", server.token));
+        assert!(entry.get("env").is_none());
+        assert!(entry.get("command").is_none());
     }
     async fn raw(server: &Server, header: String, body: Vec<u8>) -> (u16, Value) {
         let mut stream = TcpStream::connect(&server.authority).await.unwrap();
@@ -817,6 +1038,41 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn a_team_worker_decline_reaches_the_tool_result_and_a_user_decline_is_unchanged() {
+        let reason = "Declined: team workers cannot run pandacode_delegate; ask your lead to run it or decide, then continue with the rest of your work.";
+        for worker in [false, true] {
+            let mut protected = host();
+            protected.approval_tools.insert("pandacode_delegate".into());
+            let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let server = Server::start_with_approvals(protected, "task".into(), Arc::new(move |event| {
+                let _ = sender.send(event);
+            }), "ask")
+            .await
+            .unwrap();
+            let request = request(&server, call(json!(1), json!({})), "");
+            let answer = async {
+                let pending = loop {
+                    let event = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+                    if event.kind == "approval" {
+                        break event.request_id.unwrap();
+                    }
+                };
+                if worker {
+                    crate::providers::set_decline_reason("task", &pending, reason);
+                }
+                assert!(server.approve(&pending, false));
+            };
+            let ((_, result), ()) = tokio::join!(request, answer);
+            let text = result["result"].to_string();
+            assert_eq!(result["result"]["isError"], true);
+            if worker {
+                assert!(text.contains(reason) && !text.contains(crate::providers::USER_DECLINE), "{text}");
+            } else {
+                assert!(text.contains(crate::providers::USER_DECLINE) && !text.contains("team workers"), "{text}");
+            }
+        }
+    }
+    #[tokio::test]
     async fn protected_mcp_tools_never_execute_in_plan_and_full_mode_needs_no_prompt() {
         for mode in ["plan", "full"] {
             let count = Arc::new(AtomicUsize::new(0));
@@ -959,6 +1215,66 @@ mod tests {
         let ((_, result), ()) = tokio::join!(request, answer);
         assert_eq!(result["result"]["isError"], true);
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn a_team_workers_always_ask_tool_is_refused_at_the_host_before_any_prompt() {
+        let session = format!("mcp-worker-{}", uuid::Uuid::new_v4());
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let server = Server::start_with_approvals(host(), session.clone(), Arc::new(move |event| {
+            let _ = sender.send(event);
+        }), "full")
+        .await
+        .unwrap();
+        crate::providers::mark_worker_run(&session, "run", true);
+        let refused = server.current().authorize("pandacode_schedule_message", &json!({})).await;
+        crate::providers::clear_worker_run(&session, "run");
+        let reason = refused.unwrap_err();
+        assert!(reason.contains("team workers cannot run pandacode_schedule_message") && reason.contains("ask your lead"), "{reason}");
+        assert!(events.try_recv().is_err(), "no approval was asked");
+        // Other tools and non-workers are unaffected by the host check.
+        assert!(crate::providers::worker_tool_refusal(&session, "pandacode_schedule_message").is_none());
+        crate::providers::mark_worker_run(&session, "run", true);
+        assert!(crate::providers::worker_tool_refusal(&session, "pandacode_delegate").is_none());
+        // A Python run that may create a paid Colab runtime counts as managing one.
+        let refused = server.current().authorize("pandacode_colab_run_python", &json!({"code":"1","autoCreate":true})).await;
+        assert!(refused.unwrap_err().contains("pandacode_colab_manage"));
+        assert!(server.current().authorize("pandacode_colab_run_python", &json!({"code":"1"})).await.is_ok());
+        crate::providers::clear_worker_run(&session, "run");
+        assert!(events.try_recv().is_err(), "no approval was asked");
+    }
+    #[tokio::test]
+    async fn colab_autocreate_asks_even_in_full_mode() {
+        let name = "pandacode_colab_run_python";
+        let protected = ToolHost {
+            tools: vec![json!({"type":"function","name":name,"description":"Run","inputSchema":{"type":"object"}})],
+            approval_tools: [name.into()].into(),
+            handler: Arc::new(|_, _| Box::pin(async { Ok(json!({})) })),
+        };
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let server = Server::start_with_approvals(protected, "task".into(), Arc::new(move |event| { let _ = sender.send(event); }), "full").await.unwrap();
+        // On an existing runtime full access runs it unasked.
+        assert!(server.current().authorize(name, &json!({"code":"1"})).await.is_ok());
+        assert!(events.try_recv().is_err());
+        let context = server.current();
+        let args = json!({"code":"1","autoCreate":true});
+        let asking = context.authorize(name, &args);
+        let answer = async {
+            let event = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+            assert_eq!(event.kind, "approval");
+            assert!(event.text.starts_with("Allow pandacode_colab_run_python?"));
+            assert!(server.approve(event.request_id.as_ref().unwrap(), false));
+        };
+        let (result, ()) = tokio::join!(asking, answer);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn colab_calls_outlast_the_usual_host_limit() {
+        assert_eq!(host_tools::tool_timeout("pandacode_delegate", &json!({})), host_tools::HOST_TOOL_TIMEOUT);
+        assert_eq!(host_tools::tool_timeout("pandacode_colab_status", &json!({})), host_tools::HOST_TOOL_TIMEOUT);
+        assert!(host_tools::tool_timeout("pandacode_colab_run_python", &json!({"timeoutSeconds":250})) > Duration::from_secs(250));
+        assert!(host_tools::tool_timeout("pandacode_colab_manage", &json!({"action":"create"})) > Duration::from_secs(180));
+        // Never past Codex's per-run `tool_timeout_sec` (360).
+        assert!(host_tools::tool_timeout("pandacode_colab_run_python", &json!({"timeoutSeconds":1800,"autoCreate":true})) < Duration::from_secs(360));
     }
     #[tokio::test]
     async fn cancelling_pending_mcp_approval_revokes_it_without_calling_handler() {
@@ -1177,11 +1493,141 @@ mod tests {
             .await
             .unwrap()
     }
+
+    /// Live smoke (ignored by default, like `installed_zcode_lists_models`):
+    /// the installed ZCode CLI accepts the bridge entry and connects. `mcp/list`
+    /// in connect mode revalidates the strict 2026-07-28 wire — discover,
+    /// `resultType`, `ttlMs`, `cacheScope` — so `connected` with tools means the
+    /// whole handshake held. Recorded working against CLI 0.17.1 on 2026-11-13.
+    #[tokio::test]
+    #[ignore = "spawns the installed ZCode CLI"]
+    async fn installed_zcode_connects_the_native_bridge() {
+        let Some(path) = zcode::bundled().or_else(|| launch::find("zcode")) else {
+            panic!("ZCode CLI is not installed");
+        };
+        let server = server().await;
+        let entry = server.zcode_config();
+        let workspace = std::env::temp_dir();
+        let mut command = provider_command("zcode", &path).unwrap();
+        command
+            .arg("app-server")
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("zcode app-server starts");
+        use tokio::io::AsyncBufReadExt as _;
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let workspace = json!({"workspacePath": workspace, "workspaceKey": workspace});
+        let result = tokio::time::timeout(Duration::from_secs(90), async {
+            write_json(&mut stdin, &json!({"id": 1, "method": "session/create", "params": {
+                "workspace": workspace, "mode": "build", "persistence": "deferred",
+                "titleGenerationEnabled": false, "mcpServers": [entry],
+            }})).await?;
+            loop {
+                let mut line = Vec::new();
+                stdout.read_until(b'\n', &mut line).await.map_err(|e| e.to_string())?;
+                let frame: Value = serde_json::from_slice(&line).map_err(|_| "invalid JSON".to_string())?;
+                if frame.get("method").is_some() && frame.get("id").is_some() {
+                    write_json(&mut stdin, &json!({"id": frame["id"], "error": {"code": -32601, "message": "Method not found"}})).await?;
+                    continue;
+                }
+                if frame["id"] == 1 {
+                    if let Some(error) = frame.get("error") {
+                        return Err(format!("create failed: {error}"));
+                    }
+                    write_json(&mut stdin, &json!({"id": 2, "method": "mcp/list", "params": {
+                        "workspace": workspace, "mode": "connect", "mcpServers": [entry],
+                    }})).await?;
+                }
+                if frame["id"] == 2 {
+                    return match frame.get("error") {
+                        Some(error) => Err(format!("mcp/list failed: {error}")),
+                        None => Ok(frame["result"]["statuses"][SERVER_NAME].clone()),
+                    };
+                }
+            }
+        }).await;
+        drop(stdin);
+        let _ = child.start_kill();
+        // A failure can echo the per-run bearer. Redact it before it reaches the panic.
+        let status = match result {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => panic!("{}", server.redact(&error)),
+            Err(_) => panic!("the bridge check finished in time"),
+        };
+        let shown = server.redact(&status.to_string());
+        assert_eq!(status["status"], "connected", "{shown}");
+        assert!(status["toolCount"].as_u64().unwrap_or(0) > 0, "{shown}");
+    }
 }
 
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    fn colab() -> Vec<Stdio> {
+        vec![Stdio::new(COLAB_MCP, "/bin/uvx".into(), vec!["colab-mcp".into()])]
+    }
+
+    #[test]
+    fn disabled_extra_servers_leave_every_config_untouched() {
+        let claude = json!({"mcpServers":{SERVER_NAME:{"type":"http","url":"http://127.0.0.1:1/mcp","headers":{"Authorization":"Bearer t"}}}});
+        let codex = json!({SERVER_NAME:{"url":"http://127.0.0.1:1/mcp","enabled":true,"required":false}});
+        assert_eq!(claude_mcp_config(Some(claude.clone()), &[]).unwrap().to_string(), claude.to_string());
+        assert_eq!(codex_mcp_servers(Some(codex.clone()), &[]).unwrap().to_string(), codex.to_string());
+        assert_eq!(claude_mcp_config(None, &[]), None);
+        assert_eq!(codex_mcp_servers(None, &[]), None);
+        assert!(acp_mcp_servers(&[]).is_empty());
+    }
+
+    #[test]
+    fn colab_mcp_joins_claude_and_codex_beside_the_bridge_or_alone() {
+        let claude = json!({"mcpServers":{SERVER_NAME:{"type":"http","url":"http://127.0.0.1:1/mcp"}}});
+        let merged = claude_mcp_config(Some(claude.clone()), &colab()).unwrap();
+        assert_eq!(merged["mcpServers"][SERVER_NAME], claude["mcpServers"][SERVER_NAME]);
+        assert_eq!(merged["mcpServers"]["colab-mcp"], json!({"command":"/bin/uvx","args":["colab-mcp"]}));
+        assert_eq!(
+            claude_mcp_config(None, &colab()).unwrap(),
+            json!({"mcpServers":{"colab-mcp":{"command":"/bin/uvx","args":["colab-mcp"]}}})
+        );
+        let codex_entry = json!({"command":"/bin/uvx","args":["colab-mcp"],"enabled":true,"required":false,"startup_timeout_sec":90,"tool_timeout_sec":300});
+        let codex = json!({SERVER_NAME:{"url":"http://127.0.0.1:1/mcp"}});
+        let merged = codex_mcp_servers(Some(codex.clone()), &colab()).unwrap();
+        assert_eq!(merged[SERVER_NAME], codex[SERVER_NAME]);
+        assert_eq!(merged["colab-mcp"], codex_entry);
+        assert_eq!(codex_mcp_servers(None, &colab()).unwrap(), json!({"colab-mcp":codex_entry}));
+        // Codex applies each one as a dotted override, so the user's servers stay.
+        let mut protocol = Protocol::new(super::super::tests::config("codex"));
+        protocol.codex_mcp_servers = codex_mcp_servers(None, &colab());
+        let step = protocol.receive(json!({"id":1,"result":{}})).unwrap();
+        let thread = step.write.iter().find(|frame| frame["id"] == 2).expect("thread/start");
+        assert_eq!(thread["method"], "thread/start");
+        assert_eq!(thread["params"]["config"]["mcp_servers.colab-mcp"], codex_entry);
+    }
+
+    #[test]
+    fn colab_mcp_reaches_kimi_even_without_http_mcp() {
+        let mut protocol = Protocol::new(super::super::tests::config("kimi"));
+        protocol.mcp_server = Some(json!({"type":"http","name":SERVER_NAME,"url":"http://127.0.0.1:1/mcp","headers":[]}));
+        protocol.extra_mcp_servers = acp_mcp_servers(&colab());
+        let step = protocol
+            .receive(json!({"id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}))
+            .unwrap();
+        let servers = &step.write[0]["params"]["mcpServers"];
+        assert_eq!(servers[0]["name"], SERVER_NAME);
+        assert_eq!(servers[1], json!({"name":"colab-mcp","command":"/bin/uvx","args":["colab-mcp"],"env":[]}));
+        let mut protocol = Protocol::new(super::super::tests::config("kimi"));
+        protocol.mcp_server = Some(json!({"type":"http","name":SERVER_NAME}));
+        protocol.mcp_required = false;
+        protocol.extra_mcp_servers = acp_mcp_servers(&colab());
+        let step = protocol
+            .receive(json!({"id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}))
+            .unwrap();
+        assert_eq!(step.write[0]["params"]["mcpServers"], json!(acp_mcp_servers(&colab())));
+    }
     #[test]
     fn kimi_requires_http_capability_and_injects_on_new_load_and_resume() {
         for (saved, resume, method) in [

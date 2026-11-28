@@ -1,6 +1,7 @@
 import './jev-live.css';
 import { call, subscribe } from './bridge';
 import { escape, icon } from './dom';
+import { errorText } from './error-text';
 import type { JevReport } from './jev';
 
 export interface JevFrame {
@@ -18,7 +19,6 @@ type Options = { session(): string | undefined; changed(watching: boolean, avail
 const active = (report?: JevReport) => report?.status === 'starting' || report?.status === 'running';
 const statuses: Record<JevReport['status'], string> = { starting: 'Starting browser', running: 'Testing', done: 'Finished', blocked: 'Blocked', failed: 'Test failed', cancelled: 'Cancelled', limit: 'Limit reached' };
 const duration = (ms: number) => ms < 60_000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : `${Math.floor(ms / 60_000)}m ${Math.floor(ms % 60_000 / 1000)}s`;
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 function validImage(value: unknown, live = false): value is string {
   return typeof value === 'string' && value.length <= (live ? 350_000 : 2_800_000)
     && (live ? /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/ : /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/).test(value);
@@ -29,7 +29,7 @@ export async function mountJevLive(host: HTMLElement, options: Options): Promise
   host.className = 'jev-live'; host.hidden = true;
   host.setAttribute('role', 'region'); host.setAttribute('aria-label', 'Jev live browser');
   host.innerHTML = `<header class="jev-live-heading"><span class="jev-live-mark">${icon('spark')}</span><strong>Jev</strong><span class="jev-live-status" role="status"></span><button type="button" class="jev-live-stop" data-jev-live-stop>${icon('stop')}Stop test</button><button type="button" class="browser-tool" data-jev-live-return aria-label="Return to browser" title="Return to browser">${icon('back')}</button></header>
-    <div class="jev-live-run-picker" hidden><select aria-label="Jev run"></select>${icon('down')}</div>
+    <div class="jev-live-run-picker" hidden><select aria-label="Jev run"></select></div>
     <div class="jev-live-context"><strong class="jev-live-goal"></strong><span class="jev-live-url"></span></div>
     <figure class="jev-live-screen"><img alt="Jev browser live view" hidden><div class="jev-live-waiting">${icon('globe')}<span>Waiting for the browser…</span></div><figcaption>Live browser · read only</figcaption></figure>
     <div class="jev-live-progress"><span class="jev-live-step"></span><p class="jev-live-current"></p></div>

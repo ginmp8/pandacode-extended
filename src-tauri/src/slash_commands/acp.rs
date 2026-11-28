@@ -13,6 +13,11 @@ pub(super) async fn discover(provider: &str, cwd: &Path) -> Result<Catalog, Stri
         let frame = crate::providers::devin_commands(&path, cwd).await?;
         return frame.as_ref().and_then(|frame| parse_runtime(provider, frame)).ok_or(NO_COMMANDS.into());
     }
+    if provider == "cursor" {
+        // Cursor cannot delete a session, so a discovery session would stay in the
+        // project's chat history; its commands arrive with the first task instead.
+        return Err(NO_COMMANDS.into());
+    }
     let mut command = crate::providers::provider_command(provider, &path)?;
     match provider {
         "opencode" => {
@@ -47,8 +52,16 @@ pub(super) async fn discover(provider: &str, cwd: &Path) -> Result<Catalog, Stri
             command.arg("--uid=");
         }
     }
+    let _temp = (provider == "antigravity")
+        .then(|| crate::providers::AgentTemp::redirect(&mut command))
+        .flatten();
     let discovery = crate::providers::acp_catalog::begin(provider, &path);
-    let (metadata, frame) = crate::providers::acp::inspect_with(command, cwd, true, provider == "grok").await?;
+    // Antigravity answers -32000 for a quota or a 429 as well as for sign-in.
+    let (metadata, frame) = if provider == "antigravity" {
+        crate::providers::acp::inspect_antigravity(command, cwd, true).await?
+    } else {
+        crate::providers::acp::inspect_with(command, cwd, true, provider == "grok").await?
+    };
     // Model choices can be reused by the model picker, even when this session
     // never advertises commands. Commands themselves remain scoped to cwd.
     crate::providers::acp_catalog::store(discovery, &metadata);
@@ -91,7 +104,7 @@ mod tests {
 
     #[test]
     fn commands_use_real_provider_names_and_advertised_hints() {
-        for provider in ["opencode", "kilo", "antigravity", "grok", "github-copilot", "hermes"] {
+        for provider in ["opencode", "kilo", "antigravity", "grok", "github-copilot", "hermes", "cursor"] {
             let catalog = parse_runtime(provider,&json!({"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"review","description":"Review changes","input":{"hint":"[focus]"}}]}}})).unwrap();
             assert_eq!(catalog.commands[0].id, format!("{provider}:/review"));
             assert_eq!(

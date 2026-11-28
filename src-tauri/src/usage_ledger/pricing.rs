@@ -112,6 +112,44 @@ pub(crate) fn parse_prices(document: &Value) -> HashMap<String, Price> {
     prices
 }
 
+/// The bundled snapshot: one compact line, models and cost keys sorted, in the
+/// upstream key names `parse_prices` reads. The long-context tier is written back
+/// as `…_above_{n}k_tokens` so reloading the snapshot recovers it.
+#[cfg(test)]
+pub(crate) fn snapshot_json(prices: &HashMap<String, Price>) -> String {
+    use std::collections::BTreeMap;
+    let mut models = BTreeMap::new();
+    for (name, price) in prices {
+        let mut entry = BTreeMap::new();
+        entry.insert("input_cost_per_token".to_string(), price.input);
+        entry.insert("output_cost_per_token".to_string(), price.output);
+        for (key, value) in [
+            ("cache_read_input_token_cost", price.cache_read),
+            ("cache_creation_input_token_cost", price.cache_write),
+            ("cache_creation_input_token_cost_above_1hr", price.cache_write_1h),
+        ] {
+            if let Some(value) = value {
+                entry.insert(key.to_string(), value);
+            }
+        }
+        if let Some(threshold) = price.threshold {
+            let suffix = format!("_above_{}k_tokens", threshold / 1000);
+            for (key, value) in [
+                ("input_cost_per_token", price.input_high),
+                ("output_cost_per_token", price.output_high),
+                ("cache_read_input_token_cost", price.cache_read_high),
+                ("cache_creation_input_token_cost", price.cache_write_high),
+            ] {
+                if let Some(value) = value {
+                    entry.insert(format!("{key}{suffix}"), value);
+                }
+            }
+        }
+        models.insert(name.as_str(), entry);
+    }
+    serde_json::to_string(&models).expect("price snapshot serializes")
+}
+
 impl PriceBook {
     #[cfg(test)]
     pub(crate) fn from_prices(prices: HashMap<String, Price>) -> Self {
@@ -124,13 +162,18 @@ impl PriceBook {
     }
 
     /// Finds a model by exact name, then without a `[1m]`-style suffix or a date stamp.
+    /// A trailing relay/self-hosted prefix (`acme:model-x`) is stripped last, so a
+    /// model id rewritten by a proxy still matches the catalog name.
     pub(crate) fn find(&self, model: &str) -> Option<&Price> {
+        let try_name = |name: &str| -> Option<&Price> {
+            let name = name.split('[').next().unwrap_or(name).trim();
+            self.prices.get(name).or_else(|| {
+                let (stem, date) = name.rsplit_once('-')?;
+                (date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())).then(|| self.prices.get(stem)).flatten()
+            })
+        };
         let name = model.rsplit('/').next().unwrap_or(model);
-        let name = name.split('[').next().unwrap_or(name).trim();
-        self.prices.get(name).or_else(|| {
-            let (stem, date) = name.rsplit_once('-')?;
-            (date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())).then(|| self.prices.get(stem)).flatten()
-        })
+        try_name(name).or_else(|| try_name(name.rsplit(':').next().unwrap_or(name)))
     }
 
     /// Cost and cache savings in dollars, or `None` when the model is not listed.
@@ -161,7 +204,7 @@ pub(crate) fn load_saved(path: &Path) -> Option<PriceBook> {
     (!saved.prices.is_empty()).then_some(PriceBook { prices: saved.prices, source: Source::Saved, fetched_at: Some(saved.fetched_at) })
 }
 
-async fn download() -> Result<Value, String> {
+pub(crate) async fn download() -> Result<Value, String> {
     let client = crate::agent_usage::http_client().map_err(|_| "Price list client unavailable.".to_string())?;
     let mut response = client
         .get(PRICE_URL)

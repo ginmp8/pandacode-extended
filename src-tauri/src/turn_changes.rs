@@ -73,6 +73,15 @@ pub struct TurnChangeDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+/// The `error` of a turn diff whose file was hard-linked when captured: its content is never
+/// stored (a hard link carries neither a secret name nor a symlink), and `turn.diff` refuses it.
+pub(crate) const HARD_LINKED_ERROR: &str = "This file is hard-linked elsewhere, so PandaCode didn't keep its diff.";
+impl TurnChangeDiff {
+    /// Whether the file was hard-linked at capture ([`HARD_LINKED_ERROR`]).
+    pub(crate) fn hard_linked(&self) -> bool {
+        self.error.as_deref() == Some(HARD_LINKED_ERROR)
+    }
+}
 pub struct Captured {
     pub summary: TurnChanges,
     pub details: Vec<TurnChangeDiff>,
@@ -85,6 +94,8 @@ struct Entry {
     blob: Option<PathBuf>,
     binary: bool,
     truncated: bool,
+    /// A regular file with more than one hard link: hashed to notice a change, never stored.
+    linked: bool,
 }
 struct Snapshot {
     directory: Option<PathBuf>,
@@ -228,6 +239,9 @@ pub struct Tracker {
     limited: bool,
     snapshot_bytes: usize,
     observed_paths: BTreeSet<String>,
+    /// When this turn's latest write tool was seen (`storage::now`), 0 for none: a capture is saved
+    /// as its turn ends, and this dates its changes by when they happened.
+    last_write: i64,
 }
 fn empty_snapshot() -> Snapshot {
     Snapshot {
@@ -282,7 +296,11 @@ impl Tracker {
             limited: false,
             snapshot_bytes: 0,
             observed_paths: BTreeSet::new(),
+            last_write: 0,
         }
+    }
+    pub fn last_write(&self) -> i64 {
+        self.last_write
     }
     pub fn started(&mut self) {
         self.dirty_since_boundary = true;
@@ -425,6 +443,10 @@ impl Tracker {
         if !self.dirty_since_boundary || self.finished.contains(id) {
             return;
         }
+        // Only a real write dates the turn's changes, not a command that wrote nothing it reported.
+        if !reported.is_empty() || id.starts_with("reported:") {
+            self.last_write = storage::now();
+        }
         if self.finished.len() + self.pending.len() >= 512 {
             self.limited = true;
             return;
@@ -561,6 +583,7 @@ impl Tracker {
         self.snapshot_bytes = 0;
         self.observed_paths.clear();
         self.dirty_since_boundary = false;
+        self.last_write = 0;
         Some(changes)
     }
     pub fn finish(&mut self) -> Option<Captured> {
@@ -1011,7 +1034,8 @@ fn scan_paths(
             Ok((bytes, metadata, symlink)) => {
                 let truncated =
                     bytes.len() > budget || (!symlink && bytes.len() as u64 != metadata.len());
-                let blob = (!truncated).then(|| dir.join(result.entries.len().to_string()));
+                let linked = !symlink && hard_linked(&metadata);
+                let blob = (!truncated && !linked).then(|| dir.join(result.entries.len().to_string()));
                 let hash = (!truncated).then(|| Sha256::digest(&bytes).into());
                 let mut entry = Entry {
                     len: if symlink {
@@ -1022,8 +1046,9 @@ fn scan_paths(
                     mode: if symlink { 0o120000 } else { 0o100644 },
                     hash,
                     blob: blob.clone(),
-                    binary: bytes.contains(&0) || std::str::from_utf8(&bytes).is_err(),
+                    binary: !linked && (bytes.contains(&0) || std::str::from_utf8(&bytes).is_err()),
                     truncated,
+                    linked,
                 };
                 #[cfg(unix)]
                 {
@@ -1055,6 +1080,19 @@ fn scan_paths(
         }
     }
     result
+}
+/// Whether an opened regular file has another hard link (Unix; Windows never reports one).
+fn hard_linked(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.is_file() && metadata.nlink() > 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 fn entry_equal(a: &Entry, b: &Entry) -> bool {
     a.mode == b.mode
@@ -1170,7 +1208,8 @@ fn compare(before: &Snapshot, after: &Snapshot, concurrent: bool) -> Captured {
     let mut left = TURN_BYTES;
     let deadline = Instant::now() + Duration::from_millis(1500);
     for (path, old_path, status, old, new) in changes {
-        let binary = old.is_some_and(|e| e.binary) || new.is_some_and(|e| e.binary);
+        let linked = old.is_some_and(|e| e.linked) || new.is_some_and(|e| e.linked);
+        let binary = !linked && (old.is_some_and(|e| e.binary) || new.is_some_and(|e| e.binary));
         let timed_out = Instant::now() > deadline;
         let unavailable = timed_out
             || old.is_some_and(|e| e.blob.is_none())
@@ -1184,7 +1223,11 @@ fn compare(before: &Snapshot, after: &Snapshot, concurrent: bool) -> Captured {
             error: None,
         };
         let (mut additions, mut deletions) = (None, None);
-        if binary {
+        if linked {
+            // No patch, mode lines or counts: nothing from the file reaches storage.
+            detail.truncated = true;
+            detail.error = Some(HARD_LINKED_ERROR.into());
+        } else if binary {
             detail.error = Some("Binary content changed. A text diff is unavailable.".into());
         } else if unavailable {
             detail.error = Some(
@@ -1231,7 +1274,7 @@ fn compare(before: &Snapshot, after: &Snapshot, concurrent: bool) -> Captured {
                 }
             }
         }
-        if old.zip(new).is_some_and(|(a, b)| a.mode != b.mode) {
+        if !linked && old.zip(new).is_some_and(|(a, b)| a.mode != b.mode) {
             let mode = format!(
                 "old mode {:06o}\nnew mode {:06o}\n",
                 old.unwrap().mode,
@@ -1499,18 +1542,32 @@ fn myers(a: &[&str], b: &[&str]) -> Option<Vec<Op>> {
     Some(ops)
 }
 
-pub fn persist(store: &Store, sid: &str, mut capture: Captured) -> Result<i64> {
+#[cfg(test)]
+pub fn persist(store: &Store, sid: &str, capture: Captured) -> Result<i64> {
+    persist_dated(store, sid, capture, 0)
+}
+/// `persist`, with when the turn last wrote (`Tracker::last_write`, 0 when unknown) saved as
+/// `lastWriteAt`, which the team's Council dates the change by.
+pub fn persist_dated(store: &Store, sid: &str, mut capture: Captured, last_write: i64) -> Result<i64> {
     let transaction = store
         .db
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
     store.session(sid)?;
+    // How many files this conversation changed itself, before its workers' changes are rolled in.
+    let own_files = capture.summary.files.len();
     let team_sources = team::merge(store, sid, &mut capture)?;
-    let message_id:i64=store.db.query_row("INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'changes','',?2) RETURNING id",params![sid,storage::now()],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let message_id: i64 = store.db.prepare_cached("INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'changes','',?2) RETURNING id")
+        .and_then(|mut query| query.query_row(params![sid, storage::now()], |r| r.get(0)))
+        .map_err(|e| e.to_string())?;
     let mut saved_summary = serde_json::to_value(&capture.summary).map_err(|e| e.to_string())?;
     if !team_sources.is_empty() {
         saved_summary["teamSources"] =
             serde_json::to_value(team_sources).map_err(|e| e.to_string())?;
+        saved_summary["ownFiles"] = own_files.into();
+    }
+    if last_write > 0 {
+        saved_summary["lastWriteAt"] = last_write.into();
     }
     let summary = serde_json::to_string(&saved_summary).map_err(|e| e.to_string())?;
     let details = capture
@@ -1529,53 +1586,70 @@ pub fn persist(store: &Store, sid: &str, mut capture: Captured) -> Result<i64> {
     {
         return Err("Turn change snapshot exceeded its storage limit.".into());
     }
-    store.db.execute("INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes) VALUES(?1,?2,?3,?4,?5,?6)",params![capture.summary.id,sid,message_id,summary,storage::now(),bytes]).map_err(|e|e.to_string())?;
-    for (path, data) in details {
-        store
+    store.db.prepare_cached("INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes) VALUES(?1,?2,?3,?4,?5,?6)")
+        .and_then(|mut query| query.execute(params![capture.summary.id, sid, message_id, summary, storage::now(), bytes]))
+        .map_err(|e| e.to_string())?;
+    {
+        let mut insert = store
             .db
-            .execute(
-                "INSERT INTO turn_change_files(change_id,path,detail) VALUES(?1,?2,?3)",
-                params![capture.summary.id, path, data],
-            )
+            .prepare_cached("INSERT INTO turn_change_files(change_id,path,detail) VALUES(?1,?2,?3)")
             .map_err(|e| e.to_string())?;
+        for (path, data) in details {
+            insert
+                .execute(params![capture.summary.id, path, data])
+                .map_err(|e| e.to_string())?;
+        }
     }
+    prune_retained(store)?;
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(message_id)
+}
+/// The bytes held by retained diff previews (the partial `diff_bytes>0` index alone).
+pub(crate) const RETAINED_BYTES_SQL: &str = "SELECT COALESCE(SUM(diff_bytes),0) FROM turn_changes WHERE diff_bytes>0";
+/// Retained diff previews, oldest first (the partial `diff_bytes>0` index alone).
+pub(crate) const RETAINED_ROWS_SQL: &str = "SELECT id,diff_bytes FROM turn_changes WHERE diff_bytes>0 ORDER BY created_at,id";
+
+/// Drops the oldest diff previews (their file summaries stay) until every retained preview fits
+/// in `RETAINED_BYTES`. The total and the oldest-first walk both read the partial
+/// `diff_bytes>0` index alone.
+fn prune_retained(store: &Store) -> Result<()> {
     let mut retained: i64 = store
         .db
-        .query_row(
-            "SELECT COALESCE(SUM(diff_bytes),0) FROM turn_changes WHERE diff_bytes>0",
-            [],
-            |r| r.get(0),
-        )
+        .prepare_cached(RETAINED_BYTES_SQL)
+        .and_then(|mut query| query.query_row([], |r| r.get(0)))
         .map_err(|e| e.to_string())?;
-    if retained > RETAINED_BYTES {
+    if retained <= RETAINED_BYTES {
+        return Ok(());
+    }
+    let rows = {
         let mut stmt = store
             .db
-            .prepare(
-                "SELECT id,diff_bytes FROM turn_changes WHERE diff_bytes>0 ORDER BY created_at,id",
-            )
+            .prepare_cached(RETAINED_ROWS_SQL)
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
             .map_err(|e| e.to_string())?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        for (id, bytes) in rows {
-            if retained <= RETAINED_BYTES {
-                break;
-            }
-            store
-                .db
-                .execute("DELETE FROM turn_change_files WHERE change_id=?1", [&id])
-                .map_err(|e| e.to_string())?;
-            store
-                .db
-                .execute("UPDATE turn_changes SET diff_bytes=0 WHERE id=?1", [id])
-                .map_err(|e| e.to_string())?;
-            retained -= bytes;
+        rows
+    };
+    let mut delete = store
+        .db
+        .prepare_cached("DELETE FROM turn_change_files WHERE change_id=?1")
+        .map_err(|e| e.to_string())?;
+    let mut clear = store
+        .db
+        .prepare_cached("UPDATE turn_changes SET diff_bytes=0 WHERE id=?1")
+        .map_err(|e| e.to_string())?;
+    for (id, bytes) in rows {
+        if retained <= RETAINED_BYTES {
+            break;
         }
+        delete.execute([&id]).map_err(|e| e.to_string())?;
+        clear.execute([&id]).map_err(|e| e.to_string())?;
+        retained -= bytes;
     }
-    transaction.commit().map_err(|e| e.to_string())?;
-    Ok(message_id)
+    Ok(())
 }
 pub fn detail(store: &Store, sid: &str, id: &str, path: &str) -> Result<TurnChangeDiff> {
     if !safe_relative(path) || uuid::Uuid::parse_str(id).is_err() {
@@ -1589,12 +1663,8 @@ pub fn detail(store: &Store, sid: &str, id: &str, path: &str) -> Result<TurnChan
         .ok_or("This file is not in this turn's change summary.")?;
     let stored: Option<String> = store
         .db
-        .query_row(
-            "SELECT detail FROM turn_change_files WHERE change_id=?1 AND path=?2",
-            params![id, path],
-            |r| r.get(0),
-        )
-        .optional()
+        .prepare_cached("SELECT detail FROM turn_change_files WHERE change_id=?1 AND path=?2")
+        .and_then(|mut query| query.query_row(params![id, path], |r| r.get(0)).optional())
         .map_err(|e| e.to_string())?;
     stored.map(|s|serde_json::from_str(&s).map_err(|e|e.to_string())).unwrap_or_else(||Ok(TurnChangeDiff{path:path.into(),old_path:file.old_path.clone(),patch:String::new(),binary:file.binary,truncated:true,error:Some("This older diff preview was removed to keep local storage bounded. Its file summary is still available.".into())}))
 }
@@ -1604,25 +1674,24 @@ pub fn summary(store: &Store, sid: &str, id: &str) -> Result<TurnChanges> {
     }
     let summary: String = store
         .db
-        .query_row(
-            "SELECT summary FROM turn_changes WHERE id=?1 AND session_id=?2",
-            params![id, sid],
-            |r| r.get(0),
-        )
-        .optional()
+        .prepare_cached("SELECT summary FROM turn_changes WHERE id=?1 AND session_id=?2")
+        .and_then(|mut query| query.query_row(params![id, sid], |r| r.get(0)).optional())
         .map_err(|e| e.to_string())?
         .ok_or("This change summary does not belong to this task.")?;
     serde_json::from_str(&summary).map_err(|e| e.to_string())
 }
+/// Async with the store work on the blocking pool: a sync command would lock the store on the
+/// main thread. Takes only the store lock.
 #[tauri::command]
-pub fn turn_change_summary(
+pub async fn turn_change_summary(
     state: tauri::State<'_, crate::AppState>,
     session_id: String,
     change_id: String,
 ) -> Result<TurnChanges> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    summary(&store, &session_id, &change_id)
+    let store = state.store.clone();
+    crate::blocking(move || summary(&*store.lock().map_err(|e| e.to_string())?, &session_id, &change_id)).await
 }
+/// Takes only the store lock, on the blocking pool rather than an async worker.
 #[tauri::command]
 pub async fn turn_change_diff(
     state: tauri::State<'_, crate::AppState>,
@@ -1630,8 +1699,8 @@ pub async fn turn_change_diff(
     change_id: String,
     path: String,
 ) -> Result<TurnChangeDiff> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    detail(&store, &session_id, &change_id, &path)
+    let store = state.store.clone();
+    crate::blocking(move || detail(&*store.lock().map_err(|e| e.to_string())?, &session_id, &change_id, &path)).await
 }
 #[cfg(test)]
 mod tests;

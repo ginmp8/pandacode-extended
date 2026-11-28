@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { installNotes, macosNote, UNQUARANTINE } from './install-notes.mjs';
 
 test('an unsigned macOS build says how to clear the quarantine attribute', () => {
@@ -14,13 +16,24 @@ test('a notarized build does not ask for the workaround', () => {
   assert.doesNotMatch(notes, /xattr/);
   assert.doesNotMatch(notes, /Open Anyway/);
   assert.match(notes, /signed and notarized/);
+  assert.match(notes, /usual confirmation for apps downloaded from the internet, with no extra steps/);
+  assert.doesNotMatch(notes, /without a warning/);
 });
 
-test('both builds offer the terminal install, which signs locally on macOS', () => {
+test('the section ends with one newline and no trailing blank line', () => {
   for (const notes of [installNotes(), installNotes({ signed: true })]) {
-    assert.match(notes, /npx pandacode/);
-    assert.match(notes, /signs it locally on macOS/);
+    assert.ok(notes.endsWith('.\n') && !notes.endsWith('\n\n'));
   }
+});
+
+test('unsigned builds note local signing for npx pandacode, while signed builds do not', () => {
+  const unsigned = installNotes();
+  assert.match(unsigned, /`npx pandacode` downloads, verifies and installs the right build, and signs it locally on macOS, so no Gatekeeper warning appears\./);
+
+  const signed = installNotes({ signed: true });
+  assert.match(signed, /`npx pandacode` downloads, verifies and installs the right build\./);
+  assert.doesNotMatch(signed, /signs it locally on macOS/);
+  assert.doesNotMatch(signed, /Gatekeeper/);
 });
 
 test('every published asset is named once', () => {
@@ -37,6 +50,23 @@ test('every published asset is named once', () => {
   }
 });
 
+test('the Linux AppImage note gives a FUSE 2 workaround and links to the install guide', () => {
+  const notes = installNotes();
+  assert.match(notes, /FUSE 2 \(`libfuse2`\)/);
+  assert.match(notes, /`--appimage-extract-and-run`/);
+  assert.match(notes, /\(https:\/\/github\.com\/aicodeking\/pandacode#install\)/);
+});
+
+test('a release version pins the install guide to the release tag', () => {
+  assert.match(installNotes({ version: '1.2.3' }), /\(https:\/\/github\.com\/aicodeking\/pandacode\/blob\/v1\.2\.3\/README\.md#install\)/);
+});
+
+test('the CLI accepts both signing and version options', () => {
+  const script = fileURLToPath(new URL('./install-notes.mjs', import.meta.url));
+  const notes = execFileSync(process.execPath, [script, '--signed', '--version', '1.2.3'], { encoding: 'utf8' });
+  assert.equal(notes, installNotes({ signed: true, version: '1.2.3' }));
+});
+
 test('the macOS note names the same command the uninstaller uses', () => {
   assert.equal(UNQUARANTINE, 'xattr -dr com.apple.quarantine /Applications/PandaCode.app');
   assert.ok(macosNote(false).includes(UNQUARANTINE));
@@ -45,5 +75,12 @@ test('the macOS note names the same command the uninstaller uses', () => {
 test('every line of the macOS note stays inside its list item', () => {
   for (const line of macosNote(false).split('\n').slice(1)) {
     assert.ok(line === '' || line.startsWith('  '), JSON.stringify(line));
+  }
+});
+
+test('only the installers are said to carry a .sha256 checksum', () => {
+  for (const notes of [installNotes(), installNotes({ signed: true })]) {
+    assert.match(notes, /The installers each have a `\.sha256` checksum/);
+    assert.doesNotMatch(notes, /Each file has/);
   }
 });

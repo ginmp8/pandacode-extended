@@ -157,11 +157,56 @@ pub struct MessagePage {
 pub struct Store {
     pub db: Connection,
     pub path: PathBuf,
+    /// Tasks this open marked `restart_interrupted` (running or waiting when the previous
+    /// process ended, and not stopped by the user). The crash notice reads it.
+    pub restart_interrupted: usize,
 }
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
+/// The error every lookup of a task that has no row returns.
+pub(crate) const SESSION_NOT_FOUND: &str = "Conversation not found.";
+/// A team snapshot's `status` parsed from its row, NULL for a corrupt snapshot.
+macro_rules! team_status_sql {
+    () => { "CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END" };
+}
+/// Each team's `status` beside its snapshot (megabytes for a large team), so a listing reads it
+/// without parsing JSON and a save makes SQLite parse nothing either: `save_team` writes it from
+/// the value it already has. Created at every open, never by a migration, so `user_version` stays
+/// put and 0.3.129 still opens the database. `status` is untyped so a backfilled non-text status
+/// keeps its type and reads exactly as it does from the row.
+///
+/// The triggers keep it honest without parsing anything: any write to a snapshot (open-time
+/// recovery, other modules' SQL, an older build after a rollback, since triggers live in the
+/// schema) drops that team's entry, and `team_status` then parses the row. `save_team` puts the
+/// entry back in the same savepoint. The index an unreleased build of this branch kept on the
+/// parsed status is dropped: SQLite parsed the old and new snapshot on every save to maintain it.
+const TEAM_STATUS_SCHEMA: &str = "DROP INDEX IF EXISTS architect_teams_status;
+    CREATE TABLE IF NOT EXISTS architect_team_status(session_id TEXT PRIMARY KEY,status);
+    CREATE TRIGGER IF NOT EXISTS architect_team_status_insert AFTER INSERT ON architect_teams
+      BEGIN DELETE FROM architect_team_status WHERE session_id=NEW.session_id; END;
+    CREATE TRIGGER IF NOT EXISTS architect_team_status_update AFTER UPDATE ON architect_teams
+      BEGIN DELETE FROM architect_team_status WHERE session_id IN (OLD.session_id,NEW.session_id); END;
+    CREATE TRIGGER IF NOT EXISTS architect_team_status_delete AFTER DELETE ON architect_teams
+      BEGIN DELETE FROM architect_team_status WHERE session_id=OLD.session_id; END;";
+const TEAM_STATUS_TRIGGERS: [&str; 3] = ["architect_team_status_insert", "architect_team_status_update", "architect_team_status_delete"];
+/// Parses only the snapshots without an entry: none on a typical launch, the few teams the
+/// restart just interrupted, or every team the first time (or after the triggers went missing).
+pub(crate) const TEAM_STATUS_BACKFILL: &str = concat!("INSERT INTO architect_team_status(session_id,status) SELECT session_id,", team_status_sql!(),
+    " FROM architect_teams t WHERE NOT EXISTS(SELECT 1 FROM architect_team_status s WHERE s.session_id=t.session_id)");
+/// Interrupts the teams a quit left running or waiting. The side table picks them (entries are
+/// complete once `TEAM_STATUS_BACKFILL` has run in the same transaction), and the parsed status
+/// confirms each, so the rows changed are exactly those the snapshots alone would select.
+const TEAM_RECOVERY: &str = concat!("UPDATE architect_teams SET content=json_set(content,'$.status','interrupted','$.pendingTurn',NULL,'$.error','PandaCode restarted. Resume explicitly to continue.','$.generation',COALESCE(json_extract(content,'$.generation'),0)+1,'$.revision',COALESCE(json_extract(content,'$.revision'),0)+1,
+    '$.workers',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.status') IN ('running','waiting') THEN json_set(value,'$.status','stopped') ELSE value END)) FROM json_each(content,'$.workers') WHERE type='object')))
+    WHERE session_id IN (SELECT session_id FROM architect_team_status WHERE status IN ('running','waiting')) AND ", team_status_sql!(), " IN ('running','waiting')");
+const TEAM_STATUS_SAVED: &str = "SELECT status FROM architect_team_status WHERE session_id=?1";
+const TEAM_STATUS_BY_ROW: &str = concat!("SELECT ", team_status_sql!(), " FROM architect_teams WHERE session_id=?1");
+const TEAM_SAVE: &str = "INSERT INTO architect_teams(session_id,content) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET content=excluded.content";
+const TEAM_STATUS_SAVE: &str = "INSERT INTO architect_team_status(session_id,status) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET status=excluded.status";
+/// Most error rows one dismiss call may remove; the same limit as `DISMISS_BATCH` in src/thread-errors.ts (keep the two equal).
+pub const MAX_DISMISS_ERROR_IDS: usize = 500;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -202,7 +247,141 @@ fn settle_unfinished_subagents(db: &Connection, sid: Option<&str>, status: &str)
     Ok(())
 }
 
+/// Stored paths canonicalized per launch lookup at most (`launch_project_at`).
+const LAUNCH_CANDIDATES: usize = 64;
+
+/// `[as given, resolved, then each one's last component after a / and after a \]`: a stored
+/// path that names this folder another way (`..`, a trailing `.`) still ends in one of those.
+fn launch_path_patterns(cwd: &Path, resolved: &Path) -> [String; 6] {
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    let suffix = |p: &Path, separator: char| {
+        p.file_name().map_or_else(
+            || text(p),
+            |name| format!("{separator}{}", name.to_string_lossy()),
+        )
+    };
+    [
+        text(cwd),
+        text(resolved),
+        suffix(cwd, '/'),
+        suffix(cwd, '\\'),
+        suffix(resolved, '/'),
+        suffix(resolved, '\\'),
+    ]
+}
+
 impl Store {
+    /// Launch lookups must never migrate or repair the database behind the live Store.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self> {
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if version != SCHEMA_VERSION {
+            return Err(format!("Database schema {version} differs from expected {SCHEMA_VERSION}; open PandaCode to migrate it."));
+        }
+        Ok(Self {
+            db,
+            path: path.into(),
+            restart_interrupted: 0,
+        })
+    }
+
+    /// A team's stored `status`; None without a team row, for a corrupt snapshot, or for a
+    /// status that is not a string. Reads `architect_team_status`; a team without an entry there
+    /// (written since by other SQL, or a database only ever opened read-only by this build, which
+    /// may lack the table) parses its row as before.
+    pub(crate) fn team_status(&self, sid: &str) -> Option<String> {
+        let text = |value: rusqlite::types::ValueRef<'_>| value.as_str().ok().map(str::to_owned);
+        let saved = self.db.prepare_cached(TEAM_STATUS_SAVED)
+            .and_then(|mut query| query.query_row([sid], |row| row.get_ref(0).map(text)).optional());
+        if let Ok(Some(status)) = saved {
+            return status;
+        }
+        let parsed = self.db.prepare_cached(TEAM_STATUS_BY_ROW)
+            .and_then(|mut query| query.query_row([sid], |row| row.get_ref(0).map(text)));
+        parsed.ok().flatten()
+    }
+
+    /// Writes a team's snapshot and its `status` in one savepoint (a caller may already hold a
+    /// transaction), so a listing never reads a status the snapshot does not have. SQLite parses
+    /// no JSON here: the status comes from the value being saved.
+    pub(crate) fn save_team(&self, sid: &str, content: &str, status: &str) -> Result<()> {
+        self.db.execute_batch("SAVEPOINT team_save").map_err(|e| e.to_string())?;
+        let written = self.db.prepare_cached(TEAM_SAVE).and_then(|mut query| query.execute(params![sid, content]))
+            .and_then(|_| self.db.prepare_cached(TEAM_STATUS_SAVE)?.execute(params![sid, status]));
+        let end = if written.is_ok() { "RELEASE team_save" } else { "ROLLBACK TO team_save; RELEASE team_save" };
+        let ended = self.db.execute_batch(end);
+        written.map_err(|e| e.to_string())?;
+        ended.map_err(|e| e.to_string())
+    }
+
+    /// Creates the status table and its triggers and drops the old status index. Without all
+    /// three triggers (first open by this build, or a migration that rebuilt `architect_teams`)
+    /// the entries may be stale, so they are cleared for `TEAM_STATUS_BACKFILL` to rebuild.
+    fn prepare_team_status(db: &mut Connection) -> Result<()> {
+        let tx = db.transaction().map_err(|e| e.to_string())?;
+        let triggers: i64 = tx.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='architect_teams' AND name IN (?1,?2,?3)",
+            TEAM_STATUS_TRIGGERS, |row| row.get(0)).map_err(|e| e.to_string())?;
+        tx.execute_batch(TEAM_STATUS_SCHEMA).map_err(|e| e.to_string())?;
+        if triggers != TEAM_STATUS_TRIGGERS.len() as i64 {
+            tx.execute_batch("DELETE FROM architect_team_status").map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn launch_session_project(&self, sid: &str) -> Result<Option<(String, String)>> {
+        self.db.query_row(
+            "SELECT p.id,p.path FROM sessions s JOIN projects p ON p.id=s.project_id WHERE s.id=?1",
+            [sid], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional().map_err(|e| e.to_string())
+    }
+
+    /// The project a launch folder belongs to: a task worktree first, then a main checkout.
+    /// SQL keeps only rows whose stored path is the folder or ends in its name (as given or
+    /// with links resolved), so only those few candidates are canonicalized.
+    pub(crate) fn launch_project_at(&self, cwd: &Path) -> Result<Option<(String, String)>> {
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+        let wanted = canonical(cwd);
+        let [exact, resolved, a, b, c, d] = launch_path_patterns(cwd, &wanted);
+        let matches = |column: &str| {
+            format!("({column} IN (?1,?2) OR substr({column},-length(?3))=?3 OR substr({column},-length(?4))=?4 OR substr({column},-length(?5))=?5 OR substr({column},-length(?6))=?6)")
+        };
+        let params = rusqlite::params![exact, resolved, a, b, c, d];
+        let mut stmt = self.db.prepare(&format!("SELECT DISTINCT p.id,p.path,s.worktree_path FROM sessions s JOIN projects p ON p.id=s.project_id WHERE s.worktree_path IS NOT NULL AND {} ORDER BY s.worktree_path IN (?1,?2) DESC,p.id LIMIT {LAUNCH_CANDIDATES}", matches("s.worktree_path"))).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, path, worktree) = row.map_err(|e| e.to_string())?;
+            if canonical(Path::new(&worktree)) == wanted {
+                return Ok(Some((id, path)));
+            }
+        }
+        let mut stmt = self.db.prepare(&format!("SELECT id,path FROM projects WHERE {} ORDER BY path IN (?1,?2) DESC,id LIMIT {LAUNCH_CANDIDATES}", matches("path"))).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, path) = row.map_err(|e| e.to_string())?;
+            if canonical(Path::new(&path)) == wanted {
+                return Ok(Some((id, path)));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let mut db = Connection::open(path).map_err(|e| e.to_string())?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-1024; PRAGMA mmap_size=0;
@@ -531,7 +710,10 @@ impl Store {
                 migration.execute_batch("CREATE INDEX IF NOT EXISTS machine_threads_reported_by ON machine_threads(reported_by) WHERE reported_by IS NOT NULL;
                   PRAGMA user_version=36;").map_err(|e| e.to_string())?;
             }
-            if version < 37 {
+            if version < 38 {
+                // Two independent v37 layouts exist: Extended's bot/cloud compatibility repair
+                // and upstream's remotely-saved schedule provenance. Recheck the idempotent
+                // compatibility repairs for both v37 variants before recording v38.
                 // Extended main and upstream 0.3.85 used versions 27-32 for
                 // different schema changes. An existing Extended DB skips
                 // upstream cloud, mirror and bot migrations on that basis.
@@ -557,8 +739,26 @@ impl Store {
                 crate::bots::upgrade(&migration)?;
                 migration.execute_batch("PRAGMA user_version=37;").map_err(|e| e.to_string())?;
             }
+            if version < 38 {
+                // Whether a remote device last saved each schedule, so the team gate is checked
+                // again when it fires (`schedules::remote_team_gate`). Version 35's schema already
+                // carries the column on databases created since; ids an unreleased build kept in
+                // the settings row's `remoteSaved` list move into it (malformed settings JSON is skipped,
+                // never failing startup). Released version 36 recorded nothing, so a schedule saved from a
+                // phone there is indistinguishable: fail closed and mark every user-made schedule (agents'
+                // own wakeups stay unmarked); a skipped run tells the user to save it on the desktop.
+                let exists: bool = migration.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_schedules') WHERE name='saved_remotely')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+                if !exists {
+                    migration.execute_batch("ALTER TABLE task_schedules ADD COLUMN saved_remotely INTEGER NOT NULL DEFAULT 0;").map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("UPDATE task_schedules SET saved_remotely=1 WHERE created_by='user';
+                  UPDATE task_schedules SET saved_remotely=1 WHERE id IN (SELECT j.value FROM scheduler_settings s, json_each(CASE WHEN json_valid(s.content) THEN s.content ELSE '{}' END,'$.remoteSaved') j WHERE s.id=1);
+                  UPDATE scheduler_settings SET content=json_remove(content,'$.remoteSaved') WHERE id=1 AND json_valid(content);
+                  PRAGMA user_version=38;").map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
+        Self::prepare_team_status(&mut db)?;
         let recovery = db.transaction().map_err(|e| e.to_string())?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
@@ -569,6 +769,14 @@ impl Store {
             "\n\n[PandaCode was interrupted before this tool reported a result.]",
         )?;
         settle_unfinished_subagents(&recovery, None, "stopped")?;
+        // Archived tasks are left out: the page shows no Interrupted badge for them.
+        let restart_interrupted: i64 = recovery
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE status IN ('running','waiting') AND stop_requested=0 AND archived=0 AND (remote_device IS NULL OR id NOT IN (SELECT session_id FROM machine_threads))",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         recovery
             .execute(
                 // Marked `restart_interrupted`: the restart, not the user, stopped them, so a
@@ -596,15 +804,21 @@ impl Store {
                 [],
             )
             .map_err(|e| e.to_string())?;
-        recovery.execute_batch("UPDATE architect_teams SET content=json_set(content,'$.status','interrupted','$.pendingTurn',NULL,'$.error','PandaCode restarted. Resume explicitly to continue.','$.generation',COALESCE(json_extract(content,'$.generation'),0)+1,'$.revision',COALESCE(json_extract(content,'$.revision'),0)+1,
-            '$.workers',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.status') IN ('running','waiting') THEN json_set(value,'$.status','stopped') ELSE value END)) FROM json_each(content,'$.workers') WHERE type='object')))
-            WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
+        // Every snapshot written since the last open (or all of them after `prepare_team_status`
+        // cleared the entries) gets its entry first, so the side table names every running or
+        // waiting team and the recovery parses only those snapshots. Its writes drop the entries
+        // of the teams it interrupted (the update trigger), so a second backfill in the same
+        // transaction records them as interrupted.
+        recovery.execute_batch(TEAM_STATUS_BACKFILL).map_err(|e| e.to_string())?;
+        recovery.execute_batch(TEAM_RECOVERY).map_err(|e| e.to_string())?;
+        recovery.execute_batch(TEAM_STATUS_BACKFILL).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
         let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if ranked { rank_published_drafts(&db)?; }
         let store = Self {
             db,
             path: path.to_path_buf(),
+            restart_interrupted: usize::try_from(restart_interrupted).unwrap_or(0),
         };
         crate::architect::profiles::initialize(&store)?;
         store.settle_archived()?;
@@ -1023,6 +1237,25 @@ impl Store {
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND draft=1 AND NOT EXISTS(SELECT 1 FROM messages WHERE session_id=?1))", [sid], |r| r.get(0)).map_err(|e| e.to_string())
     }
 
+    /// The ids among `ids` with no session row at all (drafts, archived tasks and architect
+    /// workers all have one), in the order given. One query: the ids go in as one JSON
+    /// parameter. Err when there are more than `MAX_MISSING_IDS` or one is too long.
+    pub fn missing_sessions(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.len() > MAX_MISSING_IDS {
+            return Err(format!("At most {MAX_MISSING_IDS} task ids can be checked at once."));
+        }
+        if ids.iter().any(|id| id.chars().count() > MAX_MISSING_ID_CHARS) {
+            return Err(format!("A task id is longer than {MAX_MISSING_ID_CHARS} characters."));
+        }
+        let json = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+        let mut stmt = self
+            .db
+            .prepare_cached("SELECT value FROM json_each(?1) WHERE NOT EXISTS(SELECT 1 FROM sessions WHERE id=json_each.value) ORDER BY key")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([json], |r| r.get(0)).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<String>>>().map_err(|e| e.to_string())
+    }
+
     /// Removes drafts left from an earlier launch; none can be open yet.
     pub fn discard_empty_drafts(&self) -> Result<usize> {
         self.db.execute("DELETE FROM sessions WHERE draft=1 AND NOT EXISTS(SELECT 1 FROM messages WHERE session_id=sessions.id) AND id NOT IN (SELECT session_id FROM architect_workers) AND id NOT IN (SELECT parent_session_id FROM architect_workers)", []).map_err(|e| e.to_string())
@@ -1247,6 +1480,7 @@ impl Store {
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "commandcode",
@@ -1258,6 +1492,7 @@ impl Store {
             "devin",
             "zcode",
             "hermes",
+            "cursor",
         ]
         .contains(&provider)
         {
@@ -1433,6 +1668,7 @@ impl Store {
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "commandcode",
@@ -1444,6 +1680,7 @@ impl Store {
             "devin",
             "zcode",
             "hermes",
+            "cursor",
         ]
         .contains(&provider)
         {
@@ -1633,13 +1870,58 @@ impl Store {
         Ok(ids)
     }
     pub fn message(&self, sid: &str, role: &str, content: &str) -> Result<()> {
+        self.insert_message(sid, role, content).map(|_| ())
+    }
+    /// `message`, returning the new row's id (an error event carries it so the window can dismiss that row).
+    pub fn insert_message(&self, sid: &str, role: &str, content: &str) -> Result<i64> {
         self.db
             .execute(
                 "INSERT INTO messages(session_id,role,content,created_at) VALUES (?1,?2,?3,?4)",
                 params![sid, role, content, now()],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(self.db.last_insert_rowid())
+    }
+    /// Deletes only `role='error'` rows of `sid` whose id is listed; every other id is left alone.
+    /// Messages carry no derived state besides INSERT triggers, so a plain delete stays consistent.
+    /// A task that runs on another computer (`remote_device`) deletes nothing: its rows are copies
+    /// the mirror's backfill (`remote/mirror.rs` `oldest_copied`) could copy back, so the window
+    /// only hides them for the app session.
+    pub fn dismiss_error_messages(&self, sid: &str, ids: &[i64]) -> Result<usize> {
+        if ids.len() > MAX_DISMISS_ERROR_IDS {
+            return Err(format!("Dismiss at most {MAX_DISMISS_ERROR_IDS} errors at a time."));
+        }
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let mut deleted = 0;
+        {
+            let mut stmt = tx
+                .prepare("DELETE FROM messages WHERE session_id=?1 AND role='error' AND id=?2 AND NOT EXISTS (SELECT 1 FROM sessions WHERE id=?1 AND remote_device IS NOT NULL)")
+                .map_err(|e| e.to_string())?;
+            for id in ids {
+                deleted += stmt.execute(params![sid, id]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(deleted)
+    }
+    /// The newest `limit` tool records of the session whose saved JSON contains
+    /// `fragment` (see `tool_images::search_fragment`). Only a cheap prefilter: the
+    /// caller parses and matches the records after releasing the store lock.
+    /// Newest first, older than message `before` when given, so callers can page with the lock
+    /// released between batches. Returns (message id, content).
+    pub fn tool_records_containing(&self, sid: &str, fragment: &str, before: Option<i64>, limit: usize) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.db.prepare_cached(
+            "SELECT id, content FROM messages WHERE session_id=?1 AND role='tool' AND instr(content,?2)>0 AND id<?3 ORDER BY id DESC LIMIT ?4",
+        ).map_err(|e| e.to_string())?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let before = before.unwrap_or(i64::MAX);
+        let rows = stmt
+            .query_map(params![sid, fragment, before, limit], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<std::result::Result<_, _>>().map_err(|e| e.to_string())
     }
     /// RETURNING ties the timer to this exact insert even with concurrent tasks.
     pub fn start_turn_message(&self, sid: &str, content: &str) -> Result<i64> {
@@ -2031,7 +2313,7 @@ fn handoff_from_provider(content: &str) -> Option<String> {
                 | "glm"
                 | "antigravity"
                 | "grok"
-                | "mimo"
+                | "mimo" | "alibaba"
                 | "pi"
                 | "deepseek"
                 | "commandcode" | "cline" | "kilo"
@@ -2041,10 +2323,15 @@ fn handoff_from_provider(content: &str) -> Option<String> {
                 | "devin"
                 | "zcode"
                 | "hermes"
+                | "cursor"
         )
     };
     (known(from) && known(to)).then(|| from.to_owned())
 }
+
+/// `missing_sessions` input limits (the `sessions_missing` IPC).
+pub const MAX_MISSING_IDS: usize = 2000;
+pub const MAX_MISSING_ID_CHARS: usize = 128;
 
 #[cfg(test)]
 #[path = "storage_sidebar_tests.rs"]
@@ -2060,6 +2347,97 @@ mod tests {
             .create_session(&project.id, "claude", "sonnet", "auto")
             .unwrap();
         (store, session)
+    }
+
+    #[test]
+    fn missing_sessions_lists_only_ids_with_no_row_at_all() {
+        let (store, task) = empty_session();
+        let draft = store.create_session(&task.project_id, "claude", "sonnet", "auto").unwrap();
+        store.mark_draft(&draft.id).unwrap();
+        let archived = store.create_session(&task.project_id, "claude", "sonnet", "auto").unwrap();
+        store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&archived.id]).unwrap();
+        let ids: Vec<String> = ["gone-1", &task.id, &draft.id, "x' OR 1=1 --", &archived.id, "gone-2"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(store.missing_sessions(&ids).unwrap(), ["gone-1", "x' OR 1=1 --", "gone-2"]);
+        assert_eq!(store.missing_sessions(&[]).unwrap(), Vec::<String>::new());
+        let many: Vec<String> = (0..MAX_MISSING_IDS).map(|i| format!("id-{i}")).collect();
+        assert_eq!(store.missing_sessions(&many).unwrap().len(), MAX_MISSING_IDS);
+        let too_many: Vec<String> = (0..=MAX_MISSING_IDS).map(|i| format!("id-{i}")).collect();
+        assert!(store.missing_sessions(&too_many).is_err());
+        assert!(store.missing_sessions(&["é".repeat(MAX_MISSING_ID_CHARS)]).is_ok());
+        assert!(store.missing_sessions(&["a".repeat(MAX_MISSING_ID_CHARS + 1)]).is_err());
+    }
+
+    #[test]
+    fn tool_records_containing_reads_only_this_sessions_tool_records() {
+        let (store, session) = empty_session();
+        let other = store.create_session(&session.project_id, "claude", "sonnet", "auto").unwrap();
+        for n in 0..5 {
+            store.message(&session.id, "tool", &format!(r#"{{"type":"tool_activity","input":"/tmp/shot{n}.png"}}"#)).unwrap();
+        }
+        store.message(&session.id, "user", "/tmp/shot9.png").unwrap();
+        store.message(&other.id, "tool", r#"{"type":"tool_activity","input":"/tmp/shot7.png"}"#).unwrap();
+        let rows = store.tool_records_containing(&session.id, "shot", None, 3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].1.contains("shot4.png"), "newest first: {rows:?}");
+        // The next page starts below the oldest id of the previous one.
+        let next = store.tool_records_containing(&session.id, "shot", Some(rows[2].0), 3).unwrap();
+        assert_eq!(next.len(), 2);
+        assert!(next[0].1.contains("shot1.png") && next[1].1.contains("shot0.png"), "{next:?}");
+        assert!(store.tool_records_containing(&session.id, "shot9", None, 10).unwrap().is_empty());
+        assert!(store.tool_records_containing(&session.id, "shot7", None, 10).unwrap().is_empty());
+        assert_eq!(store.tool_records_containing(&other.id, "shot7", None, 10).unwrap().len(), 1);
+    }
+
+    /// Launch lookups consider only rows whose stored path could name the folder.
+    #[test]
+    fn launch_project_lookup_filters_rows_by_path_before_resolving_links() {
+        let root = std::env::temp_dir().join(format!("pandacode-launch-{}", uuid::Uuid::new_v4()));
+        let (main, worktree, other) = (root.join("main"), root.join("tree"), root.join("other"));
+        for dir in [&main, &worktree, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(&main).unwrap();
+        let unrelated = store.add_project(&other).unwrap();
+        let task = store
+            .create_session(&project.id, "claude", "default", "ask")
+            .unwrap();
+        store
+            .create_worktree_session_on(&task, &worktree, None)
+            .unwrap();
+        // Rows that can't name the folder are left out by SQL before anything is resolved.
+        for i in 0..20 {
+            let folder = root.join(format!("unrelated-{i}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            let task = store
+                .create_session(&unrelated.id, "claude", "default", "ask")
+                .unwrap();
+            store
+                .create_worktree_session_on(&task, &folder, None)
+                .unwrap();
+        }
+        let id = |cwd: &Path| store.launch_project_at(cwd).unwrap().map(|(id, _)| id);
+        assert_eq!(id(&worktree), Some(project.id.clone()));
+        assert_eq!(
+            id(&root.join("other").join("..").join("tree")),
+            Some(project.id.clone())
+        );
+        assert_eq!(id(&main.join(".")), Some(project.id.clone()));
+        assert_eq!(id(&other), Some(unrelated.id.clone()));
+        assert_eq!(id(&root), None);
+        #[cfg(unix)]
+        {
+            // A link with another name still resolves through the folder it points at.
+            let link = root.join("linked");
+            std::os::unix::fs::symlink(&worktree, &link).unwrap();
+            assert_eq!(id(&link), Some(project.id.clone()));
+        }
+        let [given, resolved, ..] = launch_path_patterns(&worktree, &worktree);
+        assert_eq!(
+            (given.as_str(), resolved.as_str()),
+            (worktree.to_str().unwrap(), worktree.to_str().unwrap())
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Usage-limit resumes list only flagged tasks whose reset has passed (serve mode).
@@ -2394,6 +2772,62 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_error_messages_deletes_only_this_sessions_error_rows() {
+        let (store, task) = empty_session();
+        let other = store
+            .create_session(&task.project_id, "claude", "sonnet", "auto")
+            .unwrap();
+        for (sid, role) in [(&task.id, "error"), (&task.id, "error"), (&task.id, "user"), (&task.id, "assistant"), (&task.id, "tool"), (&other.id, "error")] {
+            store.message(sid, role, "x").unwrap();
+        }
+        let rows = |sid: &str| store.messages(sid, None).unwrap();
+        let mine = rows(&task.id);
+        let id = |role: &str, n: usize| mine.iter().filter(|m| m.role == role).nth(n).unwrap().id;
+        let (e1, e2, user, assistant, tool) = (id("error", 0), id("error", 1), id("user", 0), id("assistant", 0), id("tool", 0));
+        let foreign = rows(&other.id)[0].id;
+        assert_eq!(store.dismiss_error_messages(&task.id, &[user, assistant, tool, foreign, 9_999]).unwrap(), 0);
+        assert_eq!(rows(&task.id).len(), 5);
+        assert_eq!(store.dismiss_error_messages(&task.id, &[e1]).unwrap(), 1);
+        assert_eq!(store.dismiss_error_messages(&task.id, &[e1, e2]).unwrap(), 1);
+        let left: Vec<_> = rows(&task.id).iter().map(|m| m.role.clone()).collect();
+        assert_eq!(left, ["user", "assistant", "tool"]);
+        assert_eq!(rows(&other.id).len(), 1);
+    }
+
+    #[test]
+    fn dismiss_error_insert_message_returns_the_row_id() {
+        let (store, task) = empty_session();
+        let first = store.insert_message(&task.id, "error", "boom").unwrap();
+        let second = store.insert_message(&task.id, "error", "boom").unwrap();
+        assert!(second > first);
+        let ids: Vec<i64> = store.messages(&task.id, None).unwrap().iter().map(|m| m.id).collect();
+        assert_eq!(ids, [first, second]);
+        assert_eq!(store.dismiss_error_messages(&task.id, &[first]).unwrap(), 1);
+        let left: Vec<i64> = store.messages(&task.id, None).unwrap().iter().map(|m| m.id).collect();
+        assert_eq!(left, [second]);
+    }
+
+    #[test]
+    fn dismiss_error_messages_handles_empty_and_oversized_lists() {
+        let (store, task) = empty_session();
+        store.message(&task.id, "error", "x").unwrap();
+        assert_eq!(store.dismiss_error_messages(&task.id, &[]).unwrap(), 0);
+        let too_many: Vec<i64> = (0..=MAX_DISMISS_ERROR_IDS as i64).collect();
+        assert!(store.dismiss_error_messages(&task.id, &too_many).is_err());
+        assert_eq!(store.messages(&task.id, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dismiss_error_messages_never_deletes_a_mirrored_copy() {
+        // A mirror's rows are copies of another computer's; the backfill could copy a deleted one back.
+        let (store, task) = empty_session();
+        let id = store.insert_message(&task.id, "error", "boom").unwrap();
+        store.db.execute("UPDATE sessions SET remote_device='dev',remote_session='host-task' WHERE id=?1", [&task.id]).unwrap();
+        assert_eq!(store.dismiss_error_messages(&task.id, &[id]).unwrap(), 0);
+        assert_eq!(store.messages(&task.id, None).unwrap().len(), 1);
+    }
+
+    #[test]
     fn starting_a_task_claims_running_and_message_atomically() {
         let (store, task) = empty_session();
         store.db.execute_batch("CREATE TRIGGER reject_prompt BEFORE INSERT ON messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;").unwrap();
@@ -2506,6 +2940,198 @@ mod tests {
         assert_eq!(store.settle_archived().unwrap(), 0);
     }
 
+    fn saved_status(store: &Store, sid: &str) -> Option<Option<String>> {
+        store.db.query_row("SELECT status FROM architect_team_status WHERE session_id=?1", [sid], |row| row.get(0)).optional().unwrap()
+    }
+
+    #[test]
+    fn team_status_reads_the_side_table_without_parsing_the_snapshot() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let plan: Vec<String> = store.db.prepare(&format!("EXPLAIN QUERY PLAN {TEAM_STATUS_SAVED}")).unwrap()
+            .query_map(["t"], |row| row.get::<_, String>(3)).unwrap().map(|row| row.unwrap()).collect();
+        assert_eq!(plan, ["SEARCH architect_team_status USING INDEX sqlite_autoindex_architect_team_status_1 (session_id=?)"]);
+        store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        store.save_team("t", r#"{"status":"running"}"#, "running").unwrap();
+        assert_eq!(saved_status(&store, "t"), Some(Some("running".into())));
+        assert_eq!(store.team_status("t").as_deref(), Some("running"));
+        // The entry, not the row, answers: a status the row does not hold proves it.
+        store.db.execute("UPDATE architect_team_status SET status='waiting' WHERE session_id='t'", []).unwrap();
+        assert_eq!(store.team_status("t").as_deref(), Some("waiting"));
+        // Any other write to the snapshot drops the entry, and the row is parsed.
+        store.db.execute("UPDATE architect_teams SET content='{\"status\":\"completed\"}' WHERE session_id='t'", []).unwrap();
+        assert_eq!(saved_status(&store, "t"), None);
+        assert_eq!(store.team_status("t").as_deref(), Some("completed"));
+        store.db.execute("INSERT INTO architect_teams(session_id,content) VALUES('bad','{broken')", []).unwrap();
+        assert_eq!(store.team_status("bad"), None);
+        assert_eq!(store.team_status("none"), None);
+        store.save_team("t", r#"{"status":"paused"}"#, "paused").unwrap();
+        store.db.execute("DELETE FROM architect_teams WHERE session_id='t'", []).unwrap();
+        assert_eq!(saved_status(&store, "t"), None, "a deleted team leaves no entry");
+        assert_eq!(store.team_status("t"), None);
+        assert!(store.db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)).unwrap() == "ok");
+    }
+
+    #[test]
+    fn a_team_save_makes_sqlite_parse_no_json() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        // Indexes, triggers and the tables themselves are the only work SQLite adds to a save.
+        let parsing: Vec<String> = store.db.prepare("SELECT name FROM sqlite_schema WHERE tbl_name IN ('architect_teams','architect_team_status') AND sql LIKE '%json%'").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().map(|row| row.unwrap()).collect();
+        assert!(parsing.is_empty(), "{parsing:?}");
+        assert!(!TEAM_SAVE.contains("json") && !TEAM_STATUS_SAVE.contains("json"));
+        let indexed: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='architect_teams_status')", [], |row| row.get(0)).unwrap();
+        assert!(!indexed, "the old status index is gone");
+    }
+
+    #[test]
+    fn a_team_save_writes_the_snapshot_and_status_together() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        store.save_team("t", r#"{"status":"running"}"#, "running").unwrap();
+        store.db.execute_batch("CREATE TEMP TRIGGER reject_status BEFORE INSERT ON main.architect_team_status BEGIN SELECT RAISE(ABORT,'status write failed'); END;").unwrap();
+        assert!(store.save_team("t", r#"{"status":"completed"}"#, "completed").unwrap_err().contains("status write failed"));
+        let content: String = store.db.query_row("SELECT content FROM architect_teams WHERE session_id='t'", [], |row| row.get(0)).unwrap();
+        assert_eq!(content, r#"{"status":"running"}"#, "the snapshot rolled back with its status");
+        assert_eq!(saved_status(&store, "t"), Some(Some("running".into())));
+        store.db.execute_batch("DROP TRIGGER temp.reject_status;
+            CREATE TEMP TRIGGER reject_team BEFORE UPDATE ON main.architect_teams BEGIN SELECT RAISE(ABORT,'team write failed'); END;").unwrap();
+        assert!(store.save_team("t", r#"{"status":"completed"}"#, "completed").is_err());
+        assert_eq!(store.team_status("t").as_deref(), Some("running"));
+        // Inside a caller's transaction the savepoint nests and commits with it.
+        store.db.execute_batch("DROP TRIGGER temp.reject_team; BEGIN").unwrap();
+        store.save_team("t", r#"{"status":"waiting"}"#, "waiting").unwrap();
+        store.db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(store.team_status("t").as_deref(), Some("running"));
+        assert_eq!(saved_status(&store, "t"), Some(Some("running".into())));
+    }
+
+    #[test]
+    fn team_status_survives_older_builds_and_never_bumps_the_schema() {
+        let directory = std::env::temp_dir().join(format!("pandacode-team-status-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+            store.save_team("t", r#"{"status":"running"}"#, "running").unwrap();
+            store.save_team("u", r#"{"status":"completed"}"#, "completed").unwrap();
+        }
+        {
+            // 0.3.129 after a rollback: it knows nothing of the table, but the triggers are in the
+            // schema, so its write drops the entry.
+            let db = Connection::open(&path).unwrap();
+            db.execute("UPDATE architect_teams SET content='{\"status\":\"paused\"}' WHERE session_id='t'", []).unwrap();
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM architect_team_status WHERE session_id='t'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        }
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert_eq!(read_only.team_status("t").as_deref(), Some("paused"), "parses the row without an entry");
+        drop(read_only);
+        {
+            // A database whose triggers went missing (an unreleased build of this branch, or a
+            // migration that rebuilt the table) holds stale entries; the old index is still there.
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER architect_team_status_update;
+                UPDATE architect_teams SET content='{\"status\":\"ready\"}' WHERE session_id='u';
+                INSERT INTO architect_team_status(session_id,status) VALUES('t','running');
+                CREATE INDEX architect_teams_status ON architect_teams(session_id,(CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END));").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(saved_status(&store, "t"), Some(Some("paused".into())), "rebuilt from the snapshot");
+        assert_eq!(saved_status(&store, "u"), Some(Some("ready".into())));
+        assert_eq!(store.team_status("u").as_deref(), Some("ready"));
+        let schema: (i64, i64) = store.db.query_row("SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'architect_team_status_%'),
+            (SELECT COUNT(*) FROM sqlite_schema WHERE name='architect_teams_status')", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(schema, (3, 0));
+        drop(store);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_restart_refreshes_the_status_of_interrupted_teams() {
+        let directory = std::env::temp_dir().join(format!("pandacode-team-restart-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+            store.save_team("t", r#"{"status":"running","workers":[]}"#, "running").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(saved_status(&store, "t"), Some(Some("interrupted".into())));
+        assert_eq!(store.team_status("t").as_deref(), Some("interrupted"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn launch_recovery_picks_teams_from_the_side_table() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let plan: Vec<String> = store.db.prepare(&format!("EXPLAIN QUERY PLAN {TEAM_RECOVERY}")).unwrap()
+            .query_map([], |row| row.get::<_, String>(3)).unwrap().map(|row| row.unwrap()).collect();
+        assert!(plan.iter().any(|step| step.starts_with("SEARCH architect_teams USING INDEX sqlite_autoindex_architect_teams_1")), "{plan:?}");
+        assert!(!plan.iter().any(|step| step.starts_with("SCAN architect_teams")), "{plan:?}");
+        drop(store);
+
+        const RUNNING: &str = r#"{"status":"running","legacyPromptThroughId":0,"generation":1,"workers":[{"status":"waiting"},{"status":"done"}]}"#;
+        const WAITING: &str = r#"{"status":"waiting","legacyPromptThroughId":0,"workers":[]}"#;
+        const IDLE: &str = r#"{"status":"idle","legacyPromptThroughId":0,"workers":[{"status":"running"}]}"#;
+        const PAUSED: &str = r#"{"status":"paused","legacyPromptThroughId":0}"#;
+        let team = |db: &Connection, sid: &str| -> String {
+            db.query_row("SELECT content FROM architect_teams WHERE session_id=?1", [sid], |row| row.get(0)).unwrap()
+        };
+        let assert_recovered = |store: &Store| {
+            for (sid, workers) in [("run", r#"["stopped","done"]"#), ("wait", "[]")] {
+                let (status, error, workers_now): (String, String, String) = store.db.query_row(
+                    "SELECT json_extract(content,'$.status'),json_extract(content,'$.error'),
+                        (SELECT json_group_array(json_extract(value,'$.status')) FROM json_each(content,'$.workers'))
+                     FROM architect_teams WHERE session_id=?1", [sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+                assert_eq!((status.as_str(), workers_now.as_str()), ("interrupted", workers), "{sid}");
+                assert!(error.contains("PandaCode restarted"));
+                assert_eq!(saved_status(store, sid), Some(Some("interrupted".into())));
+            }
+            assert_eq!(team(&store.db, "idle"), IDLE, "an idle team is left byte for byte");
+            assert_eq!(saved_status(store, "idle"), Some(Some("idle".into())));
+            assert_eq!(team(&store.db, "stale"), PAUSED);
+        };
+        // Each case starts from a database whose snapshots say run, wait and idle, then reopens.
+        let cases: [(&str, &str); 4] = [
+            ("entries", ""),
+            ("table missing", "DROP TABLE architect_team_status;"),
+            ("written without entries", "DELETE FROM architect_team_status;"),
+            // Triggers missing: entries may be stale both ways, so they are rebuilt first.
+            ("stale", "DROP TRIGGER architect_team_status_update;
+                UPDATE architect_team_status SET status='idle' WHERE session_id='run';
+                UPDATE architect_team_status SET status='running' WHERE session_id IN ('idle','stale');"),
+        ];
+        for (case, damage) in cases {
+            let directory = std::env::temp_dir().join(format!("pandacode-team-recovery-{}", id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("store.sqlite");
+            {
+                let store = Store::open(&path).unwrap();
+                store.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                for (sid, content, status) in [("run", RUNNING, "running"), ("wait", WAITING, "waiting"), ("idle", IDLE, "idle"), ("stale", PAUSED, "paused")] {
+                    store.save_team(sid, content, status).unwrap();
+                }
+                store.db.execute_batch(damage).unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert_recovered(&store);
+            let triggers: i64 = store.db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'architect_team_status_%'", [], |row| row.get(0)).unwrap();
+            assert_eq!(triggers, 3, "{case}");
+            drop(store);
+            // A second open finds nothing left to recover and changes nothing.
+            let before: Vec<String> = ["run", "wait", "idle"].iter().map(|sid| team(&Connection::open(&path).unwrap(), sid)).collect();
+            let store = Store::open(&path).unwrap();
+            let after: Vec<String> = ["run", "wait", "idle"].iter().map(|sid| team(&store.db, sid)).collect();
+            assert_eq!(before, after, "{case}");
+            drop(store);
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+
     #[test]
     fn a_corrupt_team_row_never_stops_the_store_opening() {
         let directory = std::env::temp_dir().join(format!("pandacode-corrupt-team-{}", id()));
@@ -2523,6 +3149,9 @@ mod tests {
         assert_eq!(broken, "{broken");
         let worker: String = db.query_row("SELECT json_extract(content,'$.workers[0].status') FROM architect_teams WHERE session_id='bad-worker'", [], |row| row.get(0)).unwrap();
         assert_eq!(worker, "stopped");
+        let entries: Vec<(String, Option<String>)> = db.prepare("SELECT session_id,status FROM architect_team_status WHERE session_id IN ('not-json','bad-worker') ORDER BY session_id").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().map(|row| row.unwrap()).collect();
+        assert_eq!(entries, [("bad-worker".into(), Some("interrupted".into())), ("not-json".into(), None)]);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -3477,7 +4106,7 @@ mod tests {
             ).unwrap();
             assert!(shared, "new upstream bot tables must be created");
             let version: i64 = store.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-            assert_eq!(version, 37);
+            assert_eq!(version, 38);
         }
         // The schema reconciliation must not need to run again on next start.
         let reopened = Store::open(&path).unwrap();
@@ -4011,6 +4640,7 @@ mod tests {
                 "antigravity",
                 "grok",
                 "mimo",
+                "alibaba",
                 "pi",
                 "deepseek",
                 "commandcode",
@@ -4022,6 +4652,7 @@ mod tests {
                 "devin",
                 "zcode",
                 "hermes",
+                "cursor",
             ] {
                 for mode in ["ask", "auto", "plan", "full"] {
                     let session = store

@@ -10640,6 +10640,34 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
         let leaf_id = child.workers[0].session_id.clone();
         let original_assignment = child.workers[0].assignment.clone();
         let original_effort = child.workers[0].reasoning_effort.clone();
+        // A legacy or partially restored child grant without the issued prompt
+        // digest cannot authenticate a new or resumed task-bound review.
+        let grant_key = format!("native-reviewer-authority:{}", child.workers[0].id);
+        let original_grant: String = store.db.query_row(
+            "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![child_id, grant_key], |row| row.get(0),
+        ).unwrap();
+        let mut unbound: serde_json::Value = serde_json::from_str(&original_grant).unwrap();
+        assert!(unbound.as_object_mut().unwrap().remove("childAssignmentSha256").is_some());
+        let unbound = serde_json::to_string(&unbound).unwrap();
+        store.db.execute(
+            "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![child_id, grant_key, unbound],
+        ).unwrap();
+        let binding = child.workers[0].reviewer_binding.as_ref().unwrap();
+        assert!(reviewer_security::validate_recorded_child_authority(
+            &store, child_id, binding, &original_assignment,
+        ).unwrap_err().contains("native child assignment"));
+        assert!(child_council::inspect(&store, &root).is_err(),
+            "an unbound child prompt cannot authenticate root evidence");
+        assert!(child_council::next_leaf_launch(&store, &Default::default(), &root).is_err(),
+            "a missing immutable assignment digest must not issue a provider launch");
+        assert_eq!(load(&store, child_id).unwrap().unwrap().workers[0].status, "queued");
+        store.db.execute(
+            "UPDATE architect_requests SET content=?3 WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![child_id, grant_key, original_grant],
+        ).unwrap();
+        assert!(child_council::inspect(&store, &root).is_ok());
         store.db.execute(
             "UPDATE sessions SET task_description='Review an unrelated task' WHERE id=?1",
             [&leaf_id],

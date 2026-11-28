@@ -236,8 +236,9 @@ struct ReviewerAuthority {
     /// automatic/selected parallel Councils may consume that legacy format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seat_context: Option<ReviewerSeatContext>,
-    /// New native child leaves bind their exact issued review prompt without
-    /// duplicating its contents. Older grants retain their metadata checks.
+    /// Native child leaves bind their exact issued review prompt without
+    /// duplicating its contents. Older unbound child grants require a fresh task;
+    /// root reviewer grants do not use this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     child_assignment_sha256: Option<String>,
     artifact_revision: String,
@@ -319,11 +320,12 @@ fn validate_issued_authority_with_assignment(
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
             }
-            if child_assignment.is_some_and(|assignment|
-                original.child_assignment_sha256.as_ref().is_some_and(|expected|
-                    expected != &assignment_digest(assignment)))
-            {
-                return Err("reviewer_session_mismatch: native child assignment changed.".into());
+            if let Some(assignment) = child_assignment {
+                if original.child_assignment_sha256.as_deref()
+                    != Some(assignment_digest(assignment).as_str())
+                {
+                    return Err("reviewer_session_mismatch: native child assignment is missing or changed; start a fresh Council task.".into());
+                }
             }
             match original.seat_context.as_ref() {
                 Some(context) if context == &ReviewerSeatContext::from_binding(binding) => {}

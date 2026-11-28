@@ -2205,6 +2205,40 @@ test('Council criteria editor saves task-scoped user criteria without altering l
   await expect(panel(page).getByLabel('Review lens')).toHaveValue('Security');
 });
 
+test('Council criteria editor authors native file checks without granting execution or weakening evidence', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await criteria.getByLabel('Criteria source').selectOption('user');
+  await criteria.getByLabel('Criterion ID').fill('manifest');
+  await criteria.getByLabel('Review lens').fill('Manual lens');
+  await criteria.getByLabel('Native file check').selectOption('reviewed_file_json_valid');
+  await criteria.getByLabel('Repository-relative file').fill('../package.json');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('repository-relative file');
+  expect(await calls(page)).toEqual([]);
+  await criteria.getByLabel('Native file check').selectOption('');
+  await expect(criteria.getByLabel('Review lens')).toHaveValue('Manual lens');
+  await criteria.getByLabel('Native file check').selectOption('reviewed_file_sha256');
+  await criteria.getByLabel('Repository-relative file').fill('package.json');
+  await criteria.getByLabel('Expected SHA-256').fill('invalid');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('64-character SHA-256');
+  expect(await calls(page)).toEqual([]);
+  const digest = 'a'.repeat(64);
+  await criteria.getByLabel('Expected SHA-256').fill(digest);
+  await expect(criteria.getByLabel('Review lens')).toHaveValue('File SHA-256: package.json');
+  await expect(criteria.getByLabel('Required criterion', { exact: true })).toBeChecked();
+  await expect(criteria.getByLabel('Require native evidence (blocks until verified)')).toBeDisabled();
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].criteria).toEqual([{
+    id: 'manifest', lens: 'File SHA-256: package.json', target: 9, required: true, evidenceRequired: true,
+    nativeEvidence: { kind: 'reviewed_file_sha256', path: 'package.json', expectedSha256: digest },
+  }]);
+});
+
 test('Council criteria editor preserves pinned native checks and refuses silent evidence removal', async ({ page }) => {
   const nativeEvidence = { kind: 'reviewed_file_text_contains', path: 'policy.txt', expectedText: 'feature: enabled', skillId: '' };
   await open(page, '/?council', {}, 0, '', {}, undefined, undefined, undefined, {

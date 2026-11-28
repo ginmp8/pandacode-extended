@@ -1781,16 +1781,21 @@ let demandArchived = false;
     linkedDecisions = []; linkedDecisionsLoaded = false; linkedDecisionsHasMore = false;
     clearMemberActivity();
     teamSearch = ''; teamStatusFilter = 'all';
+    // A row with the right ID is insufficient: the disabled Team policy
+    // must still match the acknowledged creation, including its revision.
+    const matchesCreatedTeam = (item: Config | undefined): item is Config =>
+      Boolean(item && item.enabled === false &&
+        item.name === created.name && item.policyRevision === created.policyRevision &&
+        item.projectId === created.projectId &&
+        item.coordinatorBotId === created.coordinatorBotId && item.workerBotId === created.workerBotId);
     await reload();
     let persisted = presets.find(item => item.id === created.id);
-    if (!persisted || selected !== created.id || error) {
+    if (!matchesCreatedTeam(persisted) || selected !== created.id || error) {
       selected = created.id;
       await reload();
       persisted = presets.find(item => item.id === created.id);
     }
-    if (!persisted || selected !== created.id || error || persisted.enabled ||
-        persisted.coordinatorBotId !== created.coordinatorBotId ||
-        persisted.workerBotId !== created.workerBotId) {
+    if (!matchesCreatedTeam(persisted) || selected !== created.id || error) {
       selected = '';
       throw new Error('Native Team creation was acknowledged but its disabled identity could not be verified. Refresh before retrying; the Team may already exist.');
     }

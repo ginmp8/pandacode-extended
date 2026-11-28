@@ -4727,6 +4727,65 @@ test('missing native Team after a successful ACK exposes an error without retryi
   expect(commands.filter(command=>command==='superagent_list')).toHaveLength(3);
 });
 
+for (const scenario of ['transient-revision', 'revision', 'name', 'project', 'missing-enabled'] as const) {
+  test('native Team creation verifies the acknowledged policy: ' + scenario, async ({page}) => {
+    await page.goto('/?bots=sample');
+    await page.evaluate(async (scenario) => {
+      const {mountSuperagent}=await import('/src/superagent-ui.ts');
+      const host=document.createElement('div');
+      host.id='sa-create-policy-drift'; document.body.appendChild(host);
+      let reads=0,writes=0;
+      let created:Record<string,unknown>|null=null;
+      (window as unknown as {saCreatePolicyCounts:()=>{reads:number;writes:number}})
+        .saCreatePolicyCounts=()=>({reads,writes});
+      mountSuperagent(host,async(command,args)=>{
+        if(command==='bots_list')return [
+          {id:'coordinator',name:'Coordinator',paused:false},
+          {id:'worker',name:'Worker',paused:false},
+        ] as never;
+        if(command==='superagent_list'){
+          reads++;
+          if(!created)return [] as never;
+          const drift={...created};
+          if(scenario==='revision'||(scenario==='transient-revision'&&reads===2))
+            drift.policyRevision=2;
+          if(scenario==='name')drift.name='Different Team';
+          if(scenario==='project')drift.projectId='different-project';
+          if(scenario==='missing-enabled')delete drift.enabled;
+          return [drift] as never;
+        }
+        if(command==='superagent_tickets')return [] as never;
+        if(command==='superagent_create'){
+          writes++;
+          const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+          created={...input,id:'created-team',enabled:false,policyRevision:1,projectId:'project'};
+          return {...created} as never;
+        }
+        throw Error('Unexpected native command '+command);
+      });
+    },scenario);
+    const host=page.locator('#sa-create-policy-drift');
+    await expect(host).toHaveAttribute('aria-busy','false');
+    await host.getByRole('textbox',{name:'Name',exact:true}).fill('Acknowledged Team');
+    await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+    await host.getByRole('group',{name:'Workers'}).getByRole('checkbox',{name:'Worker'}).check();
+    await host.getByRole('button',{name:'Create disabled preset'}).click();
+    if(scenario==='transient-revision'){
+      await expect(host.getByRole('region',{name:'Selected orchestration'}))
+        .toContainText('Policy revision 1');
+      await expect(host.getByRole('region',{name:'Selected orchestration'}))
+        .toContainText('Acknowledged Team');
+    }else{
+      await expect(host.getByRole('alert')).toContainText('its disabled identity could not be verified');
+      await expect(host.getByRole('region',{name:'Selected orchestration'})).toHaveCount(0);
+      await expect(host.getByRole('button',{name:'Enable manual'})).toHaveCount(0);
+    }
+    expect(await page.evaluate(()=>
+      (window as unknown as {saCreatePolicyCounts:()=>{reads:number;writes:number}})
+        .saCreatePolicyCounts())).toEqual({reads:3,writes:1});
+  });
+}
+
 test('portable confirmation rejects a manifest changed after native preview',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{

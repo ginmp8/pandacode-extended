@@ -10515,6 +10515,56 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
             [&sid], |row| row.get::<_, i64>(0),
         ).unwrap() == 0, "the root objective cannot launch speculative child reviews");
     }
+    // A copied sibling snapshot must never mint grants or save state under
+    // the sibling's ID, even when both reserved configurations are identical.
+    let (child_id, sibling_id, original, foreign, sibling_before, root_before, requests_before, workers_before) = {
+        let store = state.store.lock().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        let child_id = children[0].child_session_id.clone();
+        let sibling_id = children[1].child_session_id.clone();
+        let raw = |id: &str| -> String {
+            store.db.query_row("SELECT content FROM architect_teams WHERE session_id=?1",
+                [id], |row| row.get(0)).unwrap()
+        };
+        let original = raw(&child_id);
+        let sibling_before = raw(&sibling_id);
+        let root_before = raw(&sid);
+        let requests_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests", [], |row| row.get(0)).unwrap();
+        let workers_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers", [], |row| row.get(0)).unwrap();
+        let mut foreign = load(&store, &child_id).unwrap().unwrap();
+        foreign.session_id = sibling_id.clone();
+        let foreign = serde_json::to_string(&foreign).unwrap();
+        store.db.execute("UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            rusqlite::params![child_id, foreign]).unwrap();
+        assert!(load(&store, &child_id).unwrap_err().contains("session identity mismatch"));
+        assert!(child_council::inspect(&store, &root).unwrap_err().contains("session identity mismatch"));
+        (child_id, sibling_id, original, foreign, sibling_before, root_before, requests_before, workers_before)
+    };
+    let denial = dispatch_state(
+        &state, &sid, root.generation, "pandacode_finish_team",
+        json!({"summary":"Reject an aliased reservation."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap_err();
+    assert!(denial.contains("session identity mismatch"), "{denial}");
+    {
+        let store = state.store.lock().unwrap();
+        let raw = |id: &str| -> String {
+            store.db.query_row("SELECT content FROM architect_teams WHERE session_id=?1",
+                [id], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(raw(&child_id), foreign);
+        assert_eq!(raw(&sibling_id), sibling_before);
+        assert_eq!(raw(&sid), root_before);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM architect_requests",
+            [], |row| row.get::<_, i64>(0)).unwrap(), requests_before);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM architect_workers",
+            [], |row| row.get::<_, i64>(0)).unwrap(), workers_before);
+        store.db.execute("UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            rusqlite::params![child_id, original]).unwrap();
+        assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
+    }
     let (answer, _) = dispatch_state(
         &state, &sid, root.generation, "pandacode_finish_team",
         json!({"summary":"Ready for independent review."}),

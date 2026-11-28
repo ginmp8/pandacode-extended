@@ -526,6 +526,16 @@ fn validate_profiles(profiles: &[WorkerProfile]) -> Result<()> {
     }
     Ok(())
 }
+// Persisted snapshots are keyed by native session identity. Never trust an
+// embedded ID that could make a later save or launch target another task.
+fn decode_saved_team(sid: &str, content: &str) -> Result<TeamSnapshot> {
+    let team: TeamSnapshot = serde_json::from_str(content)
+        .map_err(|e| format!("Invalid saved team: {e}"))?;
+    if team.session_id != sid {
+        return Err("Invalid saved team: session identity mismatch.".into());
+    }
+    Ok(team)
+}
 pub(crate) fn load(store: &Store, sid: &str) -> Result<Option<TeamSnapshot>> {
     store
         .db
@@ -536,7 +546,7 @@ pub(crate) fn load(store: &Store, sid: &str) -> Result<Option<TeamSnapshot>> {
         )
         .optional()
         .map_err(|e| e.to_string())?
-        .map(|s| serde_json::from_str(&s).map_err(|e| format!("Invalid saved team: {e}")))
+        .map(|s| decode_saved_team(sid, &s))
         .transpose()
 }
 /// Whether a task's saved team is working. Every listing asks this for every task while holding
@@ -3510,16 +3520,16 @@ fn next_action_state(
         return Ok(None);
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    let mut query=store.db.prepare("SELECT content FROM architect_teams WHERE json_valid(content) AND (json_extract(content,'$.status') IN ('running','waiting') OR EXISTS(SELECT 1 FROM architect_workers aw JOIN sessions s ON s.id=aw.session_id WHERE aw.parent_session_id=architect_teams.session_id AND s.status IN ('running','waiting'))) ORDER BY json_extract(content,'$.updatedAt')").map_err(|e|e.to_string())?;
+    let mut query=store.db.prepare("SELECT session_id,content FROM architect_teams WHERE json_valid(content) AND (json_extract(content,'$.status') IN ('running','waiting') OR EXISTS(SELECT 1 FROM architect_workers aw JOIN sessions s ON s.id=aw.session_id WHERE aw.parent_session_id=architect_teams.session_id AND s.status IN ('running','waiting'))) ORDER BY json_extract(content,'$.updatedAt')").map_err(|e|e.to_string())?;
     let teams = query
-        .query_map([], |r| r.get::<_, String>(0))
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     drop(query);
     let teams = teams
         .into_iter()
-        .filter_map(|s| match serde_json::from_str::<TeamSnapshot>(&s) {
+        .filter_map(|(sid, s)| match decode_saved_team(&sid, &s) {
             Ok(team) => Some(team),
             Err(error) => {
                 eprintln!("Architect scheduler skipped an unreadable team: {error}");
